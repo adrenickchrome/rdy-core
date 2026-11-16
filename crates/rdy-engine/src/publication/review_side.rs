@@ -1,8 +1,8 @@
 //! The side-view seam of the publication review (D-W4YAE): what each row builder reads of one
 //! side of a comparison. [`PublicationReviewSide`] is read-only. [`ReaderReviewSide`] builds it
 //! from a resolved same-store side, after profile filtering and after the removals of both sides
-//! are applied ([`ReviewRemovals`]). A future baseline view builds the same facts from validated
-//! baseline metadata, with part hashes and no reader text.
+//! are applied ([`ReviewRemovals`]). The baseline view ([`super::BaselineReviewSide`]) builds the
+//! same facts from a verified portable baseline, with part hashes and no reader text.
 //!
 //! The compared parts follow D-MCH70's closed table ([`BlockParts`]): each part is the authored
 //! value ([`ReaderPartValue`]), never rendered text. A part hash is BLAKE3 over the RFC 8785
@@ -41,21 +41,37 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CanonicalNumber;
 
+/// The largest safe integer, 2^53 - 1: the largest number a publication baseline holds
+/// (D-6WD17).
+pub(crate) const SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
+
 /// The RFC 8785 (JSON Canonicalization Scheme) text of `v`: no whitespace, object keys sorted by
 /// their UTF-16 code units (RFC 8785 section 3.2.3), and strings escaped as ECMAScript
 /// `JSON.stringify` escapes them. A number is refused ([`CanonicalNumber`]).
 pub(crate) fn rfc8785(v: &Value) -> Result<String, CanonicalNumber> {
     let mut out = String::new();
-    write_canonical(v, &mut out)?;
+    write_canonical(v, false, &mut out)?;
     Ok(out)
 }
 
-fn write_canonical(v: &Value, out: &mut String) -> Result<(), CanonicalNumber> {
+/// [`rfc8785`] with the safe-integer rule of a publication baseline (D-6WD17): a number is an
+/// integer from 0 to [`SAFE_INTEGER_MAX`], written in decimal with no sign, fraction or
+/// exponent. Any other number is refused ([`CanonicalNumber`]).
+pub(crate) fn rfc8785_safe_integers(v: &Value) -> Result<String, CanonicalNumber> {
+    let mut out = String::new();
+    write_canonical(v, true, &mut out)?;
+    Ok(out)
+}
+
+fn write_canonical(v: &Value, integers: bool, out: &mut String) -> Result<(), CanonicalNumber> {
     match v {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
         Value::Bool(false) => out.push_str("false"),
-        Value::Number(_) => return Err(CanonicalNumber),
+        Value::Number(n) => match n.as_u64().filter(|n| integers && *n <= SAFE_INTEGER_MAX) {
+            Some(n) => out.push_str(&n.to_string()),
+            None => return Err(CanonicalNumber),
+        },
         Value::String(s) => write_string(s, out),
         Value::Array(items) => {
             out.push('[');
@@ -63,7 +79,7 @@ fn write_canonical(v: &Value, out: &mut String) -> Result<(), CanonicalNumber> {
                 if i > 0 {
                     out.push(',');
                 }
-                write_canonical(item, out)?;
+                write_canonical(item, integers, out)?;
             }
             out.push(']');
         }
@@ -75,7 +91,7 @@ fn write_canonical(v: &Value, out: &mut String) -> Result<(), CanonicalNumber> {
                 }
                 write_string(k, out);
                 out.push(':');
-                write_canonical(item, out)?;
+                write_canonical(item, integers, out)?;
             }
             out.push('}');
         }
@@ -229,9 +245,34 @@ pub fn text_fields(block_type: &str) -> &'static [&'static str] {
 /// The fields a doc or folder compares, besides `title`.
 const TREE_FIELDS: [&str; 2] = ["name", "description"];
 
-/// The compared parts of one block, by D-MCH70's closed table.
+impl PartName {
+    /// The part `name` names (`title`, `text`, `statement`, `type`, `links`, `status` or
+    /// `field:<name>` with a name that is not empty); `None` for any other text.
+    pub fn parse(name: &str) -> Option<PartName> {
+        Some(match name {
+            "title" => PartName::Title,
+            "text" => PartName::Text,
+            "statement" => PartName::Statement,
+            "type" => PartName::Type,
+            "links" => PartName::Links,
+            "status" => PartName::Status,
+            _ => PartName::Field(
+                name.strip_prefix("field:")
+                    .filter(|n| !n.is_empty())?
+                    .into(),
+            ),
+        })
+    }
+}
+
+/// The compared parts of one block, by D-MCH70's closed table. A reader view holds each part's
+/// value. A baseline view holds only each part's hash ([`BlockParts::hashed`]); two views
+/// compare a part by its hash when either one holds no value.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BlockParts(BTreeMap<PartName, ReaderPartValue>);
+pub struct BlockParts {
+    values: BTreeMap<PartName, ReaderPartValue>,
+    hashes: BTreeMap<PartName, String>,
+}
 
 impl BlockParts {
     /// The parts of `b`. `status` is the side's status label for `b`: the shown status that the
@@ -260,7 +301,10 @@ impl BlockParts {
                     parts.insert(PartName::Field(name.into()), ReaderPartValue::of_field(v));
                 }
             }
-            return BlockParts(parts);
+            return BlockParts {
+                values: parts,
+                hashes: BTreeMap::new(),
+            };
         }
         if b.block_type == decision::DECISION {
             let statement = b
@@ -269,7 +313,10 @@ impl BlockParts {
                 .map_or(ReaderPartValue::Absent, ReaderPartValue::of_field);
             parts.insert(PartName::Statement, statement);
             parts.insert(PartName::Status, status);
-            return BlockParts(parts);
+            return BlockParts {
+                values: parts,
+                hashes: BTreeMap::new(),
+            };
         }
         let covered = text_fields(&b.block_type);
         let mut text = BTreeMap::from([("body".to_string(), ReaderPartValue::Str(b.body.clone()))]);
@@ -308,28 +355,75 @@ impl BlockParts {
             }
             parts.insert(PartName::Field(name.clone()), ReaderPartValue::of_field(v));
         }
-        BlockParts(parts)
+        BlockParts {
+            values: parts,
+            hashes: BTreeMap::new(),
+        }
     }
 
-    /// The value of `part`: [`ReaderPartValue::Absent`] when the block has no such part.
+    /// The parts of a baseline view: each part's hash and no value (D-W4YAE).
+    pub fn hashed(hashes: BTreeMap<PartName, String>) -> BlockParts {
+        BlockParts {
+            values: BTreeMap::new(),
+            hashes,
+        }
+    }
+
+    /// The value of `part`: [`ReaderPartValue::Absent`] when the block has no such part, or when
+    /// the view holds only hashes.
     pub fn get(&self, part: &PartName) -> &ReaderPartValue {
-        self.0.get(part).unwrap_or(&ABSENT)
+        self.values.get(part).unwrap_or(&ABSENT)
     }
 
-    /// Each part the block has, in [`PartName`] order.
+    /// Each part value the block has, in [`PartName`] order. A baseline view has none.
     pub fn iter(&self) -> impl Iterator<Item = (&PartName, &ReaderPartValue)> {
-        self.0.iter()
+        self.values.iter()
+    }
+
+    /// The hash of `part` ([`ReaderPartValue::hash`]): the hash of
+    /// [`ReaderPartValue::Absent`] when the block has no such part.
+    pub fn hash(&self, part: &PartName) -> String {
+        match self.hashes.get(part) {
+            Some(h) => h.clone(),
+            None => self.get(part).hash(),
+        }
+    }
+
+    /// Each part the block has with its hash, in [`PartName`] order.
+    pub fn hashes(&self) -> BTreeMap<PartName, String> {
+        let mut out: BTreeMap<PartName, String> = self
+            .values
+            .iter()
+            .map(|(n, v)| (n.clone(), v.hash()))
+            .collect();
+        out.extend(self.hashes.iter().map(|(n, h)| (n.clone(), h.clone())));
+        out
+    }
+
+    /// Whether this view holds only hashes.
+    fn is_hashed(&self) -> bool {
+        !self.hashes.is_empty()
+    }
+
+    /// The names of the parts the block has.
+    fn names(&self) -> impl Iterator<Item = &PartName> {
+        self.values.keys().chain(self.hashes.keys())
     }
 }
 
 /// The parts that differ between two views of one block, in [`PartName`] order: the seam's one
 /// part comparison. A part that one side lacks compares as [`ReaderPartValue::Absent`]. Two equal
-/// values have equal hashes, so a baseline view compares by hash with the same result.
+/// values have equal hashes, so a baseline view, which holds hashes alone, compares by hash with
+/// the same result.
 pub fn changed_parts(before: &BlockParts, after: &BlockParts) -> Vec<PartName> {
-    let names: BTreeSet<&PartName> = before.0.keys().chain(after.0.keys()).collect();
+    let names: BTreeSet<&PartName> = before.names().chain(after.names()).collect();
+    let by_hash = before.is_hashed() || after.is_hashed();
     names
         .into_iter()
-        .filter(|name| before.get(name) != after.get(name))
+        .filter(|name| match by_hash {
+            true => before.hash(name) != after.hash(name),
+            false => before.get(name) != after.get(name),
+        })
         .cloned()
         .collect()
 }
@@ -522,8 +616,9 @@ pub struct DecisionFacts {
 }
 
 /// One side of a publication review, as every row builder reads it (D-W4YAE). A reader view
-/// ([`ReaderReviewSide`]) holds values and reader text. A future baseline view holds the same
-/// facts from baseline metadata, part hashes in place of values, and no reader text.
+/// ([`ReaderReviewSide`]) holds values and reader text. A baseline view
+/// ([`super::BaselineReviewSide`]) holds the same facts from a baseline, part hashes in place of
+/// values, and no reader text.
 pub trait PublicationReviewSide {
     /// The side's recorded selection facts.
     fn selection(&self) -> &SelectionFacts;

@@ -13,7 +13,8 @@
 //! version did not move. A doc's digest also holds its shells and the shown status of its
 //! content, so a shell that becomes whole, or a changed status, changes the doc.
 
-use super::hidden::HiddenList;
+use super::baseline::Baseline;
+use super::hidden::{HiddenList, HiddenPlanned};
 use super::references::{Classification, ReferenceRow};
 use super::select::{
     AttachmentEntry, AttachmentVariant, DocEntry, RequestSet, Resolved, SelectionEntry,
@@ -22,7 +23,7 @@ use super::select::{
 use crate::error::*;
 use crate::materialize::Materialized;
 use rdy_model::redaction::BlockResidue;
-use rdy_model::{BlockId, Hash, Op, tree};
+use rdy_model::{BlockId, Hash, Op, RepoId, tree};
 use rdy_schema::publication::Audience;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -112,27 +113,174 @@ pub struct DisclosureDiff {
     pub new_reference_count: u64,
     /// The planned blocks this side hides that the baseline did not hide, by id (D-B2AC3).
     pub newly_hidden_planned: HiddenList,
+    /// The portable baseline this comparison read, with the removal requests applied on each
+    /// side (D-CDQF7, D-6WD17); `None` for a comparison inside one store.
+    pub baseline: Option<BaselineComparison>,
+}
+
+/// What a comparison against a portable baseline names (D-6WD17): the baseline's source repo id,
+/// tag and landing, its baseline hash, and the sorted removal requests each side applies. The
+/// candidate's are its own and those of the removed versions it holds outside docs; the
+/// baseline's are the ones it reflects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BaselineComparison {
+    pub repo_id: RepoId,
+    pub tag: String,
+    pub landing: Hash,
+    pub baseline_hash: Hash,
+    pub candidate_redactions: Vec<Hash>,
+    pub baseline_redactions: Vec<Hash>,
 }
 
 /// The removed versions any of `sides` holds, each with the request that removed it. The
 /// comparison and the review's removal projection (`review_side`) read the same set.
 pub(super) fn removed_versions(sides: &[&Resolved]) -> BTreeMap<Hash, Hash> {
-    sides
-        .iter()
-        .flat_map(|r| r.entries.iter())
+    removed_entries(sides.iter().flat_map(|r| r.entries.iter()))
+}
+
+/// The removed versions of `entries`, each with the request that removed it.
+pub(super) fn removed_entries<'e>(
+    entries: impl Iterator<Item = &'e SelectionEntry>,
+) -> BTreeMap<Hash, Hash> {
+    entries
         .filter_map(|e| Some((e.version, e.redaction?)))
         .collect()
 }
+
+/// The baseline side of a comparison: a resolution in this store, or a portable baseline
+/// (D-CDQF7). A baseline holds what the comparison reads of a resolution, with each path kept
+/// as its parts, so both read the same rows.
+#[derive(Clone, Copy)]
+enum Base<'a> {
+    Store(&'a Resolved),
+    Portable(&'a Baseline),
+}
+
+impl<'a> Base<'a> {
+    fn profile_id(&self) -> Option<&'a BlockId> {
+        match self {
+            Base::Store(r) => r.profile.id.as_ref(),
+            Base::Portable(b) => b.profile_id(),
+        }
+    }
+
+    fn audience(&self) -> Audience {
+        match self {
+            Base::Store(r) => r.profile.audience,
+            Base::Portable(b) => b.audience(),
+        }
+    }
+
+    fn profile_version(&self) -> Option<Hash> {
+        match self {
+            Base::Store(r) => r.profile.version,
+            Base::Portable(b) => b.profile_version(),
+        }
+    }
+
+    fn selection_hash(&self) -> Hash {
+        match self {
+            Base::Store(r) => r.selection_hash,
+            Base::Portable(b) => b.selection_hash(),
+        }
+    }
+
+    fn selection_identity(&self) -> Hash {
+        match self {
+            Base::Store(r) => r.selection_identity,
+            Base::Portable(b) => b.selection_identity(),
+        }
+    }
+
+    fn entries(&self) -> &'a [SelectionEntry] {
+        match self {
+            Base::Store(r) => &r.entries,
+            Base::Portable(b) => b.selection_entries(),
+        }
+    }
+
+    fn redactions(&self) -> &'a [Hash] {
+        match self {
+            Base::Store(r) => &r.redactions,
+            Base::Portable(b) => b.redactions(),
+        }
+    }
+
+    fn attachments(&self) -> &'a [AttachmentEntry] {
+        match self {
+            Base::Store(r) => &r.attachments,
+            Base::Portable(b) => b.attachment_entries(),
+        }
+    }
+
+    /// Every reference row and link edge outside the selection.
+    fn references(&self) -> Box<dyn Iterator<Item = &'a ReferenceRow> + 'a> {
+        match self {
+            Base::Store(r) => Box::new(r.references.rows.iter().chain(&r.references.links_outside)),
+            Base::Portable(b) => Box::new(b.references().iter()),
+        }
+    }
+
+    /// The side's docs and folders as the comparison shows them, with `removed` applied.
+    fn names(&self, removed: &BTreeMap<Hash, Hash>) -> Result<Names, RdyError> {
+        match self {
+            Base::Store(r) => shown(r, removed),
+            Base::Portable(b) => Ok(b.shown_paths(removed)),
+        }
+    }
+
+    /// The side's selected docs.
+    fn docs(&self) -> Vec<(&'a BlockId, Hash)> {
+        match self {
+            Base::Store(r) => r.docs.iter().map(|d| (&d.id, d.digest)).collect(),
+            Base::Portable(b) => b.doc_digests(),
+        }
+    }
+
+    /// The side's selected folders: each folder's own entry, its shown path and its flag.
+    fn folders(
+        &self,
+        names: &Names,
+    ) -> Result<BTreeMap<&'a BlockId, (&'a SelectionEntry, String, bool)>, RdyError> {
+        match self {
+            Base::Store(r) => folders(r, names),
+            Base::Portable(b) => {
+                let mut out = BTreeMap::new();
+                for e in b.folder_entries() {
+                    let (path, redacted) = names.get(&e.id).ok_or_else(invalid_tree)?;
+                    out.insert(&e.id, (e, path.clone(), *redacted));
+                }
+                Ok(out)
+            }
+        }
+    }
+
+    /// The side's retained blocks outside a doc.
+    fn outside_docs(&self) -> BTreeMap<&'a BlockId, (Hash, bool)> {
+        match self {
+            Base::Store(r) => outside_docs(r),
+            Base::Portable(b) => b.outside_docs(),
+        }
+    }
+
+    /// The planned blocks the side hides; a baseline holds their ids alone.
+    fn hidden(&self) -> Cow<'a, HiddenPlanned> {
+        match self {
+            Base::Store(r) => Cow::Borrowed(&r.hidden_planned),
+            Base::Portable(b) => Cow::Owned(HiddenPlanned::of_ids(b.hidden())),
+        }
+    }
+}
+
+/// Each doc and folder of one side by id: its shown path, and whether a name in it was replaced.
+pub(super) type Names = BTreeMap<BlockId, (String, bool)>;
 
 /// One side's docs and folders as the comparison shows them: each one's path, rebuilt by the
 /// selected tree's own path rules after every doc and folder whose version is in `removed` is
 /// read as that version's stub (so it is named by its id), and whether a name in that path was
 /// replaced. A side that already holds a stub keeps it; only a supplied pre-removal side needs
 /// the projection.
-fn shown(
-    r: &Resolved,
-    removed: &BTreeMap<Hash, Hash>,
-) -> Result<BTreeMap<BlockId, (String, bool)>, RdyError> {
+fn shown(r: &Resolved, removed: &BTreeMap<Hash, Hash>) -> Result<Names, RdyError> {
     let ops: Vec<Op> =
         r.m.iter()
             .filter(|b| tree::is_tree_type(&b.block_type) && !b.is_redacted())
@@ -158,16 +306,13 @@ fn shown(
     Ok(out)
 }
 
-/// `d` with its path and flag as `names` shows them.
-fn shown_doc(
-    d: &DocEntry,
-    names: &BTreeMap<BlockId, (String, bool)>,
-) -> Result<DocEntry, RdyError> {
-    let (path, redacted) = names.get(&d.id).ok_or_else(invalid_tree)?;
+/// Doc `id` with its `digest`, and its path and flag as `names` shows them.
+fn shown_doc(id: &BlockId, digest: Hash, names: &Names) -> Result<DocEntry, RdyError> {
+    let (path, redacted) = names.get(id).ok_or_else(invalid_tree)?;
     Ok(DocEntry {
-        id: d.id.clone(),
+        id: id.clone(),
         path: path.clone(),
-        digest: d.digest,
+        digest,
         redacted: *redacted,
     })
 }
@@ -175,7 +320,7 @@ fn shown_doc(
 /// One side's selected folders: each folder's own entry, its shown path and its flag.
 fn folders<'r>(
     r: &'r Resolved,
-    names: &BTreeMap<BlockId, (String, bool)>,
+    names: &Names,
 ) -> Result<BTreeMap<&'r BlockId, (&'r SelectionEntry, String, bool)>, RdyError> {
     let mut out = BTreeMap::new();
     for e in r
@@ -217,14 +362,48 @@ fn ref_key(r: &ReferenceRow) -> RefKey<'_> {
 /// What `after` discloses relative to `before`. Both must resolve the same profile id (two
 /// implicit profiles are the same) with the same audience; the profile revision may differ.
 pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<DisclosureDiff, RdyError> {
-    if before.profile.id != after.profile.id {
+    Ok(compare(Base::Store(before), after)?.0)
+}
+
+/// What `after` discloses relative to the portable baseline `before` (D-CDQF7): the comparison
+/// of [`disclosure_diff`], read from the baseline's rows, with the removals of both sides
+/// applied by version. It adds [`DisclosureDiff::baseline`]. The caller verified the baseline,
+/// its binding and its lineage first ([`super::baseline`]).
+pub(crate) fn baseline_diff(
+    before: &Baseline,
+    after: &Resolved,
+) -> Result<DisclosureDiff, RdyError> {
+    let (mut diff, stub_requests) = compare(Base::Portable(before), after)?;
+    let mut candidate = RequestSet::default();
+    for request in after.redactions.iter().chain(&stub_requests) {
+        candidate.insert(*request)?;
+    }
+    diff.baseline = Some(BaselineComparison {
+        repo_id: before.repo_id(),
+        tag: before.tag().to_string(),
+        landing: before.landing(),
+        baseline_hash: before.baseline_hash(),
+        candidate_redactions: candidate.into_sorted(),
+        baseline_redactions: before.redactions().to_vec(),
+    });
+    Ok(diff)
+}
+
+/// Ok when `after` resolves profile `id` with `audience`: two implicit profiles are the same,
+/// and the profile revision may differ.
+pub(super) fn same_profile(
+    id: Option<&BlockId>,
+    audience: Audience,
+    after: &Resolved,
+) -> Result<(), RdyError> {
+    if id != after.profile.id.as_ref() {
         return Err(RdyError::new(
             E_BAD_INPUT,
             "Disclosure comparison requires the same publication profile.",
             "Choose a baseline that contains the candidate profile id.",
         ));
     }
-    if before.profile.audience != after.profile.audience {
+    if audience != after.profile.audience {
         return Err(RdyError::new(
             E_BAD_INPUT,
             "Disclosure comparison requires the same audience.",
@@ -232,34 +411,43 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
         ));
     }
 
+    Ok(())
+}
+
+/// The one comparison of [`disclosure_diff`] and [`baseline_diff`], with the requests of the
+/// removed versions outside docs that `after` holds and does not retain.
+fn compare(before: Base<'_>, after: &Resolved) -> Result<(DisclosureDiff, Vec<Hash>), RdyError> {
+    same_profile(before.profile_id(), before.audience(), after)?;
+
     // names: the removed versions of both sides, then each side's paths with those names
     // replaced, before any row is built
-    let removed = removed_versions(&[before, after]);
-    let b_names = shown(before, &removed)?;
+    let mut removed = removed_entries(before.entries().iter());
+    removed.extend(removed_versions(&[after]));
+    let b_names = before.names(&removed)?;
     let a_names = shown(after, &removed)?;
 
     // docs, by id
-    let b_docs: BTreeMap<&BlockId, &DocEntry> = before.docs.iter().map(|d| (&d.id, d)).collect();
-    let a_docs: BTreeMap<&BlockId, &DocEntry> = after.docs.iter().map(|d| (&d.id, d)).collect();
+    let b_docs: BTreeMap<&BlockId, Hash> = before.docs().into_iter().collect();
+    let a_docs: BTreeMap<&BlockId, Hash> = after.docs.iter().map(|d| (&d.id, d.digest)).collect();
     let mut added_docs = vec![];
-    for (id, d) in &a_docs {
+    for (id, digest) in &a_docs {
         if !b_docs.contains_key(*id) {
-            added_docs.push(shown_doc(d, &a_names)?);
+            added_docs.push(shown_doc(id, *digest, &a_names)?);
         }
     }
     let mut removed_docs = vec![];
-    for (id, d) in &b_docs {
+    for (id, digest) in &b_docs {
         if !a_docs.contains_key(*id) {
-            removed_docs.push(shown_doc(d, &b_names)?);
+            removed_docs.push(shown_doc(id, *digest, &b_names)?);
         }
     }
     let mut changed_docs = vec![];
     for (id, a) in &a_docs {
         let Some(b) = b_docs.get(id) else { continue };
-        if a.digest == b.digest {
+        if a == b {
             continue;
         }
-        let (b, a) = (shown_doc(b, &b_names)?, shown_doc(a, &a_names)?);
+        let (b, a) = (shown_doc(id, *b, &b_names)?, shown_doc(id, *a, &a_names)?);
         changed_docs.push(ChangedDoc {
             id: (*id).clone(),
             before_path: b.path,
@@ -271,7 +459,7 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
     }
 
     // folders, by id: own entry and shown path
-    let b_folders = folders(before, &b_names)?;
+    let b_folders = before.folders(&b_names)?;
     let a_folders = folders(after, &a_names)?;
     let folder_ids: BTreeSet<&BlockId> =
         b_folders.keys().chain(a_folders.keys()).copied().collect();
@@ -300,7 +488,7 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
     // blocks outside a doc, by id: own version and whether it is removed. A block the baseline
     // retains and the candidate holds removed but does not retain shows its removed version:
     // its stub has no links, so it may no longer be kept (ruling final item 4)
-    let b_outside = outside_docs(before);
+    let b_outside = before.outside_docs();
     let mut a_outside = outside_docs(after);
     let a_removed = removed_outside(after);
     let mut stub_requests = vec![];
@@ -337,7 +525,7 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
     // changed or removed is a change of its own row
     type AttKey<'r> = (&'r BlockId, Option<AttachmentVariant>);
     let b_atts: BTreeMap<AttKey, &AttachmentEntry> = before
-        .attachments
+        .attachments()
         .iter()
         .map(|a| ((&a.block, a.variant), a))
         .collect();
@@ -379,10 +567,7 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
     // the link edges outside the selection count here as before (D-44NMT leaves the comparison
     // as it was)
     let b_refs: BTreeMap<RefKey<'_>, u64> = before
-        .references
-        .rows
-        .iter()
-        .chain(&before.references.links_outside)
+        .references()
         .map(|r| (ref_key(r), r.occurrences))
         .collect();
     let mut new_references: Vec<ReferenceRow> = after
@@ -406,7 +591,7 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
     // the removal requests both resolutions apply, bounded as one list
     let mut requests = RequestSet::default();
     for request in before
-        .redactions
+        .redactions()
         .iter()
         .chain(&after.redactions)
         .chain(&stub_requests)
@@ -414,17 +599,17 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
         requests.insert(*request)?;
     }
 
-    Ok(DisclosureDiff {
+    let diff = DisclosureDiff {
         profile_id: after.profile.id.clone(),
         audience: after.profile.audience,
-        before_profile_version: before.profile.version,
+        before_profile_version: before.profile_version(),
         after_profile_version: after.profile.version,
-        before_selection_hash: before.selection_hash,
+        before_selection_hash: before.selection_hash(),
         after_selection_hash: after.selection_hash,
-        before_selection_identity: before.selection_identity,
+        before_selection_identity: before.selection_identity(),
         after_selection_identity: after.selection_identity,
         redactions: requests.into_sorted(),
-        profile_changed: before.profile.version != after.profile.version,
+        profile_changed: before.profile_version() != after.profile.version,
         added_docs,
         removed_docs,
         changed_docs,
@@ -435,6 +620,8 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
         changed_attachments,
         new_references,
         new_reference_count,
-        newly_hidden_planned: after.hidden_planned.newly(&before.hidden_planned),
-    })
+        newly_hidden_planned: after.hidden_planned.newly(&before.hidden()),
+        baseline: None,
+    };
+    Ok((diff, stub_requests))
 }

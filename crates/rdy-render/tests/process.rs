@@ -503,31 +503,29 @@ fn hpb9_unknown_input_keys_name_the_path_and_nearest_key() {
     inputs["render_inputs"]["titel"] = json!("x");
     let mut pack = base.clone();
     pack["render_inputs"]["pack"]["nmae"] = json!("x");
-    for (value, path, nearest) in [
-        (prelude, "profle", "profile"),
-        (inputs, "render_inputs.titel", "title"),
-        (pack, "render_inputs.pack.nmae", "name"),
-    ] {
+    // a prelude key is named by its path, with the nearest key
+    let e = refused(&framed(&prelude, &stream));
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert_eq!(e.message, "render process input: unknown field \"profle\"");
+    assert!(
+        e.fix
+            .starts_with("did you mean \"profile\"? the fields are "),
+        "{e}"
+    );
+    // an unknown member of the render inputs or the pack is a member this rdy cannot read
+    // whole (D-8RGWW): it names both versions, never the path
+    let v = rdy_engine::render_inputs::RDY_VERSION;
+    for value in [inputs, pack] {
         let e = refused(&framed(&value, &stream));
-        assert_eq!(e.code, E_BAD_INPUT, "{e}");
-        assert_eq!(
-            e.message,
-            format!("render process input: unknown field \"{path}\""),
-            "{e}"
-        );
-        assert!(
-            e.fix
-                .starts_with(&format!("did you mean \"{nearest}\"? the fields are ")),
-            "{e}"
+        assert_refusal(
+            &e,
+            E_BAD_INPUT,
+            (
+                &format!("render inputs from rdy {v} do not fit rdy {v}"),
+                &format!("capture the render inputs with rdy {v}, or render with rdy {v} or later"),
+            ),
         );
     }
-    let mut inputs = base.clone();
-    inputs["render_inputs"]["titel"] = json!("x");
-    let e = refused(&framed(&inputs, &stream));
-    assert_eq!(
-        e.fix,
-        "did you mean \"title\"? the fields are rdy, pack, theme, title, description, disagreements"
-    );
 }
 
 #[test]
@@ -775,15 +773,23 @@ fn hpb9_process_refusals_write_no_output() {
     // a well-formed id that names no profile of the tag
     let e = refused(&with_profile("d-ZZZZZ"));
     assert_eq!(e.code, E_NOT_FOUND, "{e}");
-    // render inputs of another renderer
+    // render inputs that another rdy captured are read (D-8RGWW)
+    let (_, good_out, _) = process(&framed(&base, &stream));
+    for label in ["0.0.1", "99.0.0"] {
+        let mut v = base.clone();
+        v["render_inputs"]["rdy"] = json!(label);
+        let (_, out, _) = process(&framed(&v, &stream));
+        assert!(out == good_out, "{label}");
+    }
+    // another theme is refused
     let mut v = base.clone();
-    v["render_inputs"]["rdy"] = json!("0.0.1");
+    v["render_inputs"]["theme"] = json!("rdy-dark");
     assert_refusal(
         &refused(&framed(&v, &stream)),
         E_BAD_INPUT,
         (
             "render inputs do not match this renderer",
-            "use this rdy version and the rdy-standard theme",
+            "use the rdy-standard theme and a non-empty title",
         ),
     );
     // a prelude alone, a truncated stream, a stream with one byte more

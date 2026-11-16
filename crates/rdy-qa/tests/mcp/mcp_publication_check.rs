@@ -6,10 +6,10 @@ use rdy_qa::fixtures::{approver, land, write};
 use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 
-const DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication. The review names docs and decisions by title, counts the changes a reader sees and gives short excerpts. A first check lists the included docs.";
+const DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Against_baseline takes the complete path of a baseline file from rdy_publication_baseline instead, for a previous publication of another project that shares this project's lineage; pass against or against_baseline, not both. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication. The review names docs and decisions by title, counts the changes a reader sees and gives short excerpts. A first check lists the included docs.";
 
 /// The tool's words before the review (pub9), and the words D-MCH70 adds to them (drv6).
-const PUB9_DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication.";
+const PUB9_DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Against_baseline takes the complete path of a baseline file from rdy_publication_baseline instead, for a previous publication of another project that shares this project's lineage; pass against or against_baseline, not both. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication.";
 const REVIEW_WORDS: &str = "The review names docs and decisions by title, counts the changes a reader sees and gives short excerpts. A first check lists the included docs.";
 
 /// A public profile `open` that refers outside its selection, an org profile `site` over the same
@@ -103,7 +103,10 @@ fn pub9_check_inputs_are_strict_and_policy_is_not_authorization() {
         p.sort();
         p
     };
-    assert_eq!(props, ["against", "profile", "release", "scope"]);
+    assert_eq!(
+        props,
+        ["against", "against_baseline", "profile", "release", "scope"]
+    );
     assert_eq!(t["inputSchema"]["required"], json!(["profile"]));
 
     // a session is required
@@ -389,6 +392,9 @@ fn drv6_tool_description_names_the_readable_review() {
         .map(String::as_str)
         .collect();
     props.sort();
-    assert_eq!(props, ["against", "profile", "release", "scope"]);
+    assert_eq!(
+        props,
+        ["against", "against_baseline", "profile", "release", "scope"]
+    );
     assert_eq!(t["inputSchema"]["required"], json!(["profile"]));
 }

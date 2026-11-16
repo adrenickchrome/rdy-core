@@ -1508,7 +1508,7 @@ fn hpb5_scratch_closes_on_every_exit() {
     // invalid inputs refuse before a scratch file is made
     let seen = Arc::new(Seen::default());
     let mut wrong = inputs(&s.r);
-    wrong.rdy = "0.0.0".into();
+    wrong.theme = "rdy-dark".into();
     let e = RenderSource::read_with(
         Cursor::new(stream.clone()),
         wrong,

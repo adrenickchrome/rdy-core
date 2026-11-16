@@ -8,6 +8,7 @@
 //! and adds its review fields. The doc arrays follow each side's reading order, not id order.
 //! No member here enters a selection hash, a selection identity or a doc digest (D-B2AC3).
 
+use super::baseline::{Baseline, BaselineReviewSide};
 use super::diff::DisclosureDiff;
 use super::references::{ReferenceReport, ReferenceRow};
 use super::report::{doc_row, hash_or_null, hidden_json, reference_row};
@@ -78,6 +79,29 @@ impl PublicationReview {
                     first_attachments: vec![],
                 }
             }
+        })
+    }
+
+    /// The review of `after` against the portable `baseline` (D-CDQF7, D-W4YAE): the candidate
+    /// reads as [`PublicationReview::build`] reads it, with the baseline's removals added; the
+    /// baseline reads through its own side view, which has no reader text.
+    pub fn build_against_baseline(
+        source: &dyn PublicationSource,
+        candidate_source: &Materialized,
+        after: &Resolved,
+        baseline: &Baseline,
+        diff: &DisclosureDiff,
+    ) -> Result<PublicationReview, RdyError> {
+        let removals = ReviewRemovals::of_sides(source, &[after])?.with_baseline(baseline);
+        let lookup = ReferenceLookup::new(candidate_source, &removals);
+        let after_side = ReaderReviewSide::new(after, &removals);
+        let before_side = BaselineReviewSide::new(baseline, &removals);
+        Ok(PublicationReview {
+            references: reference_review(&after.references, &lookup),
+            new_references: reference_labels(&diff.new_references, &lookup),
+            disclosure: Some(disclosure_review(diff, &before_side, &after_side)),
+            included: None,
+            first_attachments: vec![],
         })
     }
 }
@@ -434,13 +458,24 @@ fn disclosure_json(
             .collect(),
         left,
     );
-    let (kept, left) = p.list(&d.redactions);
-    let redactions = put(
-        "redactions",
-        kept.iter().map(|h| json!(h.to_string())).collect(),
-        left,
-    );
-    json!({
+    let hashes = |kept: &[rdy_model::Hash]| -> Vec<Value> {
+        kept.iter().map(|h| json!(h.to_string())).collect()
+    };
+    // a baseline comparison keeps each side's requests apart (D-CDQF7): the store records of one
+    // side never name the other side's requests
+    let redactions = match &d.baseline {
+        None => {
+            let (kept, left) = p.list(&d.redactions);
+            put("redactions", hashes(kept), left)
+        }
+        Some(b) => {
+            let (candidate, c_left) = p.list(&b.candidate_redactions);
+            let (baseline, b_left) = p.list(&b.baseline_redactions);
+            put("redactions", vec![], c_left + b_left);
+            json!({"candidate": hashes(candidate), "baseline": hashes(baseline)})
+        }
+    };
+    let mut out = json!({
         "profile_id": d.profile_id.as_ref().map(ToString::to_string),
         "audience": d.audience.as_str(),
         "before_profile_version": hash_or_null(d.before_profile_version),
@@ -464,5 +499,14 @@ fn disclosure_json(
         "newly_hidden_planned": hidden_json(&d.newly_hidden_planned),
         "omitted": omitted,
         "totals": value(&review.totals),
-    })
+    });
+    if let Some(b) = &d.baseline {
+        out["baseline"] = json!({
+            "repo_id": b.repo_id.to_string(),
+            "tag": b.tag,
+            "landing": b.landing.to_string(),
+            "baseline_hash": b.baseline_hash.to_string(),
+        });
+    }
+    out
 }

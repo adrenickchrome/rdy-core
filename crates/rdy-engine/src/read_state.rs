@@ -673,6 +673,15 @@ pub struct ReadState {
     pub(crate) areas: Arc<AreaMatcher>,
     /// The project directory.
     pub(crate) root: Arc<std::path::Path>,
+    /// Whether reads may look at files under `root` or the user's config (a linked checkout's
+    /// HEAD). False only for an explicit candidate's state ([`ReadState::candidate_state`]),
+    /// whose every input is a record or the caller's.
+    pub(crate) reads_files: bool,
+    /// Whether `canon_head` is the caller's explicit base rather than the store's canon. True
+    /// only for an explicit candidate's state ([`ReadState::candidate_state`]): its base, even
+    /// none (a first landing's `prev`), is an input of the check, so a holder's refusal of canon
+    /// reads does not apply to it. Every other state, published or held, keeps that refusal.
+    pub(crate) explicit_base: bool,
     /// The site's name and description, parsed from `.rdy.yaml` by a full publish.
     pub(crate) name: Arc<str>,
     pub(crate) description: Option<Arc<str>>,
@@ -987,10 +996,101 @@ impl ReadState {
         }
     }
 
+    /// The state an explicit candidate is judged on (D-0WWYR): canon at `base`, one view `view`
+    /// that holds `changes` on that base, and the pack and gate settings of `inputs`. Every other
+    /// input is a record this state's reader holds: the proposals, plans, answers, verdicts,
+    /// tensions, coordination and foreign records. It reads no other view and no view's plan, no
+    /// project file and no user config. Its caches are its own, so nothing built under another
+    /// canon or pack serves it, and nothing it builds serves a published state. It is never
+    /// published.
+    pub(crate) fn candidate_state(
+        &self,
+        base: Option<Hash>,
+        view: &str,
+        changes: &[Hash],
+        inputs: &crate::landing_check::CheckInputs,
+    ) -> ReadState {
+        let pack = Arc::new(inputs.pack.clone());
+        let head = ViewHead {
+            head: candidate_head(base, view, changes),
+            base,
+            len: changes.len() as u64,
+            owner: None,
+            pinned: false,
+            closed: false,
+            last_write_ms: 0,
+        };
+        let mut views = imbl::HashMap::new();
+        views.insert(
+            view.to_string(),
+            Arc::new(Entry::new(
+                Some(view.to_string()),
+                base,
+                Some(head),
+                Arc::new(changes.to_vec()),
+            )),
+        );
+        let caches = crate::handle::EpochCaches::new();
+        ReadState {
+            seq: self.seq,
+            check_records: self.check_records,
+            canon_head: base,
+            canon: Arc::new(Entry::new(None, base, None, Arc::new(vec![]))),
+            views,
+            tags: Arc::clone(&self.tags),
+            areas: Arc::new(pack.area_matcher()),
+            reader: self.reader.with_tracking(pack.tracking()),
+            pack,
+            root: Arc::clone(&self.root),
+            reads_files: false,
+            explicit_base: true,
+            name: Arc::clone(&self.name),
+            description: self.description.clone(),
+            require_up_to_date: inputs.require_up_to_date,
+            idle_days: self.idle_days,
+            coverage_target: inputs.coverage_target,
+            coverage_gate: inputs.coverage_gate,
+            propose_cadence: inputs.propose_cadence,
+            propose_changes: inputs.propose_changes,
+            decisions_home: inputs.decisions_home.as_deref().map(Arc::from),
+            site_base_path: self.site_base_path.clone(),
+            as_of: caches.as_of,
+            vpos: caches.vpos,
+            proposal_touched: caches.proposal_touched,
+            canon_step_cache: caches.canon_step_cache,
+            inflight_cell: Arc::default(),
+            coord_heads: Arc::clone(&self.coord_heads),
+            foreign: Arc::clone(&self.foreign),
+            plan_heads: Default::default(),
+            retirement_origins: Arc::default(),
+            coord: OnceLock::new(),
+            tensions: Arc::default(),
+            dismissals: Arc::clone(&self.dismissals),
+            mention_dismissals: Arc::clone(&self.mention_dismissals),
+            semantic: Arc::clone(&self.semantic),
+            lease_ttl_ms: self.lease_ttl_ms,
+            coverage_memo: Default::default(),
+            memo: Default::default(),
+            detectors: self.detectors,
+            error: self.error.clone(),
+        }
+    }
+
+    /// Whether reads may look at files: the project's config and the user's (a linked
+    /// checkout's HEAD). False for an explicit candidate's state.
+    pub(crate) fn reads_files(&self) -> bool {
+        self.reads_files
+    }
+
     /// A holder's refusal of every read that needs canon (`holder reads need a tag or
     /// landing`): a holder has no canon, so its scopes are tags and landings only. A state with a
-    /// canon head is never a holder's, so only a state without one reads the store's mode.
+    /// canon head is never a holder's, so only a state without one reads the store's mode. An
+    /// explicit candidate's state reads the base its caller names, never the store's canon, so
+    /// it is never refused (an empty base is a first landing's `prev`).
     pub(crate) fn refuse_holder_canon(&self) -> Result<(), RdyError> {
+        if self.explicit_base {
+            return Ok(());
+        }
         if self.canon_head.is_none() && self.reader.mode()? == StoreMode::Holder {
             return Err(crate::holder::needs_tag());
         }
@@ -1130,6 +1230,22 @@ impl ReadState {
     }
 }
 
+/// The domain of [`candidate_head`].
+const CANDIDATE_HEAD_DOMAIN: &[u8] = b"rdy-candidate-view-1\0";
+
+/// The head an explicit candidate's view reads as: a hash of its base, name and changes. No op
+/// in a store has it, so no read of the store's views can mistake it for one.
+fn candidate_head(base: Option<Hash>, view: &str, changes: &[Hash]) -> Hash {
+    let mut bytes = CANDIDATE_HEAD_DOMAIN.to_vec();
+    bytes.extend_from_slice(&base.map_or([0; 32], |h| h.0));
+    bytes.extend_from_slice(&(view.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(view.as_bytes());
+    for c in changes {
+        bytes.extend_from_slice(&c.0);
+    }
+    Hash::of(&bytes)
+}
+
 /// Builds `entry` from what it captured (never from the store's current heads). `canon` is
 /// canon's build, given only when `entry` is a view whose base is canon's head and canon is
 /// built (`ReadState::canon_for`); `merged` replaces the merge of the entry's changes.
@@ -1202,7 +1318,20 @@ fn build_merged(
             Arc::new(Materialized::build(merged.state, blocks))
         }
     };
-    Ok(Built::new(m, Arc::new(merged.conflicts)))
+    // the blocks of removed content a pull's replay left out (D-FNRXT)
+    let mut conflicts = merged.conflicts;
+    let removed = crate::sync_redaction::removal_conflicts(
+        reader,
+        &entry.included,
+        changes,
+        &|b| m.version_of(b),
+        &conflicts,
+    )?;
+    if !removed.is_empty() {
+        conflicts.extend(removed);
+        conflicts.sort_by(|a, b| a.block.cmp(&b.block));
+    }
+    Ok(Built::new(m, Arc::new(conflicts)))
 }
 
 impl ReadState {

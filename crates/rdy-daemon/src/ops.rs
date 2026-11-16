@@ -62,7 +62,7 @@ use plan::{plan, reaffirm, repin};
 use policy::policy;
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, compact, fsck, reindex};
-use publication::publication_check;
+use publication::{publication_baseline, publication_check};
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags, trace};
 use redaction::redact;
 use remote::remote;
@@ -130,6 +130,7 @@ pub const OPS: &[&str] = &[
     "query",
     "render",
     "publication_check",
+    "publication_baseline",
     "export",
     "dump",
     "clone",
@@ -476,8 +477,15 @@ pub fn dispatch_with(
         "render" => render(cx, parse(op, args, "{out, scope?, profile?}")?),
         "publication_check" => publication_check(
             cx,
-            parse(op, args, "{profile, scope?, against?, release?}")?,
+            parse(
+                op,
+                args,
+                "{profile, scope?, against?, against_baseline?, release?}",
+            )?,
         ),
+        "publication_baseline" => {
+            publication_baseline(cx, parse(op, args, "{profile, scope, out?}")?)
+        }
         "export" => export(cx, parse(op, args, EXPORT_SHAPE)?),
         "dump" => dump(cx, parse(op, args, "{out, after?}")?),
         "clone" => clone(cx, parse(op, args, "{dir, fork?}")?),

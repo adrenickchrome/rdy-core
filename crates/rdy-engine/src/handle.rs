@@ -421,6 +421,8 @@ impl Rdy {
             pack: Arc::clone(&pack),
             areas: Arc::clone(&areas),
             root: Arc::from(project),
+            reads_files: true,
+            explicit_base: false,
             name,
             description,
             require_up_to_date,

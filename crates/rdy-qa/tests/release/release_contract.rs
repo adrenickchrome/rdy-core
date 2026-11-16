@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/sd1-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/sync-client-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -98,13 +98,13 @@ fn workspace_root() -> PathBuf {
 }
 
 /// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
-/// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json` and
-/// `disclosure-review-v1.json`, all frozen) with the additions since. A capture writes this file,
-/// never a baseline. It starts as a byte copy of its predecessor `disclosure-review-v1.json`, whose
-/// bytes `sdl7_contract_changes_only_delta_surfaces` and `release_disclosure_contract.rs` pin; a
+/// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json`,
+/// `disclosure-review-v1.json` and `sd1-v1.json`, all frozen) with the additions since. A capture
+/// writes this file, never a baseline. It starts as a byte copy of its predecessor `sd1-v1.json`,
+/// whose bytes `release_sync_client_contract.rs` and `release_disclosure_contract.rs` pin; a
 /// later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/sd1-v1.json")
+    qa_root().join("fixtures/contracts/sync-client-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -951,7 +951,8 @@ fn store_row() -> Value {
     json!({
         "sources": [
             "rdy_store::format", "rdy_store::codec", "rdy_store::kinds", "rdy_model enums",
-            "fixtures/store/feature-1", "fixtures/dump/*.expect.json",
+            "fixtures/store/feature-1", "fixtures/store/hub-canon-1", "fixtures/dump/*.expect.json",
+            "rdy_store::sync_state",
         ],
         "manifest": {
             "version": MANIFEST_VERSION,
@@ -987,9 +988,11 @@ fn store_row() -> Value {
             "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
             "figure_dark": "a figure BLOCK whose dark_blob is set, alone or in a CHANGE's create or update",
             "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
+            "hub_canon": "a holder's first move: a batch that writes canon, a view/, a held/ or a replaced/ ref",
             "object_encoding": "any frame of encoding 1 or more",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
             "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
+            "sync_state": "a project's first meta/sync/ ref: a batch that writes one",
             "view_replay": "a CHANGE whose links.replayed_from is set",
         },
         "encoding_versions": {
@@ -1012,6 +1015,32 @@ fn store_row() -> Value {
         "content_domain": String::from_utf8_lossy(rdy_model::block::CONTENT_DOMAIN).trim_end_matches('\0'),
         "object_ids": object_ids,
         "native_fixture": digests(&fixtures.join("store/feature-1"), |_| true),
+        // the first-use native holder of hub_canon (Sync client A Task 1b)
+        "holder_fixture": digests(&fixtures.join("store/hub-canon-1"), |_| true),
+        // a project's sync state refs and their bounds (D-3RSCW, Sync client A Task 2)
+        "sync_state": sync_state_facts(),
+    })
+}
+
+/// The sync state refs of one remote `<remote>` and view `<name>` (D-3RSCW), their value and
+/// name bounds and the write kinds, each from `rdy_store::sync_state`.
+fn sync_state_facts() -> Value {
+    use rdy_store::sync_state as st;
+    json!({
+        "refs": [
+            st::canon_ref("<remote>"),
+            st::view_ref("<remote>", "<name>"),
+            st::upload_ref("<remote>"),
+            st::pending_ref("<remote>"),
+        ],
+        "prefix": st::SYNC_REF,
+        "max_value_bytes": st::MAX_VALUE_BYTES,
+        "max_url_bytes": st::MAX_URL_BYTES,
+        "max_push_bytes": st::MAX_PUSH_BYTES,
+        "max_remote_bytes": st::MAX_REMOTE_BYTES,
+        "max_view_chars": st::MAX_VIEW_CHARS,
+        "write_kinds": [[st::KIND_CANON, "canon"], [st::KIND_VIEW, "view"]],
+        "feature": rdy_store::format::FEATURE_SYNC_STATE,
     })
 }
 
@@ -1157,6 +1186,11 @@ fn sync_row() -> Value {
             "purpose: u8", "tag: [u8; 32]", "prerequisites: u32", "keys: kind u8 + hash [u8; 32]",
         ],
         "purposes": purposes(),
+        // the canon and view histories of stream format 4 and the upload minimum (D-KE83X,
+        // D-4XHPH; Sync client A Task 2)
+        "history": history_facts(),
+        // the views that travel with a sync (D-4E32E, D-47HVF; Sync client A Task 4)
+        "views": synced_view_facts(),
         "logical_keys": "kind: u8 || hash: [u8; 32]",
         "prerequisite_order": "strictly ascending logical keys",
         "trailer_fields": ["records: u64", "bytes: u64", "digest: [u8; 32]"],
@@ -1552,7 +1586,67 @@ fn signatures_row() -> Value {
         },
         "statements": statements,
         "vectors": vectors,
+        "carried": carried_signature(),
     })
+}
+
+/// scc3 (D-8ZEHP, D-9YAQS, D-6Z9BR): a signature that a pull replay carried to L′ with its
+/// statement and signature bytes unchanged. The check rebuilds the statement with L′'s base set
+/// to the base of a landing on L′'s replay chain (its `rebased_from`, then each source's own, in
+/// turn), and names that landing in `carried_from`. The vector is the plain one, carried by two
+/// pulls: to a replay of its landing, then to a replay of that replay, each on another base.
+fn carried_signature() -> Value {
+    use rdy_engine::signature_check::{CheckContext, SignatureSubject, check_signature_carried};
+    let v = rdy_qa::signing::vector(false);
+    let SignatureSubject::Landing { hash, record } = &v.context.subject else {
+        unreachable!("the vector signs a landing")
+    };
+    // the first pull's replay, on another base
+    let first = Hash([0x5e; 32]);
+    let first_record = rdy_model::LandingRecord {
+        prev: Some(Hash([0x5b; 32])),
+        rebased_from: vec![*hash],
+        ..record.clone()
+    };
+    // the second pull's replay of `first`: the subject
+    let replay = Hash([0x5d; 32]);
+    let carried = rdy_model::LandingRecord {
+        prev: Some(Hash([0x5c; 32])),
+        rebased_from: vec![first],
+        ..record.clone()
+    };
+    let context = CheckContext {
+        subject: SignatureSubject::Landing {
+            hash: replay,
+            record: carried,
+        },
+        ..v.context.clone()
+    };
+    let record = rdy_model::signature::Signature {
+        subject: replay,
+        ..v.record.clone()
+    };
+    let sources = [(first, first_record), (*hash, record_of(&v))];
+    let check = check_signature_carried(&record, &context, Some(&v.trust), &sources);
+    assert_eq!(check.carried_from, Some(hash.to_string()), "{check:?}");
+    let json = serde_json::to_value(&check).unwrap();
+    json!({
+        "result_member": "carried_from",
+        "result_value": "the full hash of the landing on the subject's replay chain whose base the statement names; absent for any other signature",
+        "statement_rule": "the statement rebuilt from the subject with its base set to that landing's base; every other signed field is the subject's",
+        "chain": "the subject's rebased_from, then each held source's own rebased_from in turn, breadth first, each landing once; the first landing whose base the statement names",
+        "record": "a new SIGNATURE whose subject is the replayed landing, with the source's namespace, statement, signature bytes and signer",
+        "cli": rdy_engine::signing_read::signature_line(&json),
+        "check": json,
+    })
+}
+
+/// The landing record the vector `v` signs.
+fn record_of(v: &rdy_qa::signing::Vector) -> rdy_model::LandingRecord {
+    match &v.context.subject {
+        rdy_engine::signature_check::SignatureSubject::Landing { record, .. } => record.clone(),
+        _ => unreachable!("the vector signs a landing"),
+    }
 }
 
 // ---- the seeded project and the probes ----
@@ -2032,6 +2126,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     (
         "policy",
         "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
+    ),
+    (
+        "publication baseline",
+        "makes a baseline of a tagged publication; cli_sync_baseline pins its replies",
     ),
     ("publish", "uploads a site to a host"),
     (
@@ -3179,6 +3277,10 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     (
         "rdy_policy",
         "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
+    ),
+    (
+        "rdy_publication_baseline",
+        "makes a baseline of a tagged publication; cli_sync_baseline and mcp_sync_baseline pin its replies",
     ),
     ("rdy_publish", "uploads a site to a host"),
     ("rdy_redact", "destroys content; no dry run is probed"),
@@ -5551,6 +5653,95 @@ fn purposes() -> Value {
         .collect();
     assert!(!rows.is_empty(), "the reader accepts a purpose");
     json!(rows)
+}
+
+/// Stream format 4's facts: the format, the formats this rdy reads, each purpose's first format
+/// and root kind, and the feature classes that raise a manifest's minimum rdy (probed through
+/// `StoreFeatures::min_rdy`).
+fn history_facts() -> Value {
+    let roots: Vec<Value> = (0..=u8::MAX)
+        .filter_map(sync_stream::StreamPurpose::of)
+        .map(|p| json!([p.byte(), p.first_format(), p.root_kind()]))
+        .collect();
+    let counts = |class: FeatureClass| {
+        rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
+            name: "probe".into(),
+            class,
+            required_rdy: rdy_store::format::SYNC_STATE_REQUIRED_RDY.into(),
+        }])
+        .min_rdy()
+        .is_some()
+    };
+    let minimum_classes: Vec<&str> = [
+        FeatureClass::Compatible,
+        FeatureClass::ReadOnlyCompatible,
+        FeatureClass::Incompatible,
+    ]
+    .into_iter()
+    .filter(|c| counts(*c))
+    .map(|c| c.as_str())
+    .collect();
+    json!({
+        "format": sync_stream::HISTORY_FORMAT,
+        "read_formats": sync_stream::READ_FORMATS,
+        "roots": roots,
+        "minimum_classes": minimum_classes,
+    })
+}
+
+/// The rules of views that travel with a sync (D-4E32E, D-3RSCW, D-47HVF), each from the code
+/// that applies it: the ref of a view's sync state, the `replaced/` kind of a view op, the
+/// statuses a pull reports, a push's order and fork-source refusal on a probe project, and each
+/// view refusal's code, message and fix with sample values.
+fn synced_view_facts() -> Value {
+    use rdy_engine::sync_views::{self, ViewPullStatus};
+    let (_dir, mut r) = project();
+    rdy_qa::fixtures::seed_doc(&mut r, "v");
+    r.view_fork(&rdy_qa::fixtures::writer(), "v", "f")
+        .expect("the probe fork");
+    let names = |v: &[&str]| v.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    let none = BTreeMap::new();
+    let order: Vec<String> = sync_views::push_plan(&r.read(), &names(&["f", "v"]), &none)
+        .expect("a push of a fork and its source")
+        .into_iter()
+        .map(|p| p.view)
+        .collect();
+    let row = |e: RdyError| json!([e.code, e.message, e.fix]);
+    let fork_alone = sync_views::push_plan(&r.read(), &names(&["f"]), &none)
+        .expect_err("a fork without its source");
+    let twice = sync_views::push_plan(&r.read(), &names(&["v", "v"]), &none)
+        .expect_err("a name given twice");
+    let unknown = sync_views::push_plan(&r.read(), &names(&["nope"]), &none)
+        .expect_err("a view this project lacks");
+    let (local, hub) = (Hash([1; 32]), Hash([2; 32]));
+    let statuses: Vec<Value> = [
+        ViewPullStatus::New,
+        ViewPullStatus::UpToDate,
+        ViewPullStatus::FastForward,
+        ViewPullStatus::Rechained,
+        ViewPullStatus::Taken,
+        ViewPullStatus::Refused,
+    ]
+    .iter()
+    .map(|s| serde_json::to_value(s).expect("a status"))
+    .collect();
+    json!({
+        "state_ref": rdy_store::sync_state::view_ref("<remote>", "<name>"),
+        "replaced_kind": rdy_store::hub_canon::ReplacedKind::ViewOp.byte(),
+        "pull_statuses": statuses,
+        "push_order": {"named": ["f", "v"], "sent": order},
+        "refusals": {
+            "push_fork_alone": row(fork_alone),
+            "push_twice": row(twice),
+            "push_unknown": row(unknown),
+            "pull_root": row(sync_views::view_exists("v", &local, &hub)),
+            "push_root": row(sync_views::view_root("v", &local, &hub)),
+            "diverged_proposal": row(sync_views::view_diverged("v", "P-0123456789ab@1")),
+            "diverged_view": row(sync_views::view_diverged("v", "view f")),
+            "undo_owner": row(sync_views::undo_owner("v")),
+            "pull_missing": row(sync_views::view_missing("v", "origin")),
+        },
+    })
 }
 
 // ---- derived identities ----
@@ -9178,7 +9369,8 @@ fn m4a5_contract_changes_only_hook_surfaces() {
     // the generated kungfu delivery: the tool has its row in the table and its ruleset's line
     let policy = rdy_engine::kungfu::policy("rdy_hook").expect("a kungfu row for rdy_hook");
     assert_eq!(policy.ruleset, Some("rdy:project-ops"));
-    assert_eq!(rdy_engine::kungfu::TOOLS.len(), 62);
+    // the live table also holds the tools of later releases, each pinned by its own task
+    assert!(rdy_engine::kungfu::TOOLS.len() >= 62);
     let owner = rdy_engine::kungfu::owner("project-ops").expect("the project-ops value");
     assert!(
         owner.suffix.contains("rdy_hook"),

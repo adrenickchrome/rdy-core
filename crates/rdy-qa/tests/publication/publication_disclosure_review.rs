@@ -387,7 +387,10 @@ fn drv6_review_inputs_and_existing_scope_rules_stay_closed() {
         .map(String::as_str)
         .collect();
     props.sort();
-    assert_eq!(props, ["against", "profile", "release", "scope"]);
+    assert_eq!(
+        props,
+        ["against", "against_baseline", "profile", "release", "scope"]
+    );
     assert_eq!(t["inputSchema"]["required"], json!(["profile"]));
     reader(&mut c);
     // no review input: a baseline, a projection or a limit is an unknown key

@@ -6,8 +6,9 @@
 //! consumer names them from this crate alone. The holder keeps no second renderer, worker or
 //! output holder. It writes a render request for a child process the hub creates and limits
 //! ([`Snapshot::write_render_request`]), or renders one page of a captured tag in the call
-//! ([`Snapshot::render_page`]). A project caller obtains explicit [`RenderInputs`] through
-//! `rdy_render::render_input::capture_inputs`; the holder adds no default.
+//! ([`Snapshot::render_page`]). A project captures explicit [`RenderInputs`] for a requested tag
+//! with [`Snapshot::capture_render_inputs`] (core's `rdy_render::render_input::capture_inputs`,
+//! with the tag's disagreement list); the holder adds no default and captures none.
 //! [`check_publication_media_type`] is core's rule for the media type of a manifest entry; a
 //! host checks each entry of an uploaded manifest with it and keeps no table of its own (hub
 //! D-X0F6P).
@@ -21,7 +22,7 @@ use std::io::Write;
 
 pub use crate::stream::BatchReport;
 pub use rdy_engine::publication_manifest::{Manifest, ManifestEntry, manifest_hash};
-pub use rdy_engine::render_inputs::RenderInputs;
+pub use rdy_engine::render_inputs::{DisagreementInput, RenderInputs};
 pub use rdy_render::PublicationArtifact;
 pub use rdy_render::RenderedPage;
 pub use rdy_render::check_publication_media_type;
@@ -30,6 +31,24 @@ pub use rdy_render::process::run as run_render_process;
 pub use rdy_render::process::{ProcessSummary, RenderFormat};
 
 impl Snapshot {
+    /// The render inputs of the captured tag `tag` (`1.2.0` finds `v1.2.0`) in this project, as
+    /// a push carries them with the tag (D-QMZ92, D-H0BZN, D-8RGWW): the project's effective
+    /// pack, theme, title and description, and the tag's own disagreement list (a tag at canon's
+    /// head lists canon's open disagreements; a tag at a past landing lists none). The capture
+    /// is explicit: no historical settings are read. A holder captures none (`E_BAD_INPUT`); a
+    /// tag the snapshot lacks is `E_NOT_FOUND`.
+    pub fn capture_render_inputs(&self, tag: &str) -> Result<RenderInputs, RdyError> {
+        let read = self.read_state();
+        if read.reader().mode()? == rdy_store::holder::StoreMode::Holder {
+            return Err(crate::landing_check::project_only("render inputs"));
+        }
+        read.ensure_current_epoch()?;
+        let (_, captured) = self.captured_tag(tag)?;
+        let inputs = rdy_render::render_input::capture_inputs(read, &Scope::At(captured.landing))?;
+        read.ensure_current_epoch()?;
+        Ok(inputs)
+    }
+
     /// Writes the render request of the captured tag `tag` (`1.2.0` finds `v1.2.0`) to `out`:
     /// the process prelude (`profile`, `format` and `inputs`), then the tag's complete history
     /// stream with nothing known ([`Snapshot::write_stream`]). `profile` is a full profile id

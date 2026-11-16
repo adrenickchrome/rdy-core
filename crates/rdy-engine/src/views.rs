@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 pub(crate) mod own;
-mod replay;
+pub(crate) mod replay;
 mod resolve;
 mod undo;
 
@@ -243,10 +243,17 @@ pub(crate) fn conflict_infos(
                         Some(ch) => reader.landing_of(ch)?.map(|l| l.to_string()),
                         None => None,
                     };
+                    // a side of removed content (D-FNRXT) names its removal, never its text
+                    let removal = match &side.version {
+                        Some(v) => reader.redaction_of(rdy_store::kinds::BLOCK, v)?,
+                        None => None,
+                    };
                     let mut summary = match &side.change {
                         Some(ch) => {
                             let change = reader.change(ch)?;
-                            let what = if change.message.trim().is_empty() {
+                            let what = if let Some(r) = removal {
+                                format!("Content removed by redaction {r}.")
+                            } else if change.message.trim().is_empty() {
                                 let block = change.ops.iter().rev().find_map(|op| match op {
                                     Op::Create { block } | Op::Update { block, .. }
                                         if block.id == c.block =>
@@ -264,7 +271,10 @@ pub(crate) fn conflict_infos(
                             };
                             format!("{}: {what}", change.provenance.actor)
                         }
-                        None => "canon".to_string(),
+                        None => match removal {
+                            Some(r) => format!("canon: Content removed by redaction {r}."),
+                            None => "canon".to_string(),
+                        },
                     };
                     if side.version.is_none() {
                         summary.push_str(" (deleted)");

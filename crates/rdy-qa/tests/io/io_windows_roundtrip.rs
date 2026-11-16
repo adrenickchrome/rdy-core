@@ -48,7 +48,7 @@ fn fixtures() -> Vec<Fixture> {
     let mut out = vec![];
     for n in &names {
         let stem = n.trim_end_matches(".rdydump");
-        let holder = stem.contains("holder");
+        let holder = stem.contains("holder") || stem.contains("hub-canon");
         if let Some(prefix) = stem.strip_suffix("-chain-full") {
             let files = ["full", "1", "2"]
                 .iter()

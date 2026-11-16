@@ -21,6 +21,7 @@ pub mod foreign_removal;
 pub mod format;
 pub mod fsutil;
 pub mod holder;
+pub mod hub_canon;
 pub mod inbox;
 pub mod index;
 pub mod ingest;
@@ -46,6 +47,7 @@ mod store;
 pub mod stream_error;
 pub mod stream_source;
 pub mod sync_proof;
+pub mod sync_state;
 pub mod sync_stream;
 pub mod take_batch;
 pub mod transition;
@@ -75,7 +77,10 @@ pub fn adopt_view(card: &rdy_model::Hash) -> String {
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;
-pub use land::{AltLanding, LandOutcome, LandRequest, PreparedLanding, RebasedView, Relay};
+pub use land::{
+    AltLanding, LandOutcome, LandRequest, PreparedLanding, PreparedReplay, RebasedView, Relay,
+    ReplayLanding, ReplayMerge,
+};
 pub use merge::{
     Conflict, MergeChange, Merged, Side, conflict_id, find_parent_cycle, merge, merge_on_blocks,
 };
@@ -91,4 +96,4 @@ mod state;
 pub use state::{
     AdoptProposeRequest, OrderOnlyEdits, PinAdoption, PreparedTag, ViewRecord, apply_op,
 };
-pub use view::{Owner, ResolvedOp, ViewHead, ViewOp, ViewOpKind};
+pub use view::{Owner, Rechained, ResolvedOp, ViewHead, ViewOp, ViewOpKind, ViewReferrer};

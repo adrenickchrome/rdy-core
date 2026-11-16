@@ -3,7 +3,8 @@
 use crate::params::Parameters;
 use crate::server::RdyServer;
 use crate::tools::{
-    self, ExportParams, ImportParams, PublicationCheckParams, RenderParams, SiteParams,
+    self, ExportParams, ImportParams, PublicationBaselineParams, PublicationCheckParams,
+    RenderParams, SiteParams,
 };
 use rmcp::{model::CallToolResult, tool, tool_router};
 
@@ -31,7 +32,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication. The review names docs and decisions by title, counts the changes a reader sees and gives short excerpts. A first check lists the included docs."
+        description = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Against_baseline takes the complete path of a baseline file from rdy_publication_baseline instead, for a previous publication of another project that shares this project's lineage; pass against or against_baseline, not both. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication. The review names docs and decisions by title, counts the changes a reader sees and gives short excerpts. A first check lists the included docs."
     )]
     async fn rdy_publication_check(
         &self,
@@ -40,6 +41,21 @@ impl RdyServer {
         // the report is closed and size-checked: a pack notice must not be added to it
         self.run_closed("rdy_publication_check", p, tools::rdy_publication_check)
             .await
+    }
+
+    #[tool(
+        description = "Make the portable baseline of a publication profile at a tag, the input that rdy_publication_check takes as against_baseline. Scope must be tag:<name>. It holds labels, counts and hashes, with no reader text. Pass out, a new file, to write it, and give the person its complete path; leave out to get the baseline in the reply. Any session may make one. It writes no project data, and it does not publish or authorize anything."
+    )]
+    async fn rdy_publication_baseline(
+        &self,
+        Parameters(p): Parameters<PublicationBaselineParams>,
+    ) -> CallToolResult {
+        self.run_closed(
+            "rdy_publication_baseline",
+            p,
+            tools::rdy_publication_baseline,
+        )
+        .await
     }
 
     #[tool(

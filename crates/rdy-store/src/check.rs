@@ -103,11 +103,13 @@ impl StoreReader {
         let mut view_ops = 0;
         let mut conflicts_recorded = 0;
         let mut sets: Vec<(String, ViewHead, Arc<Vec<Hash>>)> = vec![];
+        // the fetched view histories, read once and only when a view needs them
+        let mut fetched: Option<BTreeMap<String, BTreeSet<Hash>>> = None;
         for (key, bytes) in self.refs_with_prefix("view/")? {
             let name = &key["view/".len()..];
             let head: ViewHead = postcard::from_bytes(&bytes)
                 .map_err(|_| bad(format!("view {name:?}: its ref is not a view head")))?;
-            let c = self.check_view(name, &head)?;
+            let c = self.check_view(name, &head, &mut fetched)?;
             view_ops += c.ops;
             conflicts_recorded += c.conflicts;
             sets.push((name.to_string(), head, c.included));
@@ -132,17 +134,10 @@ impl StoreReader {
                 if !self.has_kind(kinds::CHANGE, c)? {
                     return Err(bad(format!("landing {l}: change {c} is missing")));
                 }
-                match self.landing_of(c)? {
-                    Some(o) if o == *l => {}
-                    other => {
-                        return Err(bad(format!(
-                            "landing {l}: the index has {other:?} as the landing of change {c}; run rdy reindex"
-                        )));
-                    }
-                }
             }
             landed_changes += rec.changes.len();
         }
+        self.check_landed(&landings)?;
         let intents = self
             .check_chains::<Intent>(kinds::INTENT, INTENT_REF, "intent", |i| (i.stable, i.prev))?;
         let alt_sets =
@@ -183,6 +178,76 @@ impl StoreReader {
             answers,
             foreign,
         })
+    }
+
+    /// The index's landed rows are the ones canon's records give (D-QCE8M, D-NME32): each
+    /// change a landing of canon's chain carries, and each change its `replayed_from` chain
+    /// reaches, reads the oldest such landing, and no other change reads landed. `landings` is
+    /// canon's chain, newest first. A missing row or another landing is `landing {l}: the index
+    /// has {other:?} as the landing of change {c}; run rdy reindex`; a row canon does not give is
+    /// `the index has landing {l} as the landing of change {c}, which canon does not carry; run
+    /// rdy reindex`. A held or replaced chain is checked by its own chain rules, never here.
+    /// Canon's head and the rows are read at one point, so a live writer's landing is no false
+    /// failure; the chain is `landings` when that head is its newest, else read from that head.
+    fn check_landed(&self, landings: &[(Hash, LandingRecord)]) -> Result<(), StoreError> {
+        let (head, rows) = self.index().canon_and_landed()?;
+        let read;
+        let chain = if head == landings.first().map(|(h, _)| *h) {
+            landings
+        } else {
+            let mut out = vec![];
+            let mut cur = head;
+            while let Some(h) = cur {
+                let rec = self.landing(&h)?;
+                cur = rec.prev;
+                out.push((h, rec));
+            }
+            read = out;
+            &read[..]
+        };
+        let rows: HashMap<Hash, Hash> = rows.into_iter().collect();
+        let mut want: HashMap<Hash, Hash> = HashMap::new();
+        let mut order: Vec<(Hash, Hash)> = Vec::new();
+        for (l, rec) in chain.iter().rev() {
+            for c in &rec.changes {
+                let mut next = Some(*c);
+                // a replay chain is no longer than the changes it names; a longer one loops
+                let mut seen: HashSet<Hash> = HashSet::new();
+                while let Some(x) = next {
+                    if !seen.insert(x) {
+                        break;
+                    }
+                    if let std::collections::hash_map::Entry::Vacant(e) = want.entry(x) {
+                        e.insert(*l);
+                        order.push((x, *l));
+                    }
+                    next = if self.has_kind(kinds::CHANGE, &x)? {
+                        self.change(&x)?.links.replayed_from
+                    } else {
+                        None
+                    };
+                }
+            }
+        }
+        // newest landing first, as the chain is read
+        for (c, l) in order.iter().rev() {
+            match rows.get(c).copied() {
+                Some(o) if o == *l => {}
+                other => {
+                    return Err(bad(format!(
+                        "landing {l}: the index has {other:?} as the landing of change {c}; run rdy reindex"
+                    )));
+                }
+            }
+        }
+        for (c, l) in &rows {
+            if !want.contains_key(c) {
+                return Err(bad(format!(
+                    "the index has landing {l} as the landing of change {c}, which canon does not carry; run rdy reindex"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Every record that may hold a carried shape keeps the carried record rules
@@ -815,8 +880,17 @@ impl StoreReader {
         Ok(())
     }
 
-    /// Checks one view: its chain, head, index entries, recorded conflicts and undo chains.
-    fn check_view(&self, name: &str, head: &ViewHead) -> Result<ViewCheck, StoreError> {
+    /// Checks one view: its chain, head, index entries, recorded conflicts and undo chains. An
+    /// indexed op off the chain is allowed when a writer put it on the chain since the walk, when
+    /// it is an op of a fetched view history (`StoreReader::sync_fetched_view_ops`), or when a
+    /// `replaced/` mark keeps its old chain readable (`StoreReader::replaced_view_ops`), both
+    /// read into `fetched` at the first view that needs them.
+    fn check_view(
+        &self,
+        name: &str,
+        head: &ViewHead,
+        fetched: &mut Option<BTreeMap<String, BTreeSet<Hash>>>,
+    ) -> Result<ViewCheck, StoreError> {
         let mut chain: BTreeSet<Hash> = BTreeSet::new();
         let mut checked: Vec<(Hash, ViewOpKind)> = vec![];
         let mut cur = Some(head.head);
@@ -871,12 +945,30 @@ impl StoreReader {
             }
         }
         let indexed: BTreeSet<Hash> = self.view_op_ids(name)?.into_iter().collect();
+        // ops a writer put on the chain since the walk, and ops of a fetched view history that
+        // no pull applied (D-3RSCW: a fetch moves no view ref)
         let newer = if indexed.is_subset(&chain) {
             BTreeSet::new()
         } else {
             self.ops_after(name, &chain)?
         };
-        if let Some(h) = indexed.difference(&chain).find(|h| !newer.contains(*h)) {
+        let off: Vec<&Hash> = indexed
+            .difference(&chain)
+            .filter(|h| !newer.contains(*h))
+            .collect();
+        if !off.is_empty() && fetched.is_none() {
+            // the old chains that a pull's re-chain or a view take marked replaced (D-4E32E)
+            let mut f = self.sync_fetched_view_ops()?;
+            for (view, ops) in self.replaced_view_ops()? {
+                f.entry(view).or_default().extend(ops);
+            }
+            *fetched = Some(f);
+        }
+        let of_view = fetched.as_ref().and_then(|f| f.get(name));
+        if let Some(h) = off
+            .into_iter()
+            .find(|h| !of_view.is_some_and(|f| f.contains(*h)))
+        {
             return Err(bad(format!(
                 "view {name:?}: op {h} is indexed but not on its chain"
             )));

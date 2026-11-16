@@ -78,6 +78,8 @@ ef51781f3de9a09a9872f4a050ae382d91a419dd20e1f63b556b7e51ba2ae668  fixture/v4-f1-
 7711a0099d629744ffef217d7a5359e71ef58010f777d9209e2d767102e23669  fixture/v4-f1-e1-holder-chain.expect.json
 ad97a7d9ef13af0e7f1b8fa1f3860b15c04d393d78e7503766e95366d09213a9  fixture/v4-f1-e1-holder.expect.json
 f2f32f7b1f0299844f4f182414e9c0a42276edc2c5bf8a372d2090a79b801ce5  fixture/v4-f1-e1-holder.rdydump
+d62fc15d86805b7974caea2859bf9fc80bc698712b9d88c59b84999b3c3f90f5  fixture/v4-f1-e1-hub-canon.expect.json
+0b76f5681830056f979e4e20d20d9e3a646ba5d5e643c53bdfa445cc299945b7  fixture/v4-f1-e1-hub-canon.rdydump
 9bb78a31bdeb14e28a777b2486d61d5949df922a27bdd362f4aa9173087cc497  fixture/v4-f1-e1-snapshot-delta.expect.json
 24b270fa27eb22d61e019039e3270491660c4245026353fcfbcf7e4ebdf1b7a8  fixture/v4-f1-e1-snapshot-delta.rdydump
 d4dbd862f5b60e9657be91f89725a8da0aa96aecc5a00585fad384dc78646433  fixture/v4-f1-e1.expect.json

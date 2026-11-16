@@ -97,7 +97,7 @@ fn mh6_project_and_holder_snapshots_keep_their_scope_rules() {
     assert_eq!(got.identity(), want.identity());
     assert_eq!(got.canon(), want.canon());
     assert_eq!(got.tags().unwrap(), want.tags().unwrap());
-    assert_eq!(got.canon_chain().unwrap(), want.canon_chain().unwrap());
+    assert_eq!(got.canon_history().unwrap(), want.canon_history().unwrap());
     assert_eq!(
         got.tag_history("1.0.0").unwrap(),
         want.tag_history("1.0.0").unwrap()

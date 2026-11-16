@@ -923,6 +923,38 @@ fn ok7_two_replays_of_one_source_agree_after_one_lands() {
 }
 
 #[test]
+fn ok7_source_view_lands_later_work_after_its_replay_lands() {
+    // D-NME32: S is replayed into b, and b lands, so S reads landed at b's landing. View a keeps
+    // S; its later work lands without S, and S is not landed a second time
+    let mut p = project();
+    let r = &mut p.r;
+    let s = update(r, &human(), "a", &p.x, "x in a");
+    new_view(r, &human(), "b");
+    let rs = new_of(&replay(r, &human(), "b", &[s]), &s);
+    let lb = land(r, "b");
+    assert_eq!(r.store().landing_of(&s).unwrap(), Some(lb));
+    assert_eq!(r.store().landing_of(&rs).unwrap(), Some(lb));
+    assert!(included(r, "a").contains(&s), "the view keeps the source");
+    let z = update(r, &human(), "a", &p.z, "z in a");
+    let prop = r
+        .propose(&human(), "a", "ok7", Some(common::TEST_SUMMARY))
+        .unwrap();
+    let carried = r.read().reader().proposal(&h(&prop.id)).unwrap().changes;
+    assert_eq!(carried, vec![z], "the proposal carries only the later work");
+    common::confirm_exceptions(r, &founder(), &prop);
+    let la: Hash = r.land(&founder(), &prop.id).unwrap().parse().unwrap();
+    assert_ne!(la, lb);
+    assert_eq!(r.store().landing_of(&z).unwrap(), Some(la));
+    assert_eq!(
+        r.store().landing_of(&s).unwrap(),
+        Some(lb),
+        "S keeps its one landing"
+    );
+    assert_eq!(canon_version(r, &p.z), version(r, "a", &p.z));
+    assert_eq!(canon_version(r, &p.x), version(r, "a", &p.x));
+}
+
+#[test]
 fn ok7_replay_equal_result_agrees_in_any_hash_order() {
     // view t holds r0, a replay that moved x from canon's u to v. A second source reached v
     // from another base u2 and is replayed into t: its result is t's version, so it agrees. It

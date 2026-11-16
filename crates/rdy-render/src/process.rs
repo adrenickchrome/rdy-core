@@ -41,7 +41,7 @@ use rdy_engine::publication_manifest::{
     ArtifactHasher, MANIFEST_RECIPE, Manifest, ManifestEntry, NOTICE_SLOT, READ_BUFFER_BYTES,
     allocation_failed, artifact_mismatch, artifact_unreadable, hex_hash, manifest_hash,
 };
-use rdy_engine::render_inputs::{RenderInputs, validate_inputs};
+use rdy_engine::render_inputs::{NOT_READABLE, RenderInputs, read_inputs_value, validate_inputs};
 use rdy_engine::render_source::RenderSource;
 use rdy_engine::{E_BAD_INPUT, E_IO, E_LIMIT, Materialized, RdyError};
 use rdy_model::Hash;
@@ -105,13 +105,22 @@ struct PreludeOut<'a> {
     render_inputs: &'a RenderInputs,
 }
 
-/// The prelude as it is read: every key, no other.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The prelude as it is read.
 struct Prelude {
     profile: String,
     format: RenderFormat,
     render_inputs: RenderInputs,
+}
+
+/// The prelude's own keys, read before its render inputs: the inputs are read whole by
+/// [`read_inputs_value`], so this reader skips their value.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreludeKeys {
+    profile: String,
+    format: RenderFormat,
+    render_inputs: serde::de::IgnoredAny,
 }
 
 /// The output metadata as it is written.
@@ -328,18 +337,31 @@ fn read_prelude(input: &mut impl Read) -> Result<Prelude, RdyError> {
     parse_prelude(&json)
 }
 
-/// The prelude of `json`: within the prelude's bounds, every key known (an unknown one is named
-/// by its path, with the nearest key), the selector stable and the render inputs this
-/// renderer's. Any other malformed prelude is the fixed refusal.
+/// The prelude of `json`: within the prelude's bounds, every prelude key known (an unknown one is
+/// named by its path, with the nearest key), the render inputs read whole from any capturing
+/// version (an input this rdy cannot read whole is refused in D-8RGWW's words), and the selector
+/// stable. Any other malformed prelude is the fixed refusal.
 fn parse_prelude(json: &[u8]) -> Result<Prelude, RdyError> {
     check_json(json, PRELUDE_LIMITS).map_err(|_| bad_input())?;
     let value: serde_json::Value = serde_json::from_slice(json).map_err(|_| bad_input())?;
-    let prelude: Prelude = objects::from_value(&value).map_err(|e| {
+    let keys: PreludeKeys = objects::from_value(&value).map_err(|e| {
         unknown_field_error_in(CONTEXT, &e.to_string(), &value).unwrap_or_else(bad_input)
     })?;
-    check_stable_selector(&prelude.profile)?;
-    validate_inputs(&prelude.render_inputs)?;
-    Ok(prelude)
+    // the render inputs read whole: any capturing version, no member dropped (D-8RGWW)
+    let render_inputs = read_inputs_value(&value["render_inputs"], |v| objects::from_value(v))
+        .map_err(|e| {
+            if e.message == NOT_READABLE {
+                bad_input()
+            } else {
+                e
+            }
+        })?;
+    check_stable_selector(&keys.profile)?;
+    Ok(Prelude {
+        profile: keys.profile,
+        format: keys.format,
+        render_inputs,
+    })
 }
 
 /// The artifact of `prelude` over the stream `input`. The stream is read and checked whole

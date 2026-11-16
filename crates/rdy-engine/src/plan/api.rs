@@ -28,8 +28,8 @@ use rdy_model::plan::{
     PlanOutcome, SealedItem, item_display,
 };
 use rdy_model::{BlockId, Hash, Proposal, Provenance};
+use rdy_store::StoreReader;
 use rdy_store::plan::PLAN_REF;
-use rdy_store::{StoreReader, kinds};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -557,9 +557,7 @@ fn plan_ref_head(view: &str, v: &[u8]) -> Result<Hash, RdyError> {
 fn landed_in(st: &ReadState, p: &Proposal) -> Result<bool, RdyError> {
     let reader = st.reader();
     for c in &p.changes {
-        if let Some(l) = reader.landing_of(c)?
-            && reader.has_kind_before(kinds::LANDING, &l, st.seq())?
-        {
+        if reader.first_carrier(c, Some(st.seq()))?.is_some() {
             return Ok(true);
         }
     }

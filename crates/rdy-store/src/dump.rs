@@ -585,7 +585,9 @@ pub struct RemovalFacts {
 /// record names is not the rule. A project's foreign removal (an apply that a FOREIGN `Removal`
 /// entry of its own batch names, `crate::foreign_removal`) is no local removal: its request's
 /// manifest places are places of the cited log, never of this one. Its spans are the occurrences
-/// its entry erased in this log, which a dump holds as `DROPPED` records naming that apply.
+/// its entry erased in this log, which a dump holds as `DROPPED` records naming that apply. A
+/// fetched removal (an apply of a batch that writes a `meta/sync/` ref, D-FNRXT) is resolved the
+/// same way: its request names places of the hub's log.
 /// [`RemovalTally::facts`] resolves from the batches alone (the reader's view of a file);
 /// [`RemovalTally::resolved`] asks the store's own authorization (the writer's). Growth is
 /// fallible.
@@ -726,7 +728,31 @@ impl RemovalTally {
             .frames
             .iter()
             .any(|f| matches!(f, Frame::Present { kind, .. } if *kind == kinds::REDACTION_APPLY));
-        if has_apply {
+        // a fetch's batch (D-FNRXT): its applies are proved elsewhere, as a foreign removal's
+        let fetched = has_apply && {
+            let mut removal = false;
+            b.frames.iter().any(|f| match f {
+                Frame::Present { kind, payload, .. } if *kind == kinds::REF_UPDATE => {
+                    removal && is_sync_ref_update(payload)
+                }
+                Frame::Present { kind, .. } => {
+                    removal |= *kind == kinds::REDACTION_APPLY
+                        || crate::codec::logical_kind(*kind) == kinds::REDACTION;
+                    false
+                }
+                Frame::Dropped { .. } => false,
+            })
+        };
+        if fetched {
+            for f in &b.frames {
+                if let Frame::Present { kind, hash, .. } = f
+                    && *kind == kinds::REDACTION_APPLY
+                {
+                    proofs.try_reserve(1).map_err(|_| drop_text::ALLOCATION)?;
+                    proofs.push(*hash);
+                }
+            }
+        } else if has_apply {
             for f in &b.frames {
                 if let Frame::Present { kind, payload, .. } = f
                     && crate::codec::logical_kind(*kind) == kinds::FOREIGN
@@ -1651,6 +1677,15 @@ pub(crate) const LINK_LEN: usize = 1 + 8 + 32;
 /// it: the chain scanner reads this much of every ref before it decides to read the rest.
 pub(crate) fn ref_name(payload: &[u8]) -> Option<&[u8]> {
     wire::ref_name(payload)
+}
+
+/// Whether the `REF_UPDATE` payload `payload` writes a `meta/sync/` ref within the sync value
+/// bound. The store's header pass marks a fetch's batch by such a ref after a request or an
+/// apply of the batch (`crate::redaction_io::collect`); the dump's readers keep that rule.
+pub(crate) fn is_sync_ref_update(payload: &[u8]) -> bool {
+    payload.len() <= crate::sync_state::MAX_VALUE_BYTES + 4_096
+        && wire::ref_name(payload)
+            .is_some_and(|n| n.starts_with(crate::sync_state::SYNC_REF.as_bytes()))
 }
 
 /// Adds one record to the bytes the trailer's digest covers: `kind || len (u64) || hash`. Its

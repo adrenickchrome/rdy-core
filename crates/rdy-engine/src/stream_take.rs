@@ -93,6 +93,12 @@ pub struct TakeOutcome {
     pub canon: Option<Hash>,
     pub end: StorePosition,
     pub unchanged: bool,
+    /// The holder's minimum rdy before and after the take (D-4XHPH). Not in the JSON output:
+    /// the published shape stays as it was.
+    #[serde(skip)]
+    pub min_rdy_before: Option<rdy_store::format::RdyVersion>,
+    #[serde(skip)]
+    pub min_rdy_after: Option<rdy_store::format::RdyVersion>,
 }
 
 fn hex<S: Serializer>(h: &Hash, s: S) -> Result<S::Ok, S::Error> {
@@ -242,6 +248,8 @@ fn outcome(t: BatchTaken) -> TakeOutcome {
             offset: t.end.offset,
         },
         unchanged: t.frames == 0,
+        min_rdy_before: t.min_rdy_before,
+        min_rdy_after: t.min_rdy_after,
     }
 }
 
@@ -265,6 +273,52 @@ fn take_error<E>(e: TakeError<PublicationRefusal<E>>) -> PublicationRefusal<E> {
             "use the holder for the stream's repo",
         ),
     })
+}
+
+/// The tag rule of a canon move (D-KE83X; the closed push rule: a push tag collision is
+/// `E_TAG_EXISTS` and changes nothing for that hub write): the tag rule of a take (module docs,
+/// step 1) for each tag the move carries, in order. A carried tag whose version the holder
+/// names at the same landing is not named again; one of a version the holder names at another
+/// landing is `E_TAG_EXISTS`; one of a new version is named. Returns the hashes of the tags the
+/// move names.
+pub fn move_tag_choice(
+    reader: &StoreReader,
+    carried: &[rdy_store::hub_canon::CarriedTag],
+) -> Result<Vec<Hash>, RdyError> {
+    let mut held = held_tags(reader)?;
+    let mut out = vec![];
+    for c in carried {
+        if let TagChoice::Incoming = choose_tag(&c.tag, &held, None)? {
+            out.push(c.hash);
+            held.push(Held {
+                version: parse_version(&c.tag.name)?,
+                hash: c.hash,
+                tag: c.tag.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// A canon move's error as the engine's (`rdy_store::Store::move_canon_with`): the tag rule's
+/// own refusal unchanged, and a take's errors as a take maps them.
+pub fn move_error(e: TakeError<RdyError>) -> RdyError {
+    match e {
+        TakeError::Validation(e) => e,
+        TakeError::Store(e) => e.into(),
+        TakeError::Stream(e) => to_rdy(e),
+        TakeError::UncoveredChange(h) => uncovered_change(h),
+        TakeError::ModeMismatch => RdyError::new(
+            E_BAD_INPUT,
+            "this store is a project",
+            "open it through the project adapter",
+        ),
+        TakeError::RepoMismatch { source, target } => RdyError::new(
+            E_REPO_MISMATCH,
+            format!("stream repo {source} does not match holder repo {target}"),
+            "use the holder for the stream's repo",
+        ),
+    }
 }
 
 /// E_REDACTION_STALE: change `h` embeds a block version an imported removal removes, and no

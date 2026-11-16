@@ -21,6 +21,10 @@ pub enum StoreError {
     NotFound(Hash),
     #[error("store at {0} is locked by another process")]
     Locked(PathBuf),
+    /// A sync state write whose compare failed (D-3RSCW): another push or pull with the remote
+    /// owns its `upload` or `pending` ref (E_LOCKED). Nothing was written.
+    #[error("a push or pull with remote {0} is running")]
+    SyncBusy(String),
     /// The store's lock was free but its index is still open: a `StoreReader` (or a state built
     /// on one) of an earlier open in this process outlived its store.
     #[error("store at {0} is still open through a reader of an earlier open in this process")]

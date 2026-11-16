@@ -73,6 +73,8 @@ impl Rdy {
                     pack: Arc::clone(&self.pack),
                     areas: Arc::clone(&self.areas),
                     root: Arc::clone(&prev.root),
+                    reads_files: prev.reads_files,
+                    explicit_base: prev.explicit_base,
                     name: Arc::clone(&prev.name),
                     description: prev.description.clone(),
                     require_up_to_date: prev.require_up_to_date,
@@ -659,6 +661,8 @@ impl Rdy {
             pack: Arc::clone(&self.pack),
             areas: Arc::clone(&self.areas),
             root: Arc::clone(&prev.root),
+            reads_files: prev.reads_files,
+            explicit_base: prev.explicit_base,
             name,
             description,
             require_up_to_date,
@@ -974,6 +978,8 @@ impl Rdy {
             pack: Arc::clone(&self.pack),
             areas: Arc::clone(&self.areas),
             root: Arc::clone(&prev.root),
+            reads_files: prev.reads_files,
+            explicit_base: prev.explicit_base,
             name,
             description,
             require_up_to_date: cfg.require_up_to_date(),
@@ -1121,6 +1127,8 @@ impl Rdy {
             pack: Arc::clone(&self.pack),
             areas: Arc::clone(&self.areas),
             root: Arc::clone(&prev.root),
+            reads_files: prev.reads_files,
+            explicit_base: prev.explicit_base,
             name: Arc::clone(&prev.name),
             description: prev.description.clone(),
             require_up_to_date: prev.require_up_to_date,
@@ -1185,6 +1193,22 @@ impl Rdy {
             next.tensions.keep(set);
         }
         self.logged = Some(next);
+    }
+
+    /// Publishes the state after a batch that moves canon, or a view, to a chain that does not
+    /// extend the one this state read (a replay's commit, or a take of another chain). The open
+    /// batch's canon move commits with its membership update, so the index is current; what an
+    /// older chain built is not: the as-of entries, the version positions and canon's version
+    /// steps are dropped first. Then one state is read whole from the store and published, and
+    /// the batch is sealed with the moves it logs, as every publish does. A failure is the
+    /// publish's.
+    #[allow(dead_code)]
+    pub(crate) fn publish_chain_moved(&mut self) -> Result<(), RdyError> {
+        self.as_of.clear();
+        *self.vpos.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+        self.canon_step_cache.clear();
+        self.recheck = Some(Cause::Recheck);
+        self.publish(Delta::Full)
     }
 
     /// Rebuilds the store's index from its log (an open batch is sealed first) and republishes

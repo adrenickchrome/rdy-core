@@ -225,9 +225,85 @@ pub const W_REDACTION_QUARANTINE_MESSAGE: &str = "Quarantine files may hold the 
 pub const W_REDACTION_SECRET_MESSAGE: &str =
     "Rotate or revoke the secret. Redaction does not undo its exposure.";
 
+/// A local change that holds content a synced removal removed, and that no removal covers
+/// (D-FNRXT): it keeps its bytes, and the warning repeats once per change on every read.
+pub const W_REDACTION_UNCOVERED: &str = "W_REDACTION_UNCOVERED";
+/// The message of `W_REDACTION_UNCOVERED` (D-47HVF `SYNC_UNCOVERED`).
+pub const SYNC_UNCOVERED_MESSAGE: &str = "change <change> holds content removed by <removal>";
+/// The fix of `W_REDACTION_UNCOVERED`.
+pub const SYNC_UNCOVERED_FIX: &str = "redact this content here; a person approves the removal";
+
 /// A public publication profile whose selection references blocks outside it (D-0VCQ5): its
 /// output is blocked.
 pub const E_PUBLICATION_REFERENCE: &str = "E_PUBLICATION_REFERENCE";
+/// A publication baseline that does not verify, does not match the previous publication's
+/// record, or comes from outside the candidate's lineage (D-CDQF7).
+pub const E_PUBLICATION_BASELINE: &str = "E_PUBLICATION_BASELINE";
+/// The message of `E_PUBLICATION_BASELINE` for every reader failure (D-6WD17).
+pub const BASELINE_VERIFY_MESSAGE: &str = "The publication baseline does not verify.";
+/// The fix of `E_PUBLICATION_BASELINE` for every reader failure.
+pub const BASELINE_VERIFY_FIX: &str =
+    "Make the baseline again with rdy publication baseline in its source project.";
+/// The message of `E_PUBLICATION_BASELINE` when the binding names another publication.
+pub const BASELINE_BINDING_MESSAGE: &str =
+    "The publication baseline does not match the previous publication <tag> of <repo_id>.";
+/// The fix of `E_PUBLICATION_BASELINE` when the binding names another publication.
+pub const BASELINE_BINDING_FIX: &str =
+    "Make the baseline again from that tag, or pass the record of the publication it came from.";
+/// The message of `E_PUBLICATION_BASELINE` for a baseline outside the lineage.
+pub const BASELINE_LINEAGE_MESSAGE: &str =
+    "The publication baseline comes from a project outside this project's lineage.";
+/// The fix of `E_PUBLICATION_BASELINE` for a baseline outside the lineage.
+pub const BASELINE_LINEAGE_FIX: &str =
+    "Use a baseline from this project or from a project that shares a fork origin with it.";
+/// The message of `E_BAD_INPUT` when a baseline make names no tag.
+pub const BASELINE_TAG_MESSAGE: &str = "A publication baseline requires a tag.";
+/// The fix of `E_BAD_INPUT` when a baseline make names no tag.
+pub const BASELINE_TAG_FIX: &str = "Use scope tag:<name>.";
+/// A pull cannot re-chain a view: another record names its unpushed work, or a proposal of the
+/// view is open (D-4E32E). Canon and the other views still pull.
+pub const E_VIEW_DIVERGED: &str = "E_VIEW_DIVERGED";
+/// The message of `E_VIEW_EXISTS` when a pull meets a local view of the name with another root
+/// (D-47HVF `SYNC_VIEW_EXISTS`).
+pub const SYNC_VIEW_EXISTS_MESSAGE: &str = "view <name> has local root <local> and hub root <hub>";
+/// The fix of `E_VIEW_EXISTS` when a pull meets a local view with another root.
+pub const SYNC_VIEW_EXISTS_FIX: &str = "run rdy pull --take --view <name>";
+/// The message of `E_VIEW_EXISTS` when a push names a view whose root is not the hub view's
+/// (D-47HVF `SYNC_VIEW_ROOT`).
+pub const SYNC_VIEW_ROOT_MESSAGE: &str = "view <name> has local root <local> and hub root <hub>";
+/// The fix of `E_VIEW_EXISTS` when a push names a view whose root is not the hub view's.
+pub const SYNC_VIEW_ROOT_FIX: &str = "fork the view to another name, then push that view";
+/// The message of `E_VIEW_DIVERGED` (D-47HVF `SYNC_VIEW_DIVERGED`). For an open proposal,
+/// `<record>` names the proposal.
+pub const SYNC_VIEW_DIVERGED_MESSAGE: &str =
+    "view <name> cannot re-chain because <record> names its unpushed work";
+/// The fix of `E_VIEW_DIVERGED`.
+pub const SYNC_VIEW_DIVERGED_FIX: &str =
+    "push the view first if the hub head has not moved, or run rdy pull --take --view <name>";
+/// The message of `E_BAD_INPUT` when a pushed view forks from a view the hub does not hold
+/// (D-47HVF `SYNC_FORK_SOURCE`).
+pub const SYNC_FORK_SOURCE_MESSAGE: &str =
+    "view <name> forks from view <source>, which the hub does not hold";
+/// The fix of `E_BAD_INPUT` when a pushed view forks from a view the hub does not hold.
+pub const SYNC_FORK_SOURCE_FIX: &str =
+    "push the source view too, or start a view from canon and include the changes";
+/// The message of `E_BAD_INPUT` for an undo of an owner change in a view with a hub head
+/// (D-47HVF `SYNC_UNDO_OWNER`).
+pub const SYNC_UNDO_OWNER_MESSAGE: &str =
+    "view <name> has a hub head; undo cannot change its owner";
+/// The fix of `E_BAD_INPUT` for an undo of an owner change in a view with a hub head.
+pub const SYNC_UNDO_OWNER_FIX: &str = "use rdy view own";
+/// The message of `E_BAD_INPUT` when a push or pull names a view twice (D-47HVF
+/// `SYNC_VIEW_TWICE`).
+pub const SYNC_VIEW_TWICE_MESSAGE: &str = "view <name> is named twice";
+/// The fix of `E_BAD_INPUT` when a push or pull names a view twice.
+pub const SYNC_VIEW_TWICE_FIX: &str = "name each view once";
+/// The message of `E_NOT_FOUND` when a pull names a view the hub lacks (D-47HVF
+/// `SYNC_VIEW_MISSING`).
+pub const SYNC_VIEW_MISSING_MESSAGE: &str = "view <name> is not on remote <remote>";
+/// The fix of `E_NOT_FOUND` when a pull names a view the hub lacks.
+pub const SYNC_VIEW_MISSING_FIX: &str =
+    "check the name, or push the view from a machine that has it";
 /// An org publication profile whose selection references blocks outside it (D-0VCQ5): a warning
 /// on its output.
 pub const W_PUBLICATION_REFERENCE: &str = "W_PUBLICATION_REFERENCE";
@@ -556,6 +632,11 @@ impl From<StoreError> for RdyError {
                     rdy_store::pio::display_path(&p)
                 ),
                 "drop --no-daemon, or stop the daemon with rdy serve --stop",
+            ),
+            StoreError::SyncBusy(remote) => RdyError::new(
+                E_LOCKED,
+                rdy_store::sync_state::sync_locked_message(&remote),
+                rdy_store::sync_state::SYNC_LOCKED_FIX,
             ),
             StoreError::HeldByReader(p) => RdyError::new(
                 E_HELD_BY_READER,
@@ -1156,7 +1237,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 116] = [
+const CORE_ERROR_CODES: [&str; 118] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1233,6 +1314,8 @@ const CORE_ERROR_CODES: [&str; 116] = [
     E_REDACTED,
     E_REDACTION_BUDGET,
     E_PUBLICATION_REFERENCE,
+    E_PUBLICATION_BASELINE,
+    E_VIEW_DIVERGED,
     E_SIGNING_KEY_MISSING,
     E_SIGNING_KEY_TYPE,
     E_NO_AGENT,

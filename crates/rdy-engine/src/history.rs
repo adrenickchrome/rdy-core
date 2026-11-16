@@ -184,6 +184,8 @@ struct Memo<'a> {
     ops: HashMap<Hash, HashMap<BlockId, Vec<usize>>>,
     landed: HashMap<Hash, Option<Hash>>,
     landings: HashMap<Hash, LandingRef>,
+    /// The state's log end: the bound of the carriers it reads.
+    end: Location,
 }
 
 fn no_writer(version: &Hash, id: &BlockId) -> RdyError {
@@ -222,6 +224,7 @@ impl<'a> Memo<'a> {
             ops: HashMap::new(),
             landed: HashMap::new(),
             landings: HashMap::new(),
+            end: state.seq(),
         })
     }
 
@@ -263,7 +266,8 @@ impl<'a> Memo<'a> {
         if let Some(h) = self.landed.get(c) {
             return Ok(*h);
         }
-        let h = self.reader.landing_of(c)?;
+        // the carrier as the log stood when the state was published (D-QCE8M reader audit)
+        let h = self.reader.first_carrier(c, Some(self.end))?;
         self.landed.insert(*c, h);
         Ok(h)
     }

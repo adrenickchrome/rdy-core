@@ -380,6 +380,12 @@ impl Rdy {
                 })?
             }
         };
+        // an undo that sets the owner rebuilds it from ops other machines wrote (D-4E32E)
+        if matches!(effect, ResolvedOp::SetOwner(_))
+            && crate::sync_views::has_hub_head(reader, view, &head.head)?
+        {
+            return Err(crate::sync_views::undo_owner(view));
+        }
         // 5. the ops: the undo, then what its inverse needs
         // one undo per member of the target's write group, the target's first
         let target = members[0];

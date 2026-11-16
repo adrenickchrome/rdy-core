@@ -34,5 +34,6 @@ mod engine_session;
 mod engine_signature_check;
 mod engine_splitbrain;
 mod engine_supersede;
+mod engine_sync_redaction;
 mod engine_write;
 mod engine_write_extras;

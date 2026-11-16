@@ -160,7 +160,7 @@ fn rtc7_adapter_reads_and_takes_text_rule_landings() {
 
     // the snapshot of the project reads both landings, newest first, as recorded
     let handle = StoreHandle::open(&src).unwrap();
-    let chain = handle.snapshot().unwrap().canon_chain().unwrap();
+    let chain = handle.snapshot().unwrap().canon_history().unwrap();
     assert_eq!(
         chain.iter().map(|f| f.hash).collect::<Vec<_>>(),
         [second, first]
@@ -205,7 +205,7 @@ fn rtc7_adapter_reads_and_takes_text_rule_landings() {
     let again: Vec<Value> = reopened
         .snapshot()
         .unwrap()
-        .canon_chain()
+        .canon_history()
         .unwrap()
         .iter()
         .map(kept)

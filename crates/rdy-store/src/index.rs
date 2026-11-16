@@ -20,8 +20,21 @@ const TYPED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("typed");
 const PRODUCERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("producers");
 /// a view name's UTF-8 bytes, a 0x00 byte, then the op hash -> empty: the ops of each view.
 const VIEW_OPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("view_ops");
-/// change hash -> the hash of the first landing that carried it into canon.
+/// change hash -> the oldest landing of current canon's chain that carries it, or that carries a
+/// change whose `links.replayed_from` chain reaches it (D-QCE8M, D-NME32). Derived from canon:
+/// a canon move and its rows commit together ([`follow_canon`]). A chain that left
+/// canon lands nothing.
 const LANDED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landed");
+/// A landing's hash -> what its LANDING frame names: a byte 0 (no `prev`) or 1 and `prev`, then
+/// the hashes of the changes it carries. A canon move reads it to update [`LANDED`].
+const LANDING_CARRIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landing_carries");
+/// A change's hash -> the change its `links.replayed_from` names (a pull or a view replay).
+const REPLAYS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("replays");
+/// A change's hash, then the hash of a landing whose LANDING frame carries it -> empty: every
+/// carrier of every change, on canon or not. The history readers read it with a log bound
+/// ([`Index::first_carrier`]): which landing first carried a change, as the log stood then,
+/// whatever canon is now (D-QCE8M reader audit, Task 3b).
+const CARRIERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("carriers");
 /// a block id's string bytes, a 0x00 byte, then the hash of a change that deletes it -> empty.
 const DELETERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("deleters");
 const REFS: TableDefinition<&str, &[u8]> = TableDefinition::new("refs");
@@ -150,6 +163,19 @@ const LANDING_WAITS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landi
 /// the log (known issue 2309). That is not damage: the index opens, and its `indexed_upto` stays
 /// the log's floor until the rebuilt index replaces it.
 const COUNTS_UPTO_KEY: &str = "counts_upto";
+/// The `meta` key that holds the revision of the derived [`LANDED`] rows: [`LANDED_REVISION`]
+/// in an index this rdy built. An index that applied a write and holds another value, or none,
+/// is an earlier rdy's, whose rows follow the first landing in log order: the open replaces it
+/// and rebuilds it from the log (`Checked::Outdated`).
+const LANDED_REVISION_KEY: &str = "landed_revision";
+/// The revision of [`LANDED`]'s rule: rows follow current canon and replay ancestry, and
+/// [`CARRIERS`] holds every carrier (revision 2).
+const LANDED_REVISION: &[u8] = &[2];
+/// The `meta` key that holds the `indexed_upto` at which [`LANDED`] was last kept by this rule,
+/// written in the same commit as `indexed_upto`. An older rdy moves `indexed_upto` alone, with
+/// rows by its own rule, so an index whose two positions differ has landed rows behind its log
+/// ([`Index::landed_behind`]), and the store's open rebuilds it from the log.
+const LANDED_UPTO_KEY: &str = "landed_upto";
 /// The `meta` key that holds the location (`loc_key`) of the log's first CHANGE whose links
 /// record a briefing; absent while no such change is indexed.
 const FIRST_BRIEFED_CHANGE_KEY: &str = "first_briefed_change";
@@ -214,10 +240,22 @@ pub enum IndexEntry {
         view: String,
         op: Hash,
     },
-    /// `landing` carried `change` into canon; only the first such landing is kept.
+    /// A raw [`LANDED`] row: `change` reads landed by `landing`, unless it already has a row.
+    /// No frame gives it; the rows follow canon ([`IndexEntry::Ref`] of `canon`).
     Landed {
         change: Hash,
         landing: Hash,
+    },
+    /// A LANDING frame: `landing` names `prev` and carries `changes`.
+    LandingCarries {
+        landing: Hash,
+        prev: Option<Hash>,
+        changes: Vec<Hash>,
+    },
+    /// A CHANGE frame whose `links.replayed_from` is set: `change` replays `source`.
+    Replay {
+        change: Hash,
+        source: Hash,
     },
     /// `change` has an op that deletes `block`.
     Deleted {
@@ -514,6 +552,9 @@ pub struct IndexDump {
     pub refs: BTreeMap<Vec<u8>, Vec<u8>>,
     pub view_ops: BTreeMap<Vec<u8>, Vec<u8>>,
     pub landed: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub landing_carries: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub replays: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub carriers: BTreeMap<Vec<u8>, Vec<u8>>,
     pub deleters: BTreeMap<Vec<u8>, Vec<u8>>,
     pub open_tensions: BTreeMap<Vec<u8>, Vec<u8>>,
     pub open_suspects: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -1212,6 +1253,137 @@ fn missing_table(names: &[String]) -> Option<&'static str> {
     None
 }
 
+/// Why an index an earlier rdy wrote cannot serve this rdy's landed reads: it has applied a write
+/// and its [`LANDED`] rows follow another rule ([`LANDED_REVISION_KEY`]). None for an index with
+/// this rule's revision, and for one that has applied no write.
+fn landed_rule_outdated(
+    r: &redb::ReadTransaction,
+    names: &[String],
+) -> Result<Option<&'static str>, StoreError> {
+    if !names.iter().any(|n| n == META.name()) {
+        return Ok(None);
+    }
+    let meta = r.open_table(META).map_err(db)?;
+    if meta.get("indexed_upto").map_err(db)?.is_none() {
+        return Ok(None);
+    }
+    let current = meta
+        .get(LANDED_REVISION_KEY)
+        .map_err(db)?
+        .is_some_and(|v| v.value() == LANDED_REVISION);
+    Ok((!current)
+        .then_some("the index's landed rows follow an earlier rule; it is rebuilt from the log"))
+}
+
+/// The name of canon's ref.
+const CANON_REF: &str = "canon";
+
+/// Canon's head and the landed rows as (change, landing) ([`Index::canon_and_landed`]).
+pub(crate) type CanonRows = (Option<Hash>, Vec<(Hash, Hash)>);
+
+/// The landing a `canon` ref value names: None for an empty value, and for a value that is no
+/// hash (fsck reports that ref; no landing reads landed on it).
+fn canon_value(v: &[u8]) -> Option<Hash> {
+    <[u8; 32]>::try_from(v).ok().map(Hash)
+}
+
+/// A [`LANDING_CARRIES`] value: a byte 0, or 1 and `prev`, then each change's hash.
+fn carries_value(prev: Option<&Hash>, changes: &[Hash]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(33 + 32 * changes.len());
+    match prev {
+        None => v.push(0),
+        Some(p) => {
+            v.push(1);
+            v.extend_from_slice(&p.0);
+        }
+    }
+    for c in changes {
+        v.extend_from_slice(&c.0);
+    }
+    v
+}
+
+/// A [`LANDING_CARRIES`] value read back: `prev` and the changes.
+fn carries_from(v: &[u8]) -> Result<(Option<Hash>, Vec<Hash>), StoreError> {
+    let bad = || StoreError::Decode(format!("landing carries entry of {} bytes", v.len()));
+    let (prev, rest) = match v.split_first() {
+        Some((0, rest)) => (None, rest),
+        Some((1, rest)) if rest.len() >= 32 => (
+            Some(hash_from(&rest[..32], "landing carries entry")?),
+            &rest[32..],
+        ),
+        _ => return Err(bad()),
+    };
+    let (changes, tail) = rest.as_chunks::<32>();
+    if !tail.is_empty() {
+        return Err(bad());
+    }
+    Ok((prev, changes.iter().map(|c| Hash(*c)).collect()))
+}
+
+/// Moves the [`LANDED`] rows from canon's head `was` to `now` (D-QCE8M, D-NME32), in the commit
+/// that moves the ref. The landings from `now` back to `was` extend canon: each change they
+/// carry, and each change its `replayed_from` chain reaches, gets a row when it has none, the
+/// oldest landing first, so a row keeps the oldest carrier. A move that does not extend canon
+/// (`was` is not on `now`'s chain) empties the table and walks `now`'s whole chain, so a chain
+/// that left canon lands nothing. The walk ends at a landing the index does not hold.
+fn follow_canon(
+    landed: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    carries: &redb::Table<'_, &'static [u8], &'static [u8]>,
+    replays: &redb::Table<'_, &'static [u8], &'static [u8]>,
+    was: Option<Hash>,
+    now: Option<Hash>,
+) -> Result<(), StoreError> {
+    if was == now {
+        return Ok(());
+    }
+    // no chain is longer than the landings the index holds: a longer walk is a loop of
+    // damaged rows, and ends
+    let most = carries.len().map_err(db)?;
+    let mut chain: Vec<(Hash, Vec<Hash>)> = Vec::new();
+    let mut extends = was.is_none();
+    let mut at = now;
+    while let Some(l) = at {
+        if Some(l) == was {
+            extends = true;
+            break;
+        }
+        if chain.len() as u64 >= most {
+            break;
+        }
+        let Some(row) = carries.get(&l.0[..]).map_err(db)? else {
+            break;
+        };
+        let (prev, changes) = carries_from(row.value())?;
+        chain.push((l, changes));
+        at = prev;
+    }
+    if !extends {
+        landed.retain(|_, _| false).map_err(db)?;
+    }
+    let steps = replays.len().map_err(db)?;
+    for (l, changes) in chain.iter().rev() {
+        for c in changes {
+            let mut next = Some(*c);
+            let mut n = 0u64;
+            while let Some(x) = next {
+                if landed.get(&x.0[..]).map_err(db)?.is_none() {
+                    landed.insert(&x.0[..], &l.0[..]).map_err(db)?;
+                }
+                if n >= steps {
+                    break;
+                }
+                n += 1;
+                next = match replays.get(&x.0[..]).map_err(db)? {
+                    Some(v) => Some(hash_from(v.value(), "replay entry")?),
+                    None => None,
+                };
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Index {
     pub fn open(path: &Path) -> Result<Index, StoreError> {
         Index::with_tables(Database::create(path).map_err(|e| open_error(path, e))?)
@@ -1246,8 +1418,9 @@ impl Index {
                 .map_err(db)?
                 .map(|t| t.name().to_string())
                 .collect();
+            let landed_rule = landed_rule_outdated(&r, &names)?;
             drop(r);
-            if let Some(why) = missing_table(&names) {
+            if let Some(why) = missing_table(&names).or(landed_rule) {
                 return Ok(Checked::Outdated(why));
             }
         }
@@ -1278,6 +1451,9 @@ impl Index {
             w.open_table(PRODUCERS).map_err(db)?;
             w.open_table(VIEW_OPS).map_err(db)?;
             w.open_table(LANDED).map_err(db)?;
+            w.open_table(LANDING_CARRIES).map_err(db)?;
+            w.open_table(REPLAYS).map_err(db)?;
+            w.open_table(CARRIERS).map_err(db)?;
             w.open_table(DELETERS).map_err(db)?;
             w.open_table(REFS).map_err(db)?;
             w.open_table(OPEN_TENSIONS).map_err(db)?;
@@ -1302,6 +1478,15 @@ impl Index {
             w.open_table(LANDING_DEPTHS).map_err(db)?;
             w.open_table(LANDING_WAITS).map_err(db)?;
             w.open_table(SNAPSHOT_DELTAS).map_err(db)?;
+            // an index that has applied no write holds no landed row: its rows follow this
+            // rdy's rule from the start. One that has keeps the revision it has
+            {
+                let mut meta = w.open_table(META).map_err(db)?;
+                if meta.get("indexed_upto").map_err(db)?.is_none() {
+                    meta.insert(LANDED_REVISION_KEY, LANDED_REVISION)
+                        .map_err(db)?;
+                }
+            }
             // an index written before the diagram cache gains its table empty: no refusal and
             // no rebuild, since a drawing is never read as absent data
             w.open_table(DIAGRAMS).map_err(db)?;
@@ -1379,6 +1564,10 @@ impl Index {
             let mut producers = w.open_table(PRODUCERS).map_err(db)?;
             let mut view_ops = w.open_table(VIEW_OPS).map_err(db)?;
             let mut landed = w.open_table(LANDED).map_err(db)?;
+            // the landing and replay tables only for a batch with a landing, a replay or a
+            // canon move
+            let mut carries: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
+            let mut replays: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             let mut deleters = w.open_table(DELETERS).map_err(db)?;
             let mut refs = w.open_table(REFS).map_err(db)?;
             let mut open_proposals = w.open_table(OPEN_PROPOSALS).map_err(db)?;
@@ -1454,6 +1643,15 @@ impl Index {
                         producers.insert(&key[..], &[][..]).map_err(db)?;
                     }
                     IndexEntry::Ref(name, value) => {
+                        // canon's head before the move, read in this commit
+                        let was = match name.as_str() {
+                            CANON_REF => Some(
+                                refs.get(CANON_REF)
+                                    .map_err(db)?
+                                    .and_then(|v| canon_value(v.value())),
+                            ),
+                            _ => None,
+                        };
                         refs.insert(name.as_str(), &value[..]).map_err(db)?;
                         if name.starts_with(OPEN_PREFIX) {
                             if value.is_empty() {
@@ -1463,6 +1661,21 @@ impl Index {
                                     .insert(name.as_str(), &value[..])
                                     .map_err(db)?;
                             }
+                        }
+                        if let Some(was) = was {
+                            if carries.is_none() {
+                                carries = Some(w.open_table(LANDING_CARRIES).map_err(db)?);
+                            }
+                            if replays.is_none() {
+                                replays = Some(w.open_table(REPLAYS).map_err(db)?);
+                            }
+                            follow_canon(
+                                &mut landed,
+                                carries.as_ref().expect("opened above"),
+                                replays.as_ref().expect("opened above"),
+                                was,
+                                canon_value(value),
+                            )?;
                         }
                     }
                     IndexEntry::ViewOp { view, op } => {
@@ -1474,6 +1687,37 @@ impl Index {
                         // the first landing that carried a change keeps it
                         if landed.get(&change.0[..]).map_err(db)?.is_none() {
                             landed.insert(&change.0[..], &landing.0[..]).map_err(db)?;
+                        }
+                    }
+                    IndexEntry::LandingCarries {
+                        landing,
+                        prev,
+                        changes,
+                    } => {
+                        let t = match &mut carries {
+                            Some(t) => t,
+                            None => carries.insert(w.open_table(LANDING_CARRIES).map_err(db)?),
+                        };
+                        // a later frame of the same landing names the same fields
+                        if t.get(&landing.0[..]).map_err(db)?.is_none() {
+                            t.insert(&landing.0[..], &carries_value(prev.as_ref(), changes)[..])
+                                .map_err(db)?;
+                            let mut all = w.open_table(CARRIERS).map_err(db)?;
+                            for c in changes {
+                                let mut key = Vec::with_capacity(64);
+                                key.extend_from_slice(&c.0);
+                                key.extend_from_slice(&landing.0);
+                                all.insert(&key[..], &[][..]).map_err(db)?;
+                            }
+                        }
+                    }
+                    IndexEntry::Replay { change, source } => {
+                        let t = match &mut replays {
+                            Some(t) => t,
+                            None => replays.insert(w.open_table(REPLAYS).map_err(db)?),
+                        };
+                        if t.get(&change.0[..]).map_err(db)?.is_none() {
+                            t.insert(&change.0[..], &source.0[..]).map_err(db)?;
                         }
                     }
                     IndexEntry::Deleted { block, change } => {
@@ -1701,6 +1945,8 @@ impl Index {
             meta.insert("indexed_upto", &enc(&upto)[..]).map_err(db)?;
             // the counts above are kept to `upto` in this same commit
             meta.insert(COUNTS_UPTO_KEY, &enc(&upto)[..]).map_err(db)?;
+            // and so are the landed rows, by this rdy's rule
+            meta.insert(LANDED_UPTO_KEY, &enc(&upto)[..]).map_err(db)?;
         }
         w.commit().map_err(db)?;
         Ok(())
@@ -1882,7 +2128,9 @@ impl Index {
         Ok(out)
     }
 
-    /// The landing that carried `change` into canon, if one has.
+    /// The oldest landing of current canon's chain that carries `change`, or that carries a
+    /// change whose `replayed_from` chain reaches it (D-NME32); None for any other change. A
+    /// reader that needs the first carrier in log order reads the log.
     pub fn landing_of(&self, change: &Hash) -> Result<Option<Hash>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(LANDED).map_err(db)?;
@@ -1892,6 +2140,66 @@ impl Index {
         }
     }
 
+    /// The landing whose LANDING frame first carried `change` in log order, among those the log
+    /// holds before `before` (all of them for None), on canon or not. A history reader's answer:
+    /// what a landing carried as the log stood at its bound, whatever canon is now. It follows no
+    /// replay: a replayed change has carriers of its own.
+    pub fn first_carrier(
+        &self,
+        change: &Hash,
+        before: Option<Location>,
+    ) -> Result<Option<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(CARRIERS).map_err(db)?;
+        let typed = r.open_table(TYPED).map_err(db)?;
+        let mut lo = change.0.to_vec();
+        lo.extend_from_slice(&[0u8; 32]);
+        let mut hi = change.0.to_vec();
+        hi.extend_from_slice(&[0xffu8; 32]);
+        let mut first: Option<(Location, Hash)> = None;
+        for item in t.range(&lo[..]..=&hi[..]).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let landing = hash_from(&k.value()[32..], "carriers key")?;
+            let Some(at) = typed
+                .get(&typed_key(kinds::LANDING, &landing)[..])
+                .map_err(db)?
+                .map(|v| dec(v.value()))
+                .transpose()?
+            else {
+                continue;
+            };
+            if before.is_some_and(|end| at >= end) {
+                continue;
+            }
+            if first.is_none_or(|(f, _)| at < f) {
+                first = Some((at, landing));
+            }
+        }
+        Ok(first.map(|(_, l)| l))
+    }
+
+    /// Canon's head and every landed row as (change, landing), in change order, from one read:
+    /// the rows that head gives, while a writer moves canon.
+    pub(crate) fn canon_and_landed(&self) -> Result<CanonRows, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let head = r
+            .open_table(REFS)
+            .map_err(db)?
+            .get(CANON_REF)
+            .map_err(db)?
+            .and_then(|v| canon_value(v.value()));
+        let t = r.open_table(LANDED).map_err(db)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            out.push((
+                hash_from(k.value(), "landed key")?,
+                hash_from(v.value(), "landed entry")?,
+            ));
+        }
+        Ok((head, out))
+    }
+
     /// Test hook: overwrites the landed entry of `change` with raw bytes, so a test can damage it.
     #[doc(hidden)]
     pub fn set_landed_raw_for_tests(&self, change: &Hash, raw: &[u8]) -> Result<(), StoreError> {
@@ -1899,6 +2207,41 @@ impl Index {
         {
             let mut t = w.open_table(LANDED).map_err(db)?;
             t.insert(&change.0[..], raw).map_err(db)?;
+        }
+        w.commit().map_err(db)
+    }
+
+    /// Test hook: removes the landed row of `change`, as an index whose rows follow another
+    /// rule may lack it.
+    #[doc(hidden)]
+    pub fn remove_landed_for_tests(&self, change: &Hash) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        {
+            let mut t = w.open_table(LANDED).map_err(db)?;
+            t.remove(&change.0[..]).map_err(db)?;
+        }
+        w.commit().map_err(db)
+    }
+
+    /// Test hook: removes the landed rows' revision, as an index an earlier rdy wrote lacks it.
+    #[doc(hidden)]
+    pub fn forget_landed_revision_for_tests(&self) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        {
+            let mut t = w.open_table(META).map_err(db)?;
+            t.remove(LANDED_REVISION_KEY).map_err(db)?;
+        }
+        w.commit().map_err(db)
+    }
+
+    /// Test hook: sets the position the landed rows were last kept at, as an older rdy's write
+    /// leaves it behind `indexed_upto`.
+    #[doc(hidden)]
+    pub fn set_landed_upto_for_tests(&self, upto: Location) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        {
+            let mut t = w.open_table(META).map_err(db)?;
+            t.insert(LANDED_UPTO_KEY, &enc(&upto)[..]).map_err(db)?;
         }
         w.commit().map_err(db)
     }
@@ -1924,6 +2267,9 @@ impl Index {
             refs,
             view_ops: dump_table(&r, VIEW_OPS)?,
             landed: dump_table(&r, LANDED)?,
+            landing_carries: dump_table(&r, LANDING_CARRIES)?,
+            replays: dump_table(&r, REPLAYS)?,
+            carriers: dump_table(&r, CARRIERS)?,
             deleters: dump_table(&r, DELETERS)?,
             open_tensions: dump_table(&r, OPEN_TENSIONS)?,
             open_suspects: dump_table(&r, OPEN_SUSPECTS)?,
@@ -2733,6 +3079,31 @@ impl Index {
         self.redacted.load(Ordering::Acquire)
     }
 
+    /// Every active mask row of `kind`, as (object hash, row), in ascending hash order: one read
+    /// of the active mask, and none when it is empty.
+    pub fn redaction_active_of(&self, kind: u8) -> Result<Vec<(Hash, ActiveObject)>, StoreError> {
+        if !self.any_redaction_active() {
+            return Ok(vec![]);
+        }
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_ACTIVE).map_err(db)?;
+        let mut out = vec![];
+        for item in t.iter().map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            let key = k.value();
+            if key.len() != 33 {
+                return Err(StoreError::Decode("redaction active entry".into()));
+            }
+            if key[32] == kind {
+                out.push((
+                    hash_from(&key[..32], "redaction active entry")?,
+                    active_object_from(v.value())?,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     /// The request logged for carrier change `carrier`, if one was.
     pub fn redaction_carrier(&self, carrier: &Hash) -> Result<Option<Hash>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
@@ -3005,6 +3376,19 @@ impl Index {
             Ok(t.get(key).map_err(db)?.map(|v| v.value().to_vec()))
         };
         Ok(at("indexed_upto")? != at(COUNTS_UPTO_KEY)?)
+    }
+
+    /// Whether the landed rows are behind the log ([`LANDED_UPTO_KEY`]): `landed_upto` is
+    /// missing or differs from `indexed_upto`, as an older rdy that wrote to the store leaves
+    /// them, with rows by its own rule. The store's open then rebuilds the index from the log,
+    /// as it does for counts behind ([`Index::counts_behind`]).
+    pub fn landed_behind(&self) -> Result<bool, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(META).map_err(db)?;
+        let at = |key: &str| -> Result<Option<Vec<u8>>, StoreError> {
+            Ok(t.get(key).map_err(db)?.map(|v| v.value().to_vec()))
+        };
+        Ok(at("indexed_upto")? != at(LANDED_UPTO_KEY)?)
     }
 
     /// The acknowledged end of the log, or None if this index has never applied a write.

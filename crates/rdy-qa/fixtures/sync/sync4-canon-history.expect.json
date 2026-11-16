@@ -1,0 +1,178 @@
+{
+  "fetch": {
+    "canon_moved": false,
+    "frames_written": 16,
+    "min_rdy_after": "0.53.0",
+    "min_rdy_before": "0.52.0",
+    "records_taken": 13,
+    "tags_kept": [],
+    "tags_taken": [
+      "v2.0.0"
+    ],
+    "view_moved": false
+  },
+  "purpose": "canon_history",
+  "rdy": "0.53.0",
+  "receiver_features": {
+    "features": [
+      {
+        "class": "incompatible",
+        "name": "assessment",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "content_hash_v2",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "object_encoding",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "snapshot_delta",
+        "required_rdy": "0.52.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "sync_state",
+        "required_rdy": "0.53.0"
+      }
+    ],
+    "manifest_version": 1
+  },
+  "stream": {
+    "bytes": 5799,
+    "digest": "daba4ddb5e0b2592662de63f1f4bafa49a846ad9b9a70fc5787046b707257492",
+    "header": {
+      "features": {
+        "features": [
+          {
+            "class": "incompatible",
+            "name": "assessment",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "object_encoding",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "snapshot_delta",
+            "required_rdy": "0.52.0"
+          }
+        ],
+        "manifest_version": 1
+      },
+      "prerequisites": [],
+      "purpose": "canon_history",
+      "repo_id": "8a55d733ad6ec262d2fd59d66db4ba8f",
+      "stream_format": 4,
+      "tag": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75"
+    },
+    "keys": [
+      {
+        "hash": "c0c408ff5302692edc569c1b12fbfc935574715e83ec24d3e66c96b93dad3b07",
+        "kind": 1
+      },
+      {
+        "hash": "d02ab7982061f800950ef9d10b41f54e2c448cb9c4d5880109cb0ffda4e0ba68",
+        "kind": 1
+      },
+      {
+        "hash": "280d4688b4f00fad6c7620ce67ef7c67721a120475fe5f69627cf744bbaae21b",
+        "kind": 1
+      },
+      {
+        "hash": "b441b6cc0af1e44384bc910142eb631864c9dac8139e6616679b8153e28b7a8b",
+        "kind": 2
+      },
+      {
+        "hash": "9ff94de1fc25a599f2f46184d972bdb69f883a304d02f2a52d2d6921e4edde03",
+        "kind": 2
+      },
+      {
+        "hash": "e8a816a8fffbae2eee78101a411e32316a4a31e17da1328b17146a80584f5b31",
+        "kind": 2
+      },
+      {
+        "hash": "911a6a0af596e41015c3a31c587c060072b2100fe7f067eddda5aed64474c8ab",
+        "kind": 3
+      },
+      {
+        "hash": "2c07deef1743f3f433b970dc1af94ff2fe660011c1ad1c4cb792ec96cfb1ce45",
+        "kind": 25
+      },
+      {
+        "hash": "372557b8f546da728919dcef3f10372f2d4a44d443e9550a0fe15c12b5e7de13",
+        "kind": 4
+      },
+      {
+        "hash": "a0a0f90ae9b8747740e2d068dd756a1ea61647a191e2a1e52e8cb4f4c7ea1b07",
+        "kind": 3
+      },
+      {
+        "hash": "2a5666313ee47d665d7a871537a3698c57d3bc6eedda6597a69295d8dbb7ff8b",
+        "kind": 25
+      },
+      {
+        "hash": "678b577cc940690b7d8dbe734cd15215b73de2eb9ebb119b4558957fda676fd1",
+        "kind": 4
+      },
+      {
+        "hash": "c28db875d1db94f4128227baa16fa81365422d26896d43bce29183400b338c34",
+        "kind": 3
+      },
+      {
+        "hash": "c13e3ac11bd03f12770bc08df446d1f0454f9dd9bea33e38fd915c3f9d90fb2a",
+        "kind": 25
+      },
+      {
+        "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+        "kind": 4
+      },
+      {
+        "hash": "8b19a504c104de64768f717530c758d41189f9f27d98df6ef63296385c652714",
+        "kind": 9
+      },
+      {
+        "hash": "33ef3a4d22fd2a356b8701f97ab1577c68863dca26e4f475aa2bac8be26aee0b",
+        "kind": 30
+      },
+      {
+        "hash": "f974cabffd9ef55ab87f75cb249b7d5999c9054b21af5331bfd317407e4f5601",
+        "kind": 30
+      },
+      {
+        "hash": "50f8f520a3094ef5948372c78729103ac8618c36c6206f65ab11a489e1a078db",
+        "kind": 30
+      }
+    ],
+    "record_features": {
+      "features": [
+        {
+          "class": "incompatible",
+          "name": "assessment",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "object_encoding",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "snapshot_delta",
+          "required_rdy": "0.52.0"
+        }
+      ],
+      "manifest_version": 1
+    },
+    "records": 19
+  },
+  "stream_format": 4,
+  "upload_min_rdy": "0.52.0"
+}

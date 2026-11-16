@@ -6,7 +6,9 @@
 //! depends on this crate alone. No raw `Local`, `Rdy`, `ReadState` or `StoreReader` escapes it.
 //! `rendering` writes a render request for the host's child process and renders one page of a
 //! captured tag; the renderer itself is core's (`rdy-render`). A store upgrade is an explicit
-//! call (`maintenance::upgrade`): no open upgrades a store (D-WWAK7).
+//! call (`maintenance::upgrade`): no open upgrades a store (D-WWAK7). `sync` checks a push into
+//! a holder and makes the hub's canon and view moves; `landing_check` checks a stored landing
+//! with the inputs the hub passes.
 //! No product behaviour is promised stable across pins.
 
 pub mod capabilities;
@@ -14,6 +16,7 @@ mod follower;
 pub mod foreign_facts;
 pub mod foreign_removal;
 pub mod history;
+pub mod landing_check;
 pub mod link_take;
 pub mod links;
 pub mod maintenance;
@@ -24,6 +27,7 @@ pub mod rendering;
 pub mod signatures;
 mod store;
 pub mod stream;
+pub mod sync;
 pub mod take;
 mod value;
 
@@ -34,7 +38,7 @@ pub use maintenance::{
     ChainEnd, DumpStop, LoadedChainFile, Location, StoppedAt, UpgradePlan, UpgradeReceipt,
     UpgradeReport, UpgradeStep,
 };
-pub use publication::{ProfileFacts, profile_facts};
+pub use publication::{Baseline, BaselineBinding, PreviousChoice, ProfileFacts, profile_facts};
 pub use publication_take::{
     PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,
 };
@@ -50,5 +54,9 @@ pub use rdy_store::holder::StoreMode;
 pub use rdy_store::meta::Origin;
 pub use reads::{ReadRequest, SearchRequest};
 pub use store::{Identity, Snapshot, StoreHandle};
+pub use sync::{
+    CanonMove, ChainFacts, CheckedQuarantine, Moved, PushedView, QuarantineFacts, RdyVersion,
+    ViewRead,
+};
 pub use take::{StorePosition, TakeOutcome, UploadTarget};
 pub use value::{encode_block, hash_bytes};

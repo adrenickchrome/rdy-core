@@ -10,9 +10,9 @@ use crate::merge::Conflict;
 use crate::state::view_ref;
 use crate::store::{Frames, encode};
 use crate::{Store, StoreReader};
-use rdy_model::{Answer, Change, Hash, Op, Provenance};
+use rdy_model::{Answer, BlockId, Change, Hash, Op, Provenance, Role};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Who a view belongs to.
@@ -725,25 +725,8 @@ impl Store {
             && !changes.is_empty()
             && src.base != canon
         {
-            let mut dropped = vec![];
-            let mut remaining = vec![];
-            for c in changes {
-                if self.landing_of(&c)?.is_some() {
-                    dropped.push(c);
-                } else {
-                    remaining.push(c);
-                }
-            }
-            let rest = remaining
-                .iter()
-                .map(|c| self.change(c))
-                .collect::<Result<Vec<_>, _>>()?;
-            let merged = self.merge_onto(canon, &self.state_of(canon)?, &rest)?;
-            // the rebase combines the view's moves with canon's: refuse a parent loop
-            let touched = rest
-                .iter()
-                .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()));
-            if let Some((a, b)) = self.parent_cycle_in(&merged.state, touched)? {
+            let onto = self.rebase_onto(landing, changes)?;
+            if let Some((a, b)) = onto.cycle {
                 return Err(StoreError::ParentCycle {
                     message: format!(
                         "forking view {from:?} onto canon would make {a} and {b} each other's ancestors"
@@ -753,14 +736,13 @@ impl Store {
                     ),
                 });
             }
-            let conflicts = merged.conflicts;
             head.base = canon;
-            head.len = remaining.len() as u64;
+            head.len = onto.remaining.len() as u64;
             let rebase = ViewOpKind::Rebase {
                 landing,
-                dropped,
-                remaining,
-                conflicts,
+                dropped: onto.dropped,
+                remaining: onto.remaining,
+                conflicts: onto.conflicts,
             };
             let (kind, bytes) =
                 crate::codec::item_new(kinds::VIEW_OP, &view_op(name, Some(head.head), rebase, by));
@@ -833,10 +815,24 @@ impl Store {
         ops: Vec<ViewOpKind>,
         by: &Provenance,
     ) -> Result<(Frames, ViewHead, Vec<Hash>), StoreError> {
-        // 1. the head and the ops
         let head = self
             .view_head(name)?
             .ok_or_else(|| StoreError::UnknownView(name.to_string()))?;
+        self.append_frames_at(name, head, ops, by, AppendRules::APPEND)
+    }
+
+    /// The frames that append `ops` to view `name`'s chain after `head`, under `rules`: the
+    /// ops, then the ref of the new head. Returns the new head and the ids of the ops written.
+    /// Nothing is written here.
+    fn append_frames_at(
+        &self,
+        name: &str,
+        head: ViewHead,
+        ops: Vec<ViewOpKind>,
+        by: &Provenance,
+        rules: AppendRules,
+    ) -> Result<(Frames, ViewHead, Vec<Hash>), StoreError> {
+        // 1. the ops
         if ops.is_empty() {
             return Err(StoreError::Decode("view_append: no ops".into()));
         }
@@ -844,7 +840,7 @@ impl Store {
             let variant = match op {
                 ViewOpKind::Create { .. } => "Create",
                 ViewOpKind::Fork { .. } => "Fork",
-                ViewOpKind::Commit { .. } => "Commit",
+                ViewOpKind::Commit { .. } if !rules.commits => "Commit",
                 _ => continue,
             };
             return Err(StoreError::Decode(format!(
@@ -860,7 +856,7 @@ impl Store {
         let mut prev = Some(head.head);
         // 3. the float catch-up
         let mut ops = ops;
-        if !head.pinned && set.list.is_empty() {
+        if rules.catch_up && !head.pinned && set.list.is_empty() {
             let canon = self.canon_head()?;
             if let Some(landing) = canon
                 && canon != head.base
@@ -882,9 +878,11 @@ impl Store {
         let mut written = vec![];
         for op in ops {
             match &op {
+                ViewOpKind::Commit { change } => set.include(vec![*change]),
                 ViewOpKind::Include { changes } => set.include(changes.clone()),
                 ViewOpKind::Exclude { changes } => set.exclude(changes.clone()),
                 ViewOpKind::Close { .. } => closed = true,
+                ViewOpKind::Own { .. } if rules.keep_owner => {}
                 ViewOpKind::Own { owner: o } => owner = o.clone(),
                 ViewOpKind::Rebase {
                     landing, remaining, ..
@@ -895,16 +893,18 @@ impl Store {
                 ViewOpKind::Undo { target } => match self.undo_effect(name, target)? {
                     ResolvedOp::Reopen => closed = false,
                     ResolvedOp::Close => closed = true,
+                    ResolvedOp::SetOwner(_) if rules.keep_owner => {}
                     ResolvedOp::SetOwner(o) => owner = o,
                     effect => set.apply(effect),
                 },
-                ViewOpKind::Create { .. } | ViewOpKind::Fork { .. } | ViewOpKind::Commit { .. } => {
+                ViewOpKind::Create { .. } | ViewOpKind::Fork { .. } => {
                     unreachable!("refused above")
                 }
             }
             if matches!(
                 op,
-                ViewOpKind::Include { .. }
+                ViewOpKind::Commit { .. }
+                    | ViewOpKind::Include { .. }
                     | ViewOpKind::Exclude { .. }
                     | ViewOpKind::Undo { .. }
                     | ViewOpKind::Rebase { .. }
@@ -1046,5 +1046,426 @@ impl Store {
             }
         }
         Ok(false)
+    }
+}
+
+/// The rules of one append (`Store::append_frames_at`).
+#[derive(Clone, Copy, Debug)]
+struct AppendRules {
+    /// The float catch-up: a `Rebase` onto canon before the first op that adds a change to an
+    /// empty unpinned view behind canon.
+    catch_up: bool,
+    /// The head keeps its owner: an `Own`, or an undo that sets the owner, moves no owner.
+    keep_owner: bool,
+    /// A `Commit` op is taken as it is.
+    commits: bool,
+}
+
+impl AppendRules {
+    /// An ordinary append.
+    const APPEND: AppendRules = AppendRules {
+        catch_up: true,
+        keep_owner: false,
+        commits: false,
+    };
+    /// A pull's re-chain (D-4E32E): each op as it was written, its `Commit` ops too, with no
+    /// catch-up, and the owner of this machine kept.
+    const RECHAIN: AppendRules = AppendRules {
+        catch_up: false,
+        keep_owner: true,
+        commits: true,
+    };
+}
+
+/// What the view rebase rule makes of a view's changes onto canon's head: the landed changes it
+/// drops, the changes that remain, the conflicts the remaining ones have with canon, and a parent
+/// loop the merge would make, if any.
+pub(crate) struct RebaseOnto {
+    pub(crate) dropped: Vec<Hash>,
+    pub(crate) remaining: Vec<Hash>,
+    pub(crate) conflicts: Vec<Conflict>,
+    pub(crate) cycle: Option<(BlockId, BlockId)>,
+}
+
+/// A record that names an op of a view's unpushed work (D-4E32E): an answer whose targets name
+/// it, a `Fork` of another view from it, or a version of an alternative set that lists the view
+/// as a member and was written after it, so that its holdings read through it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewReferrer {
+    Answer(Hash),
+    Fork { view: String, op: Hash },
+    AltSet(Hash),
+}
+
+/// What a re-chain wrote (`Store::view_rechain`): the new head, each re-chained op as its old
+/// and new id, oldest first, and the local `Rebase` ops it dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rechained {
+    pub head: ViewHead,
+    pub ops: Vec<(Hash, Hash)>,
+    pub dropped_rebases: Vec<Hash>,
+}
+
+/// A view chain walk past its bound.
+fn chain_limit() -> StoreError {
+    StoreError::Refused(format!(
+        "a view chain walk exceeds {} history depth",
+        crate::sync_stream::MAX_HISTORY_DEPTH
+    ))
+}
+
+impl StoreReader {
+    /// What the view rebase rule makes of `changes` onto `landing`, canon's head: the landed
+    /// ones are dropped, the rest are merged onto canon's state, with their conflicts as data.
+    pub(crate) fn rebase_onto(
+        &self,
+        landing: Hash,
+        changes: Vec<Hash>,
+    ) -> Result<RebaseOnto, StoreError> {
+        let mut dropped = vec![];
+        let mut remaining = vec![];
+        for c in changes {
+            if self.landing_of(&c)?.is_some() {
+                dropped.push(c);
+            } else {
+                remaining.push(c);
+            }
+        }
+        let rest = remaining
+            .iter()
+            .map(|c| self.change(c))
+            .collect::<Result<Vec<_>, _>>()?;
+        let canon = Some(landing);
+        let merged = self.merge_onto(canon, &self.state_of(canon)?, &rest)?;
+        // the rebase combines the view's moves with canon's: a parent loop is the caller's
+        let touched = rest
+            .iter()
+            .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()));
+        let cycle = self.parent_cycle_in(&merged.state, touched)?;
+        Ok(RebaseOnto {
+            dropped,
+            remaining,
+            conflicts: merged.conflicts,
+            cycle,
+        })
+    }
+
+    /// The ops of view `name`'s chain from op `head` back to its root, newest first. Each op must
+    /// be an op of `name`, and the root a `Create` or a `Fork`: a broken chain is `Decode`, with
+    /// the view chain's own texts. At most `MAX_HISTORY_DEPTH` ops are read.
+    pub fn view_chain(&self, name: &str, head: &Hash) -> Result<Vec<(Hash, ViewOp)>, StoreError> {
+        let mut out: Vec<(Hash, ViewOp)> = vec![];
+        let mut on = HashSet::new();
+        let mut cur = Some(*head);
+        while let Some(h) = cur {
+            if out.len() as u64 >= crate::sync_stream::MAX_HISTORY_DEPTH {
+                return Err(chain_limit());
+            }
+            if !on.insert(h) {
+                return Err(broken(name, &h, "the chain does not end"));
+            }
+            let op = match self.view_op(&h) {
+                Ok(op) => op,
+                Err(StoreError::NotFound(x)) if x == h => {
+                    return Err(broken(name, &h, "the op is missing"));
+                }
+                Err(e) => return Err(e),
+            };
+            if op.view != name {
+                return Err(broken(
+                    name,
+                    &h,
+                    format!("the op belongs to view {:?}", op.view),
+                ));
+            }
+            cur = op.prev;
+            if cur.is_none()
+                && !matches!(op.op, ViewOpKind::Create { .. } | ViewOpKind::Fork { .. })
+            {
+                return Err(broken(name, &h, "it ends without a checkpoint"));
+            }
+            out.push((h, op));
+        }
+        Ok(out)
+    }
+
+    /// The root of view `name`'s chain at op `head`: its first op, the hash that guards a pushed
+    /// view's name (D-4E32E).
+    pub fn view_chain_root(&self, name: &str, head: &Hash) -> Result<Hash, StoreError> {
+        let chain = self.view_chain(name, head)?;
+        Ok(chain.last().map(|(h, _)| *h).unwrap_or(*head))
+    }
+
+    /// View `name`'s head at op `head`, its facts derived from the chain alone: the base, the
+    /// included changes' count, whether it is closed and its last write, as a hub's head reads
+    /// them. A chain's ops never give the owner or the pin of this machine (D-4E32E): the head
+    /// takes `owner` and `pinned` as the caller gives them.
+    pub fn chain_view_head(
+        &self,
+        name: &str,
+        head: &Hash,
+        owner: Option<Owner>,
+        pinned: bool,
+    ) -> Result<ViewHead, StoreError> {
+        let facts = self.hub_view_head(name, head)?;
+        Ok(ViewHead {
+            owner,
+            pinned,
+            ..facts
+        })
+    }
+
+    /// The records that name an op of `ops`, unpushed ops of view `name` (D-4E32E): each answer
+    /// whose targets name one, each `Fork` op of another view whose source op is one, and each
+    /// version of an alternative set that lists `name` as a member and that the log took after
+    /// the oldest of them. Answers first, then forks, then alternative sets, each by hash.
+    pub fn view_op_referrers(
+        &self,
+        name: &str,
+        ops: &[Hash],
+    ) -> Result<Vec<ViewReferrer>, StoreError> {
+        let set: HashSet<Hash> = ops.iter().copied().collect();
+        if set.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut out = vec![];
+        self.for_each_object_of(kinds::ANSWER, |h| {
+            let a: Answer = self.get_typed(kinds::ANSWER, &h)?;
+            if a.targets.iter().any(|t| set.contains(t)) {
+                out.push(ViewReferrer::Answer(h));
+            }
+            Ok(())
+        })?;
+        self.for_each_object_of(kinds::VIEW_OP, |h| {
+            let op = self.view_op(&h)?;
+            if op.view != name
+                && let ViewOpKind::Fork {
+                    from, from_head, ..
+                } = &op.op
+                && from == name
+                && set.contains(from_head)
+            {
+                out.push(ViewReferrer::Fork {
+                    view: op.view.clone(),
+                    op: h,
+                });
+            }
+            Ok(())
+        })?;
+        let mut first = None;
+        for op in &set {
+            let at = self.index().typed(kinds::VIEW_OP, op)?;
+            if let Some(at) = at
+                && first.is_none_or(|f| at < f)
+            {
+                first = Some(at);
+            }
+        }
+        if let Some(first) = first {
+            self.for_each_object_of(kinds::ALT_SET, |h| {
+                let v = self.alt_set(&h)?;
+                let at = self.index().typed(kinds::ALT_SET, &h)?;
+                if v.members.iter().any(|m| m.view == name) && at.is_some_and(|at| at > first) {
+                    out.push(ViewReferrer::AltSet(h));
+                }
+                Ok(())
+            })?;
+        }
+        Ok(out)
+    }
+
+    /// The view ops that `replaced/` marks of kind view op keep readable, by view name: each
+    /// marked op and every op before it on its chain. A pull's re-chain and a view take leave
+    /// the old chain there (D-4E32E); fsck reads these ops as off the view's chain by right.
+    /// Each op is read once, and a walk stops at an op the store does not hold.
+    pub(crate) fn replaced_view_ops(&self) -> Result<BTreeMap<String, BTreeSet<Hash>>, StoreError> {
+        let mut out: BTreeMap<String, BTreeSet<Hash>> = BTreeMap::new();
+        let mut seen: HashSet<Hash> = HashSet::new();
+        for (name, value) in self.refs_with_prefix(crate::hub_canon::REPLACED_REF)? {
+            let Some(hex) = name.strip_prefix(crate::hub_canon::REPLACED_REF) else {
+                continue;
+            };
+            let Ok(mark) = crate::hub_canon::Replaced::decode(&value) else {
+                continue;
+            };
+            if mark.kind != crate::hub_canon::ReplacedKind::ViewOp {
+                continue;
+            }
+            let Ok(mut cur) = hex.parse::<Hash>().map(Some) else {
+                continue;
+            };
+            while let Some(h) = cur {
+                if !seen.insert(h) {
+                    break;
+                }
+                let op = match self.view_op(&h) {
+                    Ok(op) => op,
+                    Err(StoreError::NotFound(_)) => break,
+                    Err(e) => return Err(e),
+                };
+                cur = op.prev;
+                out.entry(op.view).or_default().insert(h);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl Store {
+    /// Moves view `name`'s ref to `head`, whose op the store holds on `name`'s chain: a pull's or
+    /// a take's move to a chain the fetch took. Into the open batch, when one is open.
+    pub fn view_set_head(&mut self, name: &str, head: &ViewHead) -> Result<(), StoreError> {
+        self.ensure_writable()?;
+        let op = self.view_op(&head.head)?;
+        if op.view != name {
+            return Err(broken(
+                name,
+                &head.head,
+                format!("the op belongs to view {:?}", op.view),
+            ));
+        }
+        let items = self.ref_items_pub(vec![(view_ref(name), encode(head))]);
+        self.write(items).map(drop)
+    }
+
+    /// Re-chains `ops`, view `name`'s unpushed ops (oldest first, each with its old id), after
+    /// `from`, the hub's head with this machine's owner and pin (D-4E32E). Each op keeps its kind,
+    /// author and time, and gets the new op before it as `prev`. An `Undo` whose target is a
+    /// re-chained op names the target's new id. A `Rebase` op is dropped. `Own` ops and owner
+    /// undos travel, but the head keeps `from`'s owner. The ref moves to `from` first, then each
+    /// op is one write with the head's ref, so an undo reads the op it undoes. Into the open
+    /// batch, when one is open.
+    pub fn view_rechain(
+        &mut self,
+        name: &str,
+        from: ViewHead,
+        ops: Vec<(Hash, ViewOp)>,
+    ) -> Result<Rechained, StoreError> {
+        self.view_set_head(name, &from)?;
+        let mut head = from;
+        let mut out = Rechained {
+            head: head.clone(),
+            ops: vec![],
+            dropped_rebases: vec![],
+        };
+        let mut new_of: HashMap<Hash, Hash> = HashMap::new();
+        for (old, op) in ops {
+            if op.view != name {
+                return Err(broken(
+                    name,
+                    &old,
+                    format!("the op belongs to view {:?}", op.view),
+                ));
+            }
+            let kind = match op.op {
+                ViewOpKind::Rebase { .. } => {
+                    out.dropped_rebases.push(old);
+                    continue;
+                }
+                ViewOpKind::Undo { target } => ViewOpKind::Undo {
+                    target: new_of.get(&target).copied().unwrap_or(target),
+                },
+                kind => kind,
+            };
+            let by = Provenance {
+                actor: op.actor,
+                run: op.run,
+                role: Role::Writer,
+                at_ms: op.at_ms,
+            };
+            let (items, new_head, written) =
+                self.append_frames_at(name, head, vec![kind], &by, AppendRules::RECHAIN)?;
+            self.write(items)?;
+            let new = written[0];
+            new_of.insert(old, new);
+            out.ops.push((old, new));
+            head = new_head;
+        }
+        out.head = head;
+        Ok(out)
+    }
+
+    /// The view rebase rule on view `name` after a re-chain (D-4E32E), by `by`: an open, unpinned
+    /// view with changes gets a `Rebase` onto canon's head when its base is not that head, or
+    /// when it includes a landed change. A re-chain drops the local `Rebase` that took a landed
+    /// change out, and the hub's base can equal canon already, so the base alone does not tell.
+    /// The rebase drops the landed changes and records the conflicts of the rest. A rebase whose
+    /// merge would make a parent loop is not written. Returns the rebase op and its conflicts,
+    /// or None. Into the open batch, when one is open.
+    pub fn view_rebase_rechained(
+        &mut self,
+        name: &str,
+        by: &Provenance,
+    ) -> Result<Option<(Hash, Vec<Conflict>)>, StoreError> {
+        self.ensure_writable()?;
+        let head = self
+            .view_head(name)?
+            .ok_or_else(|| StoreError::UnknownView(name.to_string()))?;
+        let canon = self.canon_head()?;
+        let Some(landing) = canon else {
+            return Ok(None);
+        };
+        if head.closed || head.pinned || head.len == 0 {
+            return Ok(None);
+        }
+        let changes = self.included_at(name, &head)?.as_ref().clone();
+        if head.base == canon {
+            let mut landed = false;
+            for c in &changes {
+                if self.landing_of(c)?.is_some() {
+                    landed = true;
+                    break;
+                }
+            }
+            if !landed {
+                return Ok(None);
+            }
+        }
+        let onto = self.rebase_onto(landing, changes)?;
+        if onto.cycle.is_some() {
+            return Ok(None);
+        }
+        let conflicts = onto.conflicts.clone();
+        let rebase = ViewOpKind::Rebase {
+            landing,
+            dropped: onto.dropped,
+            remaining: onto.remaining,
+            conflicts: onto.conflicts,
+        };
+        let (items, new_head, _) =
+            self.append_frames_at(name, head, vec![rebase], by, AppendRules::RECHAIN)?;
+        self.write(items)?;
+        Ok(Some((new_head.head, conflicts)))
+    }
+
+    /// Writes the refs that end one view's pull (D-3RSCW, D-4E32E): the sync state `value` of
+    /// view `name` of remote `remote`, and the `replaced/` mark `replaced` of the old local head,
+    /// when the pull replaced it. Into the open batch, when one is open. Each ref keeps its rules.
+    pub fn write_view_pull_refs(
+        &mut self,
+        remote: &str,
+        name: &str,
+        value: crate::sync_state::SyncView,
+        replaced: Option<(Hash, crate::hub_canon::Replaced)>,
+    ) -> Result<(), StoreError> {
+        self.ensure_writable()?;
+        if !crate::sync_state::is_remote(remote) {
+            return Err(StoreError::Refused(format!(
+                "{remote:?} is not a remote name"
+            )));
+        }
+        if !crate::sync_state::is_view_name(name) {
+            return Err(StoreError::Refused(format!("{name:?} is not a view name")));
+        }
+        let mut refs = vec![(
+            crate::sync_state::view_ref(remote, name),
+            crate::sync_state::SyncValue::View(value).encode(),
+        )];
+        if let Some((old, mark)) = replaced {
+            refs.push((crate::hub_canon::replaced_ref(&old), mark.encode()));
+        }
+        let items = self.ref_items_pub(refs);
+        self.write_refs_as(items, crate::holder::RefWrite::Sync)
+            .map(drop)
     }
 }

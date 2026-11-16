@@ -744,6 +744,15 @@ pub(crate) fn briefed_entry(links: &rdy_model::ChangeLinks, at: Location) -> Opt
         .then_some(IndexEntry::BriefedChange { at })
 }
 
+/// The entry of CHANGE `change` whose links name the change it replays (`replayed_from`, a pull
+/// or a view replay): a landing that carries it lands that source too (D-QCE8M). None for a
+/// change that replays none.
+pub(crate) fn replay_entry(links: &rdy_model::ChangeLinks, change: Hash) -> Option<IndexEntry> {
+    links
+        .replayed_from
+        .map(|source| IndexEntry::Replay { change, source })
+}
+
 /// The entry of the ASSESSMENT `hash` at `at`, split as `o`: the version it assesses. Its body
 /// is read with the bounded decoder (an assessment's lists may come from another store); one
 /// that does not decode is `record <hash> (kind 25): <reason>`.
@@ -841,6 +850,7 @@ fn frame_entries(
         kinds::CHANGE => {
             let change: Change = crate::codec::decode_split(&o)?;
             out.extend(briefed_entry(&change.links, loc));
+            out.extend(replay_entry(&change.links, hash));
             for op in &change.ops {
                 match op {
                     Op::Create { block } | Op::Update { block, .. } => {
@@ -873,10 +883,12 @@ fn frame_entries(
                 landing: hash,
                 prev: rec.prev,
             });
-            out.extend(rec.changes.into_iter().map(|change| IndexEntry::Landed {
-                change,
+            // the landed rows follow canon: its ref's move reads what this landing carries
+            out.push(IndexEntry::LandingCarries {
                 landing: hash,
-            }));
+                prev: rec.prev,
+                changes: rec.changes,
+            });
         }
         kinds::SIGNATURE => {
             // the bounded decoder only: a record that does not decode is damage
@@ -2009,7 +2021,8 @@ impl Store {
         // the index was trusted above, so its acknowledged end stayed the log's floor, and it is
         // now rebuilt from the log. The old file is zeroed as a removal's reindex zeroes it, so
         // no text a pending removal erases (a cached drawing) survives in a kept copy
-        if store.index().counts_behind()? {
+        // and so are landed rows an older rdy kept by its own rule after this rdy last wrote
+        if store.index().counts_behind()? || store.index().landed_behind()? {
             store.reindex_after_removal()?;
             store.report.index_rebuilt = true;
         }
@@ -2665,7 +2678,7 @@ impl Store {
         for (kind, payload) in &last {
             entries_for_frame(*kind, Hash::of(payload), ORIGIN, payload, &mut probe)?;
         }
-        let (last, activated, published) = self.first_use(last)?;
+        let (last, activated, published) = self.first_use(last, RefWrite::Public)?;
         let start = self.open.as_ref().map_or(self.log.end(), |o| o.start);
         match self.seal_batch(last) {
             Ok(()) => {
@@ -3118,6 +3131,16 @@ impl Store {
         self.write_checked(items, how)
     }
 
+    /// `write` with the ref rules `how` names, for the store's own writers in other modules
+    /// (`crate::sync_state`).
+    pub(crate) fn write_refs_as(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+        how: RefWrite,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.write_refs(items, how)
+    }
+
     /// The take's write (Task 11 is its caller): `write`, where a holder's
     /// `answer/tag-object:<hash>` names a TAG object in `items` or in the store (O11).
     #[cfg_attr(not(test), allow(dead_code))]
@@ -3128,6 +3151,22 @@ impl Store {
         self.write_refs(items, RefWrite::Take)
     }
 
+    /// A move's write (`Store::move_canon`): `write`, where a holder's `hub_canon` refs stand
+    /// beside the move's objects, and the first of them activates the feature in its batch. As
+    /// in the take's write, the pushed objects may hold PLAN records (a holder keeps them with
+    /// no `plan/` ref, which its ref families refuse). The move is one sealed batch of its own,
+    /// held batches on or off (as `write_sealed`): the caller refuses a move while one is open.
+    pub(crate) fn write_move(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        debug_assert!(self.open.is_none(), "move_canon refuses an open held batch");
+        let held = std::mem::replace(&mut self.held, false);
+        let result = self.write_refs(items, RefWrite::Move);
+        self.held = held;
+        result
+    }
+
     /// The ref rules of a write or seal of `items`, before anything is appended.
     fn check_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
         self.check_mode_refs(items, how)?;
@@ -3136,9 +3175,7 @@ impl Store {
 
     /// The mode and holder ref rules of [`Store::check_refs`] alone.
     fn check_mode_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
-        crate::holder::check_ref_writes(self.creation.mode, items, how, |h| {
-            self.has_kind(kinds::TAG, h)
-        })
+        crate::holder::check_ref_writes(self.creation.mode, items, how, |k, h| self.has_kind(k, h))
     }
 
     /// `write` for the store's own checked writers: any kind, with the removed-hash refusal.
@@ -3197,7 +3234,7 @@ impl Store {
         let (items, activated, published) = if how == RefWrite::Upgrade {
             (items, None, false)
         } else {
-            self.first_use(items)?
+            self.first_use(items, how)?
         };
         let start = self.log.end();
         let mut result = if self.held {
@@ -3248,11 +3285,42 @@ impl Store {
     /// fails keeps `FORMAT` as published. A `FORMAT` that lists more than the sealed log (a crash
     /// before the batch sealed) opens by the log's features, and the open puts it back. Returns the items, the merged manifest, if any, and whether `FORMAT` was
     /// rewritten.
-    fn first_use(&self, mut items: Frames) -> Result<FirstUse, StoreError> {
+    ///
+    /// A move's batch (`RefWrite::Move`) that writes a holder's first `hub_canon` ref activates
+    /// `hub_canon` the same way (D-DZDB7). A project's sync state batch or fetch
+    /// (`RefWrite::Sync`, `RefWrite::Take`) that writes its first `meta/sync/` ref activates
+    /// `sync_state` (D-3RSCW). No other write activates a feature by a ref.
+    fn first_use(&self, mut items: Frames, how: RefWrite) -> Result<FirstUse, StoreError> {
         let current = self.held_features.as_ref().unwrap_or(&self.features);
         let mut needed: Vec<format::StoreFeature> = vec![];
         for (raw, payload) in &items {
             let kind = crate::codec::logical_kind(*raw);
+            // a holder's first `hub_canon` ref activates the feature in its batch (D-DZDB7)
+            if kind == kinds::REF_UPDATE
+                && how == RefWrite::Move
+                && self.creation.mode == StoreMode::Holder
+                && !current.has(format::FEATURE_HUB_CANON)
+                && crate::holder::decode_ref(payload)
+                    .is_some_and(|u| crate::hub_canon::is_hub_ref(&u.name))
+            {
+                let f = format::registered(format::FEATURE_HUB_CANON);
+                if !needed.contains(&f) {
+                    needed.push(f);
+                }
+            }
+            // a project's first `meta/sync/` ref activates `sync_state` in its batch (D-3RSCW)
+            if kind == kinds::REF_UPDATE
+                && matches!(how, RefWrite::Sync | RefWrite::Take)
+                && self.creation.mode == StoreMode::Project
+                && !current.has(format::FEATURE_SYNC_STATE)
+                && crate::holder::decode_ref(payload)
+                    .is_some_and(|u| crate::sync_state::is_sync_ref(&u.name))
+            {
+                let f = format::registered(format::FEATURE_SYNC_STATE);
+                if !needed.contains(&f) {
+                    needed.push(f);
+                }
+            }
             if kind == kinds::REF_UPDATE || kind == kinds::BATCH_COMMIT {
                 continue;
             }
@@ -3865,6 +3933,15 @@ impl StoreReader {
         &self.tracking
     }
 
+    /// This reader with the tracking fields `t` in place of its own: the same index, epoch and
+    /// masks. A check that passes its own pack reads with that pack's fields.
+    pub fn with_tracking(&self, t: Tracking) -> StoreReader {
+        StoreReader {
+            tracking: Arc::new(t),
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn index(&self) -> &Index {
         &self.index
     }
@@ -4185,6 +4262,17 @@ impl StoreReader {
     /// was sealed after that state. An index lookup that reads no frame.
     pub fn has_kind_before(&self, kind: u8, h: &Hash, end: Location) -> Result<bool, StoreError> {
         Ok(self.index().typed(kind, h)?.is_some_and(|at| at < end))
+    }
+
+    /// The landing whose frame first carried `change` in log order, of those the log holds
+    /// before `before` (all for None), on canon or not: a history reader's carrier, as the log
+    /// stood at its bound. [`StoreReader::landing_of`] is current canon's instead.
+    pub fn first_carrier(
+        &self,
+        change: &Hash,
+        before: Option<Location>,
+    ) -> Result<Option<Hash>, StoreError> {
+        self.index().first_carrier(change, before)
     }
 
     /// The place in the log of the object of `kind` with hash `h`, from the index alone.
@@ -4573,7 +4661,7 @@ impl StoreReader {
             let bound = at(kinds::LANDING, head)?;
             let mut landed: Option<(Location, Location, Hash)> = None;
             for c in changes {
-                if let Some(l) = self.index().landing_of(c)? {
+                if let Some(l) = self.index().first_carrier(c, None)? {
                     let l = at(kinds::LANDING, &l)?;
                     if l <= bound {
                         let key = (l, at(kinds::CHANGE, c)?, *c);
@@ -4607,13 +4695,13 @@ impl StoreReader {
         let at = |kind: u8, h: &Hash| -> Result<Location, StoreError> {
             self.index().typed(kind, h)?.ok_or(StoreError::NotFound(*h))
         };
-        let Some(own) = self.index().landing_of(change)? else {
+        let Some(own) = self.index().first_carrier(change, None)? else {
             return Ok(None);
         };
         let bound = (at(kinds::LANDING, &own)?, at(kinds::CHANGE, change)?);
         let mut last: Option<(Location, Location, Hash)> = None;
         for c in changes {
-            if let Some(l) = self.index().landing_of(c)? {
+            if let Some(l) = self.index().first_carrier(c, None)? {
                 let key = (at(kinds::LANDING, &l)?, at(kinds::CHANGE, c)?, *c);
                 if (key.0, key.1) < bound {
                     last = Some(last.map_or(key, |k| k.max(key)));
@@ -5362,40 +5450,283 @@ impl Store {
             check,
         )?;
         drop(reader);
-        self.seal_take(files, plan)
+        let (end, frames) = self.seal_take(files, &plan, RefWrite::Take)?;
+        let empty = plan.writes.is_empty() && plan.refs.is_empty();
+        Ok(crate::take_batch::BatchTaken {
+            new_objects: plan.writes.len() as u64,
+            frames,
+            redacted_objects: if empty { 0 } else { plan.redacted_objects },
+            end,
+            tag_hash: plan.tag_hash,
+            tag: plan.tag.expect("an upload's root tag"),
+            min_rdy_before: plan.min_rdy.0,
+            min_rdy_after: plan.min_rdy.1,
+        })
     }
 
-    /// Writes a prepared take (see [`Store::take_batches`]).
+    /// The fetch of a canon or view history into a project (D-3RSCW): the take's checks over
+    /// the project (`crate::take_batch::prepare_fetch`), then one sealed batch of its own, held
+    /// batches on or off, with the new records, the free tag refs with their free relay answer
+    /// refs, and the remote's sync state, which activates `sync_state` when it is the first. It moves no canon or view ref. A
+    /// holder is `TakeError::ModeMismatch`; an open held batch is refused; a retry of a fetch
+    /// already taken writes nothing.
+    pub fn take_fetched<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::FetchTarget,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{Receiver, TakeError};
+        self.refuse_follower_write().map_err(TakeError::Store)?;
+        if files.is_empty() {
+            return Err(TakeError::Stream(
+                crate::stream_error::StreamError::bad_record(
+                    0,
+                    0,
+                    crate::stream_error::Reason::NoBatchFiles,
+                ),
+            ));
+        }
+        if files.len() > crate::sync_stream::MAX_BATCH_FILES {
+            return Err(TakeError::Stream(crate::stream_error::StreamError::limit(
+                None,
+                0,
+                crate::sync_stream::LIMIT_BATCH_FILES,
+            )));
+        }
+        self.ensure_writable().map_err(TakeError::Store)?;
+        if self.poisoned {
+            return Err(TakeError::Store(self.poisoned_err()));
+        }
+        if self.open.is_some() {
+            return Err(TakeError::Store(batch_open("before a fetch")));
+        }
+        if self.creation.mode != StoreMode::Project {
+            return Err(TakeError::ModeMismatch);
+        }
+        if !crate::sync_state::is_remote(&target.remote) {
+            return Err(TakeError::Store(StoreError::Refused(format!(
+                "{:?} is not a remote name",
+                target.remote
+            ))));
+        }
+        let repo = self
+            .repo_id()?
+            .ok_or_else(|| StoreError::Decode("the project has no meta/repo_id".into()))?;
+        let reader = self.reader();
+        let auth = Arc::clone(self.log.authorization());
+        let plan = crate::take_batch::prepare_fetch(
+            &Receiver {
+                reader: &reader,
+                log: self.log.readers(),
+                auth: &auth,
+                end: self.log.end(),
+                repo,
+                features: &self.features,
+            },
+            files,
+            target,
+            check,
+        )?;
+        drop(reader);
+        // the fetch is one sealed batch of its own (as a move): no held batch is open here
+        let held = std::mem::replace(&mut self.held, false);
+        let sealed = self.seal_take(files, &plan, RefWrite::Take);
+        self.held = held;
+        let (end, frames) = sealed?;
+        let empty = plan.writes.is_empty() && plan.refs.is_empty();
+        Ok(crate::take_batch::FetchTaken {
+            new_objects: plan.writes.len() as u64,
+            frames,
+            end,
+            tags_taken: plan.tags_taken,
+            tags_kept: plan.tags_kept,
+            min_rdy_before: plan.min_rdy.0,
+            min_rdy_after: plan.min_rdy.1,
+            redacted_objects: if empty { 0 } else { plan.redacted_objects },
+            applies: plan.applies,
+        })
+    }
+
+    /// A holder's take of a pushed canon or view history (D-FNRXT): the take's checks over the
+    /// holder (`crate::take_batch::prepare_history`), then one sealed batch with the records the
+    /// holder lacks and the drops the pushed removals approve. Each new apply passes its
+    /// portable proof, and the holder's own copies of what it approves are erased once the
+    /// batch is durable, as an upload's take erases them. A holder change that embeds an
+    /// approved version and that no approval covers refuses the take (`UncoveredChange`). No
+    /// ref moves: the hub moves canon or a view afterwards ([`Store::move_canon`]). A project
+    /// is `TakeError::ModeMismatch`; a retry of a take already made writes nothing.
+    pub fn take_history<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::HistoryTarget,
+    ) -> Result<crate::take_batch::HistoryTaken, crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{Receiver, TakeError};
+        self.refuse_follower_write().map_err(TakeError::Store)?;
+        if files.is_empty() {
+            return Err(TakeError::Stream(
+                crate::stream_error::StreamError::bad_record(
+                    0,
+                    0,
+                    crate::stream_error::Reason::NoBatchFiles,
+                ),
+            ));
+        }
+        if files.len() > crate::sync_stream::MAX_BATCH_FILES {
+            return Err(TakeError::Stream(crate::stream_error::StreamError::limit(
+                None,
+                0,
+                crate::sync_stream::LIMIT_BATCH_FILES,
+            )));
+        }
+        self.ensure_writable().map_err(TakeError::Store)?;
+        if self.poisoned {
+            return Err(TakeError::Store(self.poisoned_err()));
+        }
+        if self.held || self.open.is_some() {
+            return Err(TakeError::Store(batch_open("before a take")));
+        }
+        if self.creation.mode != StoreMode::Holder {
+            return Err(TakeError::ModeMismatch);
+        }
+        let repo = self
+            .repo_id()?
+            .ok_or_else(|| StoreError::Decode("a holder has no meta/repo_id".into()))?;
+        let reader = self.reader();
+        let auth = Arc::clone(self.log.authorization());
+        let plan = crate::take_batch::prepare_history(
+            &Receiver {
+                reader: &reader,
+                log: self.log.readers(),
+                auth: &auth,
+                end: self.log.end(),
+                repo,
+                features: &self.features,
+            },
+            files,
+            target,
+        )?;
+        drop(reader);
+        let (end, frames) = self.seal_take(files, &plan, RefWrite::Take)?;
+        let empty = plan.writes.is_empty() && plan.refs.is_empty();
+        Ok(crate::take_batch::HistoryTaken {
+            new_objects: plan.writes.len() as u64,
+            frames,
+            redacted_objects: if empty { 0 } else { plan.redacted_objects },
+            applies: plan.applies,
+            end,
+            min_rdy_before: plan.min_rdy.0,
+            min_rdy_after: plan.min_rdy.1,
+        })
+    }
+
+    /// The batch of a canon or view move whose pushed history carries a removal
+    /// (`Store::move_canon_with`, D-FNRXT): the take's checks over the holder
+    /// (`crate::take_batch::prepare_history`), then one sealed batch of its own, held batches on
+    /// or off, with the records the holder lacks, the approved drops, the move's `refs` (which
+    /// list `hub_canon` when the holder does not list it yet) and the features ref last. Every
+    /// present record of the quarantine (`records`) must be one the take writes or the holder
+    /// holds: other input is `input changed during take`. A failure writes nothing.
+    pub(crate) fn take_history_move<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::HistoryTarget,
+        records: &[(u8, Vec<u8>)],
+        refs: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{Receiver, TakeError};
+        self.refuse_follower_write().map_err(TakeError::Store)?;
+        if self.poisoned {
+            return Err(TakeError::Store(self.poisoned_err()));
+        }
+        if self.creation.mode != StoreMode::Holder {
+            return Err(TakeError::ModeMismatch);
+        }
+        let repo = self
+            .repo_id()?
+            .ok_or_else(|| StoreError::Decode("a holder has no meta/repo_id".into()))?;
+        let reader = self.reader();
+        let auth = Arc::clone(self.log.authorization());
+        let mut plan = crate::take_batch::prepare_history(
+            &Receiver {
+                reader: &reader,
+                log: self.log.readers(),
+                auth: &auth,
+                end: self.log.end(),
+                repo,
+                features: &self.features,
+            },
+            files,
+            target,
+        )?;
+        let written: HashSet<crate::object_refs::ObjectKey> =
+            plan.writes.iter().map(|w| w.key()).collect();
+        for (raw, payload) in records {
+            let key = crate::object_refs::ObjectKey {
+                kind: crate::codec::logical_kind(*raw),
+                hash: Hash::of(payload),
+            };
+            if !written.contains(&key) && !reader.has_kind(key.kind, &key.hash)? {
+                return Err(TakeError::Stream(
+                    crate::stream_error::StreamError::bad_record(
+                        0,
+                        0,
+                        crate::stream_error::Reason::InputChangedDuringTake,
+                    )
+                    .with_object(Some(key)),
+                ));
+            }
+        }
+        drop(reader);
+        // the move's refs, then the features ref last: the batch lists `hub_canon` with its
+        // first hub ref (D-DZDB7)
+        plan.refs.retain(|(n, _)| n != format::REF_STORE_FEATURES);
+        plan.refs.extend(refs);
+        let current = plan
+            .features
+            .clone()
+            .unwrap_or_else(|| self.features.clone());
+        let features = if current.has(format::FEATURE_HUB_CANON) {
+            current
+        } else {
+            current.merged(&[format::registered(format::FEATURE_HUB_CANON)])
+        };
+        if features != self.features {
+            plan.refs
+                .push((format::REF_STORE_FEATURES.into(), features.to_json()));
+            plan.features = Some(features);
+        } else {
+            plan.features = None;
+        }
+        let held = std::mem::replace(&mut self.held, false);
+        let sealed = self.seal_take(files, &plan, RefWrite::Move);
+        self.held = held;
+        sealed?;
+        Ok(())
+    }
+
+    /// Writes a prepared take (see [`Store::take_batches`], [`Store::take_fetched`]): returns
+    /// the log's end after it and the data frames it wrote (none for a complete retry).
     fn seal_take<E>(
         &mut self,
         files: &[File],
-        plan: crate::take_batch::Plan,
-    ) -> Result<crate::take_batch::BatchTaken, crate::take_batch::TakeError<E>> {
-        use crate::take_batch::{BatchTaken, TakeError};
-        let taken = |end, frames| BatchTaken {
-            new_objects: plan.writes.len() as u64,
-            frames,
-            redacted_objects: plan.redacted_objects,
-            end,
-            tag_hash: plan.tag_hash,
-            tag: plan.tag.clone(),
-        };
+        plan: &crate::take_batch::Plan,
+        how: RefWrite,
+    ) -> Result<(Location, u64), crate::take_batch::TakeError<E>> {
+        use crate::take_batch::TakeError;
         if plan.writes.is_empty() && plan.refs.is_empty() {
-            return Ok(BatchTaken {
-                redacted_objects: 0,
-                ..taken(self.log.end(), 0)
-            });
+            return Ok((self.log.end(), 0));
         }
         let refs = self.ref_items(plan.refs.clone());
         // an answer ref may name a TAG object the plan writes in this batch (the root)
-        crate::holder::check_ref_writes(self.creation.mode, &refs, RefWrite::Take, |h| {
-            let key = crate::object_refs::ObjectKey {
-                kind: kinds::TAG,
-                hash: *h,
-            };
-            Ok(plan.writes.iter().any(|w| w.key() == key) || self.has_kind(kinds::TAG, h)?)
+        crate::holder::check_ref_writes(self.creation.mode, &refs, how, |k, h| {
+            let key = crate::object_refs::ObjectKey { kind: k, hash: *h };
+            Ok(plan.writes.iter().any(|w| w.key() == key) || self.has_kind(k, h)?)
         })?;
-        crate::holder::refuse_upgrade_writes(&refs, RefWrite::Take)?;
+        crate::holder::refuse_upgrade_writes(&refs, how)?;
         let epoch = if plan.new_applies {
             Some(
                 self.shared
@@ -5415,7 +5746,7 @@ impl Store {
             None => false,
         };
         let before = self.log.end();
-        let appended = self.append_take(files, &plan, &refs);
+        let appended = self.append_take(files, plan, &refs);
         let (frames, entries) = match appended {
             Ok(a) => a,
             Err(e) => {
@@ -5425,10 +5756,15 @@ impl Store {
                 return Err(e);
             }
         };
-        // a batch that changes the removal authorization is judged by the holder's own
-        // bootstrap over the log it makes, before it is synced
+        // a batch that changes the removal authorization is judged by the store's own
+        // bootstrap over the log it makes, before it is synced: a holder's, or a project's,
+        // which authorizes a fetch's applies by their portable proofs (D-FNRXT)
         let auth = if plan.redaction {
-            match crate::redaction_import::bootstrap_holder(self.log.readers()) {
+            let judged = match self.creation.mode {
+                StoreMode::Holder => crate::redaction_import::bootstrap_holder(self.log.readers()),
+                StoreMode::Project => crate::redaction_io::bootstrap(self.log.readers()),
+            };
+            match judged {
                 Ok(a) => Some(a),
                 Err(e) => {
                     if self.roll_back(before) && published {
@@ -5468,7 +5804,7 @@ impl Store {
             }
             self.writes += 1;
             self.acknowledge(frames);
-            return Ok(taken(self.log.end(), n));
+            return Ok((self.log.end(), n));
         };
         // authorized: the batch is durable, and no error below rolls it back
         self.log.set_authorization(Arc::new(auth));
@@ -5491,7 +5827,7 @@ impl Store {
         }
         self.writes += 1;
         self.acknowledge(frames);
-        Ok(taken(self.log.end(), n))
+        Ok((self.log.end(), n))
     }
 
     /// Appends a prepared take's frames and marker, with no sync: each new record read again

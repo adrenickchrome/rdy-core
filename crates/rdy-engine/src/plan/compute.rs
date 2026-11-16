@@ -567,13 +567,14 @@ fn sides_of(st: &ReadState, changes: &[Change], canon_at: Option<Hash>) -> Resul
     })
 }
 
-/// The linked checkouts `heads` names, each with its first HEAD; `None` when none is linked.
+/// The linked checkouts `heads` names, each with its first HEAD; `None` when none is linked, or
+/// when `st` reads no files (an explicit candidate's state links no checkout).
 fn code_sides(
     st: &ReadState,
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<Option<Vec<CodeSide>>, RdyError> {
-    if heads.is_empty() {
+    if heads.is_empty() || !st.reads_files() {
         return Ok(None);
     }
     let repos = code_repos(st.root())?;

@@ -1755,9 +1755,11 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "dispute",
             "figure_dark",
             "foreign_copy",
+            "hub_canon",
             "object_encoding",
             "plan_tension",
             "snapshot_delta",
+            "sync_state",
             "view_replay"
         ]
     );
@@ -1768,6 +1770,8 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "foreign_copy" => format::FOREIGN_COPY_REQUIRED_RDY,
             "figure_dark" => format::FIGURE_DARK_REQUIRED_RDY,
             "snapshot_delta" => format::SNAPSHOT_DELTA_REQUIRED_RDY,
+            "hub_canon" => format::HUB_CANON_REQUIRED_RDY,
+            "sync_state" => format::SYNC_STATE_REQUIRED_RDY,
             _ => FEATURE_REQUIRED_RDY,
         };
         assert_eq!(f.required_rdy, want, "{}", f.name);

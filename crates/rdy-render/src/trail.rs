@@ -29,6 +29,9 @@ pub struct Event {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Trail {
     pub events: Vec<Event>,
+    /// HTML, empty for none: the closing line that names the entities `b` describes through
+    /// which decisions reach it that are no row (D-CMXNP), each linked to its home.
+    pub through: String,
 }
 
 const MONTHS: [&str; 12] = [
@@ -173,26 +176,79 @@ impl Cx<'_> {
         }
     }
 
-    /// Every decision that governs `b`, by the graph's one route query: `decided_by`,
-    /// `implements`, `affects`, and `affects` an entity `b` describes. Every status is kept
-    /// (the trail tells what became of a ruling). A decision or an entity that the selection
-    /// holds back is not in `m`, so it adds no route. `cache` is the one every trail read from
-    /// `g` shares.
-    fn governing(&self, b: &Block, cache: &mut GoverningCache) -> BTreeSet<BlockId> {
-        let is_entity = |id: &BlockId| {
-            self.m.get(id).is_some_and(|e| {
-                self.pack
-                    .block_types
-                    .get(&e.block_type)
-                    .is_some_and(|t| t.traits.contains(&Trait::Defines))
-            })
-        };
-        self.g
-            .governing_routes(&b.id, GoverningStatuses::All, is_entity, cache)
+    /// Whether the selection holds `id` and the pack says its type defines an entity.
+    fn is_entity(&self, id: &BlockId) -> bool {
+        self.m.get(id).is_some_and(|e| {
+            self.pack
+                .block_types
+                .get(&e.block_type)
+                .is_some_and(|t| t.traits.contains(&Trait::Defines))
+        })
+    }
+
+    /// Every decision that governs `b`, by the graph's one route query, split in two (D-CMXNP):
+    /// those that reach `b` through `decided_by`, `implements` or a direct `affects`, and those
+    /// that reach it only through an entity it describes. Every status is kept (the trail tells
+    /// what became of a ruling). A decision or an entity that the selection holds back is not in
+    /// `m`, so it adds no route. `cache` is the one every trail read from `g` shares.
+    fn governing(
+        &self,
+        b: &Block,
+        cache: &mut GoverningCache,
+    ) -> (BTreeSet<BlockId>, BTreeSet<BlockId>) {
+        let (mut direct, mut through) = (BTreeSet::new(), BTreeSet::new());
+        for r in self.g.governing_routes(
+            &b.id,
+            GoverningStatuses::All,
+            |id| self.is_entity(id),
+            cache,
+        ) {
+            if self.decision(&r.decision).is_none() {
+                continue;
+            }
+            // a direct route outranks an entity route, so `entity` is set only for the latter
+            match r.entity {
+                Some(_) => through.insert(r.decision),
+                None => direct.insert(r.decision),
+            };
+        }
+        (direct, through)
+    }
+
+    /// The closing line of `b`'s trail (D-CMXNP): the entities `b` describes that a decision in
+    /// `through` affects, each linked to its home, by label, at most five, then how many more.
+    /// Empty when there are none.
+    fn through_line(&self, b: &Block, through: &BTreeSet<BlockId>) -> String {
+        let affected: BTreeSet<&BlockId> = through
+            .iter()
+            .flat_map(|d| self.g.outgoing(d))
+            .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == decision::AFFECTS))
+            .map(|e| &e.to)
+            .collect();
+        let described: BTreeSet<&BlockId> = self
+            .g
+            .outgoing(&b.id)
+            .iter()
+            .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == decision::DESCRIBES))
+            .map(|e| &e.to)
+            .filter(|e| affected.contains(e) && self.is_entity(e))
+            .collect();
+        // by label, then by id; the anchor last
+        let mut named: Vec<(String, &BlockId, String)> = described
             .into_iter()
-            .map(|r| r.decision)
-            .filter(|d| self.decision(d).is_some())
-            .collect()
+            .filter_map(|e| (self.link)(e).filter(|l| !l.dropped).map(|l| (l, e)))
+            .map(|(l, e)| (l.label.clone(), e, html::anchor(&l)))
+            .collect();
+        if named.is_empty() {
+            return String::new();
+        }
+        named.sort();
+        let names: Vec<String> = named.into_iter().map(|(_, _, a)| a).collect();
+        let list = match names.len() {
+            n if n > 5 => format!("{} and {} more", names[..5].join(", "), n - 5),
+            _ => list_and(&names),
+        };
+        format!("Also decided about: {list}.")
     }
 
     /// `start` and every decision reached from it through `supersedes` and `revokes` edges, in
@@ -403,9 +459,13 @@ pub fn for_block(
         local_link,
     };
     let mut events: BTreeMap<Key, Event> = BTreeMap::new();
-    for id in cx.chain(cx.governing(b, cache)) {
-        cx.events_of(&id, &mut events);
+    let (direct, through) = cx.governing(b, cache);
+    let rows = cx.chain(direct);
+    for id in &rows {
+        cx.events_of(id, &mut events);
     }
+    // a decision the chain made a row is named by no entity
+    let through: BTreeSet<BlockId> = through.difference(&rows).cloned().collect();
     for e in g.incoming(&b.id) {
         if e.kind != EdgeKind::References {
             continue;
@@ -441,6 +501,7 @@ pub fn for_block(
     }
     Trail {
         events: events.into_values().collect(),
+        through: cx.through_line(b, &through),
     }
 }
 
@@ -559,13 +620,293 @@ mod tests {
         for i in 0..n {
             let b = m.get(&id(&format!("p-A{i:04}"))).expect("the block");
             let t = for_block(b, &g, &pack, &site, "doc.html", "", None, &mut cache);
-            assert_eq!(t.events.len(), 1, "the decision governs p-A{i:04}");
-            assert!(
-                t.events[0].text.contains("Widgets are blue"),
-                "{:?}",
-                t.events
-            );
+            // D-CMXNP: the decision reaches p-A{i:04} only through the entity, so it is no
+            // row: the trail's closing line names the entity instead
+            assert!(t.events.is_empty(), "{:?}", t.events);
+            assert!(t.through.contains(">Widget</a>"), "{}", t.through);
         }
         assert_eq!(cache.entity_scans(), 1, "one scan for the shared entity");
+    }
+
+    /// A doc `d-AAAAA` holding `blocks`, as a state, its graph and the standard pack. `held`
+    /// names blocks the graph holds but the selection's state does not (a named profile's
+    /// held-back block).
+    fn world(blocks: Vec<Block>, held: &[&str]) -> (Materialized, Graph, Pack) {
+        let mut doc = blk("d-AAAAA", rdy_model::tree::DOC, None, "a");
+        field(&mut doc, "name", "doc");
+        field(&mut doc, "title", "Doc");
+        field(&mut doc, "doc_type", "page");
+        let all: Vec<Block> = std::iter::once(doc).chain(blocks).collect();
+        let ops = |keep: &dyn Fn(&Block) -> bool| -> Vec<Op> {
+            all.iter()
+                .filter(|b| keep(b))
+                .map(|b| Op::Create { block: b.clone() })
+                .collect()
+        };
+        let full = Materialized::default().with(&ops(&|_| true));
+        let g = Graph::build_from(full.iter());
+        let m = Materialized::default().with(&ops(&|b| !held.contains(&b.id.to_string().as_str())));
+        let pack = rdy_schema::PackSet::with_builtin()
+            .resolve("rdy-standard")
+            .expect("the pack");
+        (m, g, pack)
+    }
+
+    fn entity(i: &str, name: &str, order: &str) -> Block {
+        let mut e = blk(i, "component", Some("d-AAAAA"), order);
+        field(&mut e, "name", name);
+        e
+    }
+
+    fn ruling(i: &str, statement: &str, at: &str, order: &str, links: &[(&str, &str)]) -> Block {
+        let mut d = blk(i, decision::DECISION, Some("d-AAAAA"), order);
+        field(&mut d, "status", "accepted");
+        field(&mut d, "statement", statement);
+        field(&mut d, "decided_at", at);
+        for (n, t) in links {
+            link(&mut d, n, t);
+        }
+        d
+    }
+
+    fn prose(i: &str, order: &str, describes: &[&str]) -> Block {
+        let mut p = blk(i, "prose", Some("d-AAAAA"), order);
+        p.body = "A paragraph.".into();
+        for t in describes {
+            link(&mut p, "describes", t);
+        }
+        p
+    }
+
+    fn trail_of(i: &str, m: &Materialized, g: &Graph, pack: &Pack) -> Trail {
+        let site = Site::new(m, pack, "Project");
+        let b = m.get(&id(i)).expect("the block");
+        for_block(
+            b,
+            g,
+            pack,
+            &site,
+            "doc.html",
+            "",
+            None,
+            &mut GoverningCache::default(),
+        )
+    }
+
+    fn anchors(html: &str) -> usize {
+        html.matches("<a href=").count()
+    }
+
+    /// D-CMXNP: a decision that reaches a block directly is a row; one that reaches it only
+    /// through an entity it describes is not, and the trail ends with one line naming that
+    /// entity, linked to its home.
+    #[test]
+    fn cmxnp_entity_only_decision_is_a_line_not_a_row() {
+        let (m, g, pack) = world(
+            vec![
+                entity("m-AAAAA", "Widget", "a"),
+                ruling(
+                    "D-AAAAA",
+                    "Paragraphs are short",
+                    "2021-02-08T10:00:00Z",
+                    "b",
+                    &[("affects", "p-AAAAA")],
+                ),
+                ruling(
+                    "D-BBBBB",
+                    "Widgets are blue",
+                    "2021-02-09T10:00:00Z",
+                    "c",
+                    &[("affects", "m-AAAAA")],
+                ),
+                prose("p-AAAAA", "d", &["m-AAAAA"]),
+            ],
+            &[],
+        );
+        let t = trail_of("p-AAAAA", &m, &g, &pack);
+        assert_eq!(t.events.len(), 1, "{:?}", t.events);
+        assert!(
+            t.events[0].text.contains("Paragraphs are short"),
+            "{:?}",
+            t.events
+        );
+        assert_eq!(anchors(&t.through), 1, "{}", t.through);
+        assert!(
+            t.through.starts_with("Also decided about: <a href=\""),
+            "{}",
+            t.through
+        );
+        assert!(t.through.ends_with(">Widget</a>."), "{}", t.through);
+        // the entity's home: its own place on the site, here on the same page
+        assert!(t.through.contains("<a href=\"#widget\">"), "{}", t.through);
+    }
+
+    /// D-CMXNP: a decision that reaches the block both directly and through an entity is a row,
+    /// and the entity is not named for it.
+    #[test]
+    fn cmxnp_direct_and_entity_decision_is_a_row_and_names_no_entity() {
+        let (m, g, pack) = world(
+            vec![
+                entity("m-AAAAA", "Widget", "a"),
+                ruling(
+                    "D-AAAAA",
+                    "Widgets are blue",
+                    "2021-02-08T10:00:00Z",
+                    "b",
+                    &[("affects", "m-AAAAA"), ("affects", "p-AAAAA")],
+                ),
+                entity("m-BBBBB", "Gadget", "e"),
+                ruling(
+                    "D-BBBBB",
+                    "Gadgets are red",
+                    "2021-02-09T10:00:00Z",
+                    "f",
+                    &[("affects", "m-BBBBB")],
+                ),
+                prose("p-AAAAA", "d", &["m-AAAAA", "m-BBBBB"]),
+            ],
+            &[],
+        );
+        let t = trail_of("p-AAAAA", &m, &g, &pack);
+        assert_eq!(t.events.len(), 1, "{:?}", t.events);
+        assert!(
+            t.events[0].text.contains("Widgets are blue"),
+            "{:?}",
+            t.events
+        );
+        assert_eq!(anchors(&t.through), 1, "{}", t.through);
+        assert!(t.through.contains(">Gadget</a>"), "{}", t.through);
+        assert!(
+            !t.through.contains("Widget"),
+            "no entity-only decision through Widget: {}",
+            t.through
+        );
+    }
+
+    /// D-CMXNP (TASK detail): the line names at most five entities, then the count of the rest.
+    #[test]
+    fn cmxnp_line_names_five_then_and_n_more() {
+        let mut blocks = vec![];
+        let names: Vec<String> = (0..7).map(|i| format!("m-AAAA{i}")).collect();
+        for (i, e) in names.iter().enumerate() {
+            blocks.push(entity(e, &format!("Thing {i}"), &format!("a{i}")));
+            blocks.push(ruling(
+                &format!("D-AAAA{i}"),
+                &format!("Thing {i} is kept"),
+                "2021-02-08T10:00:00Z",
+                &format!("b{i}"),
+                &[("affects", e)],
+            ));
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        blocks.push(prose("p-AAAAA", "c", &refs));
+        let (m, g, pack) = world(blocks, &[]);
+        let t = trail_of("p-AAAAA", &m, &g, &pack);
+        assert!(t.events.is_empty(), "{:?}", t.events);
+        assert_eq!(anchors(&t.through), 5, "{}", t.through);
+        assert!(t.through.ends_with(" and 2 more."), "{}", t.through);
+    }
+
+    /// D-CMXNP: an entity the selection holds back is neither named nor counted.
+    #[test]
+    fn cmxnp_held_back_entity_is_not_named_or_counted() {
+        let mut blocks = vec![];
+        let names: Vec<String> = (0..6).map(|i| format!("m-AAAA{i}")).collect();
+        for (i, e) in names.iter().enumerate() {
+            blocks.push(entity(e, &format!("Thing {i}"), &format!("a{i}")));
+            blocks.push(ruling(
+                &format!("D-AAAA{i}"),
+                &format!("Thing {i} is kept"),
+                "2021-02-08T10:00:00Z",
+                &format!("b{i}"),
+                &[("affects", e)],
+            ));
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        blocks.push(prose("p-AAAAA", "c", &refs));
+        let (m, g, pack) = world(blocks, &["m-AAAA3"]);
+        let t = trail_of("p-AAAAA", &m, &g, &pack);
+        assert!(t.events.is_empty(), "{:?}", t.events);
+        assert_eq!(anchors(&t.through), 5, "{}", t.through);
+        assert!(!t.through.contains("more"), "{}", t.through);
+        assert!(!t.through.contains("Thing 3"), "{}", t.through);
+    }
+
+    /// D-CMXNP: the supersedes/revokes chain still follows from the direct rows, and not from
+    /// an entity-only decision.
+    #[test]
+    fn cmxnp_chain_follows_direct_rows_only() {
+        let (m, g, pack) = world(
+            vec![
+                entity("m-AAAAA", "Widget", "a"),
+                ruling(
+                    "D-AAAAA",
+                    "Paragraphs are short",
+                    "2021-02-08T10:00:00Z",
+                    "b",
+                    &[("affects", "p-AAAAA")],
+                ),
+                ruling(
+                    "D-AAAAB",
+                    "Paragraphs are long",
+                    "2021-03-08T10:00:00Z",
+                    "c",
+                    &[("supersedes", "D-AAAAA")],
+                ),
+                ruling(
+                    "D-BBBBA",
+                    "Widgets are blue",
+                    "2021-02-09T10:00:00Z",
+                    "d",
+                    &[("affects", "m-AAAAA")],
+                ),
+                ruling(
+                    "D-BBBBB",
+                    "Widgets are red",
+                    "2021-03-09T10:00:00Z",
+                    "e",
+                    &[("supersedes", "D-BBBBA")],
+                ),
+                prose("p-AAAAA", "f", &["m-AAAAA"]),
+            ],
+            &[],
+        );
+        let t = trail_of("p-AAAAA", &m, &g, &pack);
+        let text: Vec<&str> = t.events.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(t.events.len(), 3, "{text:?}");
+        assert!(
+            text.iter().any(|e| e
+                .starts_with("Superseded: Paragraphs are short gave way to Paragraphs are long")),
+            "{text:?}"
+        );
+        assert!(text.iter().all(|e| !e.contains("Widgets")), "{text:?}");
+        assert_eq!(anchors(&t.through), 1, "{}", t.through);
+    }
+
+    /// D-CMXNP: an entity's own trail still lists its decisions as rows (they reach it directly).
+    #[test]
+    fn cmxnp_entity_trail_keeps_its_rows() {
+        let (m, g, pack) = world(
+            vec![
+                entity("m-AAAAA", "Widget", "a"),
+                ruling(
+                    "D-BBBBB",
+                    "Widgets are blue",
+                    "2021-02-09T10:00:00Z",
+                    "c",
+                    &[("affects", "m-AAAAA")],
+                ),
+                prose("p-AAAAA", "d", &["m-AAAAA"]),
+            ],
+            &[],
+        );
+        let t = trail_of("m-AAAAA", &m, &g, &pack);
+        assert_eq!(t.events.len(), 1, "{:?}", t.events);
+        assert!(
+            t.events[0].text.contains("Widgets are blue"),
+            "{:?}",
+            t.events
+        );
+        assert_eq!(t.through, "");
     }
 }

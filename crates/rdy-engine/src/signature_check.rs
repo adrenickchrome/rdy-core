@@ -25,7 +25,10 @@
 //! [`read_check_context`] and [`signature_checks`] read the subject, the current repo id and the
 //! fork sources of the log's fork lineage from one immutable read state through the typed
 //! readers. A holder finds a tag's relay answer by the tag object
-//! (`answer/tag-object:<hash>`), a project by the tag name (`answer/tag:<name>`).
+//! (`answer/tag-object:<hash>`), a project by the tag name (`answer/tag:<name>`). A project tag
+//! object that no tag ref names (a fetched tag whose name the project keeps for its own tag,
+//! D-3RSCW) has no answer ref of its own: its relay answer is the stored answer that is that tag
+//! object's relay answer (`rdy_store::holder::is_relay_answer_of`).
 
 use crate::allowed_signers::AllowedSigners;
 use crate::read_state::ReadState;
@@ -36,13 +39,13 @@ use rdy_model::signature::{
     Signature, StatementKind, StatementSource, parse_statement, statement_for_version,
 };
 use rdy_model::{ActorRun, Answer, Hash, LandingRecord, RepoId, Tag};
-use rdy_store::holder::{StoreMode, answer_tag_object_ref};
+use rdy_store::holder::{StoreMode, answer_tag_object_ref, is_relay_answer_of};
 use rdy_store::kinds::RefUpdate;
 use rdy_store::meta::{REF_ORIGIN, decode_origin};
 use rdy_store::signature::MAX_PER_SUBJECT;
 use rdy_store::{StoreError, kinds};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet, VecDeque};
 
 /// `signed`: the signature verifies and names its key.
 pub const SIGNED_VALID: &str = "valid";
@@ -154,6 +157,11 @@ pub struct SignatureCheck {
     /// holder's own ([`STATEMENT_FOREIGN_REPO`]). Absent from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreign_repo: Option<String>,
+    /// A carried signature only (D-8ZEHP, D-9YAQS, D-6Z9BR): the full hash of the landing
+    /// on the subject's replay chain whose base the statement names. Absent from the JSON
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carried_from: Option<String>,
 }
 
 /// Checks `record` against `context`, with the caller's trust data (`None`: no allowed-signers
@@ -181,6 +189,7 @@ pub fn check_signature(
             code: Some(E_SIG_INVALID.into()),
             warnings: vec![],
             foreign_repo: None,
+            carried_from: None,
         };
     }
     let parsed = parse_statement(&record.statement).ok();
@@ -202,6 +211,7 @@ pub fn check_signature(
         code: Some(E_SIG_INVALID.into()),
         warnings: vec![],
         foreign_repo: None,
+        carried_from: None,
     };
     let (Some(parsed), Some(key)) = (parsed, crypto.key.as_deref()) else {
         return out;
@@ -236,6 +246,86 @@ pub fn check_signature(
             .push(sig_unknown_key(key, principal, &record.namespace).into());
     }
     out
+}
+
+/// [`check_signature`], then for a landing subject whose statement does not match: the check
+/// of a signature that a pull replay carried (D-8ZEHP, D-9YAQS, D-6Z9BR). `sources` are
+/// the landings on the subject's replay chain that the caller holds, with their records, in the
+/// order [`carried_sources`] gives; a source that the chain does not reach through the sources
+/// before it is skipped. The statement matches when it equals the one rebuilt from the subject
+/// with its base (`prev`) set to the `prev` of one of those landings: every other signed field
+/// is the subject's own. The first source that matches wins, and `carried_from` names its full
+/// hash. Pure, as [`check_signature`] is.
+pub fn check_signature_carried(
+    record: &Signature,
+    context: &CheckContext,
+    trust: Option<&AllowedSigners>,
+    sources: &[(Hash, LandingRecord)],
+) -> SignatureCheck {
+    let out = check_signature(record, context, trust);
+    let SignatureSubject::Landing { hash, record: l } = &context.subject else {
+        return out;
+    };
+    if out.signed != SIGNED_VALID || out.statement != STATEMENT_MISMATCH {
+        return out;
+    }
+    // a source counts only when the chain reaches it: from the subject's `rebased_from`, or
+    // from the `rebased_from` of a source before it
+    let mut chain: HashSet<Hash> = l.rebased_from.iter().copied().collect();
+    for (source, s) in sources {
+        if !chain.contains(source) {
+            continue;
+        }
+        chain.extend(s.rebased_from.iter().copied());
+        if s.prev == l.prev {
+            continue;
+        }
+        let at_base = CheckContext {
+            subject: SignatureSubject::Landing {
+                hash: *hash,
+                record: LandingRecord {
+                    prev: s.prev,
+                    ..l.clone()
+                },
+            },
+            ..context.clone()
+        };
+        let carried = check_signature(record, &at_base, trust);
+        if carried.statement == STATEMENT_MATCH {
+            return SignatureCheck {
+                carried_from: Some(source.to_string()),
+                ..carried
+            };
+        }
+    }
+    out
+}
+
+/// The landings on the subject's replay chain that `state` holds before its log end, with their
+/// records: the sources [`check_signature_carried`] reads (D-6Z9BR). The chain is the
+/// subject's `rebased_from`, then each held source's own `rebased_from` in turn, breadth first,
+/// each landing once. A pull adds one link per replay and hashes keep the chain acyclic, so the
+/// walk has no depth cap. Empty for any other subject.
+pub(crate) fn carried_sources(
+    state: &ReadState,
+    context: &CheckContext,
+) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {
+    let SignatureSubject::Landing { hash, record } = &context.subject else {
+        return Ok(vec![]);
+    };
+    let reader = state.reader();
+    let mut out: Vec<(Hash, LandingRecord)> = vec![];
+    let mut seen = HashSet::from([*hash]);
+    let mut queue: VecDeque<Hash> = record.rebased_from.iter().copied().collect();
+    while let Some(source) = queue.pop_front() {
+        if !seen.insert(source) || !reader.has_kind_before(kinds::LANDING, &source, state.seq())? {
+            continue;
+        }
+        let l = reader.landing(&source)?;
+        queue.extend(l.rebased_from.iter().copied());
+        out.push((source, l));
+    }
+    Ok(out)
 }
 
 /// Whether `record` keeps the shared bounds a stored SIGNATURE keeps: each field within its own
@@ -462,8 +552,12 @@ impl<'s> Lineage<'s> {
         }
         let (current, sources) = self.ids()?;
         let context = subject_context(self.state, subject, *current, sources.clone())?;
+        let carried = carried_sources(self.state, &context)?;
         ids.iter()
-            .map(|id| Ok(check_signature(&reader.signature(id)?, &context, trust)))
+            .map(|id| {
+                let record = reader.signature(id)?;
+                Ok(check_signature_carried(&record, &context, trust, &carried))
+            })
             .collect()
     }
 }
@@ -539,7 +633,7 @@ pub(crate) fn subject_context(
         let answer = if holder {
             relay_answer_by_object(state, subject)?
         } else {
-            reader.answer_of(&format!("tag:{}", record.name))?
+            project_relay_answer(state, subject, &record.name)?
         };
         // the refs are live: an answer written after the state is not its answer
         let answer = match answer {
@@ -560,6 +654,36 @@ pub(crate) fn subject_context(
         source_repos: if holder { vec![] } else { source_repos },
         holder,
     })
+}
+
+/// A project's relay answer of the TAG object `tag` named `name`. When `tag/<name>` names this
+/// tag object, it is the answer `answer/tag:<name>` names, as `tag_as` and a fetch write them.
+/// Otherwise no ref names this tag object's answer (a fetched tag whose name the project keeps,
+/// D-3RSCW): it is the first stored answer, by hash, that is this tag object's relay answer, or
+/// none.
+fn project_relay_answer(
+    state: &ReadState,
+    tag: &Hash,
+    name: &str,
+) -> Result<Option<(Hash, Answer)>, RdyError> {
+    let reader = state.reader();
+    let named = reader
+        .get_ref(&format!("{}{name}", rdy_store::holder::TAG_REF))?
+        .is_some_and(|v| v == tag.0);
+    if named {
+        return Ok(reader.answer_of(&format!("tag:{name}"))?);
+    }
+    let mut found: Option<(Hash, Answer)> = None;
+    reader.for_each_object_of(kinds::ANSWER, |h| {
+        if found.is_none() {
+            let a: Answer = reader.get_typed(kinds::ANSWER, &h)?;
+            if is_relay_answer_of(&a, tag, name) {
+                found = Some((h, a));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(found)
 }
 
 /// A holder's relay answer of the TAG object `tag`: the answer `answer/tag-object:<tag>` names.

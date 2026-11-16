@@ -160,7 +160,7 @@ fn ha10_a_consumer_names_every_fact_type_from_the_adapter() {
     let e: RdyError = snap.tag_signatures("v9.9.9").unwrap_err();
     assert_eq!(e.code, "E_NOT_FOUND");
     // the same facts through the chain reads
-    assert_eq!(snap.canon_chain().unwrap(), std::slice::from_ref(&facts));
+    assert_eq!(snap.canon_history().unwrap(), std::slice::from_ref(&facts));
     assert_eq!(snap.tag_history("v1.0.0").unwrap(), [facts]);
     handle.close().unwrap();
 }

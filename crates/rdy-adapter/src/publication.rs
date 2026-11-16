@@ -10,7 +10,8 @@ use crate::store::Snapshot;
 use rdy_engine::publication::review_model::AttachmentLabels;
 use rdy_engine::publication::{
     ADAPTER_REVIEW_BYTES, IMPLICIT_ORG, PublicationReview, ReadPublicationSource, Resolved,
-    ReviewProjection, disclosure_diff, fit_within, resolve, review_json,
+    ReviewProjection, compare_with_baseline, disclosure_diff, fit_within, make_baseline_at,
+    resolve, review_json,
 };
 use rdy_engine::{E_BAD_INPUT, E_INTERNAL, Scope};
 use rdy_model::{BlockId, Hash, tree};
@@ -20,8 +21,9 @@ use serde_json::{Value, json};
 pub use rdy_engine::RdyError;
 pub use rdy_engine::publication::review_model::Included;
 pub use rdy_engine::publication::{
-    AttachmentEntry, AttachmentVariant, Audience, CheckStatus, DisclosureDiff, HiddenList,
-    HiddenRow, ProfileFacts, ReferenceReport, SelectionEntry, profile_facts,
+    AttachmentEntry, AttachmentVariant, Audience, Baseline, BaselineBinding, BaselineComparison,
+    CheckStatus, DisclosureDiff, HiddenList, HiddenRow, ProfileFacts, ReferenceReport,
+    SelectionEntry, profile_facts,
 };
 
 /// One publication profile as a tag holds it. `selector` is the value to pass back to
@@ -62,6 +64,20 @@ pub struct PreviousPublication {
     /// The profile block's version then; None for the implicit profile.
     pub profile_version: Option<Hash>,
     pub selection_identity: Hash,
+}
+
+/// The previous publication a check compares with (D-CDQF7): a tag this store holds, read by
+/// the host's record of it, or a portable baseline with the host's record of the publication it
+/// came from. The record binds each: a mismatch is refused before any comparison.
+#[derive(Clone, Copy, Debug)]
+pub enum PreviousChoice<'a> {
+    /// A tag of this store and the host's record of its publication.
+    SameStore(&'a PreviousPublication),
+    /// A portable baseline and the host's record of the publication it came from.
+    Baseline {
+        baseline: &'a Baseline,
+        binding: &'a BaselineBinding,
+    },
 }
 
 /// One attachment of a first publication with its labels (D-9BWMV): the old row, unchanged, and
@@ -200,23 +216,50 @@ impl Snapshot {
         profile: &str,
         previous: Option<&PreviousPublication>,
     ) -> Result<PublicationCheck, RdyError> {
+        self.disclosure_within(
+            tag,
+            profile,
+            previous.map(PreviousChoice::SameStore),
+            ADAPTER_REVIEW_BYTES,
+        )
+    }
+
+    /// [`Snapshot::disclosure`] against either kind of previous publication. Against a
+    /// baseline it checks, in order, the baseline hash, the binding, the profile id and
+    /// audience, and the lineage; then it compares, reading no record of the baseline's store.
+    pub fn disclosure_against(
+        &self,
+        tag: &str,
+        profile: &str,
+        previous: Option<PreviousChoice<'_>>,
+    ) -> Result<PublicationCheck, RdyError> {
         self.disclosure_within(tag, profile, previous, ADAPTER_REVIEW_BYTES)
     }
 
-    /// [`Snapshot::disclosure`] with the review held to `max_bytes`.
+    /// The portable baseline of `profile` at the captured tag `tag` (D-CDQF7): the tag's own
+    /// name and landing, and the snapshot's repo id and logged fork origins. A removal since the
+    /// snapshot was captured refuses it with `E_REDACTED_STATE`.
+    pub fn publication_baseline(&self, tag: &str, profile: &str) -> Result<Baseline, RdyError> {
+        let read = self.read_state();
+        read.ensure_current_epoch()?;
+        let (_, captured) = self.captured_tag(tag)?;
+        make_baseline_at(read, &captured.name, captured.landing, profile)
+    }
+
+    /// [`Snapshot::disclosure_against`] with the review held to `max_bytes`.
     fn disclosure_within(
         &self,
         tag: &str,
         profile: &str,
-        previous: Option<&PreviousPublication>,
+        previous: Option<PreviousChoice<'_>>,
         max_bytes: usize,
     ) -> Result<PublicationCheck, RdyError> {
         let scope = self.tag_scope(tag)?;
         let read = self.read_state();
         let candidate = resolve(read, &scope, profile)?;
         let prior = match previous {
-            None => None,
-            Some(prev) => {
+            None | Some(PreviousChoice::Baseline { .. }) => None,
+            Some(PreviousChoice::SameStore(prev)) => {
                 let prior_scope = self.tag_scope(&prev.tag)?;
                 let selector = match &candidate.profile.id {
                     Some(id) => {
@@ -242,16 +285,32 @@ impl Snapshot {
         let (title, description) = (read.project_name(), read.project_description());
         let source =
             ReadPublicationSource::with_settings(read, read.pack(), &title, description.as_deref());
-        let review = PublicationReview::build(
-            &source,
-            &source_state,
-            &candidate,
-            prior.as_ref().map(|(p, d)| (p, d)),
-        )?;
+        let (comparison, review) = match previous {
+            Some(PreviousChoice::Baseline { baseline, binding }) => {
+                let (diff, review) = compare_with_baseline(
+                    read,
+                    &source,
+                    &source_state,
+                    &candidate,
+                    baseline,
+                    Some(binding),
+                )?;
+                (Some(diff), review)
+            }
+            _ => {
+                let review = PublicationReview::build(
+                    &source,
+                    &source_state,
+                    &candidate,
+                    prior.as_ref().map(|(p, d)| (p, d)),
+                )?;
+                (prior.map(|(_, d)| d), review)
+            }
+        };
         let shown = review_json(
             ReviewProjection::Adapter,
             &candidate.references,
-            prior.as_ref().map(|(_, d)| d),
+            comparison.as_ref(),
             &review,
         );
         let review_value = fit_within(
@@ -265,7 +324,6 @@ impl Snapshot {
         )?;
         // a removal since the snapshot was captured refuses the whole read
         read.ensure_current_epoch()?;
-        let comparison = prior.map(|(_, d)| d);
         let first_attachments = comparison.is_none().then(|| {
             candidate
                 .attachments

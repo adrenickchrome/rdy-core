@@ -74,6 +74,9 @@ fn not_owned() -> RdyError {
     )
 }
 
+/// The new changes of a view replay in replay order, and each source with its new change.
+pub(crate) type Prepared = (Vec<Change>, Vec<(Hash, Hash)>);
+
 /// The replay order of `nodes` (each a source and its deps): Kahn's algorithm over the graph
 /// the selected sources induce (a dep outside them is no edge), its ready set in ascending hash
 /// order. A cycle among them is refused.
@@ -296,6 +299,56 @@ impl Rdy {
                 requested.push(h);
             }
         }
+        let by = s.provenance();
+        let (prepared, replayed_list) = replay_changes(&st, view, &head, &requested, &by)?;
+        // 7. the one write, then publish and report
+        drop(st);
+        let (include, ids) = self.store.view_replay_prepared(view, &prepared, &by)?;
+        debug_assert_eq!(
+            ids,
+            replayed_list.iter().map(|(_, n)| *n).collect::<Vec<_>>()
+        );
+        self.publish(Delta::View {
+            view: view.to_string(),
+        })?;
+        let st = self.read();
+        Ok(ReplayResult {
+            view: view.to_string(),
+            head: include.to_string(),
+            changes: st.included(view).len(),
+            replayed: replayed_list
+                .iter()
+                .map(|(src, new)| ReplayedChange {
+                    source: src.to_string(),
+                    change: new.to_string(),
+                })
+                .collect(),
+            added: strings(&ids),
+            added_deps: vec![],
+            removed: vec![],
+            cascaded: vec![],
+            conflicts: conflict_infos(&st, &st.conflicts(&Scope::View(view.to_string()))?)?,
+        })
+    }
+}
+
+/// The new changes of a replay of `requested` (distinct sources) into `view` on `st`, whose
+/// head is `head`, by `by`: steps 3 to 6 of [`Rdy::view_replay`] (each source read once and
+/// bounded, the foreign pins, the order, the preview and the new changes, the parent rule and
+/// the parent loop). Returns the new changes in replay order, and each source with its new
+/// change in that order. Writes nothing. A pull's stopped replay calls it for its `pull-<n>`
+/// view (D-QCE8M), on a state whose canon is the pull's new tip.
+pub(crate) fn replay_changes(
+    st: &ReadState,
+    view: &str,
+    head: &str,
+    requested: &[Hash],
+    by: &Provenance,
+) -> Result<Prepared, RdyError> {
+    {
+        if requested.len() > MAX_REPLAY_CHANGES {
+            return Err(limit());
+        }
         // 3. each source read once: present, not a removed projection; the ops counted
         let reader = st.reader();
         let mut sources: Vec<(Hash, Change)> = Vec::new();
@@ -307,7 +360,7 @@ impl Rdy {
         // the new changes copy their contents, so sources over the byte limit are refused before
         // they are held (step 5 checks the new changes' exact bytes)
         let mut stored = 0u64;
-        for c in &requested {
+        for c in requested {
             if !reader.has_kind(kinds::CHANGE, c)? {
                 return Err(RdyError::new(
                     E_NOT_FOUND,
@@ -350,7 +403,7 @@ impl Rdy {
         let mut with_parents = nodes.clone();
         for ((h, c), (_, deps)) in sources.iter().zip(with_parents.iter_mut()) {
             for op in &c.ops {
-                if let Some(p) = placed_under(&st, op)?
+                if let Some(p) = placed_under(st, op)?
                     && let Some(w) = creator.get(&p)
                     && w != h
                 {
@@ -373,7 +426,6 @@ impl Rdy {
             slots: HashMap::new(),
         };
         let included: HashSet<Hash> = st.included(view).iter().copied().collect();
-        let by = s.provenance();
         let mut new_of: HashMap<Hash, Hash> = HashMap::new();
         let mut last_writer: HashMap<BlockId, Hash> = HashMap::new();
         let mut prepared: Vec<Change> = Vec::new();
@@ -419,7 +471,7 @@ impl Rdy {
                     // It merges after the view's writers of that version
                     Slot::Clean(v) if v == new => {
                         if preview.targets_own(id) {
-                            deps.extend(view_writers(&st, &included, src, id, v)?);
+                            deps.extend(view_writers(st, &included, src, id, v)?);
                         }
                         Slot::Clean(new)
                     }
@@ -431,7 +483,7 @@ impl Rdy {
             // a parent an earlier replay of this call wrote: the child's replay depends on it,
             // so no exclude or include separates them
             for op in &source.ops {
-                if let Some(p) = placed_under(&st, op)? {
+                if let Some(p) = placed_under(st, op)? {
                     if let Some(w) = last_writer.get(&p) {
                         deps.insert(*w);
                     }
@@ -441,19 +493,11 @@ impl Rdy {
             if !ordinary.is_empty() {
                 let probe = Change {
                     ops: ordinary,
-                    ..replayed(source, *src, view, &head, n, vec![], &by)
+                    ..replayed(source, *src, view, head, n, vec![], by)
                 };
                 deps.extend(reader.change_deps(&probe, Some(view))?);
             }
-            let change = replayed(
-                source,
-                *src,
-                view,
-                &head,
-                n,
-                deps.into_iter().collect(),
-                &by,
-            );
+            let change = replayed(source, *src, view, head, n, deps.into_iter().collect(), by);
             let (_, payload) = rdy_store::codec::item(kinds::CHANGE, &change)?;
             bytes = bytes
                 .checked_add(payload.len())
@@ -482,7 +526,7 @@ impl Rdy {
         }
         drop(placed);
         // 6. the candidate graph: no parent loop with what the view holds
-        let moved = moved_blocks(&st, &prepared)?;
+        let moved = moved_blocks(st, &prepared)?;
         if !moved.is_empty() {
             let base = st.effective_base(view);
             let mut list: Vec<Change> = st
@@ -500,34 +544,6 @@ impl Rdy {
                 ));
             }
         }
-        // 7. the one write, then publish and report
-        drop(m);
-        drop(st);
-        let (include, ids) = self.store.view_replay_prepared(view, &prepared, &by)?;
-        debug_assert_eq!(
-            ids,
-            replayed_list.iter().map(|(_, n)| *n).collect::<Vec<_>>()
-        );
-        self.publish(Delta::View {
-            view: view.to_string(),
-        })?;
-        let st = self.read();
-        Ok(ReplayResult {
-            view: view.to_string(),
-            head: include.to_string(),
-            changes: st.included(view).len(),
-            replayed: replayed_list
-                .iter()
-                .map(|(src, new)| ReplayedChange {
-                    source: src.to_string(),
-                    change: new.to_string(),
-                })
-                .collect(),
-            added: strings(&ids),
-            added_deps: vec![],
-            removed: vec![],
-            cascaded: vec![],
-            conflicts: conflict_infos(&st, &st.conflicts(&Scope::View(view.to_string()))?)?,
-        })
+        Ok((prepared, replayed_list))
     }
 }

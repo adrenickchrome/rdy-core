@@ -64,6 +64,12 @@ pub enum Reason {
     UnlistedDependency(ObjectRef),
     RootTagNotListed,
     UnneededPrerequisite(ObjectKey),
+    /// A canon_history stream's root LANDING is neither in the batch nor a prerequisite.
+    RootLandingNotListed,
+    /// A view_history stream's root VIEW_OP is neither in the batch nor a prerequisite.
+    RootViewOpNotListed,
+    /// A canon_history or view_history record that the root's sync closure does not hold.
+    OutsideSyncClosure,
     /// A link_delivery stream's `DELIVERY` record is missing after its header, or repeats.
     DeliveryOutOfOrder,
     /// A `DELIVERY` record's versions are not in strict id order, or its selection digest is not
@@ -98,6 +104,9 @@ impl Reason {
             Reason::UnlistedDependency(_) => "unlisted dependency",
             Reason::RootTagNotListed => "root tag is not in the batch or its prerequisites",
             Reason::UnneededPrerequisite(_) => "unneeded prerequisite",
+            Reason::RootLandingNotListed => "root landing is not in the batch or its prerequisites",
+            Reason::RootViewOpNotListed => "root view op is not in the batch or its prerequisites",
+            Reason::OutsideSyncClosure => "object is outside the sync closure",
             Reason::DeliveryOutOfOrder => "delivery record out of order",
             Reason::InvalidSelection => "invalid delivered selection",
             Reason::OutsideSelection => "object is outside the delivered selection",

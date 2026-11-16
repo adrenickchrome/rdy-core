@@ -464,7 +464,7 @@ pub fn not_reachable(hash: Hash) -> RdyError {
     RdyError::new(
         E_NOT_FOUND,
         format!("no landing {hash} in the captured history"),
-        "read landings from canon_chain or tag_history",
+        "read landings from canon_history or tag_history",
     )
 }
 

@@ -336,8 +336,13 @@ impl ReadState {
     /// is outside the project's `.rdy`. A call that writes no file runs them too, so a path no
     /// dump could use is refused whether or not the call has batches to write.
     fn check_dump_out(&self, out: &Path) -> Result<(), RdyError> {
+        self.check_out(out, DUMP_CMD)
+    }
+
+    /// The guards of [`ReadState::check_dump_out`] for the command `cmd`.
+    fn check_out(&self, out: &Path, cmd: &str) -> Result<(), RdyError> {
         if std::fs::symlink_metadata(out).is_ok() {
-            return Err(exists(out, DUMP_CMD));
+            return Err(exists(out, cmd));
         }
         let dir = out
             .parent()
@@ -350,7 +355,16 @@ impl ReadState {
                 "create the directory first, or pick another path",
             ));
         }
-        inside_rdy(self.root(), dir, out)
+        inside_rdy(self.root(), dir, out, cmd)
+    }
+
+    /// Writes `bytes` to the new file `out` for the command `cmd` (for example
+    /// `rdy publication baseline`), through the output guards of a dump: `out` must not exist,
+    /// its directory must, and it must be outside the project's `.rdy`; then [`place_file`]
+    /// puts it in place whole or not at all. Returns the length of the file.
+    pub fn write_new_output(&self, out: &Path, bytes: &[u8], cmd: &str) -> Result<u64, RdyError> {
+        self.check_out(out, cmd)?;
+        place_file(out, bytes, cmd)
     }
 
     /// Writes the dump (`prev` None) or the increment after `prev` to `out`, through the
@@ -627,7 +641,7 @@ fn no_hard_links(e: &std::io::Error) -> bool {
 /// Refuses an `out` in the project's `.rdy` directory or below it: a file there can break the
 /// store (a stray pack file, a segment name). Compares resolved paths, so a symlink or `..`
 /// does not pass.
-fn inside_rdy(root: &Path, dir: &Path, out: &Path) -> Result<(), RdyError> {
+fn inside_rdy(root: &Path, dir: &Path, out: &Path, cmd: &str) -> Result<(), RdyError> {
     let rdy = root.join(".rdy");
     let rdy = std::fs::canonicalize(&rdy).map_err(|e| io_at(&rdy, e))?;
     let dir = std::fs::canonicalize(dir).map_err(|e| io_at(dir, e))?;
@@ -635,7 +649,11 @@ fn inside_rdy(root: &Path, dir: &Path, out: &Path) -> Result<(), RdyError> {
         return Err(RdyError::new(
             E_BAD_INPUT,
             format!("{} is inside the project .rdy directory", out.display()),
-            "dump to a path outside .rdy",
+            if cmd == DUMP_CMD {
+                "dump to a path outside .rdy".to_string()
+            } else {
+                "write to a path outside .rdy".to_string()
+            },
         ));
     }
     Ok(())
