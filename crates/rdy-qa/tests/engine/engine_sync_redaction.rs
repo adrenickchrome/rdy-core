@@ -965,3 +965,171 @@ fn scc5_uncovered_warning_code_message_and_fix_are_exact() {
         })
     );
 }
+
+/// Fix round 1, F1: a removal landed here and a fetched removal of another block of the same
+/// change compose: the open, a reindex and a reopen keep both, and the native change residue's
+/// reference to the block the fetched removal erased resolves through the fetched residue.
+#[test]
+fn scc5_native_and_fetched_removals_compose() {
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    w.applied(w.base);
+    let prose = w.prose.clone();
+    let figure = w.figure.clone();
+    let mine = remove_on(&mut w.local, "redact", vec![prose.clone()]);
+    let mine_request = request_of(&w.local, &mine);
+    let theirs = remove_on(&mut w.hub, "redact", vec![figure.clone()]);
+    let theirs_request = request_of(&w.hub, &theirs);
+    let f = w.fetch();
+    assert_eq!(f.removals.len(), 1, "{f:?}");
+    let check = |w: &World| {
+        let read = w.local.read();
+        let at = Scope::At(w.base);
+        assert_eq!(
+            read.block(&at, &id(&w.prose)).unwrap().body,
+            CONTENT_REMOVED
+        );
+        let fig = read.block(&at, &id(&w.figure)).unwrap();
+        assert_eq!(
+            w.local
+                .store()
+                .reader()
+                .redaction_of(kinds::BLOCK, &fig.version_hash())
+                .unwrap(),
+            Some(theirs_request)
+        );
+        assert_eq!(
+            w.local
+                .store()
+                .reader()
+                .redaction_of(kinds::BLOCK, &w.secret_version())
+                .unwrap(),
+            Some(mine_request)
+        );
+        assert!(!on_disk(&w.local_dir(), SECRET.as_bytes()));
+        w.local.store().reader().check_objects().unwrap();
+    };
+    check(&w);
+    w.reopen();
+    check(&w);
+    w.local.store_mut().reindex().unwrap();
+    check(&w);
+    w.reopen();
+    check(&w);
+    // a dump of it loads
+    let loaded = dump_and_load(&w, "copy");
+    loaded.store().reader().check_objects().unwrap();
+    assert!(!on_disk(&w.dir.path().join("copy"), SECRET.as_bytes()));
+}
+
+/// Fix round 1, F1: the warning's fix works. After a fetched removal leaves an uncovered local
+/// carrier, a person here approves a removal of that content: it lands, the carrier's bytes go,
+/// the warning stops, and an open and a reindex keep it so.
+#[test]
+fn scc5_uncovered_carrier_fix_lands_locally() {
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    w.applied(w.base);
+    let back = away_and_back(&mut w, "keep");
+    let prose = w.prose.clone();
+    let l = remove_on(&mut w.hub, "redact", vec![prose.clone()]);
+    let request = request_of(&w.hub, &l);
+    let f = w.fetch();
+    assert_eq!(f.warnings, vec![uncovered_warning(back, request)]);
+    remove_on(&mut w.local, "keep", vec![prose]);
+    let check = |w: &World| {
+        assert!(w.local.read().uncovered_warnings().unwrap().is_empty());
+        assert!(
+            w.local
+                .store()
+                .reader()
+                .redaction_of(kinds::CHANGE, &back)
+                .unwrap()
+                .is_some()
+        );
+        assert!(!on_disk(&w.local_dir(), SECRET.as_bytes()));
+        w.local.store().reader().check_objects().unwrap();
+    };
+    check(&w);
+    w.reopen();
+    check(&w);
+    w.local.store_mut().reindex().unwrap();
+    check(&w);
+    // a dump of it loads, and the loaded copy warns of nothing
+    let loaded = dump_and_load(&w, "copy");
+    assert!(loaded.read().uncovered_warnings().unwrap().is_empty());
+    assert!(!on_disk(&w.dir.path().join("copy"), SECRET.as_bytes()));
+}
+
+/// Dumps `w`'s local project and loads the dump into a new directory; returns the loaded copy.
+fn dump_and_load(w: &World, name: &str) -> Rdy {
+    let file = w.dir.path().join(format!("{name}.rdydump"));
+    w.local.read().dump(&file).unwrap();
+    let dest = w.dir.path().join(name);
+    std::fs::create_dir(&dest).unwrap();
+    rdy_engine::load::load(&file, &dest).unwrap();
+    Rdy::open(&dest).unwrap()
+}
+
+/// Fix round 1, F2: a project whose log layout differs from the hub's fetches a removal of a
+/// version the hub wrote after the shared base; its dump loads, the loaded copy reads the stub
+/// and holds no removed byte, and it dumps and loads again.
+#[test]
+fn scc5_fetched_removal_dump_loads_with_divergent_layout() {
+    const NEWER: &str = "scc5-newer-removed-version";
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    w.applied(w.base);
+    let doc = w.doc.clone();
+    write(
+        &mut w.local,
+        "title",
+        json!([{"op": "update", "id": doc, "fields": {"title": "Local title"}}]),
+    )
+    .unwrap();
+    land_view(&mut w.local, "title");
+    let prose = w.prose.clone();
+    write(
+        &mut w.hub,
+        "newer",
+        json!([{"op": "update", "id": prose, "body": NEWER}]),
+    )
+    .unwrap();
+    land_view(&mut w.hub, "newer");
+    let l = remove_on(&mut w.hub, "redact", vec![prose.clone()]);
+    let request = request_of(&w.hub, &l);
+    let f = w.fetch();
+    assert_eq!(f.removals.len(), 1, "{f:?}");
+    assert!(!on_disk(&w.local_dir(), NEWER.as_bytes()));
+    let loaded = dump_and_load(&w, "copy");
+    let check = |r: &Rdy, dir: &Path| {
+        let tip = w
+            .local
+            .store()
+            .reader()
+            .sync_canon("origin")
+            .unwrap()
+            .unwrap();
+        let at = Scope::At(tip.fetched.unwrap());
+        let b = r.read().block(&at, &id(&prose)).unwrap();
+        assert_eq!(b.body, CONTENT_REMOVED);
+        assert_eq!(
+            r.store()
+                .reader()
+                .redaction_of(kinds::BLOCK, &b.version_hash())
+                .unwrap(),
+            Some(request)
+        );
+        assert!(!on_disk(dir, NEWER.as_bytes()));
+        assert!(!on_disk(dir, SECRET.as_bytes()));
+        r.store().reader().check_objects().unwrap();
+    };
+    check(&loaded, &w.dir.path().join("copy"));
+    // the loaded copy dumps again, and that dump loads
+    let file = w.dir.path().join("again.rdydump");
+    loaded.read().dump(&file).unwrap();
+    let dest = w.dir.path().join("again");
+    std::fs::create_dir(&dest).unwrap();
+    rdy_engine::load::load(&file, &dest).unwrap();
+    check(&Rdy::open(&dest).unwrap(), &dest);
+}

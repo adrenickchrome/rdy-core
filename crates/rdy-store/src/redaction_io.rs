@@ -221,7 +221,7 @@ pub(crate) struct Authorization {
     /// What the verified foreign removals of a project authorize (`crate::foreign_removal`).
     pub(crate) foreign: crate::foreign_removal::ForeignAuthority,
     /// What the removals a project fetched authorize (D-FNRXT,
-    /// `crate::redaction_import::authorize_synced`).
+    /// `crate::redaction_import::synced_authority`).
     pub(crate) synced: crate::redaction_import::Synced,
 }
 
@@ -575,7 +575,7 @@ pub(crate) struct Collected {
     pub(crate) foreign_proofs: Vec<crate::foreign_removal::ProofFrame>,
     /// The applies of a batch that writes a `meta/sync/` ref (a fetch's batch, D-FNRXT), in log
     /// order: they are no native applies. Their requests name places of another log, so their
-    /// portable proofs authorize them (`crate::redaction_import::authorize_synced`).
+    /// portable proofs authorize them (`crate::redaction_import::synced_authority`).
     pub(crate) synced: Vec<ApplyFrame>,
     /// The requests such a batch holds, approved or not: their manifests name places of
     /// another log, so no span of this log is theirs by place.
@@ -1378,17 +1378,19 @@ impl Validator {
 
     /// The meaning of the applies validated so far against `log` before `upto`, with the
     /// carried records of `c` before `upto` laid over them, as the bootstrap checks a log
-    /// (`redaction_carried::overlay`, then [`check_log`], both its passes). What the validated
-    /// applies authorize is left as it is.
+    /// (`redaction_carried::overlay`, then [`check_log`], both its passes, with what the
+    /// fetched applies authorize, `synced`). What the validated applies authorize is left as
+    /// it is.
     pub(crate) fn check_meaning(
         &self,
         c: &Collected,
         log: &mut dyn FrameLog,
         upto: Location,
+        synced: &crate::redaction_import::SyncedAuthority,
     ) -> Result<(), StoreError> {
         let mut auth = self.auth.clone();
         crate::redaction_carried::overlay(c, log, &mut auth, upto)?;
-        check_log(log, &BTreeMap::new(), &auth, &self.selected, upto)
+        check_log(log, &BTreeMap::new(), &auth, &self.selected, upto, synced)
     }
 }
 
@@ -1543,7 +1545,9 @@ pub(crate) fn for_each_seen(
 /// The holes of `auth` are the applies' spans; the carried records' spans (`SpanAuth::carried`,
 /// laid over by `redaction_carried::overlay` before this check) take part only in the
 /// resolution of a kept reference and the id of a selected version whose block they zeroed:
-/// they never count as a span of an apply or as a copy the selection covers.
+/// they never count as a span of an apply or as a copy the selection covers. The spans of the
+/// fetched applies (`synced`, D-FNRXT) take part in the same way: a zero block frame a fetched
+/// removal erased keeps the id its block residue gives, before or after a native apply.
 ///
 /// A failure is `RedactionCorrupt`: at the frame or span for a frame failure, else at the apply.
 fn check_log(
@@ -1552,6 +1556,7 @@ fn check_log(
     auth: &Authorization,
     sel: &[Selected],
     upto: Location,
+    synced: &crate::redaction_import::SyncedAuthority,
 ) -> Result<(), StoreError> {
     if sel.is_empty() {
         return Ok(());
@@ -1640,13 +1645,14 @@ fn check_log(
     let mut kept_found: HashSet<(BlockId, Hash)> = HashSet::new();
     let mut seen_chunks: HashSet<Hash> = HashSet::new();
     let residue_of = |loc: &Location| auth.spans[loc].residue.and_then(|r| auth.residues.get(&r));
-    // the id a carried record's block residue gives a zero frame it explains
+    // the id a carried record's or a fetched apply's block residue gives a zero frame it
+    // explains
     let carried_id = |loc: &Location| match auth.spans.get(loc) {
         Some(s) if s.carried => match s.residue.and_then(|r| auth.residues.get(&r)) {
             Some(RedactionResidue::Block(b)) => Some(b.id.clone()),
             _ => None,
         },
-        _ => None,
+        _ => synced.block_id_at(loc).cloned(),
     };
     log.walk(upto, memory, &mut |f| {
         let hole = auth.erasable(&f.loc);
@@ -1814,9 +1820,10 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
         memory: &c.memory,
     };
     crate::redaction_carried::overlay(&c, &mut log, &mut auth, end)?;
-    check_log(&mut log, &c.memory, &auth, &sel, end)?;
+    let synced = crate::redaction_import::synced_authority(&c, &mut log, end)?;
+    check_log(&mut log, &c.memory, &auth, &sel, end, &synced)?;
     crate::foreign_removal::authorize(&c, &mut log, &mut auth, end)?;
-    crate::redaction_import::authorize_synced(&c, &mut log, &mut auth, end)?;
+    synced.merge(&mut auth)?;
     auth.requests = c
         .requests
         .iter()
@@ -1886,9 +1893,10 @@ pub(crate) fn sealed_of(
         segment: 0,
         offset: 0,
     });
-    check_log(&mut log, &BTreeMap::new(), &auth, &sel, upto)?;
+    let synced = crate::redaction_import::synced_authority(c, &mut log, upto)?;
+    check_log(&mut log, &BTreeMap::new(), &auth, &sel, upto, &synced)?;
     crate::foreign_removal::authorize(c, &mut log, &mut auth, upto)?;
-    crate::redaction_import::authorize_synced(c, &mut log, &mut auth, upto)?;
+    synced.merge(&mut auth)?;
     Ok(auth)
 }
 
@@ -1912,9 +1920,10 @@ pub(crate) fn bootstrap_pending(
         memory: &c.memory,
     };
     crate::redaction_carried::overlay(&c, &mut log, &mut auth, start)?;
-    check_log(&mut log, &c.memory, &auth, &sel, start)?;
+    let synced = crate::redaction_import::synced_authority(&c, &mut log, start)?;
+    check_log(&mut log, &c.memory, &auth, &sel, start, &synced)?;
     crate::foreign_removal::authorize(&c, &mut log, &mut auth, start)?;
-    crate::redaction_import::authorize_synced(&c, &mut log, &mut auth, start)?;
+    synced.merge(&mut auth)?;
     auth.requests = c.requests.clone();
     Ok(auth)
 }

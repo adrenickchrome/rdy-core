@@ -43,7 +43,7 @@ use crate::stream_error::StreamError;
 use crate::sync_proof::{self, ObjectSource, PortableRemoval};
 use crate::sync_stream::StreamRecord;
 use rdy_model::redaction::{MAX_RECORD_BYTES, RedactionResidue};
-use rdy_model::{Change, Hash, Op};
+use rdy_model::{BlockId, Change, Hash, Op};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -187,6 +187,7 @@ impl ObjectSource for LogSource<'_> {
         let Some(loc) = self.first.get(&key).copied() else {
             return Ok(None);
         };
+
         let io = |e: StoreError| StreamError::io(None, 0, &std::io::Error::other(e.to_string()));
         let header_io = |e: StoreError| match e {
             StoreError::Io(e) => StreamError::io(None, 0, &e),
@@ -671,22 +672,97 @@ pub(crate) fn synced_candidate_holes(
     })
 }
 
-/// Adds what the fetched applies of `c` before `upto` authorize to `auth` (D-FNRXT; see
-/// [`Synced`]): each apply's portable proof over the log's own records (`sync_proof::check`:
-/// a person's approval, never a policy), then rules 2 and 3 of the module docs over every frame
-/// before `upto`, except that an uncovered local carrier keeps its bytes. A span an earlier
-/// native apply already authorizes keeps that apply as its proof. The validated applies join
-/// `auth.applies` in log order. A failure is `RedactionCorrupt` at the apply or the frame.
-pub(crate) fn authorize_synced(
+/// What the fetched applies of a log authorize before some place (D-FNRXT; see [`Synced`]),
+/// derived apart from the native applies so that the native check of the log can read it
+/// (`redaction_io::check_log`: a zero block frame a fetched removal erased still has its id),
+/// then laid over them ([`SyncedAuthority::merge`]). Not stored.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SyncedAuthority {
+    holes: Holes,
+    spans: BTreeMap<Location, SpanAuth>,
+    residues: Residues,
+    applies: Vec<Applied>,
+    imported: Imported,
+    requests: HashSet<Hash>,
+}
+
+impl SyncedAuthority {
+    /// The id of the block whose frame at `loc` a fetched apply authorizes, from its block
+    /// residue: what a zero frame there held. None for any other place.
+    pub(crate) fn block_id_at(&self, loc: &Location) -> Option<&BlockId> {
+        let r = self.spans.get(loc)?.residue?;
+        match self.residues.get(&r) {
+            Some((RedactionResidue::Block(b), _)) => Some(&b.id),
+            _ => None,
+        }
+    }
+
+    /// Each span the fetched applies authorize, by place, with the apply that authorizes it.
+    pub(crate) fn spans(&self) -> impl Iterator<Item = (Hash, RedactedSpan)> + '_ {
+        self.holes.iter().filter_map(|(loc, h)| {
+            let s = self.spans.get(loc)?;
+            Some((
+                s.apply,
+                RedactedSpan {
+                    loc: *loc,
+                    kind: h.kind,
+                    hash: h.hash,
+                    len: h.len,
+                    residue: s.residue,
+                },
+            ))
+        })
+    }
+
+    /// Lays what the fetched applies authorize over `auth`: a span a native apply already
+    /// authorizes keeps that apply as its proof, and the validated fetched applies join
+    /// `auth.applies` in log order. Two different holes at one place are `RedactionCorrupt`.
+    pub(crate) fn merge(self, auth: &mut Authorization) -> Result<(), StoreError> {
+        auth.synced.requests = self.requests;
+        if self.applies.is_empty() {
+            return Ok(());
+        }
+        for (loc, hole) in self.holes {
+            match auth.holes.get(&loc) {
+                // a native apply covers the frame already: it stays the frame's proof
+                Some(h) if *h == hole => {}
+                Some(_) => return Err(StoreError::corrupt_at(loc)),
+                None => {
+                    let span = *self
+                        .spans
+                        .get(&loc)
+                        .ok_or_else(|| StoreError::corrupt_at(loc))?;
+                    auth.holes.insert(loc, hole);
+                    auth.spans.insert(loc, span);
+                }
+            }
+        }
+        auth.keep_residues(self.residues)?;
+        auth.applies.extend(self.applies);
+        auth.applies.sort_by_key(|a| a.loc);
+        auth.synced.imported = self.imported;
+        Ok(())
+    }
+}
+
+/// What the fetched applies of `c` before `upto` authorize (D-FNRXT; see [`Synced`]): each
+/// apply's portable proof over the log's own records (`sync_proof::check`: a person's approval,
+/// never a policy), then rules 2 and 3 of the module docs over every frame before `upto`,
+/// except that an uncovered local carrier keeps its bytes. It reads the log alone, never the
+/// native applies, so the native check can run with it ([`SyncedAuthority::block_id_at`]); a
+/// failure is `RedactionCorrupt` at the apply or the frame.
+pub(crate) fn synced_authority(
     c: &Collected,
     log: &mut dyn FrameLog,
-    auth: &mut Authorization,
     upto: Location,
-) -> Result<(), StoreError> {
-    auth.synced.requests = c.synced_requests.clone();
+) -> Result<SyncedAuthority, StoreError> {
+    let mut out = SyncedAuthority {
+        requests: c.synced_requests.clone(),
+        ..SyncedAuthority::default()
+    };
     let frames = synced_frames(c, upto);
     if frames.is_empty() {
-        return Ok(());
+        return Ok(out);
     }
     let caps = ReceiverCaps::current();
     let (_, first) = locate(log, upto, &caps)?;
@@ -742,23 +818,15 @@ pub(crate) fn authorize_synced(
         &caps,
         Uncovered::Kept,
     )?;
-    for (loc, hole) in holes {
-        match auth.holes.get(&loc) {
-            // a native apply covers the frame already: it stays the frame's proof
-            Some(h) if *h == hole => {}
-            Some(_) => return Err(StoreError::corrupt_at(loc)),
-            None => {
-                let span = *spans.get(&loc).ok_or_else(|| StoreError::corrupt_at(loc))?;
-                auth.holes.insert(loc, hole);
-                auth.spans.insert(loc, span);
-            }
-        }
+    if let Some(loc) = holes.keys().find(|l| !spans.contains_key(l)) {
+        return Err(StoreError::corrupt_at(*loc));
     }
-    auth.keep_residues(residues)?;
-    auth.applies.extend(applies);
-    auth.applies.sort_by_key(|a| a.loc);
-    auth.synced.imported = imported;
-    Ok(())
+    out.holes = holes;
+    out.spans = spans;
+    out.residues = residues;
+    out.applies = applies;
+    out.imported = imported;
+    Ok(out)
 }
 
 /// Whether a local copy of an approved key (rule 2) is what its approved `tuple` says: its header

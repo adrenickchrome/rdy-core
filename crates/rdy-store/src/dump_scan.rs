@@ -1440,7 +1440,7 @@ struct FileScan {
     batches: u64,
     frames: u64,
     applies: u64,
-    /// The foreign removals among its applies.
+    /// The foreign and the fetched removals among its applies.
     foreign: u64,
     last: Option<(Location, BatchMarker)>,
     /// The validated applies of this input (indexes into the scan's applies).
@@ -1492,6 +1492,16 @@ struct Scan<'p> {
     /// The foreign removals of a project's chain, in physical order (`collected.foreign_proofs`
     /// holds their frames, in the same order).
     foreign: Vec<ForeignFact>,
+    /// Whether the current batch holds a request or an apply so far, and whether it then writes
+    /// a `meta/sync/` ref: a fetch's batch (D-FNRXT), as the store's header pass tells it.
+    batch_removal: bool,
+    batch_sync: bool,
+    /// The fetched removals of a project's chain (the applies of a fetch's batch), in physical
+    /// order (`collected.synced` holds their frames, in the same order).
+    synced: Vec<ForeignFact>,
+    /// What those fetched removals authorize, once the whole chain authorized them: the meaning
+    /// checks read it.
+    synced_auth: crate::redaction_import::SyncedAuthority,
     /// The inputs that hold a foreign removal, each with the lowest span of its validated local
     /// applies: its trailer's first removed span is checked once the foreign spans are known.
     foreign_trailers: Vec<(usize, Option<Location>)>,
@@ -1637,6 +1647,10 @@ impl<'p> Scan<'p> {
             applies: Vec::new(),
             batch_foreign: Vec::new(),
             foreign: Vec::new(),
+            batch_removal: false,
+            batch_sync: false,
+            synced: Vec::new(),
+            synced_auth: Default::default(),
             foreign_trailers: Vec::new(),
             carried: Vec::new(),
             drops: HashMap::new(),
@@ -1752,6 +1766,8 @@ impl<'p> Scan<'p> {
             self.batch_landings.clear();
             self.landing_hashes.clear();
             self.batch_foreign.clear();
+            self.batch_removal = false;
+            self.batch_sync = false;
             let mut start = f.at;
             while f.at < end {
                 visited += 1;
@@ -1820,6 +1836,8 @@ impl<'p> Scan<'p> {
                     self.batch_landings.clear();
                     self.landing_hashes.clear();
                     self.batch_foreign.clear();
+                    self.batch_removal = false;
+                    self.batch_sync = false;
                     f.at = fh.end();
                     start = f.at;
                     last = Some(marker);
@@ -2085,6 +2103,8 @@ impl<'p> Scan<'p> {
         self.batch_landings.clear();
         self.landing_hashes.clear();
         self.batch_foreign.clear();
+        self.batch_removal = false;
+        self.batch_sync = false;
         let mut pairs: Vec<(u8, Hash)> = Vec::new();
         let mut events: Vec<Event> = Vec::new();
         let mut place = start.offset;
@@ -2257,6 +2277,9 @@ impl<'p> Scan<'p> {
                 let p = read_body(r, fh).map_err(|e| self.fail(i, e))?;
                 dump::check_carried(fh.kind, &p)
                     .map_err(|what| self.fail(i, damaged(fh.at, what)))?;
+                if request || fh.kind == kinds::REDACTION_APPLY {
+                    self.batch_removal = true;
+                }
                 match fh.kind {
                     _ if request => {
                         self.collected
@@ -2381,9 +2404,10 @@ impl<'p> Scan<'p> {
 
     /// The payload of the `REF_UPDATE` record `fh` when its name is one the scan needs (the
     /// mode, the repo id, the store format), read whole and checked against its hash; None for
-    /// any other ref, whose rest is skipped.
+    /// any other ref, whose rest is skipped. A `meta/sync/` ref after a request or an apply of
+    /// its batch marks a fetch's batch (`dump::is_sync_ref_update`).
     fn ref_payload(
-        &self,
+        &mut self,
         r: &mut BufReader<Input>,
         f: &FileScan,
         fh: &RecordHead,
@@ -2397,6 +2421,13 @@ impl<'p> Scan<'p> {
         p.try_reserve_exact(first).map_err(|_| alloc(i, fh.at))?;
         p.resize(first, 0);
         dump::read_exact_at(r, &mut p, fh.at).map_err(|e| self.fail(i, e))?;
+        if self.batch_removal
+            && fh.len <= (crate::sync_state::MAX_VALUE_BYTES + 4_096) as u64
+            && dump::ref_name(&p)
+                .is_some_and(|n| n.starts_with(crate::sync_state::SYNC_REF.as_bytes()))
+        {
+            self.batch_sync = true;
+        }
         let wanted = dump::ref_name(&p)
             .is_some_and(|name| SCANNED_REFS.iter().any(|n| n.as_bytes() == name));
         if !wanted {
@@ -2487,6 +2518,10 @@ impl<'p> Scan<'p> {
                         Some((entry_loc, entry)) => {
                             return self
                                 .foreign_apply(f, at, hash, record, entry_loc, entry, start, end);
+                        }
+                        // a fetched removal's request names places of the hub's log
+                        None if self.batch_sync => {
+                            return self.synced_apply(f, at, hash, record, end);
                         }
                         None => {
                             self.native_apply(f.file, at, offset, hash, record, landings, end)?
@@ -2671,6 +2706,37 @@ impl<'p> Scan<'p> {
             batch_start: start,
         });
         self.foreign.push(ForeignFact {
+            apply: hash,
+            batch_end: end,
+            file: f.file,
+            spans: Vec::new(),
+        });
+        f.foreign += 1;
+        Ok(())
+    }
+
+    /// A project's fetched removal (an apply of a fetch's batch, D-FNRXT): noted, as the log's
+    /// header pass notes it. The whole chain authorizes it once every input is read
+    /// ([`Scan::foreign_removals`]), as a log's bootstrap does
+    /// (`redaction_import::synced_authority`).
+    fn synced_apply(
+        &mut self,
+        f: &mut FileScan,
+        at: Location,
+        hash: Hash,
+        record: Option<rdy_model::redaction::RedactionApply>,
+        end: Location,
+    ) -> Result<(), StoreError> {
+        let refused = || damaged(PRELUDE_LEN, drop_text::ALLOCATION);
+        self.collected
+            .synced
+            .try_reserve(1)
+            .map_err(|_| refused())?;
+        self.synced.try_reserve(1).map_err(|_| refused())?;
+        self.collected
+            .synced
+            .push(ApplyFrame::new(at, hash, record, self.batch_no, Vec::new()));
+        self.synced.push(ForeignFact {
             apply: hash,
             batch_end: end,
             file: f.file,
@@ -3088,7 +3154,7 @@ impl<'p> Scan<'p> {
                 first = Some(first.map_or(l, |x| x.min(l)));
             }
         }
-        // a foreign removal's spans are known once the whole chain authorized it
+        // a foreign or fetched removal's spans are known once the whole chain authorized it
         if f.foreign > 0 {
             if self.foreign_trailers.try_reserve(1).is_err() {
                 self.proof_failed(f.file, damaged(PRELUDE_LEN, drop_text::ALLOCATION));
@@ -3155,9 +3221,12 @@ impl<'p> Scan<'p> {
                         self.holder.residues.clone(),
                     )
                 }
-                _ => self
-                    .validator
-                    .check_meaning(&self.collected, &mut access, upto),
+                _ => self.validator.check_meaning(
+                    &self.collected,
+                    &mut access,
+                    upto,
+                    &self.synced_auth,
+                ),
             }
         };
         let file = self
@@ -3222,8 +3291,9 @@ impl<'p> Scan<'p> {
     /// applies and foreign removals. Its spans are never read as places of this log: they are
     /// derived from this log's frames.
     fn foreign_removals(&mut self) -> Result<(), ScanError> {
+        self.synced_removals()?;
         if self.foreign.is_empty() {
-            return Ok(());
+            return self.removal_trailers();
         }
         let first_file = self.foreign[0].file;
         let upto = self.envs[self.envs.len() - 1].header.log_end;
@@ -3264,10 +3334,81 @@ impl<'p> Scan<'p> {
                 }
             }
         }
+        self.removal_trailers()
+    }
+
+    /// The fetched removals of a project's chain (D-FNRXT), authorized as a log's bootstrap
+    /// authorizes them, over the whole chain (`redaction_import::synced_authority`): each
+    /// proof passes `sync_proof::check` over the chain's own records (a person's approval), and
+    /// its spans are every copy of an approved tuple in this log, derived by tuple, never the
+    /// places its request names (those are the hub's). Each dropped frame of such a span that
+    /// no local apply covers is then released by it, as the store keeps the local apply as the
+    /// proof of a span both cover. Like a foreign removal, it gives no carried record: a stop
+    /// before it refuses a retained frame only it dropped.
+    fn synced_removals(&mut self) -> Result<(), ScanError> {
+        if self.synced.is_empty() {
+            return Ok(());
+        }
+        let first_file = self.synced[0].file;
+        let upto = self.envs[self.envs.len() - 1].header.log_end;
+        let checked = {
+            let mut access = ChainAccess {
+                lookups: &mut self.lookups,
+                batches: &mut self.batches,
+                recs: &self.recs,
+                batch: &[],
+                drops: &self.drops,
+                lens: &self.lens,
+            };
+            crate::redaction_import::synced_authority(
+                &self.collected,
+                &mut ByPlace(&mut access),
+                upto,
+            )
+        };
+        let authority = match checked {
+            Ok(a) => a,
+            Err(e) => return Err(self.chain_refusal(e, first_file)),
+        };
+        for s in authority.spans().collect::<Vec<_>>() {
+            let native = self
+                .validator
+                .auth
+                .spans
+                .get(&s.1.loc)
+                .is_some_and(|n| !n.carried);
+            if native {
+                continue;
+            }
+            if let Some(x) = self.synced.iter_mut().find(|x| x.apply == s.0) {
+                x.spans.try_reserve(1).map_err(|_| alloc(x.file, 0))?;
+                x.spans.push(s.1);
+            }
+        }
+        for i in 0..self.synced.len() {
+            let apply = self.synced[i].apply;
+            for j in 0..self.synced[i].spans.len() {
+                let s = self.synced[i].spans[j];
+                if let Err(source) =
+                    self.release(s.loc, apply, (s.kind, s.hash, s.len, s.residue), None)
+                {
+                    let file = self.blame.take().unwrap_or(self.synced[i].file);
+                    return Err(ScanError::Input { file, source });
+                }
+            }
+        }
+        self.synced_auth = authority;
+        Ok(())
+    }
+
+    /// Each input that holds a foreign or a fetched removal must record, as its first removed
+    /// span, the lowest span of its local applies and of those removals.
+    fn removal_trailers(&mut self) -> Result<(), ScanError> {
         for (file, local) in std::mem::take(&mut self.foreign_trailers) {
             let first = self
                 .foreign
                 .iter()
+                .chain(&self.synced)
                 .filter(|x| x.file == file)
                 .flat_map(|x| x.spans.iter().map(|s| s.loc))
                 .chain(local)
@@ -3423,6 +3564,7 @@ impl<'p> Scan<'p> {
         let later_foreign: HashSet<Hash> = self
             .foreign
             .iter()
+            .chain(&self.synced)
             .filter(|x| x.batch_end > end)
             .map(|x| x.apply)
             .collect();
@@ -3753,7 +3895,12 @@ impl<'p> Scan<'p> {
             }
             // the retained occurrences a foreign removal at or before the end erases: zeros,
             // never written even for a moment; a later one leaves them as they are
-            for x in self.foreign.iter().filter(|x| x.batch_end <= end) {
+            for x in self
+                .foreign
+                .iter()
+                .chain(&self.synced)
+                .filter(|x| x.batch_end <= end)
+            {
                 for s in x
                     .spans
                     .iter()
