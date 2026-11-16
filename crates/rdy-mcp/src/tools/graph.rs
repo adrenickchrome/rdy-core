@@ -58,15 +58,33 @@ pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     Ok(budget(v, p.max_tokens))
 }
 
-pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
+/// What `rdy_suspects` takes. The engine owns the token cut, so the reply is not budgeted again.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SuspectsParams {
+    /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>", "proposal:P-<id>@<n>" or "view:<name>". Defaults to the session view.
+    pub scope: Option<String>,
+    /// The budget of the reply, at most 100000 (default 4000).
+    pub max_tokens: Option<usize>,
+    /// next from the previous page, with the same scope.
+    pub page: Option<String>,
+}
+
+/// `rdy_suspects`: every suspect when they fit the budget, else the page of rows that fits, with
+/// `next` while rows remain.
+pub fn rdy_suspects(st: &mut McpState, p: SuspectsParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
     let scope = scope_of(&st.view, &st_, &p.scope)?;
-    Ok(budget(
-        json!({"items": st_.suspect_details(&scope)?}),
-        p.max_tokens,
-    ))
+    let scope_text = p.scope.clone().unwrap_or_else(|| st.view.clone());
+    st_.suspects_page(
+        &scope,
+        &scope_text,
+        p.page.as_deref(),
+        p.max_tokens
+            .unwrap_or(rdy_engine::suspect_reply::SUSPECTS_DEFAULT_TOKENS),
+    )
 }
 
 /// What `rdy_trace` takes (D-1876T). It takes no page, cursor, mutation, output-file or
