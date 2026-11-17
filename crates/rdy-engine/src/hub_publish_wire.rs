@@ -679,7 +679,7 @@ fn check_site(site: &str) -> Result<(), RdyError> {
 }
 
 /// 1 to 16 distinct positive stream formats.
-fn formats_ok(list: &[u32]) -> bool {
+pub(crate) fn formats_ok(list: &[u32]) -> bool {
     !list.is_empty()
         && list.len() <= MAX_FORMATS
         && list.iter().all(|&f| f > 0)
@@ -782,7 +782,7 @@ impl Write for Capped {
 }
 
 /// The compact JSON of `value`, refused with `E_LIMIT` at more than `cap` bytes.
-fn encode<T: Serialize>(value: &T, cap: usize) -> Result<Vec<u8>, RdyError> {
+pub(crate) fn encode<T: Serialize>(value: &T, cap: usize) -> Result<Vec<u8>, RdyError> {
     let mut w = Capped {
         out: Vec::new(),
         cap,
@@ -1187,6 +1187,29 @@ impl HttpPublishWire {
         reply_limit: usize,
         success: &[u16],
     ) -> Result<Vec<u8>, RdyError> {
+        self.post_as(
+            cx,
+            effect,
+            url,
+            "application/json",
+            json,
+            reply_limit,
+            success,
+        )
+    }
+
+    /// A POST of a step whose JSON body is sent as `content_type`.
+    #[allow(clippy::too_many_arguments)]
+    fn post_as(
+        &self,
+        cx: &UploadContext,
+        effect: Effect,
+        url: &str,
+        content_type: &str,
+        json: Vec<u8>,
+        reply_limit: usize,
+        success: &[u16],
+    ) -> Result<Vec<u8>, RdyError> {
         let len = u64::try_from(json.len()).map_err(|_| hub_limit(usize::MAX, LimitUnit::Bytes))?;
         let mut body = Cursor::new(json);
         self.exchange(
@@ -1195,7 +1218,7 @@ impl HttpPublishWire {
                 effect,
                 method: UploadMethod::Post,
                 url,
-                content_type: "application/json",
+                content_type,
                 body: Some(&mut body),
                 body_len: len,
                 reply_limit,
@@ -1205,13 +1228,28 @@ impl HttpPublishWire {
     }
 }
 
-/// The state reply's checks; it clamps the limits to core's caps.
+/// The state reply's checks for a publish upload; it clamps the limits to core's caps.
 fn check_state(st: &mut PublishState) -> bool {
+    check_state_with(
+        st,
+        &|name| KNOWN_INCOMPATIBLE.contains(&name),
+        Some(formats().stream),
+    )
+}
+
+/// The state reply's checks; it clamps the limits to core's caps. An incompatible feature is
+/// refused unless `incompatible_known` knows its name; with `stream`, the hub must read that
+/// stream format.
+fn check_state_with(
+    st: &mut PublishState,
+    incompatible_known: &dyn Fn(&str) -> bool,
+    stream: Option<u32>,
+) -> bool {
     let semver_ok = |v: &str| semver::Version::parse(v).is_ok();
     let versions_ok = semver_ok(&st.rdy) && st.min_rdy.as_deref().is_none_or(semver_ok);
     let streams_ok = formats_ok(&st.stream_read)
         && formats_ok(&st.stream_write)
-        && st.stream_read.contains(&formats().stream);
+        && stream.is_none_or(|f| st.stream_read.contains(&f));
     let names_ok = st.features.len() <= MAX_FEATURES
         && st.features.iter().all(|f| {
             !f.name.is_empty()
@@ -1222,9 +1260,10 @@ fn check_state(st: &mut PublishState) -> bool {
         })
         && st.features.windows(2).all(|w| w[0].name < w[1].name);
     // Only an incompatible feature this client does not know is refused.
-    let features_ok = st.features.iter().all(|f| {
-        f.class != FeatureClass::Incompatible || KNOWN_INCOMPATIBLE.contains(&f.name.as_str())
-    });
+    let features_ok = st
+        .features
+        .iter()
+        .all(|f| f.class != FeatureClass::Incompatible || incompatible_known(&f.name));
     let caps = [
         (&mut st.batch_bytes, CORE_BATCH_BYTES),
         (&mut st.batch_records, CORE_BATCH_RECORDS),
@@ -1238,6 +1277,84 @@ fn check_state(st: &mut PublishState) -> bool {
         *value = (*value).min(cap);
     }
     versions_ok && streams_ok && names_ok && features_ok && limits_ok
+}
+
+impl HttpPublishWire {
+    /// `POST <base>/state` with the encoded request `json` as `content_type`: the decoded reply,
+    /// unchecked.
+    pub(crate) fn state_as(
+        &self,
+        cx: &UploadContext,
+        json: Vec<u8>,
+        content_type: &str,
+    ) -> Result<PublishState, RdyError> {
+        let url = route(cx, &["state"], &[])?;
+        let body = self.post_as(
+            cx,
+            Effect::Read,
+            &url,
+            content_type,
+            json,
+            REPLY_BYTES,
+            &[200],
+        )?;
+        reply(
+            &body,
+            limits(REPLY_BYTES, MAX_JSON_VALUES),
+            Effect::Read,
+            &cx.bearer,
+        )
+    }
+
+    /// `POST <base>/known` (push form) with the body sent as `content_type`: the keys of `keys`
+    /// the hub lacks, a sorted, unique subset of them.
+    pub(crate) fn known_as(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        keys: &[ObjectKey],
+        content_type: &str,
+    ) -> Result<Vec<ObjectKey>, RdyError> {
+        check_push(push)?;
+        check_entries(keys.len(), MAX_KNOWN_KEYS, "object key")?;
+        if keys.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(unordered("object keys"));
+        }
+        let url = route(cx, &["known"], &[])?;
+        let json = encode(&KnownBody { push, keys }, KNOWN_REQUEST_BYTES)?;
+        let body = self.post_as(
+            cx,
+            Effect::Read,
+            &url,
+            content_type,
+            json,
+            KNOWN_REPLY_BYTES,
+            &[200],
+        )?;
+        // Per key, one element and two members: 3 values, with headroom for added members.
+        let values = known_values(keys.len(), 3);
+        let dto: MissingKeys = reply(
+            &body,
+            limits(KNOWN_REPLY_BYTES, values),
+            Effect::Read,
+            &cx.bearer,
+        )?;
+        let missing: Vec<ObjectKey> = dto.missing.into_iter().map(ObjectKey::from).collect();
+        let subset = missing.windows(2).all(|w| w[0] < w[1])
+            && missing.iter().all(|k| keys.binary_search(k).is_ok());
+        if !subset {
+            return Err(upstream_protocol());
+        }
+        Ok(missing)
+    }
+}
+
+/// The sync exchange's state reply checks (D-4XHPH, D-N8PR2): those of a publish upload, with
+/// every feature of the real registry known and no stream format required; the exchange checks
+/// the stream format it sends. It clamps the limits to core's caps.
+pub(crate) fn check_sync_state(st: &mut PublishState) -> bool {
+    let registry = rdy_store::format::registered_features();
+    check_state_with(st, &|name| registry.iter().any(|f| f.name == name), None)
 }
 
 impl PublishWire for HttpPublishWire {
@@ -1280,15 +1397,8 @@ impl PublishWire for HttpPublishWire {
 
     fn state(&self, cx: &UploadContext, request: &StateRequest) -> Result<PublishState, RdyError> {
         check_state_request(cx, request)?;
-        let url = route(cx, &["state"], &[])?;
         let json = encode(request, STATE_REQUEST_BYTES)?;
-        let body = self.post_json(cx, Effect::Read, &url, json, REPLY_BYTES, &[200])?;
-        let mut st: PublishState = reply(
-            &body,
-            limits(REPLY_BYTES, MAX_JSON_VALUES),
-            Effect::Read,
-            &cx.bearer,
-        )?;
+        let mut st = self.state_as(cx, json, "application/json")?;
         if !check_state(&mut st) {
             return Err(upstream_protocol());
         }
@@ -1301,29 +1411,7 @@ impl PublishWire for HttpPublishWire {
         push: &str,
         keys: &[ObjectKey],
     ) -> Result<Vec<ObjectKey>, RdyError> {
-        check_push(push)?;
-        check_entries(keys.len(), MAX_KNOWN_KEYS, "object key")?;
-        if keys.windows(2).any(|w| w[0] >= w[1]) {
-            return Err(unordered("object keys"));
-        }
-        let url = route(cx, &["known"], &[])?;
-        let json = encode(&KnownBody { push, keys }, KNOWN_REQUEST_BYTES)?;
-        let body = self.post_json(cx, Effect::Read, &url, json, KNOWN_REPLY_BYTES, &[200])?;
-        // Per key, one element and two members: 3 values, with headroom for added members.
-        let values = known_values(keys.len(), 3);
-        let dto: MissingKeys = reply(
-            &body,
-            limits(KNOWN_REPLY_BYTES, values),
-            Effect::Read,
-            &cx.bearer,
-        )?;
-        let missing: Vec<ObjectKey> = dto.missing.into_iter().map(ObjectKey::from).collect();
-        let subset = missing.windows(2).all(|w| w[0] < w[1])
-            && missing.iter().all(|k| keys.binary_search(k).is_ok());
-        if !subset {
-            return Err(upstream_protocol());
-        }
-        Ok(missing)
+        self.known_as(cx, push, keys, "application/json")
     }
 
     fn put_objects(

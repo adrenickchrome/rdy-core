@@ -35,7 +35,7 @@
 //!   returned, never fetched or opened.
 use crate::error::{
     E_BAD_INPUT, E_LIMIT, E_REPO_MISMATCH, E_UPSTREAM_ACTOR_CLAIM, E_UPSTREAM_UNCERTAIN, RdyError,
-    upstream_auth, upstream_protocol,
+    SYNC_REMOTE_MODE_FIX, SYNC_REMOTE_MODE_MESSAGE, upstream_auth, upstream_protocol,
 };
 use crate::formats::formats;
 use crate::hub_config::{
@@ -354,7 +354,16 @@ fn not_publish_remote(remote: &str) -> RdyError {
     )
 }
 
-fn repo_mismatch() -> RdyError {
+/// E_BAD_INPUT: a push or pull names remote `remote`, whose mode is not share (D-47HVF
+/// `SYNC_REMOTE_MODE`).
+pub(crate) fn not_share_remote(remote: &str) -> RdyError {
+    bad_input(
+        SYNC_REMOTE_MODE_MESSAGE.replace("<name>", remote),
+        SYNC_REMOTE_MODE_FIX,
+    )
+}
+
+pub(crate) fn repo_mismatch() -> RdyError {
     RdyError::new(
         E_REPO_MISMATCH,
         "the remote holds another source project",

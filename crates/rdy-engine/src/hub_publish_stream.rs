@@ -30,6 +30,12 @@
 //!   id. A failure ends the upload as it is: nothing is retried, no other push id is chosen and
 //!   no quarantine is deleted. A wire error, an uncertain one included, is returned unchanged.
 //!   A reply outside its contract is `E_UPSTREAM_PROTOCOL`.
+//!
+//! The sync exchange sends a canon history the same way ([`PreparedHistory::canon`],
+//! [`send_objects`]; D-H0BZN, D-KE83X): its records are Plan A's closure from the head above the
+//! hub tip, read from the captured state, and the keys it names but does not hold are
+//! prerequisites that never travel. Each format-4 batch passes Plan A's batch check before it
+//! is sent. When nothing is missing, no batch is sent.
 use crate::error::{E_BAD_INPUT, E_INTERNAL, E_IO, E_LIMIT, RdyError, upstream_protocol};
 use crate::hub_publish_wire::{
     CORE_BATCH_BYTES, CORE_BATCH_RECORDS, MAX_KNOWN_KEYS, ObjectPut, PUSH_ID_CHARS, PublishWire,
@@ -40,17 +46,21 @@ use crate::stream_error::{StreamError, to_rdy};
 use crate::stream_export;
 use crate::stream_take::uncovered_change;
 use rdy_model::{CROCKFORD, Hash, RepoId};
+use rdy_store::closure::{StoreSource, history_closure_before};
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::stream_error::{LIMIT_OBJECT_RECORDS, LIMIT_PREREQUISITES, LIMIT_TOTAL_BYTES};
 use rdy_store::stream_source::CheckedStream;
+use rdy_store::sync_proof::ObjectSource;
 use rdy_store::sync_stream::{
     HEADER_FIXED, KEY_LEN, LIMIT_BATCH_FILES, MAGIC, MAX_BATCH_FILES, MAX_PREREQUISITES,
-    MAX_RECORDS, MAX_STREAM_BYTES, StreamHeader, StreamWriter, TRAILER_LEN,
+    MAX_RECORDS, MAX_STREAM_BYTES, StreamHeader, StreamPurpose, StreamRecord, StreamWriter,
+    TRAILER_LEN,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::sync::Arc;
 
 /// The bytes of a stream frame's own header: length, kind and hash.
 const FRAME_HEADER: u64 = 4 + 1 + 32;
@@ -89,6 +99,19 @@ impl PushId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The push id `text` names: 26 lower-case Crockford base32 digits, the first 0 to 7.
+    /// `None` for any other text.
+    pub fn parse(text: &str) -> Option<PushId> {
+        let digit = |b: u8| CROCKFORD.iter().any(|c| c.to_ascii_lowercase() == b);
+        let ok = text.len() == PUSH_ID_CHARS
+            && text.bytes().all(digit)
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| (b'0'..=b'7').contains(b));
+        ok.then(|| PushId(text.to_string()))
+    }
 }
 
 /// The hub's batch limits from its state reply: the encoded bytes and the object records of one
@@ -108,9 +131,22 @@ pub struct HistorySent {
     pub bytes: u64,
 }
 
-/// One tag's complete history, exported and checked, ready to send (see the module docs).
+/// Where a prepared history's records are read: the checked export of a tag, or the captured
+/// state a canon history's closure was taken from.
+enum Source {
+    Checked(CheckedStream<File>),
+    State(Arc<ReadState>),
+}
+
+/// One tag's complete history, exported and checked, or one canon history's closure, ready to
+/// send (see the module docs).
 pub struct PreparedHistory {
-    stream: CheckedStream<File>,
+    source: Source,
+    /// The stream's purpose: a tag history or a canon history.
+    purpose: StreamPurpose,
+    /// The places at the end of `order` that are prerequisites only: keys the records need
+    /// that the history leaves to the receiver. They are never sent.
+    externals: usize,
     /// The source store's features, which every batch's header names.
     features: rdy_store::format::StoreFeatures,
     /// The bytes of `features`' canonical JSON in every batch's header.
@@ -126,7 +162,7 @@ pub struct PreparedHistory {
     deps: Vec<u32>,
     /// Whether the record always travels: a placeholder or a proof a placeholder needs.
     retained: Vec<bool>,
-    /// The root tag's place in `order`.
+    /// The root's place in `order`: the tag, or the canon head landing.
     root: u32,
 }
 
@@ -273,7 +309,9 @@ impl PreparedHistory {
         let manifest = features.to_json().len() as u64;
         read.ensure_current_epoch()?;
         Ok(PreparedHistory {
-            stream,
+            source: Source::Checked(stream),
+            purpose: StreamPurpose::TagHistory,
+            externals: 0,
             features,
             manifest,
             repo_id,
@@ -285,6 +323,164 @@ impl PreparedHistory {
             retained,
             root,
         })
+    }
+
+    /// The canon history from the head landing `head` above the hub tip `base` that `read`
+    /// captured: Plan A's closure of the head (D-KE83X), whose records the hub may lack, in
+    /// dependency order. The keys its records need beyond it are prerequisites that never
+    /// travel. Records are read from `read` when a batch is written.
+    pub fn canon(
+        read: Arc<ReadState>,
+        head: Hash,
+        base: Option<Hash>,
+    ) -> Result<PreparedHistory, RdyError> {
+        read.ensure_current_epoch()?;
+        let repo_id = read.repo_id()?;
+        let end = read.seq();
+        let found = history_closure_before(
+            read.reader(),
+            StreamPurpose::CanonHistory,
+            head,
+            &BTreeSet::new(),
+            base,
+            end,
+        )
+        .map_err(to_rdy)?;
+        let records = found.records.len();
+        let mut order = found.records;
+        order.extend(found.prerequisites.iter().copied());
+        let place: HashMap<ObjectKey, u32> = order
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (*k, i as u32))
+            .collect();
+        if place.len() != order.len() {
+            return Err(inconsistent());
+        }
+        let at = |k: &ObjectKey| place.get(k).copied().ok_or_else(inconsistent);
+        let root = at(&ObjectKey {
+            kind: kinds::LANDING,
+            hash: head,
+        })?;
+        if root as usize >= records {
+            return Err(inconsistent());
+        }
+        let mut source = StoreSource {
+            reader: read.reader(),
+            end,
+        };
+        let mut len = Vec::with_capacity(order.len());
+        let mut starts = Vec::with_capacity(order.len() + 1);
+        let mut deps: Vec<u32> = Vec::new();
+        let mut seeds: Vec<u32> = Vec::new();
+        for (i, key) in order[..records].iter().enumerate() {
+            let record = source
+                .record(*key)
+                .map_err(from_stream)?
+                .ok_or_else(inconsistent)?;
+            let refs = record.refs(&found.features).map_err(|e| {
+                to_rdy(StreamError::from_record(i as u64 + 1, 0, &e).with_object(Some(*key)))
+            })?;
+            let mut mine = Vec::with_capacity(refs.len() + 1);
+            for r in refs {
+                let target = match r.kind {
+                    Some(kind) => ObjectKey { kind, hash: r.hash },
+                    None => {
+                        let mut found = rdy_store::sync_stream::sync_kinds()
+                            .iter()
+                            .map(|&kind| ObjectKey { kind, hash: r.hash })
+                            .filter(|k| place.contains_key(k));
+                        let one = found.next().ok_or_else(inconsistent)?;
+                        if found.next().is_some() {
+                            return Err(inconsistent());
+                        }
+                        one
+                    }
+                };
+                // a record's need comes before it, or is a prerequisite
+                let p = at(&target)?;
+                if (p as usize) >= i && (p as usize) < records {
+                    return Err(inconsistent());
+                }
+                mine.push(p);
+            }
+            if let Some(proof) = record.proof() {
+                mine.push(at(&proof)?);
+                seeds.push(i as u32);
+                seeds.extend(mine.iter().copied());
+            }
+            mine.sort_unstable();
+            mine.dedup();
+            starts.push(deps.len());
+            deps.extend(mine);
+            len.push(record.frame_len());
+        }
+        for _ in records..order.len() {
+            starts.push(deps.len());
+            len.push(0);
+        }
+        starts.push(deps.len());
+        let mut retained = vec![false; order.len()];
+        while let Some(p) = seeds.pop() {
+            let p = p as usize;
+            if retained[p] || p >= records {
+                continue;
+            }
+            retained[p] = true;
+            seeds.extend(
+                deps[starts[p]..starts[p + 1]]
+                    .iter()
+                    .filter(|d| !retained[**d as usize]),
+            );
+        }
+        let features = found.features;
+        let manifest = features.to_json().len() as u64;
+        read.ensure_current_epoch()?;
+        Ok(PreparedHistory {
+            source: Source::State(read),
+            purpose: StreamPurpose::CanonHistory,
+            externals: order.len() - records,
+            features,
+            manifest,
+            repo_id,
+            tag: head,
+            order,
+            len,
+            starts,
+            deps,
+            retained,
+            root,
+        })
+    }
+
+    /// The places of the records, without the prerequisites only.
+    fn records(&self) -> usize {
+        self.order.len() - self.externals
+    }
+
+    /// The history's record keys in key order.
+    pub fn keys(&self) -> Vec<ObjectKey> {
+        match &self.source {
+            Source::Checked(stream) => stream.facts().objects.clone(),
+            Source::State(_) => {
+                let mut keys = self.order[..self.records()].to_vec();
+                keys.sort_unstable();
+                keys
+            }
+        }
+    }
+
+    /// The record of `key`, from the checked export or the captured state.
+    fn read(&self, key: ObjectKey) -> Result<StreamRecord, RdyError> {
+        let found = match &self.source {
+            Source::Checked(stream) => stream.read(key),
+            Source::State(read) => StoreSource {
+                reader: read.reader(),
+                end: read.seq(),
+            }
+            .record(key),
+        };
+        found.map_err(from_stream)?.ok_or_else(inconsistent)
     }
 
     fn deps_of(&self, p: u32) -> &[u32] {
@@ -312,29 +508,7 @@ pub fn missing_keys(
     wire: &dyn PublishWire,
     context: &mut dyn FnMut() -> Result<UploadContext, RdyError>,
 ) -> Result<Vec<ObjectKey>, RdyError> {
-    if keys.len() as u64 > MAX_RECORDS {
-        return Err(upload_limit(LIMIT_OBJECT_RECORDS));
-    }
-    if keys.windows(2).any(|w| w[0] >= w[1]) {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            "the object keys are not in strictly ascending order",
-            "sort the object keys and remove repeats",
-        ));
-    }
-    let mut missing: Vec<ObjectKey> = Vec::new();
-    for chunk in keys.chunks(MAX_KNOWN_KEYS) {
-        let cx = context()?;
-        let reply = wire.known(&cx, push.as_str(), chunk)?;
-        let subset = reply.len() <= chunk.len()
-            && reply.windows(2).all(|w| w[0] < w[1])
-            && reply.iter().all(|k| chunk.binary_search(k).is_ok());
-        if !subset || missing.len() + reply.len() > MAX_RECORDS as usize {
-            return Err(upstream_protocol());
-        }
-        missing.extend(reply);
-    }
-    Ok(missing)
+    missing_with(keys, push, &PublishObjects(wire), context)
 }
 
 /// One planned batch: its places, its prerequisites and its encoded bytes.
@@ -552,20 +726,27 @@ fn write_batch(
     scratch
         .seek(SeekFrom::Start(0))
         .map_err(|_| scratch_error())?;
-    let header = StreamHeader::tag_history(
-        history.features.clone(),
-        history.repo_id,
-        history.tag,
-        batch.prerequisites.clone(),
-    );
+    let header = match history.purpose {
+        StreamPurpose::CanonHistory => StreamHeader::canon_history(
+            history.features.clone(),
+            history.repo_id,
+            history.tag,
+            batch.prerequisites.clone(),
+        ),
+        _ => StreamHeader::tag_history(
+            history.features.clone(),
+            history.repo_id,
+            history.tag,
+            batch.prerequisites.clone(),
+        ),
+    };
+    if let Source::State(read) = &history.source {
+        read.ensure_current_epoch()?;
+    }
     let mut out = BufWriter::new(&mut *scratch);
     let mut w = StreamWriter::new(&mut out, &header).map_err(from_stream)?;
     for &p in &batch.places {
-        let record = history
-            .stream
-            .read(history.order[p as usize])
-            .map_err(from_stream)?
-            .ok_or_else(inconsistent)?;
+        let record = history.read(history.order[p as usize])?;
         w.record(&record).map_err(from_stream)?;
     }
     let (_, totals) = w.finish().map_err(from_stream)?;
@@ -578,7 +759,58 @@ fn write_batch(
     scratch
         .seek(SeekFrom::Start(0))
         .map_err(|_| scratch_error())?;
+    // a canon history batch passes Plan A's batch check before it is sent
+    if history.purpose != StreamPurpose::TagHistory {
+        crate::stream_check::check_batch((&*scratch).take(written), Some(history.repo_id))?;
+        scratch
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| scratch_error())?;
+    }
     Ok(written)
+}
+
+/// The known and put steps a history upload uses: the publication upload's, or the sync
+/// exchange's.
+pub trait ObjectWire {
+    /// The keys of `keys` the hub lacks for push `push`.
+    fn known(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        keys: &[ObjectKey],
+    ) -> Result<Vec<ObjectKey>, RdyError>;
+    /// One batch of `len` bytes into the quarantine of push `push`.
+    fn put(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut dyn Read,
+        len: u64,
+    ) -> Result<ObjectPut, RdyError>;
+}
+
+/// The publication upload's wire as an [`ObjectWire`].
+struct PublishObjects<'a>(&'a dyn PublishWire);
+
+impl ObjectWire for PublishObjects<'_> {
+    fn known(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        keys: &[ObjectKey],
+    ) -> Result<Vec<ObjectKey>, RdyError> {
+        self.0.known(cx, push, keys)
+    }
+
+    fn put(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut dyn Read,
+        len: u64,
+    ) -> Result<ObjectPut, RdyError> {
+        self.0.put_objects(cx, push, body, len)
+    }
 }
 
 /// Sends `history` to the hub under push `push` (see the module docs): the known step, then each
@@ -591,26 +823,94 @@ pub fn send_history(
     wire: &dyn PublishWire,
     context: &mut dyn FnMut() -> Result<UploadContext, RdyError>,
 ) -> Result<HistorySent, RdyError> {
-    let history = &*history;
-    let missing = missing_keys(&history.stream.facts().objects, push, wire, context)?;
-    let send: Vec<u32> = (0..history.order.len() as u32)
+    let mut sent = HistorySent::default();
+    let missing = missing_with(&history.keys(), push, &PublishObjects(wire), context)?;
+    send_objects(
+        history,
+        &missing,
+        push,
+        limits,
+        &PublishObjects(wire),
+        context,
+        &mut || Ok(()),
+        &mut sent,
+    )?;
+    Ok(sent)
+}
+
+/// [`missing_keys`] over any [`ObjectWire`].
+pub fn missing_with(
+    keys: &[ObjectKey],
+    push: &PushId,
+    wire: &dyn ObjectWire,
+    context: &mut dyn FnMut() -> Result<UploadContext, RdyError>,
+) -> Result<Vec<ObjectKey>, RdyError> {
+    if keys.len() as u64 > MAX_RECORDS {
+        return Err(upload_limit(LIMIT_OBJECT_RECORDS));
+    }
+    if keys.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "the object keys are not in strictly ascending order",
+            "sort the object keys and remove repeats",
+        ));
+    }
+    let mut missing: Vec<ObjectKey> = Vec::new();
+    for chunk in keys.chunks(MAX_KNOWN_KEYS) {
+        let cx = context()?;
+        let reply = wire.known(&cx, push.as_str(), chunk)?;
+        let subset = reply.len() <= chunk.len()
+            && reply.windows(2).all(|w| w[0] < w[1])
+            && reply.iter().all(|k| chunk.binary_search(k).is_ok());
+        if !subset || missing.len() + reply.len() > MAX_RECORDS as usize {
+            return Err(upstream_protocol());
+        }
+        missing.extend(reply);
+    }
+    Ok(missing)
+}
+
+/// Sends the records of `history` that `missing` names (and every record that always travels)
+/// under push `push`, each batch right after a fresh `context`; `before_put` runs once, before
+/// the first put. `sent` counts each acknowledged batch as it comes, so a caller that gets an
+/// error still knows what the hub acknowledged. Every batch is planned before the first is
+/// sent. A tag history with nothing to send sends one batch of no record; a canon history sends
+/// none.
+#[allow(clippy::too_many_arguments)]
+pub fn send_objects(
+    history: &PreparedHistory,
+    missing: &[ObjectKey],
+    push: &PushId,
+    limits: BatchLimits,
+    wire: &dyn ObjectWire,
+    context: &mut dyn FnMut() -> Result<UploadContext, RdyError>,
+    before_put: &mut dyn FnMut() -> Result<(), RdyError>,
+    sent: &mut HistorySent,
+) -> Result<(), RdyError> {
+    let send: Vec<u32> = (0..history.records() as u32)
         .filter(|&p| {
             history.retained[p as usize]
                 || missing.binary_search(&history.order[p as usize]).is_ok()
         })
         .collect();
+    if send.is_empty() && history.purpose != StreamPurpose::TagHistory {
+        return Ok(());
+    }
     let batches = plan(history, &send, limits)?;
     let mut scratch = tempfile::tempfile().map_err(|_| scratch_error())?;
-    let mut sent = HistorySent::default();
     let mut last = ObjectPut {
         records: 0,
         bytes: 0,
     };
+    let mut first = true;
     for batch in &batches {
         let len = write_batch(history, batch, &mut scratch)?;
+        if std::mem::replace(&mut first, false) {
+            before_put()?;
+        }
         let cx = context()?;
         let mut body = (&scratch).take(len);
-        let put = wire.put_objects(&cx, push.as_str(), &mut body, len)?;
+        let put = wire.put(&cx, push.as_str(), &mut body, len)?;
         // the quarantine's distinct records and bytes so far: they never shrink and stay
         // within one upload's caps
         if put.records < last.records
@@ -625,5 +925,5 @@ pub fn send_history(
         sent.records += batch.places.len() as u64;
         sent.bytes += len;
     }
-    Ok(sent)
+    Ok(())
 }

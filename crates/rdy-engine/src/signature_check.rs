@@ -306,7 +306,7 @@ pub fn check_signature_carried(
 /// subject's `rebased_from`, then each held source's own `rebased_from` in turn, breadth first,
 /// each landing once. A pull adds one link per replay and hashes keep the chain acyclic, so the
 /// walk has no depth cap. Empty for any other subject.
-pub(crate) fn carried_sources(
+pub fn carried_sources(
     state: &ReadState,
     context: &CheckContext,
 ) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {

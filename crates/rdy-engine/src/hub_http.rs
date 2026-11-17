@@ -1524,9 +1524,10 @@ pub(crate) enum ApiOutcome {
 
 /// The hub's API error codes the client recognizes, each with one HTTP status it is sent with:
 /// the one hub-code table. A code may have more than one row (`E_HUB_BAD_INPUT`). The first 17
-/// rows are HA2a's; the rest are the publication upload's (hub tb-1V67R, tb-NZXSA, tb-WDA9Q,
-/// tb-K416A, tb-4FYKZ, tb-CVS65 and tb-SVP3W).
-const API_ERRORS: [(&str, u16, ApiOutcome); 52] = [
+/// rows are HA2a's; then the publication upload's (hub tb-1V67R, tb-NZXSA, tb-WDA9Q,
+/// tb-K416A, tb-4FYKZ, tb-CVS65 and tb-SVP3W); the last three are the sync exchange's move codes
+/// (D-0SC9C).
+const API_ERRORS: [(&str, u16, ApiOutcome); 55] = [
     ("E_HUB_ACTOR_CLAIM", 403, ApiOutcome::ActorClaim),
     ("E_HUB_NO_CREDENTIAL", 401, ApiOutcome::AuthRequired),
     ("E_HUB_CREDENTIAL_UNKNOWN", 401, ApiOutcome::AuthRequired),
@@ -1586,6 +1587,10 @@ const API_ERRORS: [(&str, u16, ApiOutcome); 52] = [
     ("E_HUB_REMOVAL_UNCOVERED", 409, ApiOutcome::Refused),
     ("E_HUB_SITE_AUDIENCE", 409, ApiOutcome::Refused),
     ("E_HUB_PUBLIC_SITES_OFF", 403, ApiOutcome::Refused),
+    // D-0SC9C: the hub's move codes (rdyhub tb-KAZ3J)
+    ("E_HUB_CHAIN_INVALID", 422, ApiOutcome::Refused),
+    ("E_HUB_BEHIND", 409, ApiOutcome::Refused),
+    ("E_HUB_VIEW_EXISTS", 409, ApiOutcome::Refused),
 ];
 
 /// The [`API_ERRORS`] row of `code`: its static spelling and classification. With

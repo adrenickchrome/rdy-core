@@ -304,6 +304,22 @@ pub const SYNC_VIEW_MISSING_MESSAGE: &str = "view <name> is not on remote <remot
 /// The fix of `E_NOT_FOUND` when a pull names a view the hub lacks.
 pub const SYNC_VIEW_MISSING_FIX: &str =
     "check the name, or push the view from a machine that has it";
+/// A push whose local canon does not hold the hub tip (D-47HVF, D-0SC9C): the client's own
+/// refusal, checked before any known or put step.
+pub const E_DIVERGED: &str = "E_DIVERGED";
+/// The message of `E_DIVERGED` (D-47HVF `SYNC_DIVERGED`).
+pub const SYNC_DIVERGED_MESSAGE: &str = "local canon does not hold hub tip <tip>";
+/// The fix of `E_DIVERGED`.
+pub const SYNC_DIVERGED_FIX: &str = "run rdy pull to replay local landings, then push again";
+/// The message of `E_BAD_INPUT` when a push or pull names a remote whose mode is not share
+/// (D-47HVF `SYNC_REMOTE_MODE`).
+pub const SYNC_REMOTE_MODE_MESSAGE: &str = "remote <name> is not a share remote";
+/// The fix of `E_BAD_INPUT` when a push or pull names a remote whose mode is not share.
+pub const SYNC_REMOTE_MODE_FIX: &str = "set its mode to share, or choose a share remote";
+/// The message of `E_STORE_FORMAT` when the hub repo's `min_rdy` is above this rdy (D-4XHPH).
+pub const SYNC_MIN_RDY_MESSAGE: &str = "hub repo <name> needs rdy <version>";
+/// The fix of `E_STORE_FORMAT` when the hub repo's `min_rdy` is above this rdy.
+pub const SYNC_MIN_RDY_FIX: &str = "update rdy to <version> or later";
 /// An org publication profile whose selection references blocks outside it (D-0VCQ5): a warning
 /// on its output.
 pub const W_PUBLICATION_REFERENCE: &str = "W_PUBLICATION_REFERENCE";
@@ -1237,7 +1253,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 118] = [
+const CORE_ERROR_CODES: [&str; 119] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1316,6 +1332,7 @@ const CORE_ERROR_CODES: [&str; 118] = [
     E_PUBLICATION_REFERENCE,
     E_PUBLICATION_BASELINE,
     E_VIEW_DIVERGED,
+    E_DIVERGED,
     E_SIGNING_KEY_MISSING,
     E_SIGNING_KEY_TYPE,
     E_NO_AGENT,
