@@ -134,7 +134,7 @@ pub struct HistorySent {
 /// Where a prepared history's records are read: the checked export of a tag, or the captured
 /// state a canon history's closure was taken from.
 enum Source {
-    Checked(CheckedStream<File>),
+    Checked(Box<CheckedStream<File>>),
     State(Arc<ReadState>),
 }
 
@@ -309,7 +309,7 @@ impl PreparedHistory {
         let manifest = features.to_json().len() as u64;
         read.ensure_current_epoch()?;
         Ok(PreparedHistory {
-            source: Source::Checked(stream),
+            source: Source::Checked(Box::new(stream)),
             purpose: StreamPurpose::TagHistory,
             externals: 0,
             features,
