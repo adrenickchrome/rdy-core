@@ -1072,8 +1072,9 @@ fn nb11_rdy_pending_shows_the_words_and_the_related_list() {
             .to_string()
     };
     let batch = item_of(&v, &pv.r#ref);
-    let counts = "0 listed by link, 1 found by text, 0 omitted";
-    let text_row = format!("{n} same_entity {a} [live] via text");
+    // D-Q6A3F: the text row is named after the counts
+    let text_row = format!("{n} same_entity {a} [live] via text: Entries are append-only");
+    let counts = format!("0 listed by link, 1 found by text, 0 omitted: {text_row}");
     assert_eq!(
         fact(&batch, "Confidence"),
         format!("medium: unlinked_mention on {n} (\"ledger service\")")
@@ -1097,9 +1098,7 @@ fn nb11_rdy_pending_shows_the_words_and_the_related_list() {
     );
     for card in [&batch, &confirm] {
         let text = card["card"].as_str().unwrap();
-        assert!(text.contains(counts), "{text}");
-        assert!(!text.contains(&text_row), "{text}");
-        assert!(!text.contains("Entries are append-only"), "{text}");
+        assert!(text.contains(&counts), "{text}");
     }
     for item in [&batch, &confirm] {
         let mut keys: Vec<&str> = item
