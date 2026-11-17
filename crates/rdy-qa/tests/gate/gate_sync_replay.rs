@@ -872,11 +872,14 @@ fn scc3_landing_dependencies_use_current_canon_membership() {
                 if p.is_dir() {
                     stack.push(p);
                 } else if p.extension().is_some_and(|x| x == "rs") {
+                    // '/' on every OS, as the audit table writes it
                     let rel = p
                         .strip_prefix(workspace())
                         .unwrap()
-                        .to_string_lossy()
-                        .into_owned();
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/");
                     for n in landing_of_calls(&rel) {
                         found.push((rel.clone(), n));
                     }
