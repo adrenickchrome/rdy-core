@@ -577,8 +577,7 @@ fn scc8_wire_bounds_and_redirects_fail_closed() {
     let e = err(unsent(&[&s], || hub.wire.known(&cx, PUSH, &many)));
     assert_eq!(e.code, E_LIMIT);
     let e = err(unsent(&[&s], || {
-        hub.wire
-            .known(&cx, PUSH, &[key(1, 2), key(1, 1)].map(|k| k).to_vec())
+        hub.wire.known(&cx, PUSH, &[key(1, 2), key(1, 1)])
     }));
     assert_eq!(e.code, E_BAD_INPUT);
     // 100,000 keys go in one request within 16,777,216 bytes
@@ -590,7 +589,7 @@ fn scc8_wire_bounds_and_redirects_fail_closed() {
 
     // a reply one byte over its bound
     let pad = |n: usize| " ".repeat(n);
-    let big = format!(r#"{{"sync_base":"/sync","protocols":[1]}}"#);
+    let big = r#"{"sync_base":"/sync","protocols":[1]}"#;
     let over = format!("{big}{}", pad(REPLY_BYTES + 1 - big.len()));
     let (r, _) = served(&mut s, Reply::json(200, &over), || {
         hub.wire.discovery(&base_cx, &remote)
