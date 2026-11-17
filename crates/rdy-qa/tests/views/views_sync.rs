@@ -538,7 +538,12 @@ fn scc4_rechain_onto_current_base_drops_landed_changes() {
     // a is a copy of b with b's canon; a takes the hub's v, rebases it onto that canon and
     // writes on, so the hub's v has its own rebase and a base equal to b's canon
     let a2 = w.dir.path().join("a2");
-    copy_dir(&w.dir.path().join("b"), &a2);
+    // Windows refuses to copy a project that is open: close b while it is copied
+    let b_path = w.dir.path().join("b");
+    let spare = Rdy::init(&w.dir.path().join("spare"), "rdy-standard").unwrap();
+    drop(std::mem::replace(&mut w.b, spare));
+    copy_dir(&b_path, &a2);
+    w.b = Rdy::open(&b_path).unwrap();
     w.a = Rdy::open(&a2).unwrap();
     let got = w.pull_req(Side::A, &["v"], true, None).unwrap();
     assert_eq!(got[0].status, ViewPullStatus::Taken, "{got:?}");

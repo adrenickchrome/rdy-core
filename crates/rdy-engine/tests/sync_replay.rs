@@ -240,6 +240,12 @@ impl World {
 
     /// Closes the local project and opens it again.
     fn reopen(&mut self) {
+        self.close_local();
+        self.local = Rdy::open(&self.dir.path().join("local")).unwrap();
+    }
+
+    /// Closes the local project: `local` holds a spare project until it is opened again.
+    fn close_local(&mut self) {
         let spare = self.dir.path().join("spare");
         if !spare.exists() {
             drop(Rdy::init(&spare, "rdy-standard").unwrap());
@@ -248,7 +254,6 @@ impl World {
             &mut self.local,
             Rdy::open(&spare).unwrap(),
         ));
-        self.local = Rdy::open(&self.dir.path().join("local")).unwrap();
     }
 
     fn landing(&self, h: &Hash) -> LandingRecord {
@@ -485,10 +490,13 @@ fn scc3_replay_order_and_sources_are_exact() {
     let pushed = land_doc(&mut w.local, "pushed");
     w.applied(pushed);
     // the hub holds the pushed landing too: it lands on top of it
+    // Windows refuses to copy a project that is open
+    w.close_local();
     drop(w.hub);
     let hub_dir = w.dir.path().join("hub");
     std::fs::remove_dir_all(&hub_dir).unwrap();
     copy_dir(&w.dir.path().join("local"), &hub_dir);
+    w.local = Rdy::open(&w.dir.path().join("local")).unwrap();
     w.hub = Rdy::open(&hub_dir).unwrap();
     let ls: Vec<Hash> = ["one", "two", "three"]
         .iter()
