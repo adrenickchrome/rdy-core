@@ -34,8 +34,10 @@
 //! The sync exchange sends a canon history the same way ([`PreparedHistory::canon`],
 //! [`send_objects`]; D-H0BZN, D-KE83X): its records are Plan A's closure from the head above the
 //! hub tip, read from the captured state, and the keys it names but does not hold are
-//! prerequisites that never travel. Each format-4 batch passes Plan A's batch check before it
-//! is sent. When nothing is missing, no batch is sent.
+//! prerequisites that never travel. When the hub tip is the head, the closure holds only the
+//! attachments made since (later tags, signatures and answers), and every batch names the head
+//! as a prerequisite. Each format-4 batch passes Plan A's batch check before it is sent. When
+//! nothing is missing, no batch is sent.
 use crate::error::{E_BAD_INPUT, E_INTERNAL, E_IO, E_LIMIT, RdyError, upstream_protocol};
 use crate::hub_publish_wire::{
     CORE_BATCH_BYTES, CORE_BATCH_RECORDS, MAX_KNOWN_KEYS, ObjectPut, PUSH_ID_CHARS, PublishWire,
@@ -328,7 +330,9 @@ impl PreparedHistory {
     /// The canon history from the head landing `head` above the hub tip `base` that `read`
     /// captured: Plan A's closure of the head (D-KE83X), whose records the hub may lack, in
     /// dependency order. The keys its records need beyond it are prerequisites that never
-    /// travel. Records are read from `read` when a batch is written.
+    /// travel. When `base` is the head, the head is such a prerequisite and the records are the
+    /// attachments the base's links do not reach. Records are read from `read` when a batch is
+    /// written.
     pub fn canon(
         read: Arc<ReadState>,
         head: Hash,
@@ -362,7 +366,8 @@ impl PreparedHistory {
             kind: kinds::LANDING,
             hash: head,
         })?;
-        if root as usize >= records {
+        // the root is a record, unless the base's links hold it: then the base is the head
+        if root as usize >= records && base != Some(head) {
             return Err(inconsistent());
         }
         let mut source = StoreSource {

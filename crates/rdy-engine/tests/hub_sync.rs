@@ -77,6 +77,8 @@ struct Hub {
     calls: Mutex<Vec<Call>>,
     /// Each put's push id and the keys its batch carried, in order.
     puts: Mutex<Vec<(String, Vec<ObjectKey>)>>,
+    /// Each put's batch root and prerequisites, in order.
+    roots: Mutex<Vec<(Hash, Vec<ObjectKey>)>>,
 }
 
 fn base_state() -> PublishState {
@@ -109,6 +111,7 @@ impl Hub {
             hook: Mutex::default(),
             calls: Mutex::default(),
             puts: Mutex::default(),
+            roots: Mutex::default(),
         }
     }
 
@@ -225,6 +228,10 @@ impl SyncWire for Hub {
         assert_eq!(bytes.len() as u64, len);
         let report = stream_check::check_batch(&bytes[..], None).unwrap();
         assert_eq!(report.header.purpose, StreamPurpose::CanonHistory);
+        self.roots
+            .lock()
+            .unwrap()
+            .push((report.header.tag, report.header.prerequisites.clone()));
         self.puts
             .lock()
             .unwrap()
@@ -373,7 +380,7 @@ fn scc8_no_state_push_seeds_extends_or_diverges() {
         s.canon = Some(tip);
     });
     let out = push(&e, &hub, None).unwrap();
-    let PushOutcome::Uploaded { base, .. } = out else {
+    let PushOutcome::Uploaded { base, push: id, .. } = out else {
         panic!("{out:?}")
     };
     assert_eq!(base, Some(tip));
@@ -384,13 +391,19 @@ fn scc8_no_state_push_seeds_extends_or_diverges() {
         hash: tip
     }));
 
-    // up to date: the hub tip is the head
+    // up to date: the hub tip is the head (as after the write, which clears the upload) and the
+    // hub holds its whole closure
+    seed_sync(&e, "shared", vec![SyncStep::ClearUpload { push: id }]);
     let hub = Hub::new().with_state(|s| s.canon = Some(head));
+    *hub.held.lock().unwrap() = closure(&e, head, None);
     assert_eq!(
         push(&e, &hub, None).unwrap(),
         PushOutcome::UpToDate { tip: Some(head) }
     );
+    // landings with no attachment: the closure above the head is empty, so known is not asked
+    assert_eq!(closure(&e, head, Some(head)), BTreeSet::new());
     assert_eq!(hub.steps(), ["discovery", "state"]);
+    assert_eq!(upload_of(&e, "shared"), None);
 
     // diverged: a tip local canon does not hold
     let e = env(1);
@@ -406,6 +419,83 @@ fn scc8_no_state_push_seeds_extends_or_diverges() {
         )
     );
     assert_eq!(hub.steps(), ["discovery", "state"]);
+    assert_eq!(upload_of(&e, "shared"), None);
+}
+
+/// D-KE83X, D-H0BZN: an attachment made after the hub took local canon's head travels though
+/// both tips match. The push asks known for the head's attachments and sends the missing ones in
+/// a batch that names the head as a prerequisite; it records the upload before that put. It is
+/// up to date only when the hub holds every one of them.
+#[test]
+fn scc8_equal_tip_push_sends_late_attachments() {
+    let e = env(2);
+    let head = *e.landings.last().unwrap();
+    let hub = Hub::new().with_state(|s| s.canon = Some(head));
+    *hub.held.lock().unwrap() = closure(&e, head, None);
+    assert_eq!(
+        push(&e, &hub, None).unwrap(),
+        PushOutcome::UpToDate { tip: Some(head) }
+    );
+
+    // a version named on the head after the hub took it
+    let tag: Hash = rdy_engine::engine::with_writer_result(&e.engine, |r| {
+        let v = r.tag(&founder(), "v1.0.0", None, None)?;
+        Ok(v.tag.parse().unwrap())
+    })
+    .unwrap();
+    let tag_key = ObjectKey {
+        kind: rdy_store::kinds::TAG,
+        hash: tag,
+    };
+    let late = closure(&e, head, Some(head));
+    assert!(late.contains(&tag_key), "{late:?}");
+    hub.calls.lock().unwrap().clear();
+    let out = push(&e, &hub, None).unwrap();
+    let PushOutcome::Uploaded {
+        push: id,
+        base,
+        head: pushed,
+        resumed,
+        sent,
+    } = out
+    else {
+        panic!("{out:?}")
+    };
+    assert_eq!((base, pushed, resumed), (Some(head), head, false));
+    assert_eq!(hub.steps(), ["discovery", "state", "known", "put"]);
+    let sent_keys: BTreeSet<ObjectKey> = hub.sent_keys().into_iter().collect();
+    let held = hub.held.lock().unwrap().clone();
+    let want: BTreeSet<ObjectKey> = late.difference(&held).copied().collect();
+    assert!(want.contains(&tag_key));
+    assert_eq!(sent_keys, want);
+    assert_eq!(sent.records, want.len() as u64);
+    let head_key = ObjectKey {
+        kind: rdy_store::kinds::LANDING,
+        hash: head,
+    };
+    assert!(!sent_keys.contains(&head_key));
+    // the batch's root is the head, named as a prerequisite
+    let roots = hub.roots.lock().unwrap().clone();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].0, head);
+    assert!(roots[0].1.contains(&head_key), "{:?}", roots[0].1);
+    let u = upload_of(&e, "shared").expect("the upload stays for the write step");
+    assert_eq!((u.push.as_str(), u.kind), (id.as_str(), KIND_CANON));
+
+    // once the hub holds the tag (as after the write) and the upload is gone, nothing travels
+    hub.held.lock().unwrap().extend(sent_keys.iter().copied());
+    seed_sync(
+        &e,
+        "shared",
+        vec![SyncStep::ClearUpload { push: id.clone() }],
+    );
+    hub.calls.lock().unwrap().clear();
+    hub.puts.lock().unwrap().clear();
+    assert_eq!(
+        push(&e, &hub, None).unwrap(),
+        PushOutcome::UpToDate { tip: Some(head) }
+    );
+    assert_eq!(hub.steps(), ["discovery", "state", "known"]);
     assert_eq!(upload_of(&e, "shared"), None);
 }
 

@@ -14,10 +14,13 @@
 //!    (`E_REPO_MISMATCH`) and the history stream format. A `pending` write found here stops the
 //!    push with [`PushOutcome::PendingWrite`]; both refs stay. Then the base rule: a null hub tip
 //!    seeds, a tip local canon holds is the base, any other tip is `E_DIVERGED`.
-//! 6. **Upload.** One push id per upload: the `upload` ref's, when one names this remote's canon
-//!    upload (a stopped put resumes), else a new one. Known names the keys neither the hub's
-//!    store nor the push's quarantine holds; only those travel, in Plan A's format-4 batches.
-//!    The `upload` ref is written before the first put.
+//! 6. **Upload.** The records are Plan A's closure of local canon's head above the hub tip
+//!    (D-KE83X). When the hub tip is the head, they are the attachments made since (later tags,
+//!    signatures and answers); with none, the push is up to date. One push id per upload: the
+//!    `upload` ref's, when one names this remote's canon upload (a stopped put resumes), else a
+//!    new one. Known names the keys neither the hub's store nor the push's quarantine holds;
+//!    only those travel, in Plan A's format-4 batches. The `upload` ref is written before the
+//!    first put. A push at the hub tip that sends nothing and resumes no upload is up to date.
 //! 7. **End.** After the last put the upload stays for the write step. A push that fails
 //!    clears only an `upload` it wrote itself, and only when no put of it may have reached the
 //!    quarantine.
@@ -62,10 +65,12 @@ pub struct PushRequest {
 /// How a push ended without an error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PushOutcome {
-    /// The hub tip is local canon's head (or both are empty): nothing to upload.
+    /// The hub tip is local canon's head (or both are empty), and the hub holds every
+    /// attachment of the head's history: nothing to upload.
     UpToDate { tip: Option<Hash> },
     /// Every record the hub lacked is in the quarantine of `push`, from local canon's `head`
-    /// above the hub tip `base`. The `upload` ref stays for the write step.
+    /// above the hub tip `base`. `base` is `head` when only later attachments travel. The
+    /// `upload` ref stays for the write step.
     Uploaded {
         push: String,
         base: Option<Hash>,
@@ -331,9 +336,17 @@ impl<'a> SyncService<'a> {
         {
             return Err(diverged(tip));
         }
-        let Some(head) = head.filter(|h| Some(*h) != base) else {
+        let Some(head) = head else {
+            // both are empty: the base rule refused any hub tip
             return Ok(PushOutcome::UpToDate { tip: base });
         };
+        // at the hub tip, the history is the attachments made since (D-KE83X)
+        let history = PreparedHistory::canon(Arc::clone(&read), head, base)?;
+        let keys = history.keys();
+        let at_tip = base == Some(head);
+        if at_tip && keys.is_empty() {
+            return Ok(PushOutcome::UpToDate { tip: base });
+        }
 
         // 6. the upload: a stopped one of this remote's canon resumes under its push id
         let resumed = refs.upload.as_ref().and_then(|u| {
@@ -349,10 +362,9 @@ impl<'a> SyncService<'a> {
         }
         let was_resumed = resumed.is_some();
         let push = resumed.unwrap_or_else(PushId::new);
-        let history = PreparedHistory::canon(Arc::clone(&read), head, base)?;
         let wire = SyncObjects(self.wire);
         let mut context = || self.context(t, &read, Some(&base_url));
-        let missing = missing_with(&history.keys(), &push, &wire, &mut context)?;
+        let missing = missing_with(&keys, &push, &wire, &mut context)?;
         let limits = BatchLimits {
             bytes: state.batch_bytes,
             records: state.batch_records,
@@ -400,6 +412,10 @@ impl<'a> SyncService<'a> {
                 );
             }
             return Err(e);
+        }
+        if at_tip && sent.batches == 0 && !was_resumed {
+            // the hub holds every attachment: no upload was recorded
+            return Ok(PushOutcome::UpToDate { tip: base });
         }
         // Seam (8a2): the write step follows here, with the render inputs and, for canon, the
         // gate settings; it sends the write under this push id.
