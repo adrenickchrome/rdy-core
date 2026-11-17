@@ -130,6 +130,25 @@ def result_rule(result, driver, extensions):
     return select_reference(rule_ref, component.get('rules', []), ('id', 'guid'))
 
 
+# CodeQL counts faults in its own extractor and libraries (CFG, SSA, type
+# inference) and reports the counts as diagnostics with IDs like
+# rust/diagnostics/type-inference-consistency-counts. These name no file and
+# say nothing about the code, so they do not block. Every other error does.
+CONSISTENCY_SELF_CHECK = re.compile(r'[a-z]+/diagnostics/[a-z-]+-consistency-counts')
+
+
+def consistency_self_check(notification):
+    descriptor = notification.get('descriptor')
+    return (isinstance(descriptor, dict) and isinstance(descriptor.get('id'), str)
+            and CONSISTENCY_SELF_CHECK.fullmatch(descriptor['id']) is not None)
+
+
+def notification_text(notification):
+    message = notification.get('message')
+    text = message.get('text') if isinstance(message, dict) else None
+    return text if isinstance(text, str) else '(no message)'
+
+
 def inspect_sarif(document, repository_paths=None):
     if not isinstance(document, dict) or document.get('version') != '2.1.0':
         raise ValueError('unsupported SARIF')
@@ -181,6 +200,11 @@ def inspect_sarif(document, repository_paths=None):
                 if not isinstance(notification, dict):
                     raise ValueError('invalid analyzer notification')
                 if notification.get('level') == 'error':
+                    if consistency_self_check(notification):
+                        print('CodeQL self-check (does not block): '
+                              f"{notification['descriptor']['id']}: {notification_text(notification)}",
+                              file=sys.stderr)
+                        continue
                     raise ValueError('analysis reported an error')
         results = run.get('results')
         if not isinstance(results, list):

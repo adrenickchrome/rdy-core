@@ -1,5 +1,5 @@
 """Failure-path checks for the CI scripts and policies, with no network or product store."""
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import http.client
 import importlib.util
@@ -85,6 +85,25 @@ class SarifPolicy(unittest.TestCase):
             item = report(results=False)
             item['runs'][0]['invocations'] = [invocation]
             with self.assertRaises(ValueError):
+                SARIF.inspect_sarif(item)
+
+    def test_codeql_consistency_self_checks_do_not_block(self):
+        # Shape from hosted CodeQL 2.27.4 on Rust: an error-level count with no location.
+        check = {'level': 'error', 'message': {'text': 'Ill-formed type mention'},
+                 'descriptor': {'id': 'rust/diagnostics/type-inference-consistency-counts', 'index': 0}}
+        for key in ('toolExecutionNotifications', 'toolConfigurationNotifications'):
+            item = report(results=False)
+            item['runs'][0]['invocations'] = [{'executionSuccessful': True, key: [check]}]
+            with redirect_stderr(io.StringIO()) as err:
+                SARIF.inspect_sarif(item)
+            self.assertIn('type-inference-consistency-counts: Ill-formed type mention', err.getvalue())
+        for descriptor in [None, {}, {'id': 7}, {'id': 'rust/diagnostics/extraction-errors'},
+                           {'id': 'rust/diagnostics/type-inference-consistency-counts/x'},
+                           {'id': 'rust/queries/type-inference-consistency-counts'}]:
+            item = report(results=False)
+            item['runs'][0]['invocations'] = [{'executionSuccessful': True, 'toolExecutionNotifications': [
+                {'level': 'error', 'descriptor': descriptor}]}]
+            with self.subTest(descriptor=descriptor), self.assertRaises(ValueError):
                 SARIF.inspect_sarif(item)
 
     def test_unscored_error_blocks(self):
