@@ -24778,6 +24778,10 @@
               "fix": "string",
               "when": "string"
             },
+            "E_DIVERGED": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_DUMP": {
               "fix": "string",
               "when": "string"

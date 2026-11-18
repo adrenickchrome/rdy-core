@@ -99,6 +99,10 @@ const SCC9_CHANGES: &[(&str, &str)] = &[
         "the chat row of a push whose local canon does not hold the hub tip",
     ),
     (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/E_DIVERGED",
+        "rdy_schema lists the new error row",
+    ),
+    (
         "added /mcp/result_fields_not_captured/rdy_pull",
         "rdy_pull needs a hub; mcp_sync pins its replies",
     ),
