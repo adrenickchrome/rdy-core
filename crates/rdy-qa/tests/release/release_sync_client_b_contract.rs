@@ -227,7 +227,7 @@ fn scc8_contract_adds_only_sync_wire_and_errors() {
     .unwrap();
     assert_eq!(
         sha(&wire2),
-        "37aba1e73101e071f38a42f515968aae28f0232a2a886890b40a5fcc340fd45d"
+        "ddc3e17a39425ba7af5a7a4be8531fa89e484b2ff82cc4f4b12d8d37418e33e7"
     );
     assert_eq!(
         now["sync"]["fixture_digests"]["sync-client-wire-v2.json"],

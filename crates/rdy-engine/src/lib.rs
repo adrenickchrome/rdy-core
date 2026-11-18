@@ -142,6 +142,7 @@ pub mod suspect_reply;
 pub mod sync_fetch;
 pub mod sync_redaction;
 pub mod sync_replay;
+pub mod sync_restore;
 pub mod sync_state;
 pub mod sync_views;
 pub mod tensions;

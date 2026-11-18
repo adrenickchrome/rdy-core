@@ -34,11 +34,15 @@
 //!    fetched tip or head (when the store holds it), the keys this store lacks fetched in
 //!    batches within the hub's limits, each streamed to a scratch file and checked, then Plan
 //!    A's fetch and replay.
+//! 10. **Restore.** A dump goes to the hub through a temporary store (`crate::sync_restore`).
+//!
+//! A hub refusal keeps the hub's message, fix and request id. `E_HUB_TAG_TAKEN` takes core's
+//! code `E_TAG_EXISTS` with the hub's words (rdyhub-design i-B40VF).
 use crate::engine::{Engine, with_writer_result};
 use crate::error::{
-    E_BAD_INPUT, E_DIVERGED, E_STORE_FORMAT, E_UPSTREAM_ACTOR_CLAIM, E_UPSTREAM_UNCERTAIN,
-    RdyError, SYNC_DIVERGED_FIX, SYNC_DIVERGED_MESSAGE, SYNC_MIN_RDY_FIX, SYNC_MIN_RDY_MESSAGE,
-    sync_uncertain, upstream_auth, upstream_protocol,
+    E_BAD_INPUT, E_DIVERGED, E_STORE_FORMAT, E_TAG_EXISTS, E_UPSTREAM_ACTOR_CLAIM,
+    E_UPSTREAM_UNCERTAIN, RdyError, SYNC_DIVERGED_FIX, SYNC_DIVERGED_MESSAGE, SYNC_MIN_RDY_FIX,
+    SYNC_MIN_RDY_MESSAGE, sync_uncertain, upstream_auth, upstream_protocol,
 };
 use crate::formats::formats;
 use crate::hub_config::{BAD_REMOTE_NAME_FIX, BAD_REMOTE_NAME_MESSAGE, HubConfig, RemoteMode};
@@ -60,6 +64,7 @@ use crate::readiness::assessment::pack_digest;
 use crate::render_inputs::{RenderInputs, validate_inputs};
 use crate::session::{Scope, Session};
 use crate::sync_fetch::{FetchOutcome, HubState, usable_canon_state, usable_view_state};
+use crate::sync_restore::{RestoreOutcome, RestoreRequest};
 use crate::sync_state::{RemoteGuard, remote_refs, write_steps};
 use crate::sync_views::{
     ViewPullRequest, ViewPulled, pull_views, push_plan, view_diverged, view_missing,
@@ -278,12 +283,22 @@ pub fn canon_preview(
     hub_tip: Option<Hash>,
     kind: PreviewKind,
 ) -> Result<CanonPreview, RdyError> {
-    let reader = read.reader();
     let local = read.canon_head();
     let (before, after) = match kind {
         PreviewKind::ForcePush => (hub_tip, local),
         PreviewKind::TakePull => (local, hub_tip),
     };
+    Ok(preview_move(read.reader(), remote, before, after))
+}
+
+/// What a move of canon from `before` to `after` removes, read from `reader` alone (see
+/// [`CanonPreview`]).
+pub(crate) fn preview_move(
+    reader: &StoreReader,
+    remote: &str,
+    before: Option<Hash>,
+    after: Option<Hash>,
+) -> CanonPreview {
     let (kept, kept_complete) = chain(reader, after);
     let kept: BTreeSet<Hash> = kept.into_iter().collect();
     // the chain before the move, back to the first landing it shares with the chain kept (all
@@ -307,13 +322,38 @@ pub fn canon_preview(
     // a list is complete only when this store holds the chain that leaves, and holds enough of
     // the chain kept to show that no listed landing stays
     let complete = gone_known && (kept_complete || leaving.is_empty());
-    Ok(CanonPreview {
+    CanonPreview {
         remote: remote.to_string(),
         before,
         after,
         leaving,
         complete,
-    })
+    }
+}
+
+/// A hub refusal `e` of a write as core reports it: `E_HUB_TAG_TAKEN` is `E_TAG_EXISTS` with
+/// the hub's words and request id (rdyhub-design i-B40VF); any other refusal is unchanged.
+pub(crate) fn write_refusal(mut e: RdyError) -> RdyError {
+    if e.code == "E_HUB_TAG_TAKEN" {
+        e.code = E_TAG_EXISTS;
+    }
+    e
+}
+
+/// The gate settings of `read` (D-0WWYR): the settings readiness reads, and the pack of
+/// `inputs` by its digest.
+pub(crate) fn gate_settings(read: &ReadState, inputs: &RenderInputs) -> GateSettings {
+    let gate = CheckInputs::of_state(read);
+    GateSettings {
+        coverage_gate: gate.coverage_gate.as_str().to_string(),
+        coverage_target: gate.coverage_target,
+        decisions_home: gate.decisions_home,
+        pack_digest: pack_digest(&inputs.pack),
+        propose: ProposeGate {
+            cadence: gate.propose_cadence.as_str().to_string(),
+            changes: gate.propose_changes,
+        },
+    }
 }
 
 /// E_BAD_INPUT: a pull that takes the hub tip cannot also stop at the first replay.
@@ -326,9 +366,9 @@ fn take_and_strict() -> RdyError {
 }
 
 /// The selected remote's install and trust.
-struct Target {
-    name: String,
-    url: String,
+pub(crate) struct Target {
+    pub(crate) name: String,
+    pub(crate) url: String,
     install: Origin,
     ca_file: Option<PathBuf>,
     claim: RequestClaim,
@@ -372,12 +412,14 @@ pub struct SyncService<'a> {
     user_file: PathBuf,
     api: &'a dyn HubTransport,
     clock: &'a dyn HubClock,
-    wire: &'a dyn SyncWire,
-    renderer: &'a dyn PublishRenderer,
+    pub(crate) wire: &'a dyn SyncWire,
+    pub(crate) renderer: &'a dyn PublishRenderer,
+    /// Where a restore makes its temporary store: the system temp root when None.
+    pub(crate) scratch: Option<PathBuf>,
 }
 
 /// The sync wire's known and put steps for the history sender.
-struct SyncObjects<'a>(&'a dyn SyncWire);
+pub(crate) struct SyncObjects<'a>(pub(crate) &'a dyn SyncWire);
 
 impl ObjectWire for SyncObjects<'_> {
     fn known(
@@ -435,7 +477,16 @@ impl<'a> SyncService<'a> {
             clock,
             wire,
             renderer,
+            scratch: None,
         }
+    }
+
+    /// This coordinator with its restores' temporary stores made under `root` in place of the
+    /// system temp root (a test's private directory).
+    #[doc(hidden)]
+    pub fn scratch_in(mut self, root: &Path) -> SyncService<'a> {
+        self.scratch = Some(root.to_path_buf());
+        self
     }
 
     fn credentials(&self) -> HubCredentials<'a> {
@@ -445,7 +496,7 @@ impl<'a> SyncService<'a> {
     /// The context of one request on `t`: current access to its install (renewed when it
     /// expires), checked to hold the run's account and bound claim, then the state's
     /// redaction epoch.
-    fn context(
+    pub(crate) fn context(
         &self,
         t: &Target,
         read: &ReadState,
@@ -487,7 +538,7 @@ impl<'a> SyncService<'a> {
     }
 
     /// Steps 1 to 3: the remote, its guard and its trust; then `run` on them.
-    fn with_target<T>(
+    pub(crate) fn with_target<T>(
         &self,
         session: &Session,
         remote: Option<&str>,
@@ -584,9 +635,31 @@ impl<'a> SyncService<'a> {
         })
     }
 
+    /// Restores the dump of `request` into the hub repo of its share remote through a
+    /// temporary store (`crate::sync_restore`). The caller's project gives the remote, its
+    /// trust and the sign-in; its store is not read or written.
+    pub fn restore(
+        &self,
+        session: &Session,
+        request: RestoreRequest,
+    ) -> Result<RestoreOutcome, RdyError> {
+        crate::sync_restore::restore(self, session, &request)
+    }
+
+    /// What the restore of `request` would remove from hub canon (see [`CanonPreview`]): the
+    /// remote, the hub tip before, the dump's tip after, and each landing of hub canon that the
+    /// dump's store holds and its chain does not. It sends no write and writes nothing.
+    pub fn restore_preview(
+        &self,
+        session: &Session,
+        request: RestoreRequest,
+    ) -> Result<CanonPreview, RdyError> {
+        crate::sync_restore::preview(self, session, &request)
+    }
+
     /// Steps 4 and 5: discovery, state with `views`, and the checks before any transfer.
     /// Returns the sync base and the state.
-    fn open(
+    pub(crate) fn open(
         &self,
         t: &Target,
         read: &ReadState,
@@ -798,17 +871,7 @@ impl<'a> SyncService<'a> {
         let scope = head.map_or(Scope::Canon, Scope::At);
         let inputs = self.renderer.capture(read, &scope)?;
         validate_inputs(&inputs)?;
-        let gate = CheckInputs::of_state(read);
-        let gate = GateSettings {
-            coverage_gate: gate.coverage_gate.as_str().to_string(),
-            coverage_target: gate.coverage_target,
-            decisions_home: gate.decisions_home,
-            pack_digest: pack_digest(&inputs.pack),
-            propose: ProposeGate {
-                cadence: gate.propose_cadence.as_str().to_string(),
-                changes: gate.propose_changes,
-            },
-        };
+        let gate = gate_settings(read, &inputs);
         Ok(Capture { inputs, gate, head })
     }
 
@@ -1104,7 +1167,7 @@ impl<'a> SyncService<'a> {
             gate: (job.kind != WriteKind::View).then(|| capture.gate.clone()),
             kind: job.kind,
             push: id.clone(),
-            render_inputs: capture.inputs.clone(),
+            render_inputs: Some(capture.inputs.clone()),
             tags,
             view: job.view.clone(),
         };
@@ -1137,7 +1200,7 @@ impl<'a> SyncService<'a> {
                 self.reply_only(engine, t, &id)?;
                 return Ok(WriteEnd::Refused {
                     push: Some(id),
-                    error: *error,
+                    error: write_refusal(*error),
                 });
             }
             Err(WriteFailure::Uncertain) => return Err(sync_uncertain(&id)),

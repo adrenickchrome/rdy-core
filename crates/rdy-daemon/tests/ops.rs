@@ -39,7 +39,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 73);
+    assert_eq!(OPS.len(), 74);
     assert_eq!(OPS[0], "session");
     let impact = OPS.iter().position(|o| *o == "impact").unwrap();
     assert_eq!(
@@ -113,9 +113,10 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
             "publish",
             "hook",
             "push",
-            "pull"
+            "pull",
+            "restore"
         ],
-        "sig9: sign and key_show follow answer; hsa9: remote, key_bind, key_retire and key_revoke follow key_show; hpb15: publish follows key_revoke; m4a2: hook follows publish; scc8: push and pull follow hook"
+        "sig9: sign and key_show follow answer; hsa9: remote, key_bind, key_retire and key_revoke follow key_show; hpb15: publish follows key_revoke; m4a2: hook follows publish; scc8: push and pull follow hook, then restore"
     );
     let resolve = OPS.iter().position(|o| *o == "resolve").unwrap();
     assert_eq!(
@@ -141,10 +142,13 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
             .any(|o| o.trim_start_matches("one of: ") == "rule"),
         "rtc4: the unknown-op fix names rule: {err}"
     );
-    // scc8: push and pull take their own strict arguments, refused before any config is read
+    // scc8: push, pull and restore take their own strict arguments, refused before any
+    // config is read
     for (op, args) in [
         ("push", json!({"remote": "shared", "tag": "v1"})),
         ("pull", json!({"views": "not a list"})),
+        ("restore", json!({"dump": "a.rdydump", "force": true})),
+        ("restore", json!({"remote": "shared"})),
     ] {
         let err = dispatch(&cx(&e, &s, d.path()), op, args).unwrap_err();
         assert_eq!(err.code, E_BAD_INPUT, "{op}: {err}");

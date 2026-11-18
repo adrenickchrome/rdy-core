@@ -16,7 +16,8 @@ use hub_tls::{Reply, Server};
 use rdy_engine::hub_http::HttpHubTransport;
 use rdy_engine::hub_publish_wire::{SYNC_MEDIA_TYPE, UploadContext};
 use rdy_engine::hub_sync::{
-    CanonPreview, PreviewKind, PullRequest, PushOutcome, PushRequest, WriteEnd, canon_preview,
+    CanonPreview, PreviewKind, PullRequest, PushOutcome, PushRequest, SyncService, WriteEnd,
+    canon_preview,
 };
 use rdy_engine::hub_sync_wire::{
     GateSettings, GetRequest, HttpSyncWire, HubRequest, KnownPull, LookupOutcome, ProposeGate,
@@ -25,6 +26,7 @@ use rdy_engine::hub_sync_wire::{
 use rdy_engine::hub_types::{Origin, OriginFence, RequestClaim, Secret};
 use rdy_engine::landing_check::CheckInputs;
 use rdy_engine::readiness::assessment::pack_digest;
+use rdy_engine::sync_restore::{RestoreOutcome, RestoreRequest};
 use rdy_engine::*;
 use rdy_model::Hash;
 use rdy_store::kinds;
@@ -527,7 +529,7 @@ fn scc8_hub_refusals_use_publish_mapping() {
         }),
         kind: WriteKind::Landings,
         push: push_id.into(),
-        render_inputs: inputs,
+        render_inputs: Some(inputs),
         tags: vec![],
         view: None,
     };
@@ -1088,7 +1090,7 @@ fn scc8_every_write_has_one_render_capture_and_canon_gate_digest() {
     let rdy = rdy_engine::formats::formats().rdy;
     for w in &writes {
         assert_eq!(w.render_inputs, writes[0].render_inputs);
-        assert_eq!(w.render_inputs.rdy, rdy);
+        assert_eq!(w.render_inputs.as_ref().unwrap().rdy, rdy);
         assert!(w.tags.is_empty());
     }
     let read = e.engine.read();
@@ -1100,7 +1102,7 @@ fn scc8_every_write_has_one_render_capture_and_canon_gate_digest() {
             coverage_gate: want.coverage_gate.as_str().into(),
             coverage_target: want.coverage_target,
             decisions_home: want.decisions_home.clone(),
-            pack_digest: pack_digest(&writes[0].render_inputs.pack),
+            pack_digest: pack_digest(&writes[0].render_inputs.as_ref().unwrap().pack),
             propose: ProposeGate {
                 cadence: want.propose_cadence.as_str().into(),
                 changes: want.propose_changes,
@@ -1142,7 +1144,7 @@ fn scc8_every_write_has_one_render_capture_and_canon_gate_digest() {
     s.push(PushRequest::default()).unwrap();
     assert_eq!(*s.renderer.scopes.lock().unwrap(), [Scope::At(head)]);
     let w = &hub.writes()[0];
-    assert_eq!(w.render_inputs.rdy, rdy);
+    assert_eq!(w.render_inputs.as_ref().unwrap().rdy, rdy);
     assert_eq!(w.tags.len(), 1);
     assert!(w.gate.is_some());
 }
@@ -1670,4 +1672,870 @@ fn scc8_force_push_moves_hub_canon_and_previews_leaving() {
         .unwrap();
     assert!(out.force_not_needed);
     assert_eq!(hub.writes()[0].kind, WriteKind::Landings);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Restore through the exchange (Task 8b: D-J3YA0, D-D5J18, D-QMZ92, D-0WWYR, D-H0BZN, D-47HVF)
+// ---------------------------------------------------------------------------------------------
+
+/// The fake hub behind a tap: each put's batch bytes are kept, and with `taken_on_lookup` the
+/// outcome lookup answers taken at the hub's tip (the write took, its reply was lost).
+struct Tap<'a> {
+    hub: &'a Hub,
+    batches: Mutex<Vec<Vec<u8>>>,
+    taken_on_lookup: bool,
+}
+
+impl<'a> Tap<'a> {
+    fn new(hub: &'a Hub, taken_on_lookup: bool) -> Tap<'a> {
+        Tap {
+            hub,
+            batches: Mutex::default(),
+            taken_on_lookup,
+        }
+    }
+}
+
+impl SyncWire for Tap<'_> {
+    fn discovery(
+        &self,
+        cx: &UploadContext,
+        remote: &str,
+    ) -> Result<rdy_engine::hub_publish_wire::Discovery, RdyError> {
+        self.hub.discovery(cx, remote)
+    }
+
+    fn state(
+        &self,
+        cx: &UploadContext,
+        request: &SyncStateRequest,
+    ) -> Result<rdy_engine::hub_sync_wire::SyncState, RdyError> {
+        self.hub.state(cx, request)
+    }
+
+    fn known(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        keys: &[ObjectKey],
+    ) -> Result<Vec<ObjectKey>, RdyError> {
+        self.hub.known(cx, push, keys)
+    }
+
+    fn put(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut dyn std::io::Read,
+        len: u64,
+    ) -> Result<rdy_engine::hub_publish_wire::ObjectPut, RdyError> {
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes).unwrap();
+        self.batches.lock().unwrap().push(bytes.clone());
+        self.hub.put(cx, push, &mut &bytes[..], len)
+    }
+
+    fn known_pull(
+        &self,
+        cx: &UploadContext,
+        request: &KnownPull,
+    ) -> Result<rdy_engine::hub_sync_wire::KnownPage, RdyError> {
+        self.hub.known_pull(cx, request)
+    }
+
+    fn get(
+        &self,
+        cx: &UploadContext,
+        request: &GetRequest,
+        sink: &mut dyn std::io::Write,
+        limit: u64,
+    ) -> Result<u64, RdyError> {
+        self.hub.get(cx, request, sink, limit)
+    }
+
+    fn write(
+        &self,
+        cx: &UploadContext,
+        request: &SyncWrite,
+    ) -> Result<rdy_engine::hub_sync_wire::WriteReply, WriteFailure> {
+        self.hub.write(cx, request)
+    }
+
+    fn outcome(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+    ) -> Result<rdy_engine::hub_sync_wire::OutcomeReply, RdyError> {
+        if !self.taken_on_lookup {
+            return self.hub.outcome(cx, push);
+        }
+        self.hub.enter("outcome", cx, Some(push), None)?;
+        let tip = self.hub.state.lock().unwrap().canon.expect("a hub tip");
+        Ok(rdy_engine::hub_sync_wire::OutcomeReply {
+            outcome: LookupOutcome::Taken { tip: landing(tip) },
+            kind: Some("restore".into()),
+            view: None,
+            request_state: None,
+        })
+    }
+}
+
+/// The restore of `dump` from the project `e` (its share remote, user config and sign-in) over
+/// `wire`, with its temporary store made under `scratch`.
+fn restore_with(
+    e: &Env,
+    wire: &dyn SyncWire,
+    renderer: &Renderer,
+    scratch: &std::path::Path,
+    dump: &std::path::Path,
+) -> Result<RestoreOutcome, RdyError> {
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    SyncService::new(&e.project, &e.user_file, &api, &clock, wire, renderer)
+        .scratch_in(scratch)
+        .restore(
+            &agent(),
+            RestoreRequest {
+                dump: vec![dump.to_path_buf()],
+                remote: None,
+            },
+        )
+}
+
+/// The read-only preview of the restore of `dump`, as [`restore_with`] runs it.
+fn preview_with(
+    e: &Env,
+    wire: &dyn SyncWire,
+    scratch: &std::path::Path,
+    dump: &std::path::Path,
+) -> Result<CanonPreview, RdyError> {
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    let renderer = Renderer::default();
+    SyncService::new(&e.project, &e.user_file, &api, &clock, wire, &renderer)
+        .scratch_in(scratch)
+        .restore_preview(
+            &agent(),
+            RestoreRequest {
+                dump: vec![dump.to_path_buf()],
+                remote: None,
+            },
+        )
+}
+
+/// A full dump of `engine`'s project at `dir/name`.
+fn dump_of(engine: &Local, dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let out = dir.join(name);
+    engine.read().dump(&out).unwrap();
+    out
+}
+
+const ORIGIN: rdy_store::segment::Location = rdy_store::segment::Location {
+    segment: 0,
+    offset: 0,
+};
+
+/// The sync frames of `read`'s log from `from`: what a push of them brings to a hub store.
+fn frames(read: &ReadState, from: rdy_store::segment::Location) -> Vec<(u8, Vec<u8>)> {
+    let mut out = vec![];
+    read.reader()
+        .for_each_frame_from(from, read.seq(), |_, raw, _, payload, _| {
+            if rdy_store::sync_stream::is_sync_kind(rdy_store::codec::logical_kind(raw)) {
+                out.push((raw, payload.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+/// The first op of the chain of view op `head`.
+fn view_root(read: &ReadState, head: Hash) -> Hash {
+    let mut at = head;
+    while let Some(prev) = read.reader().view_op(&at).unwrap().prev {
+        at = prev;
+    }
+    at
+}
+
+/// The dump at `dir/name` of a hub store (a holder of `e`'s repo, D-DZDB7) that holds `e`'s
+/// canon, each view of `views` at its head in `e`, and, when given, the held chain `held`
+/// (its frames and head) beside canon.
+fn hub_dump(
+    e: &Env,
+    views: &[&str],
+    held: Option<(Vec<(u8, Vec<u8>)>, Hash)>,
+    dir: &std::path::Path,
+    name: &str,
+) -> std::path::PathBuf {
+    use rdy_store::hub_canon::{CanonMove, Moved};
+    let read = e.engine.read();
+    let head = read.canon_head().unwrap();
+    let mut h = Rdy::create_holder(&dir.join(format!("{name}-holder")), repo_of(e)).unwrap();
+    let s = h.store_mut();
+    let b = s
+        .reader()
+        .check_move_batch(frames(&read, ORIGIN), head)
+        .unwrap();
+    assert_eq!(
+        s.move_canon(&b, &CanonMove::Seed, None, T0).unwrap(),
+        Moved::Moved { tip: head }
+    );
+    for v in views {
+        let vh = read.view_head(v).unwrap().head;
+        let b = s.reader().check_move_batch(vec![], vh).unwrap();
+        let mv = CanonMove::SetViewHead {
+            name: v.to_string(),
+            root: view_root(&read, vh),
+        };
+        assert_eq!(
+            s.move_canon(&b, &mv, None, T0).unwrap(),
+            Moved::Moved { tip: vh }
+        );
+    }
+    if let Some((records, hh)) = held {
+        let b = s.reader().check_move_batch(records, hh).unwrap();
+        assert_eq!(
+            s.move_canon(&b, &CanonMove::Hold, Some(head), T0).unwrap(),
+            Moved::Moved { tip: hh }
+        );
+    }
+    // reopened, as a hub opens its store: the moves above went past the handle's published
+    // state
+    h.close().unwrap();
+    let h = Rdy::open_holder(&dir.join(format!("{name}-holder"))).unwrap();
+    let out = dir.join(name);
+    h.read().dump(&out).unwrap();
+    h.close().unwrap();
+    out
+}
+
+/// Whether `dir` holds nothing.
+fn is_empty_dir(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).unwrap().next().is_none()
+}
+
+fn append(file: &std::path::Path, text: &str) {
+    let mut f = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+    std::io::Write::write_all(&mut f, text.as_bytes()).unwrap();
+}
+
+fn tag_head(e: &Env, name: &str) {
+    let name = name.to_string();
+    rdy_engine::engine::with_writer_result(&e.engine, move |r| {
+        r.tag(&founder(), &name, None, None)?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[track_caller]
+fn taken_end(end: &Option<WriteEnd>) -> (Option<Hash>, Hash, Hash) {
+    match end {
+        Some(WriteEnd::Taken {
+            base, head, tip, ..
+        }) => (*base, *head, *tip),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// D-J3YA0: into an empty hub repo a restore is one write of the kind `restore` expecting
+/// nothing (the seed move); into a hub repo with canon it expects the state's tip (the hub
+/// chooses force); a repo id mismatch stops before any known or put. A hub dump's views follow
+/// the canon write's reply, each with its own push id, when the hub lacks them or the dump's
+/// chain holds the hub's head; a hub view past the dump's is not sent and is listed. A project
+/// dump's views stay home, and a held chain travels only as records that canon or a view names.
+/// The preview names what the move removes and writes nothing.
+#[test]
+fn scc8_restore_seeds_or_forces_and_keeps_newer_hub_views() {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let src = env(2);
+    write_in(&src.engine, "draft", "x1");
+    let head = src.landings[1];
+    let dump = dump_of(&src.engine, dir.path(), "project.rdydump");
+    let renderer = Renderer::default();
+
+    // into an empty hub repo: one write, kind restore, expecting nothing; the view stays home
+    let hub = Hub::new();
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &dump).unwrap();
+    assert!(!out.holder);
+    assert_eq!(out.remote, "shared");
+    assert_eq!(write_kinds(&hub), [(WriteKind::Restore, None)]);
+    let w = &hub.writes()[0];
+    assert_eq!(w.expected, None);
+    assert_eq!(serde_json::to_value(w).unwrap()["kind"], "restore");
+    assert_eq!(taken_end(&out.canon), (None, head, head));
+    assert!(out.views.is_empty() && out.kept.is_empty());
+    assert_eq!(hub.states.lock().unwrap()[0].views, None);
+    assert!(hub.sent_keys().iter().all(|k| k.kind != kinds::VIEW_OP));
+    let empty = preview_with(&caller, &Hub::new(), scratch.path(), &dump).unwrap();
+    assert_eq!(
+        empty,
+        CanonPreview {
+            remote: "shared".into(),
+            before: None,
+            after: Some(head),
+            leaving: vec![],
+            complete: true,
+        }
+    );
+
+    // a hub tip the dump holds: the write expects it, and the history goes above it
+    let base = src.landings[0];
+    let with_canon = || {
+        Hub::new().with_state(|s| {
+            s.repo_id = Some(repo_of(&src));
+            s.canon = Some(base);
+        })
+    };
+    let hub = with_canon();
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &dump).unwrap();
+    let w = &hub.writes()[0];
+    assert_eq!(
+        (w.kind, w.expected, w.view.clone()),
+        (WriteKind::Restore, Some(landing(base)), None)
+    );
+    assert_eq!(taken_end(&out.canon), (Some(base), head, head));
+    assert_eq!(
+        preview_with(&caller, &with_canon(), scratch.path(), &dump).unwrap(),
+        CanonPreview {
+            remote: "shared".into(),
+            before: Some(base),
+            after: Some(head),
+            leaving: vec![],
+            complete: true,
+        }
+    );
+
+    // a hub tip the dump lacks: seed or force is the hub's choice; the write expects that tip
+    let other = Hash::of(b"a tip only the hub holds");
+    let lacking = || {
+        Hub::new().with_state(|s| {
+            s.repo_id = Some(repo_of(&src));
+            s.canon = Some(other);
+        })
+    };
+    let hub = lacking();
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &dump).unwrap();
+    assert_eq!(
+        (hub.writes()[0].kind, hub.writes()[0].expected),
+        (WriteKind::Restore, Some(landing(other)))
+    );
+    assert_eq!(taken_end(&out.canon), (None, head, head));
+    let p = preview_with(&caller, &lacking(), scratch.path(), &dump).unwrap();
+    assert_eq!(
+        (p.before, p.after, p.complete),
+        (Some(other), Some(head), false)
+    );
+    assert_eq!(hub.writes().len(), 1);
+
+    // another repo's hub: E_REPO_MISMATCH before any known or put
+    let hub = Hub::new().with_state(|s| s.repo_id = Some(repo_of(&caller)));
+    let e = err(restore_with(
+        &caller,
+        &hub,
+        &renderer,
+        scratch.path(),
+        &dump,
+    ));
+    assert_eq!(e.code, E_REPO_MISMATCH);
+    assert_eq!(hub.steps(), ["discovery", "state"]);
+
+    // a hub dump: new and extending views follow canon; a hub view past the dump's stays
+    let hsrc = env(1);
+    write_in(&hsrc.engine, "v1", "a");
+    write_in(&hsrc.engine, "v2", "b");
+    let v2_first = view_head(&hsrc, "v2");
+    write_in(&hsrc.engine, "v2", "c");
+    write_in(&hsrc.engine, "v3", "d");
+    let at = hsrc.engine.read().seq();
+    let (_copy_dir, copy) = copy_project(&hsrc);
+    let q = land_in(&copy, "held");
+    let held = (frames(&copy.read(), at), q);
+    let hdump = hub_dump(
+        &hsrc,
+        &["v1", "v2", "v3"],
+        Some(held),
+        dir.path(),
+        "hub.rdydump",
+    );
+    let read = hsrc.engine.read();
+    let (v2, v3) = (view_head(&hsrc, "v2"), view_head(&hsrc, "v3"));
+    let hub = Hub::new().with_state(|s| s.repo_id = Some(repo_of(&hsrc)));
+    hub.views
+        .lock()
+        .unwrap()
+        .insert("v2".into(), (view_root(&read, v2), v2_first));
+    hub.views.lock().unwrap().insert(
+        "v3".into(),
+        (view_root(&read, v3), Hash::of(b"a head past the dump's")),
+    );
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &hdump).unwrap();
+    assert!(out.holder);
+    assert_eq!(
+        hub.states.lock().unwrap()[0].views,
+        Some(names(&["v1", "v2", "v3"]))
+    );
+    assert_eq!(
+        write_kinds(&hub),
+        [
+            (WriteKind::Restore, None),
+            (WriteKind::View, Some("v1".into())),
+            (WriteKind::View, Some("v2".into())),
+        ]
+    );
+    let writes = hub.writes();
+    assert_eq!(writes[0].expected, None);
+    assert_eq!(writes[1].expected, None);
+    assert_eq!(
+        writes[2].expected,
+        Some(ObjectKey {
+            kind: kinds::VIEW_OP,
+            hash: v2_first
+        })
+    );
+    let pushes: BTreeSet<&str> = writes.iter().map(|w| w.push.as_str()).collect();
+    assert_eq!(pushes.len(), 3, "one push id per write");
+    assert_eq!(taken_end(&out.canon).1, hsrc.landings[0]);
+    assert_eq!(
+        out.views
+            .iter()
+            .map(|(n, end)| (n.as_str(), matches!(end, WriteEnd::Taken { .. })))
+            .collect::<Vec<_>>(),
+        [("v1", true), ("v2", true)]
+    );
+    assert_eq!(out.kept, ["v3"]);
+    // the held chain is named by neither canon nor a view: it never travels
+    assert!(!hub.sent_keys().contains(&landing(q)));
+    assert!(is_empty_dir(scratch.path()));
+}
+
+/// D-J3YA0 step 5, D-D2NPN, D-R80JP, D-H0BZN "Lost reply": the temporary store is removed after
+/// success, a hub refusal, a transport failure, a lost reply (looked up once in the same run), a
+/// load refusal and a cancelled call, and the caller's dump keeps its bytes. A hub refusal keeps
+/// the hub's words; `E_HUB_TAG_TAKEN` is core's `E_TAG_EXISTS` with them.
+#[test]
+fn scc8_restore_cleans_temp_store_on_every_exit() {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let src = env(1);
+    let head = src.landings[0];
+    let dump = dump_of(&src.engine, dir.path(), "project.rdydump");
+    let bytes = std::fs::read(&dump).unwrap();
+    let renderer = Renderer::default();
+    let check = |what: &str| {
+        assert!(
+            is_empty_dir(scratch.path()),
+            "{what}: a temporary store remains"
+        );
+        assert_eq!(
+            std::fs::read(&dump).unwrap(),
+            bytes,
+            "{what}: the dump changed"
+        );
+    };
+
+    // success
+    let hub = Hub::new();
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &dump).unwrap();
+    assert_eq!(taken_end(&out.canon).2, head);
+    assert!(out.cleanup.is_none());
+    check("success");
+
+    // the hub refuses the write: its words stay
+    for (code, want) in [
+        ("E_HUB_BEHIND", "E_HUB_BEHIND"),
+        ("E_HUB_TAG_TAKEN", E_TAG_EXISTS),
+    ] {
+        let hub = Hub::new();
+        hub.plan_write(1, WritePlan::Refuse(hub_words(code)));
+        let out = restore_with(&caller, &hub, &renderer, scratch.path(), &dump).unwrap();
+        match &out.canon {
+            Some(WriteEnd::Refused {
+                push: Some(push),
+                error,
+            }) => {
+                assert_eq!(push.as_str(), hub.writes()[0].push.as_str());
+                assert_eq!(
+                    (error.code, error.message.as_str(), error.fix.as_str()),
+                    (want, "the hub's words", "the hub's fix")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        check(code);
+    }
+
+    // a transport failure
+    let hub = Hub::new();
+    hub.fail_at("put", 1, transport_failure());
+    let e = err(restore_with(
+        &caller,
+        &hub,
+        &renderer,
+        scratch.path(),
+        &dump,
+    ));
+    assert_eq!(e.code, E_UPSTREAM_TRANSPORT);
+    check("transport failure");
+
+    // a lost reply of a write that took: one outcome lookup in the same run reports it
+    let hub = Hub::new();
+    hub.plan_write(1, WritePlan::Lost { apply: true });
+    let tap = Tap::new(&hub, true);
+    let out = restore_with(&caller, &tap, &renderer, scratch.path(), &dump).unwrap();
+    assert_eq!(hub.steps().iter().filter(|s| **s == "outcome").count(), 1);
+    assert_eq!(taken_end(&out.canon).2, head);
+    assert_eq!(out.lookups.len(), 1);
+    assert_eq!(out.lookups[0].push, hub.writes()[0].push);
+    assert!(matches!(
+        out.lookups[0].outcome,
+        LookupOutcome::Taken { .. }
+    ));
+    check("lost reply, taken");
+
+    // a lost reply the hub knows no outcome of: publish's uncertain words naming the push id;
+    // the write is never sent again
+    let hub = Hub::new();
+    hub.plan_write(1, WritePlan::Lost { apply: false });
+    let e = err(restore_with(
+        &caller,
+        &hub,
+        &renderer,
+        scratch.path(),
+        &dump,
+    ));
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_UPSTREAM_UNCERTAIN,
+            UPSTREAM_UNCERTAIN_MESSAGE,
+            UPSTREAM_UNCERTAIN_FIX
+        )
+    );
+    let push = hub.writes()[0].push.clone();
+    assert!(
+        e.issues.iter().any(|i| i.message.contains(&push)),
+        "{:?}",
+        e.issues
+    );
+    assert_eq!(hub.writes().len(), 1);
+    assert_eq!(hub.steps().iter().filter(|s| **s == "outcome").count(), 1);
+    check("lost reply, unknown");
+
+    // a dump the load refuses
+    let bad = dir.path().join("bad.rdydump");
+    std::fs::write(&bad, b"not a dump").unwrap();
+    let hub = Hub::new();
+    let e = err(restore_with(&caller, &hub, &renderer, scratch.path(), &bad));
+    assert_eq!(e.code, E_DUMP);
+    assert!(hub.steps().is_empty());
+    assert_eq!(std::fs::read(&bad).unwrap(), b"not a dump");
+    check("load refusal");
+
+    // a cancelled call: the restore is dropped during its put
+    let hub = Hub::new();
+    *hub.hook.lock().unwrap() = Some(("put", Box::new(|_| panic!("the call is cancelled"))));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        restore_with(&caller, &hub, &renderer, scratch.path(), &dump)
+    }));
+    assert!(r.is_err());
+    check("cancelled");
+}
+
+/// D-D5J18, D-QMZ92, D-8RGWW, D-0WWYR: a project dump's restore captures its gate settings and
+/// render inputs from the dump's own project files, with this client as `rdy`: the dump's title,
+/// description and effective pack, and its gate with that pack's digest. The caller project's
+/// settings never enter, and neither the dump writer's version nor the hub's is compared.
+#[test]
+fn scc8_restore_uses_only_dump_project_files_for_gate_and_render_inputs() {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    append(
+        &caller.project.join(".rdy.yaml"),
+        "name: Caller Title\ndescription: The caller's words.\ncoverage:\n  target: 7\npropose:\n  cadence: asked\n",
+    );
+    let src = env(1);
+    append(
+        &src.project.join(".rdy.yaml"),
+        "name: Dump Title\ndescription: The dump's words.\ncoverage:\n  target: 42\n  gate: no_lower\npropose:\n  cadence: task\n",
+    );
+    let dump = dump_of(&src.engine, dir.path(), "project.rdydump");
+    // what the dump's own files give, read from a plain load of it
+    let plain = dir.path().join("plain");
+    rdy_engine::load::load(&dump, &plain).unwrap();
+    let loaded = Rdy::open(&plain).unwrap();
+    let lread = loaded.read();
+    let want_inputs = rdy_engine::render_inputs::capture(&lread).unwrap();
+    let want = CheckInputs::of_state(&lread);
+    assert_eq!(want.coverage_target, 42);
+
+    let hub = Hub::new().with_state(|s| s.rdy = "0.1.0".into());
+    let renderer = Renderer::default();
+    restore_with(&caller, &hub, &renderer, scratch.path(), &dump).unwrap();
+    let w = &hub.writes()[0];
+    let inputs = w
+        .render_inputs
+        .clone()
+        .expect("a dump that names its title sends render inputs");
+    assert_eq!(
+        semver::Version::parse(&inputs.rdy).unwrap(),
+        semver::Version::parse(&rdy_engine::formats::formats().rdy).unwrap()
+    );
+    assert_eq!(
+        (inputs.title.as_str(), inputs.description.as_deref()),
+        ("Dump Title", Some("The dump's words."))
+    );
+    assert_eq!(inputs.pack, want_inputs.pack);
+    assert_eq!(
+        w.gate,
+        Some(GateSettings {
+            coverage_gate: want.coverage_gate.as_str().into(),
+            coverage_target: 42,
+            decisions_home: want.decisions_home.clone(),
+            pack_digest: pack_digest(&want_inputs.pack),
+            propose: ProposeGate {
+                cadence: "task".into(),
+                changes: want.propose_changes,
+            },
+        })
+    );
+    // the caller's settings never enter
+    let body = serde_json::to_string(w).unwrap();
+    assert!(!body.contains("Caller Title") && !body.contains("The caller's words."));
+    // one capture, at the dump's head
+    assert_eq!(
+        *renderer.scopes.lock().unwrap(),
+        [Scope::At(src.landings[0])]
+    );
+}
+
+/// D-D5J18 "Never invented": a dump whose `.rdy.yaml` names no title sends `render_inputs`
+/// null, still sends its gate settings (the pack by its digest), and lists each tag it sent
+/// without render inputs. No request names the temporary directory.
+#[test]
+fn scc8_restore_without_explicit_title_omits_render_inputs_and_lists_tags() {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let src = env(1);
+    tag_head(&src, "v1.0.0");
+    let yaml = std::fs::read_to_string(src.project.join(".rdy.yaml")).unwrap();
+    assert!(!yaml.contains("name:"), "{yaml}");
+    let dump = dump_of(&src.engine, dir.path(), "project.rdydump");
+    let hub = Hub::new();
+    // the temporary directory's name, read while the restore runs
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    {
+        let seen = Arc::clone(&seen);
+        let root = scratch.path().to_path_buf();
+        *hub.hook.lock().unwrap() = Some((
+            "write",
+            Box::new(move |_| {
+                for entry in std::fs::read_dir(&root).unwrap() {
+                    let name = entry.unwrap().file_name().to_string_lossy().to_string();
+                    seen.lock().unwrap().push(name);
+                }
+            }),
+        ));
+    }
+    let renderer = Renderer::default();
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &dump).unwrap();
+    let w = &hub.writes()[0];
+    assert_eq!(w.render_inputs, None);
+    let gate = w.gate.clone().expect("the dump's gate settings still go");
+    assert_eq!(gate.pack_digest, pack_digest(src.engine.read().pack()));
+    assert_eq!(
+        w.tags.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["v1.0.0"]
+    );
+    assert_eq!(out.without_inputs, ["v1.0.0"]);
+    let body = serde_json::to_value(w).unwrap();
+    assert!(body["render_inputs"].is_null());
+    // no request names the temporary directory, as it is or as a title
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let temp = seen[0].to_lowercase();
+    let as_title = temp.replace(['-', '_'], " ").trim().to_string();
+    let mut bodies: Vec<String> = hub
+        .writes()
+        .iter()
+        .map(|w| serde_json::to_string(w).unwrap())
+        .collect();
+    bodies.extend(
+        hub.states
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap()),
+    );
+    for b in bodies {
+        let b = b.to_lowercase();
+        assert!(!b.contains(&temp) && !b.contains(&as_title), "{b}");
+    }
+}
+
+/// D-D5J18 "Restore from a hub dump": a holder dump has no project files, so its canon write and
+/// every view write send `gate` null and `render_inputs` null, and nothing is captured.
+#[test]
+fn scc8_holder_restore_sends_no_gate_or_render_inputs() {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let src = env(1);
+    tag_head(&src, "v1.0.0");
+    write_in(&src.engine, "v1", "a");
+    let hdump = hub_dump(&src, &["v1"], None, dir.path(), "hub.rdydump");
+    let hub = Hub::new();
+    let renderer = Renderer::default();
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &hdump).unwrap();
+    assert!(out.holder);
+    assert_eq!(
+        write_kinds(&hub),
+        [
+            (WriteKind::Restore, None),
+            (WriteKind::View, Some("v1".into()))
+        ]
+    );
+    for w in hub.writes() {
+        assert_eq!((w.gate.clone(), w.render_inputs.clone()), (None, None));
+        let body = serde_json::to_value(&w).unwrap();
+        assert!(body["gate"].is_null() && body["render_inputs"].is_null());
+    }
+    assert!(renderer.scopes.lock().unwrap().is_empty());
+    assert_eq!(
+        hub.writes()[0]
+            .tags
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        ["v1.0.0"]
+    );
+    assert_eq!(out.without_inputs, ["v1.0.0"]);
+}
+
+/// SD1 (D-8T7PA): every restore batch carries each landing's `SNAPSHOT_DELTA` (kind 30) and the
+/// `snapshot_delta` feature minimum, and passes core's batch check, from a project dump and from
+/// a hub dump.
+#[test]
+fn scc8_restore_preserves_sd1_deltas() {
+    use rdy_store::format::FEATURE_SNAPSHOT_DELTA;
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let src = env(2);
+    write_in(&src.engine, "v1", "a");
+    let dumps = [
+        dump_of(&src.engine, dir.path(), "project.rdydump"),
+        hub_dump(&src, &["v1"], None, dir.path(), "hub.rdydump"),
+    ];
+    let repo = repo_of(&src);
+    for dump in &dumps {
+        let hub = Hub::new();
+        let tap = Tap::new(&hub, false);
+        let renderer = Renderer::default();
+        restore_with(&caller, &tap, &renderer, scratch.path(), dump).unwrap();
+        let batches = tap.batches.lock().unwrap().clone();
+        assert!(!batches.is_empty());
+        let mut landings = BTreeSet::new();
+        for b in &batches {
+            let report = stream_check::check_batch(&b[..], Some(repo)).unwrap();
+            assert!(
+                report.header.features.has(FEATURE_SNAPSHOT_DELTA),
+                "{:?}",
+                report.header.features
+            );
+            let here: Vec<&ObjectKey> = report
+                .keys
+                .iter()
+                .filter(|k| k.kind == kinds::LANDING)
+                .collect();
+            let deltas = report
+                .keys
+                .iter()
+                .filter(|k| k.kind == kinds::SNAPSHOT_DELTA)
+                .count();
+            assert_eq!(deltas, here.len(), "one delta for each landing");
+            landings.extend(here.into_iter().map(|k| k.hash));
+        }
+        assert_eq!(
+            landings,
+            src.landings.iter().copied().collect::<BTreeSet<_>>()
+        );
+    }
+}
+
+/// The names of the TAG records `tap`'s put batches carried, sorted, and empties the tap.
+fn carried_tags(tap: &Tap<'_>, read: &ReadState) -> Vec<String> {
+    let batches = std::mem::take(&mut *tap.batches.lock().unwrap());
+    let mut names = Vec::new();
+    for b in &batches {
+        let report = stream_check::check_batch(&b[..], None).unwrap();
+        for k in report.keys.iter().filter(|k| k.kind == kinds::TAG) {
+            names.push(read.reader().read_tag(&k.hash).unwrap().name);
+        }
+    }
+    names.sort();
+    names
+}
+
+/// The tag names of `write`, as sent.
+fn named_tags(write: &SyncWrite) -> Vec<String> {
+    write.tags.iter().map(|t| t.name.clone()).collect()
+}
+
+/// rdyhub d84d2d96: the hub refuses a write that does not name every tag its push carries, or
+/// that names one twice. A push's write and a restore's write name each carried tag once: a
+/// seed's every tag, an extend's new tag only.
+#[test]
+fn scc8_every_write_names_each_carried_tag_once() {
+    let e = env(1);
+    tag_head(&e, "v1.0.0");
+    let hub = Hub::new();
+    let tap = Tap::new(&hub, false);
+    let s = Sync::new(&e, &hub);
+    let service = SyncService::new(
+        &e.project,
+        &e.user_file,
+        &s.api,
+        &s.clock,
+        &tap,
+        &s.renderer,
+    );
+    // a seed carries v1.0.0
+    service
+        .push(&e.engine, &agent(), PushRequest::default())
+        .unwrap();
+    let read = e.engine.read();
+    assert_eq!(carried_tags(&tap, &read), ["v1.0.0"]);
+    assert_eq!(named_tags(&hub.writes()[0]), ["v1.0.0"]);
+    // an extend carries only the new v1.1.0 and v1.2.0
+    land_in(&e.engine, "two");
+    tag_head(&e, "v1.1.0");
+    land_in(&e.engine, "three");
+    tag_head(&e, "v1.2.0");
+    service
+        .push(&e.engine, &agent(), PushRequest::default())
+        .unwrap();
+    let read = e.engine.read();
+    assert_eq!(carried_tags(&tap, &read), ["v1.1.0", "v1.2.0"]);
+    assert_eq!(named_tags(&hub.writes()[1]), ["v1.1.0", "v1.2.0"]);
+
+    // a restore into an empty hub repo carries and names all three, once each
+    let dir = private_dir();
+    let scratch = private_dir();
+    let dump = dump_of(&e.engine, dir.path(), "tags.rdydump");
+    let caller = env(0);
+    let fresh = Hub::new();
+    let tap = Tap::new(&fresh, false);
+    let renderer = Renderer::default();
+    restore_with(&caller, &tap, &renderer, scratch.path(), &dump).unwrap();
+    assert_eq!(carried_tags(&tap, &read), ["v1.0.0", "v1.1.0", "v1.2.0"]);
+    let writes = fresh.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(named_tags(&writes[0]), ["v1.0.0", "v1.1.0", "v1.2.0"]);
 }

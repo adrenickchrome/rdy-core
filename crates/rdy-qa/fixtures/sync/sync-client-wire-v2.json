@@ -6,6 +6,7 @@
     "The hub repo is acme/docs with the site docs-site, owned by ana, on a test install with Share on and its default sync settings. A publication upload of tag v1.0.0 of rdyhub-core's Signed upload fixture gave the hub repo its upload history first.",
     "Each push is a canon history of rdyhub-core's push fixture, put in one batch: its chain is the landing of v1.0.0, then three landings after it. A binary body gives its length and sha256.",
     "The extend's gate settings name a pack digest that the test chose: the hub computes no pack digest and compares the digests as each write sent them (D-BYZR0).",
+    "The pushed-tag cases: acme/docs takes an extend that carries tag v1.1.0; acme/fresh, a hub repo with no upload and no store, takes a seed that carries v1.0.0 and v1.1.0; acme/kept holds v1.0.0 from a seed, then takes an extend whose write names v1.0.0 again and the new v1.1.0; acme/press holds a seed of tag v1.0.0 of rdyhub-core's Public upload fixture, then refuses a push of that project's clash batch, whose v1.0.0 names another landing.",
     "The case E_HUB_SHARE_OFF comes from a second service of the same build with Share off.",
     "The list headers names the request headers that the hub reads on these steps. The hub refuses no header that the list leaves out.",
     "The list not_served names the cases of D-H0BZN that this hub does not serve yet, with the design that sets each one and the reason."
@@ -85,24 +86,6 @@
       "design": "i-6YB7Y",
       "reason": "the hub does not hold a write as a landing request yet; a later version of this file adds the held cases",
       "step": "outcome"
-    },
-    {
-      "case": "taken: a seed that carries a new tag",
-      "design": "i-B40VF, D-QMZ92",
-      "reason": "waits on rdy core's read of a pushed tag's landing (0.54.0)",
-      "step": "write"
-    },
-    {
-      "case": "taken: an extend that carries a new tag",
-      "design": "i-B40VF, D-QMZ92",
-      "reason": "waits on rdy core's read of a pushed tag's landing (0.54.0)",
-      "step": "write"
-    },
-    {
-      "case": "E_HUB_TAG_TAKEN: a pushed tag that names another landing",
-      "design": "i-B40VF, r-DR5Z9",
-      "reason": "waits on rdy core's read of a pushed tag's landing (0.54.0)",
-      "step": "write"
     }
   ],
   "steps": [
@@ -6976,7 +6959,7 @@
       "reply": {
         "body": {
           "code": "E_HUB_NOT_FOUND",
-          "fix": "run rdy push again; it makes a new push id",
+          "fix": "check the push id, and sign in with the account that opened push 0123456789abcdefghjkmnpq08",
           "issues": [],
           "message": "no push 0123456789abcdefghjkmnpq08 of yours in this hub repo",
           "request_id": "<request-id>"
@@ -7057,6 +7040,3901 @@
         "path": "/sync/acme/docs/outcome"
       },
       "step": "outcome"
+    },
+    {
+      "case": "taken: an extend of hub canon that carries a new tag",
+      "reply": {
+        "body": {
+          "min_rdy_raised": false,
+          "outcome": "taken",
+          "request": null,
+          "tip": {
+            "hash": "7ecc4d423aa97030e26175b0f5a3bab79e79c218e7ca2f7720314693afc44817",
+            "kind": 4
+          }
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "expected": {
+            "hash": "278632dc52b499f6d94b5bf3e95129bdc0aad4d37f7fdec525e8659f611a98be",
+            "kind": 4
+          },
+          "gate": {
+            "coverage_gate": "off",
+            "coverage_target": null,
+            "decisions_home": null,
+            "pack_digest": null,
+            "propose": null
+          },
+          "kind": "landings",
+          "push": "0123456789abcdefghjkmnpq12",
+          "render_inputs": {
+            "description": null,
+            "disagreements": [],
+            "pack": {
+              "areas": {},
+              "block_types": {
+                "actor": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "a",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "authority_policy": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "agent_may_accept": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "owners": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "require": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "roles": {
+                      "kind": "map",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "ap",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "claim": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "c",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "code": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "lang": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "cd",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "component": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "m",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "constraint": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "k",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "decision": {
+                  "body": "optional",
+                  "children": [
+                    "rationale"
+                  ],
+                  "class": "supporting",
+                  "fields": {
+                    "attested_by": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "authority_basis": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "direct_ruling",
+                        "recorded_ruling",
+                        "delegated",
+                        "precedent",
+                        "elimination",
+                        "none"
+                      ]
+                    },
+                    "decided_at": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "effective_from": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "kind": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "needs_content": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "options": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "placeholders": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "recommend": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "confirm",
+                        "reject"
+                      ]
+                    },
+                    "recommend_reason": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "recorded_at": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "reversibility": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "one_way",
+                        "two_way"
+                      ]
+                    },
+                    "review_by": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "statement": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "status": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "proposed",
+                        "accepted",
+                        "rejected"
+                      ]
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "why": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "D",
+                  "tracking": [],
+                  "traits": [
+                    "normative"
+                  ]
+                },
+                "diagram": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "alt": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "lang": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "mermaid",
+                        "d2"
+                      ]
+                    }
+                  },
+                  "prefix": "dg",
+                  "tracking": [],
+                  "traits": [
+                    "informative",
+                    "asset"
+                  ]
+                },
+                "doc": {
+                  "body": "forbidden",
+                  "children": [
+                    "section",
+                    "prose",
+                    "claim",
+                    "requirement",
+                    "constraint",
+                    "term",
+                    "component",
+                    "actor",
+                    "interface",
+                    "value",
+                    "entity",
+                    "flow",
+                    "example",
+                    "note",
+                    "rationale",
+                    "table",
+                    "diagram",
+                    "figure",
+                    "code",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source",
+                    "publication_profile",
+                    "authority_policy"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "doc_type": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "lifecycle": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "draft",
+                        "stable",
+                        "deprecated"
+                      ]
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "d",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "entity": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "kind": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "en",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "example": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "e",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "figure": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "alt": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "blob": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "media_type": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "fg",
+                  "tracking": [],
+                  "traits": [
+                    "informative",
+                    "asset"
+                  ]
+                },
+                "finding": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "evidence": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "statement": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "F",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "flow": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "steps": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "f",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "folder": {
+                  "body": "forbidden",
+                  "children": [
+                    "folder",
+                    "doc",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "description": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "fd",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "interface": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "i",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "defines"
+                  ]
+                },
+                "note": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "n",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "prose": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "p",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "publication_profile": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "audience": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "org",
+                        "public"
+                      ]
+                    },
+                    "description": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "select": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "trail": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "pf",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "question": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "options": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "prompt": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "recommend_reason": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "recommended": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "why": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "Q",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "rationale": {
+                  "body": "required",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {},
+                  "prefix": "ra",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "requirement": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "priority": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "must",
+                        "should",
+                        "may"
+                      ]
+                    }
+                  },
+                  "prefix": "r",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "section": {
+                  "body": "optional",
+                  "children": [
+                    "section",
+                    "prose",
+                    "claim",
+                    "requirement",
+                    "constraint",
+                    "term",
+                    "component",
+                    "actor",
+                    "interface",
+                    "value",
+                    "entity",
+                    "flow",
+                    "example",
+                    "note",
+                    "rationale",
+                    "table",
+                    "diagram",
+                    "figure",
+                    "code",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "lifecycle": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "draft",
+                        "stable",
+                        "deprecated"
+                      ]
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "s",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "source": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "kind": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "release",
+                        "commit",
+                        "spec"
+                      ]
+                    },
+                    "locator": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "version": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "S",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "table": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "columns": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "normative": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "rows": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "tb",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "term": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "t",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "value": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "unit": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "value": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "v",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "defines"
+                  ]
+                }
+              },
+              "coverage": null,
+              "default_doc_type": "overview",
+              "doc_types": {
+                "components": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Components"
+                    },
+                    {
+                      "required": false,
+                      "title": "Interfaces"
+                    }
+                  ]
+                },
+                "constraints": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Constraints"
+                    }
+                  ]
+                },
+                "decisions-log": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Decisions"
+                    }
+                  ]
+                },
+                "flows": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Flows"
+                    }
+                  ]
+                },
+                "open-questions": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Questions"
+                    }
+                  ]
+                },
+                "overview": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Summary"
+                    },
+                    {
+                      "required": true,
+                      "title": "Goals"
+                    },
+                    {
+                      "required": false,
+                      "title": "Non-goals"
+                    },
+                    {
+                      "required": false,
+                      "title": "Context"
+                    }
+                  ]
+                },
+                "page": {
+                  "nav": true,
+                  "skeleton": []
+                },
+                "principles": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Principles"
+                    }
+                  ]
+                }
+              },
+              "duplicate_text_min_words": null,
+              "extends": null,
+              "link_types": [
+                "affects",
+                "answers",
+                "conditional_on",
+                "decided_by",
+                "depends_on",
+                "describes",
+                "implements",
+                "refines",
+                "reflects",
+                "revokes",
+                "supersedes"
+              ],
+              "name": "rdy-standard",
+              "tensions": {},
+              "version": "0.1.0"
+            },
+            "rdy": "0.53.0",
+            "theme": "rdy-standard",
+            "title": "Publish"
+          },
+          "tags": [
+            {
+              "disagreements": [],
+              "name": "v1.1.0"
+            }
+          ],
+          "view": null
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/write"
+      },
+      "step": "write"
+    },
+    {
+      "case": "taken: the write that carried a new tag",
+      "reply": {
+        "body": {
+          "code": null,
+          "kind": "landings",
+          "outcome": "taken",
+          "request": null,
+          "request_state": null,
+          "tip": {
+            "hash": "7ecc4d423aa97030e26175b0f5a3bab79e79c218e7ca2f7720314693afc44817",
+            "kind": 4
+          },
+          "view": null
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "push": "0123456789abcdefghjkmnpq12"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/outcome"
+      },
+      "step": "outcome"
+    },
+    {
+      "case": "taken: a seed that carries new tags, into a hub repo with no store yet",
+      "reply": {
+        "body": {
+          "min_rdy_raised": true,
+          "outcome": "taken",
+          "request": null,
+          "tip": {
+            "hash": "7ecc4d423aa97030e26175b0f5a3bab79e79c218e7ca2f7720314693afc44817",
+            "kind": 4
+          }
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "expected": null,
+          "gate": {
+            "coverage_gate": "off",
+            "coverage_target": null,
+            "decisions_home": null,
+            "pack_digest": null,
+            "propose": null
+          },
+          "kind": "landings",
+          "push": "0123456789abcdefghjkmnpq13",
+          "render_inputs": {
+            "description": null,
+            "disagreements": [],
+            "pack": {
+              "areas": {},
+              "block_types": {
+                "actor": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "a",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "authority_policy": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "agent_may_accept": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "owners": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "require": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "roles": {
+                      "kind": "map",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "ap",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "claim": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "c",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "code": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "lang": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "cd",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "component": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "m",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "constraint": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "k",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "decision": {
+                  "body": "optional",
+                  "children": [
+                    "rationale"
+                  ],
+                  "class": "supporting",
+                  "fields": {
+                    "attested_by": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "authority_basis": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "direct_ruling",
+                        "recorded_ruling",
+                        "delegated",
+                        "precedent",
+                        "elimination",
+                        "none"
+                      ]
+                    },
+                    "decided_at": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "effective_from": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "kind": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "needs_content": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "options": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "placeholders": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "recommend": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "confirm",
+                        "reject"
+                      ]
+                    },
+                    "recommend_reason": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "recorded_at": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "reversibility": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "one_way",
+                        "two_way"
+                      ]
+                    },
+                    "review_by": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "statement": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "status": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "proposed",
+                        "accepted",
+                        "rejected"
+                      ]
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "why": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "D",
+                  "tracking": [],
+                  "traits": [
+                    "normative"
+                  ]
+                },
+                "diagram": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "alt": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "lang": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "mermaid",
+                        "d2"
+                      ]
+                    }
+                  },
+                  "prefix": "dg",
+                  "tracking": [],
+                  "traits": [
+                    "informative",
+                    "asset"
+                  ]
+                },
+                "doc": {
+                  "body": "forbidden",
+                  "children": [
+                    "section",
+                    "prose",
+                    "claim",
+                    "requirement",
+                    "constraint",
+                    "term",
+                    "component",
+                    "actor",
+                    "interface",
+                    "value",
+                    "entity",
+                    "flow",
+                    "example",
+                    "note",
+                    "rationale",
+                    "table",
+                    "diagram",
+                    "figure",
+                    "code",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source",
+                    "publication_profile",
+                    "authority_policy"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "doc_type": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "lifecycle": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "draft",
+                        "stable",
+                        "deprecated"
+                      ]
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "d",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "entity": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "kind": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "en",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "example": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "e",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "figure": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "alt": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "blob": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "media_type": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "fg",
+                  "tracking": [],
+                  "traits": [
+                    "informative",
+                    "asset"
+                  ]
+                },
+                "finding": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "evidence": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "statement": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "F",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "flow": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "steps": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "f",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "folder": {
+                  "body": "forbidden",
+                  "children": [
+                    "folder",
+                    "doc",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "description": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "fd",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "interface": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "i",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "defines"
+                  ]
+                },
+                "note": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "n",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "prose": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "p",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "publication_profile": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "audience": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "org",
+                        "public"
+                      ]
+                    },
+                    "description": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "select": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "trail": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "pf",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "question": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "options": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "prompt": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "recommend_reason": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "recommended": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "why": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "Q",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "rationale": {
+                  "body": "required",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {},
+                  "prefix": "ra",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "requirement": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "priority": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "must",
+                        "should",
+                        "may"
+                      ]
+                    }
+                  },
+                  "prefix": "r",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "section": {
+                  "body": "optional",
+                  "children": [
+                    "section",
+                    "prose",
+                    "claim",
+                    "requirement",
+                    "constraint",
+                    "term",
+                    "component",
+                    "actor",
+                    "interface",
+                    "value",
+                    "entity",
+                    "flow",
+                    "example",
+                    "note",
+                    "rationale",
+                    "table",
+                    "diagram",
+                    "figure",
+                    "code",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "lifecycle": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "draft",
+                        "stable",
+                        "deprecated"
+                      ]
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "s",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "source": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "kind": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "release",
+                        "commit",
+                        "spec"
+                      ]
+                    },
+                    "locator": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "version": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "S",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "table": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "columns": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "normative": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "rows": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "tb",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "term": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "t",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "value": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "unit": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "value": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "v",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "defines"
+                  ]
+                }
+              },
+              "coverage": null,
+              "default_doc_type": "overview",
+              "doc_types": {
+                "components": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Components"
+                    },
+                    {
+                      "required": false,
+                      "title": "Interfaces"
+                    }
+                  ]
+                },
+                "constraints": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Constraints"
+                    }
+                  ]
+                },
+                "decisions-log": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Decisions"
+                    }
+                  ]
+                },
+                "flows": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Flows"
+                    }
+                  ]
+                },
+                "open-questions": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Questions"
+                    }
+                  ]
+                },
+                "overview": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Summary"
+                    },
+                    {
+                      "required": true,
+                      "title": "Goals"
+                    },
+                    {
+                      "required": false,
+                      "title": "Non-goals"
+                    },
+                    {
+                      "required": false,
+                      "title": "Context"
+                    }
+                  ]
+                },
+                "page": {
+                  "nav": true,
+                  "skeleton": []
+                },
+                "principles": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Principles"
+                    }
+                  ]
+                }
+              },
+              "duplicate_text_min_words": null,
+              "extends": null,
+              "link_types": [
+                "affects",
+                "answers",
+                "conditional_on",
+                "decided_by",
+                "depends_on",
+                "describes",
+                "implements",
+                "refines",
+                "reflects",
+                "revokes",
+                "supersedes"
+              ],
+              "name": "rdy-standard",
+              "tensions": {},
+              "version": "0.1.0"
+            },
+            "rdy": "0.53.0",
+            "theme": "rdy-standard",
+            "title": "Publish"
+          },
+          "tags": [
+            {
+              "disagreements": [],
+              "name": "v1.0.0"
+            },
+            {
+              "disagreements": [],
+              "name": "v1.1.0"
+            }
+          ],
+          "view": null
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/fresh/write"
+      },
+      "step": "write"
+    },
+    {
+      "case": "taken: an extend that names a tag the hub repo holds already at that landing, and a new tag",
+      "reply": {
+        "body": {
+          "min_rdy_raised": false,
+          "outcome": "taken",
+          "request": null,
+          "tip": {
+            "hash": "7ecc4d423aa97030e26175b0f5a3bab79e79c218e7ca2f7720314693afc44817",
+            "kind": 4
+          }
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "expected": {
+            "hash": "1e10876e20cd6f1e3d57c20bbd2e73ab0ecff4c58c2f7654ff27ca7f2a2a6618",
+            "kind": 4
+          },
+          "gate": {
+            "coverage_gate": "off",
+            "coverage_target": null,
+            "decisions_home": null,
+            "pack_digest": null,
+            "propose": null
+          },
+          "kind": "landings",
+          "push": "0123456789abcdefghjkmnpq17",
+          "render_inputs": {
+            "description": null,
+            "disagreements": [],
+            "pack": {
+              "areas": {},
+              "block_types": {
+                "actor": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "a",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "authority_policy": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "agent_may_accept": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "owners": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "require": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "roles": {
+                      "kind": "map",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "ap",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "claim": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "c",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "code": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "lang": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "cd",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "component": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "m",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "constraint": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "k",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "decision": {
+                  "body": "optional",
+                  "children": [
+                    "rationale"
+                  ],
+                  "class": "supporting",
+                  "fields": {
+                    "attested_by": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "authority_basis": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "direct_ruling",
+                        "recorded_ruling",
+                        "delegated",
+                        "precedent",
+                        "elimination",
+                        "none"
+                      ]
+                    },
+                    "decided_at": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "effective_from": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "kind": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "needs_content": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "options": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "placeholders": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "recommend": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "confirm",
+                        "reject"
+                      ]
+                    },
+                    "recommend_reason": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "recorded_at": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "reversibility": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "one_way",
+                        "two_way"
+                      ]
+                    },
+                    "review_by": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "statement": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "status": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "proposed",
+                        "accepted",
+                        "rejected"
+                      ]
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "why": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "D",
+                  "tracking": [],
+                  "traits": [
+                    "normative"
+                  ]
+                },
+                "diagram": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "alt": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "lang": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "mermaid",
+                        "d2"
+                      ]
+                    }
+                  },
+                  "prefix": "dg",
+                  "tracking": [],
+                  "traits": [
+                    "informative",
+                    "asset"
+                  ]
+                },
+                "doc": {
+                  "body": "forbidden",
+                  "children": [
+                    "section",
+                    "prose",
+                    "claim",
+                    "requirement",
+                    "constraint",
+                    "term",
+                    "component",
+                    "actor",
+                    "interface",
+                    "value",
+                    "entity",
+                    "flow",
+                    "example",
+                    "note",
+                    "rationale",
+                    "table",
+                    "diagram",
+                    "figure",
+                    "code",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source",
+                    "publication_profile",
+                    "authority_policy"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "doc_type": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "lifecycle": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "draft",
+                        "stable",
+                        "deprecated"
+                      ]
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "d",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "entity": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "kind": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "en",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "example": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "e",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "figure": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "alt": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "blob": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "media_type": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "fg",
+                  "tracking": [],
+                  "traits": [
+                    "informative",
+                    "asset"
+                  ]
+                },
+                "finding": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "evidence": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "statement": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "F",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "flow": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "steps": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "f",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "folder": {
+                  "body": "forbidden",
+                  "children": [
+                    "folder",
+                    "doc",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "description": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "fd",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "interface": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "i",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "defines"
+                  ]
+                },
+                "note": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "n",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "prose": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "p",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "publication_profile": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "audience": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "org",
+                        "public"
+                      ]
+                    },
+                    "description": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "select": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "trail": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "pf",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "question": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "options": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "prompt": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "recommend_reason": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "recommended": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "why": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "Q",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "rationale": {
+                  "body": "required",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {},
+                  "prefix": "ra",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "requirement": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "priority": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "must",
+                        "should",
+                        "may"
+                      ]
+                    }
+                  },
+                  "prefix": "r",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "section": {
+                  "body": "optional",
+                  "children": [
+                    "section",
+                    "prose",
+                    "claim",
+                    "requirement",
+                    "constraint",
+                    "term",
+                    "component",
+                    "actor",
+                    "interface",
+                    "value",
+                    "entity",
+                    "flow",
+                    "example",
+                    "note",
+                    "rationale",
+                    "table",
+                    "diagram",
+                    "figure",
+                    "code",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "lifecycle": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "draft",
+                        "stable",
+                        "deprecated"
+                      ]
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "s",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "source": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "kind": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "release",
+                        "commit",
+                        "spec"
+                      ]
+                    },
+                    "locator": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "version": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "S",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "table": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "columns": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "normative": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "rows": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "tb",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "term": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "t",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "value": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "unit": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "value": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "v",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "defines"
+                  ]
+                }
+              },
+              "coverage": null,
+              "default_doc_type": "overview",
+              "doc_types": {
+                "components": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Components"
+                    },
+                    {
+                      "required": false,
+                      "title": "Interfaces"
+                    }
+                  ]
+                },
+                "constraints": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Constraints"
+                    }
+                  ]
+                },
+                "decisions-log": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Decisions"
+                    }
+                  ]
+                },
+                "flows": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Flows"
+                    }
+                  ]
+                },
+                "open-questions": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Questions"
+                    }
+                  ]
+                },
+                "overview": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Summary"
+                    },
+                    {
+                      "required": true,
+                      "title": "Goals"
+                    },
+                    {
+                      "required": false,
+                      "title": "Non-goals"
+                    },
+                    {
+                      "required": false,
+                      "title": "Context"
+                    }
+                  ]
+                },
+                "page": {
+                  "nav": true,
+                  "skeleton": []
+                },
+                "principles": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Principles"
+                    }
+                  ]
+                }
+              },
+              "duplicate_text_min_words": null,
+              "extends": null,
+              "link_types": [
+                "affects",
+                "answers",
+                "conditional_on",
+                "decided_by",
+                "depends_on",
+                "describes",
+                "implements",
+                "refines",
+                "reflects",
+                "revokes",
+                "supersedes"
+              ],
+              "name": "rdy-standard",
+              "tensions": {},
+              "version": "0.1.0"
+            },
+            "rdy": "0.53.0",
+            "theme": "rdy-standard",
+            "title": "Publish"
+          },
+          "tags": [
+            {
+              "disagreements": [],
+              "name": "v1.0.0"
+            },
+            {
+              "disagreements": [],
+              "name": "v1.1.0"
+            }
+          ],
+          "view": null
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/kept/write"
+      },
+      "step": "write"
+    },
+    {
+      "case": "E_HUB_TAG_TAKEN: the push's tag v1.0.0 names another landing than the hub repo's v1.0.0",
+      "reply": {
+        "body": {
+          "code": "E_HUB_TAG_TAKEN",
+          "fix": "Tag your landing with another name, then upload or push that tag.",
+          "issues": [],
+          "message": "Tag v1.0.0 already names landing 946bf107e296e19e86147f54c4faf1f58d2b13f2b3bb3da28038ec862e9f7a6e in this hub repo.",
+          "request_id": "<request-id>"
+        },
+        "content_type": "application/json",
+        "status": 409
+      },
+      "request": {
+        "body": {
+          "expected": {
+            "hash": "946bf107e296e19e86147f54c4faf1f58d2b13f2b3bb3da28038ec862e9f7a6e",
+            "kind": 4
+          },
+          "gate": {
+            "coverage_gate": "off",
+            "coverage_target": null,
+            "decisions_home": null,
+            "pack_digest": null,
+            "propose": null
+          },
+          "kind": "landings",
+          "push": "0123456789abcdefghjkmnpq15",
+          "render_inputs": {
+            "description": null,
+            "disagreements": [],
+            "pack": {
+              "areas": {},
+              "block_types": {
+                "actor": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "a",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "authority_policy": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "agent_may_accept": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "owners": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "require": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "roles": {
+                      "kind": "map",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "ap",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "claim": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "c",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "code": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "lang": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "cd",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "component": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "m",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "constraint": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "k",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "decision": {
+                  "body": "optional",
+                  "children": [
+                    "rationale"
+                  ],
+                  "class": "supporting",
+                  "fields": {
+                    "attested_by": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "authority_basis": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "direct_ruling",
+                        "recorded_ruling",
+                        "delegated",
+                        "precedent",
+                        "elimination",
+                        "none"
+                      ]
+                    },
+                    "decided_at": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "effective_from": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "kind": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "needs_content": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "options": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "placeholders": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "recommend": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "confirm",
+                        "reject"
+                      ]
+                    },
+                    "recommend_reason": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "recorded_at": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "reversibility": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "one_way",
+                        "two_way"
+                      ]
+                    },
+                    "review_by": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "statement": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "status": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "proposed",
+                        "accepted",
+                        "rejected"
+                      ]
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "why": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "D",
+                  "tracking": [],
+                  "traits": [
+                    "normative"
+                  ]
+                },
+                "diagram": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "alt": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "lang": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "mermaid",
+                        "d2"
+                      ]
+                    }
+                  },
+                  "prefix": "dg",
+                  "tracking": [],
+                  "traits": [
+                    "informative",
+                    "asset"
+                  ]
+                },
+                "doc": {
+                  "body": "forbidden",
+                  "children": [
+                    "section",
+                    "prose",
+                    "claim",
+                    "requirement",
+                    "constraint",
+                    "term",
+                    "component",
+                    "actor",
+                    "interface",
+                    "value",
+                    "entity",
+                    "flow",
+                    "example",
+                    "note",
+                    "rationale",
+                    "table",
+                    "diagram",
+                    "figure",
+                    "code",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source",
+                    "publication_profile",
+                    "authority_policy"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "doc_type": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "lifecycle": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "draft",
+                        "stable",
+                        "deprecated"
+                      ]
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "d",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "entity": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "kind": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "en",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "example": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "e",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "figure": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "alt": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "blob": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "media_type": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "fg",
+                  "tracking": [],
+                  "traits": [
+                    "informative",
+                    "asset"
+                  ]
+                },
+                "finding": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "evidence": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "statement": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "F",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "flow": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "steps": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "f",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "folder": {
+                  "body": "forbidden",
+                  "children": [
+                    "folder",
+                    "doc",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "description": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "fd",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "interface": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "i",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "defines"
+                  ]
+                },
+                "note": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "n",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "prose": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {},
+                  "prefix": "p",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "publication_profile": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "audience": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "org",
+                        "public"
+                      ]
+                    },
+                    "description": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "select": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "trail": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "pf",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "question": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "options": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "prompt": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "recommend_reason": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "recommended": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "why": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "Q",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "rationale": {
+                  "body": "required",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {},
+                  "prefix": "ra",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "requirement": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "priority": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "must",
+                        "should",
+                        "may"
+                      ]
+                    }
+                  },
+                  "prefix": "r",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "describes"
+                  ]
+                },
+                "section": {
+                  "body": "optional",
+                  "children": [
+                    "section",
+                    "prose",
+                    "claim",
+                    "requirement",
+                    "constraint",
+                    "term",
+                    "component",
+                    "actor",
+                    "interface",
+                    "value",
+                    "entity",
+                    "flow",
+                    "example",
+                    "note",
+                    "rationale",
+                    "table",
+                    "diagram",
+                    "figure",
+                    "code",
+                    "decision",
+                    "question",
+                    "finding",
+                    "source"
+                  ],
+                  "class": null,
+                  "fields": {
+                    "lifecycle": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "draft",
+                        "stable",
+                        "deprecated"
+                      ]
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "s",
+                  "tracking": [],
+                  "traits": [
+                    "structural"
+                  ]
+                },
+                "source": {
+                  "body": "optional",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "kind": {
+                      "kind": "enum",
+                      "required": true,
+                      "values": [
+                        "release",
+                        "commit",
+                        "spec"
+                      ]
+                    },
+                    "locator": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "version": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "S",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "table": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "columns": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "normative": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "rows": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "tb",
+                  "tracking": [],
+                  "traits": [
+                    "informative"
+                  ]
+                },
+                "term": {
+                  "body": "required",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "t",
+                  "tracking": [],
+                  "traits": [
+                    "defines"
+                  ]
+                },
+                "value": {
+                  "body": "optional",
+                  "children": [],
+                  "class": null,
+                  "fields": {
+                    "aliases": {
+                      "kind": "list",
+                      "required": false,
+                      "values": []
+                    },
+                    "name": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "unit": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "value": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    }
+                  },
+                  "prefix": "v",
+                  "tracking": [],
+                  "traits": [
+                    "normative",
+                    "defines"
+                  ]
+                }
+              },
+              "coverage": null,
+              "default_doc_type": "overview",
+              "doc_types": {
+                "components": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Components"
+                    },
+                    {
+                      "required": false,
+                      "title": "Interfaces"
+                    }
+                  ]
+                },
+                "constraints": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Constraints"
+                    }
+                  ]
+                },
+                "decisions-log": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Decisions"
+                    }
+                  ]
+                },
+                "flows": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Flows"
+                    }
+                  ]
+                },
+                "open-questions": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Questions"
+                    }
+                  ]
+                },
+                "overview": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Summary"
+                    },
+                    {
+                      "required": true,
+                      "title": "Goals"
+                    },
+                    {
+                      "required": false,
+                      "title": "Non-goals"
+                    },
+                    {
+                      "required": false,
+                      "title": "Context"
+                    }
+                  ]
+                },
+                "page": {
+                  "nav": true,
+                  "skeleton": []
+                },
+                "principles": {
+                  "nav": true,
+                  "skeleton": [
+                    {
+                      "required": true,
+                      "title": "Principles"
+                    }
+                  ]
+                }
+              },
+              "duplicate_text_min_words": null,
+              "extends": null,
+              "link_types": [
+                "affects",
+                "answers",
+                "conditional_on",
+                "decided_by",
+                "depends_on",
+                "describes",
+                "implements",
+                "refines",
+                "reflects",
+                "revokes",
+                "supersedes"
+              ],
+              "name": "rdy-standard",
+              "tensions": {},
+              "version": "0.1.0"
+            },
+            "rdy": "0.53.0",
+            "theme": "rdy-standard",
+            "title": "Publish"
+          },
+          "tags": [],
+          "view": null
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/press/write"
+      },
+      "step": "write"
     },
     {
       "case": "E_HUB_SHARE_OFF: a write on an install with Share off",

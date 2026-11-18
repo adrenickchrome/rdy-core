@@ -44,7 +44,7 @@ const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
 const FIXTURE: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v1.json");
 const FIXTURE_SHA256: &str = "18ade8e2c1a301d780270f20fe49fc116110a6aa512baf624d768ef5ba39711f";
 const FIXTURE_V2: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v2.json");
-const FIXTURE_V2_SHA256: &str = "37aba1e73101e071f38a42f515968aae28f0232a2a886890b40a5fcc340fd45d";
+const FIXTURE_V2_SHA256: &str = "ddc3e17a39425ba7af5a7a4be8531fa89e484b2ff82cc4f4b12d8d37418e33e7";
 const PUSH: &str = "0123456789abcdefghjkmnpqrs";
 const REPO_PATH: &str = "/acme/docs";
 
@@ -236,9 +236,22 @@ fn key_of(v: &Value) -> ObjectKey {
 }
 
 /// A write of the fixture's write body `b`, with this client's gate values in place of the
-/// fixture's nulls (open question Q2: the client sends its effective gate values).
+/// fixture's nulls (open question Q2: the client sends its effective gate values), and the
+/// body's tags.
 fn write_of(b: &Value) -> SyncWrite {
     let render_inputs: RenderInputs = serde_json::from_value(b["render_inputs"].clone()).unwrap();
+    let tags = b["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            assert_eq!(t["disagreements"], json!([]), "{t}");
+            WriteTag {
+                name: t["name"].as_str().unwrap().into(),
+                disagreements: vec![],
+            }
+        })
+        .collect();
     SyncWrite {
         expected: (!b["expected"].is_null()).then(|| key_of(&b["expected"])),
         gate: Some(GateSettings {
@@ -253,8 +266,8 @@ fn write_of(b: &Value) -> SyncWrite {
         }),
         kind: WriteKind::Landings,
         push: b["push"].as_str().unwrap().into(),
-        render_inputs,
-        tags: vec![],
+        render_inputs: Some(render_inputs),
+        tags,
         view: None,
     }
 }
@@ -304,7 +317,7 @@ fn fixture_v2_steps() {
     assert_eq!(f["version"], 2);
     assert_eq!(f["media_type"], SYNC_MEDIA_TYPE);
     let st: Vec<Value> = f["steps"].as_array().unwrap().clone();
-    assert_eq!(st.len(), 30);
+    assert_eq!(st.len(), 35);
     let named: Vec<&str> = st.iter().map(|s| s["step"].as_str().unwrap()).collect();
     assert_eq!(
         named,
@@ -338,11 +351,16 @@ fn fixture_v2_steps() {
             "outcome",
             "outcome",
             "outcome",
+            "write",
+            "outcome",
+            "write",
+            "write",
+            "write",
             "write"
         ]
     );
-    // the cases the hub does not serve yet: nine, each with its step, design and reason; the
-    // client pins none of them here
+    // the cases the hub does not serve yet: six, each with its step, design and reason; the
+    // client pins none of them here (rdyhub d84d2d96 serves the tag cases)
     let not_served = f["not_served"].as_array().unwrap();
     let skipped: Vec<(&str, &str)> = not_served
         .iter()
@@ -350,9 +368,7 @@ fn fixture_v2_steps() {
         .collect();
     assert_eq!(
         skipped.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
-        [
-            "dump", "state", "write", "write", "write", "outcome", "write", "write", "write"
-        ]
+        ["dump", "state", "write", "write", "write", "outcome"]
     );
     for n in not_served {
         for m in ["case", "design", "reason"] {
@@ -604,9 +620,56 @@ fn fixture_v2_steps() {
         let e = refused(served(&mut s, reply_of(&st[i]), || hub.wire.write(&cx, &a_write())).0);
         matches_refusal(&e, &st[i]);
     }
-    // 29: E_HUB_SHARE_OFF is in no table: core's text
+    // the pushed-tag writes (29, 31, 32; rdyhub d84d2d96), each in its own hub repo: taken,
+    // the body the fixture's but the gate's values, every carried tag named once with no
+    // disagreements (32 names v1.0.0, which the hub holds at that landing, and is taken)
+    for (i, repo) in [(29, "docs"), (31, "fresh"), (32, "kept")] {
+        let w = &st[i];
+        let b = &w["request"]["body"];
+        let tags: Vec<&str> = b["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(!tags.is_empty(), "step {i}");
+        assert!(
+            tags.windows(2).all(|w| w[0] < w[1]),
+            "step {i}: once each, by name"
+        );
+        let rcx = hub.cx_with(Some(format!("{origin}/sync/acme/{repo}")));
+        let (r, req) = served(&mut s, reply_of(w), || hub.wire.write(&rcx, &write_of(b)));
+        matches_request(&req, w);
+        let sent: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(without(&sent, "gate"), without(b, "gate"), "step {i}");
+        let rep = &w["reply"]["body"];
+        let got = r.unwrap();
+        assert_eq!(
+            (got.outcome, got.tip, got.request, got.min_rdy_raised),
+            (
+                WriteOutcome::Taken,
+                Some(key_of(&rep["tip"])),
+                None,
+                rep["min_rdy_raised"].as_bool().unwrap()
+            ),
+            "step {i}"
+        );
+    }
+    // 33: E_HUB_TAG_TAKEN keeps the hub's words and request id (the exchange gives it core's
+    // code E_TAG_EXISTS)
+    let press = hub.cx_with(Some(format!("{origin}/sync/acme/press")));
+    let w = &st[33];
+    let (r, req) = served(&mut s, reply_of(w), || {
+        hub.wire.write(&press, &write_of(&w["request"]["body"]))
+    });
+    matches_request(&req, w);
+    let e = refused(r);
+    matches_refusal(&e, w);
+    assert_eq!(e.code, "E_HUB_TAG_TAKEN");
+
+    // 34: E_HUB_SHARE_OFF is in no table: core's text
     let e = refused(
-        served(&mut s, reply_of(&st[29]), || {
+        served(&mut s, reply_of(&st[34]), || {
             hub.wire.write(&cx, &a_write())
         })
         .0,
@@ -620,9 +683,11 @@ fn fixture_v2_steps() {
         )
     );
 
-    // outcome (11, 21, 25, 28; refusals 26, 27)
+    // outcome (11, 21, 25, 28, 30; refusals 26, 27)
+    let tagged = key_of(&st[30]["reply"]["body"]["tip"]);
     for (i, want) in [
         (11, LookupOutcome::Taken { tip: seed }),
+        (30, LookupOutcome::Taken { tip: tagged }),
         (
             21,
             LookupOutcome::Refused {

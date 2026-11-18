@@ -287,6 +287,8 @@ pub enum WriteKind {
     Landings,
     Force,
     View,
+    /// A restore of a dump's canon (D-J3YA0): the hub chooses the seed or the force move.
+    Restore,
 }
 
 /// One tag a write carries and the hub lacks, with the disagreements at its scope.
@@ -315,16 +317,19 @@ pub struct GateSettings {
     pub propose: ProposeGate,
 }
 
-/// The write step's request. A canon write (`landings`, `force`) has no view and sends `gate`;
-/// a view write names its view and sends no gate. `expected` is the hub tip or head the write
-/// expects, or None for a seed or a new view.
+/// The write step's request. A canon write (`landings`, `force`) has no view and sends `gate`
+/// and `render_inputs`; a view write names its view and sends no gate. A restore (`restore`)
+/// has no view; its `gate` and `render_inputs` are null when the dump has none, and it sends
+/// render inputs only with a gate (rdyhub-design i-B40VF, D-D5J18). The view writes of a
+/// restore send no render inputs. `expected` is the hub tip or head the write expects, or None
+/// for a seed or a new view.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct WriteRequest {
     pub expected: Option<ObjectKey>,
     pub gate: Option<GateSettings>,
     pub kind: WriteKind,
     pub push: String,
-    pub render_inputs: RenderInputs,
+    pub render_inputs: Option<RenderInputs>,
     pub tags: Vec<WriteTag>,
     pub view: Option<String>,
 }
@@ -343,8 +348,14 @@ impl WriteRequest {
 /// their bounds and the body within [`WRITE_REQUEST_BYTES`]. Nothing is sent.
 pub fn encode_write(w: &WriteRequest) -> Result<Vec<u8>, RdyError> {
     check_push(&w.push)?;
-    let canon = w.kind != WriteKind::View;
-    if canon != w.gate.is_some() || canon == w.view.is_some() {
+    let fits = match w.kind {
+        WriteKind::Landings | WriteKind::Force => {
+            w.gate.is_some() && w.render_inputs.is_some() && w.view.is_none()
+        }
+        WriteKind::View => w.gate.is_none() && w.view.is_some(),
+        WriteKind::Restore => w.view.is_none() && (w.gate.is_some() || w.render_inputs.is_none()),
+    };
+    if !fits {
         return Err(RdyError::new(
             E_BAD_INPUT,
             "the write's kind does not match its members",
@@ -358,7 +369,9 @@ pub fn encode_write(w: &WriteRequest) -> Result<Vec<u8>, RdyError> {
             "expect the hub's tip or view head",
         ));
     }
-    validate_inputs(&w.render_inputs)?;
+    if let Some(inputs) = &w.render_inputs {
+        validate_inputs(inputs)?;
+    }
     encode(w, WRITE_REQUEST_BYTES)
 }
 

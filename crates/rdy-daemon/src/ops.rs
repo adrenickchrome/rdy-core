@@ -186,6 +186,7 @@ pub const OPS: &[&str] = &[
     "hook",
     "push",
     "pull",
+    "restore",
 ];
 
 /// ain5: the ops whose successful replies carry the reminder while it is owed, the CLI's
@@ -698,6 +699,11 @@ pub fn dispatch_with(
         "pull" => {
             let req = parse(op, args, "{remote?, views?, take?, strict?}")?;
             sync::pull(cx.engine, &cx.engine.root(), cx.session, req)
+        }
+        // a restore reads only the dump and its temporary store: the project gives the remote
+        "restore" => {
+            let req = parse(op, args, "{dump, remote?}")?;
+            sync::restore(&cx.engine.root(), cx.session, req)
         }
         "instructions" => instructions(cx, parse(op, args, "{full?, load?, part?}")?),
         "links" => links(cx, parse(op, args, "{op?, alias?}")?),

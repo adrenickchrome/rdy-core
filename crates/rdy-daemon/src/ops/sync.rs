@@ -1,5 +1,5 @@
 //! The sync ops (D-H0BZN): a push of local canon and named views to a share remote's hub repo,
-//! and a pull of hub canon and named views from it. Each runs the engine's sync coordinator
+//! a pull of hub canon and named views from it, and the restore of a dump into it (D-J3YA0). Each runs the engine's sync coordinator
 //! ([`SyncService`]) with this crate's renderer for the render inputs a write carries. The
 //! coordinator holds the store's writer only for its local steps, never across a request.
 //!
@@ -20,6 +20,7 @@ use rdy_engine::hub_sync_wire::{
 };
 use rdy_engine::hub_types::SystemHubClock;
 use rdy_engine::sync_fetch::FetchOutcome;
+use rdy_engine::sync_restore::{RestoreOutcome, RestoreRequest};
 use rdy_engine::{E_INTERNAL, Engine, RdyError, Session};
 use rdy_render::publish::PublicationRenderer;
 use rdy_store::object_refs::ObjectKey;
@@ -27,7 +28,7 @@ use rdy_store::sync_state::KIND_VIEW;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// The push op's arguments: the remote (none for the default), the named views and `force`.
@@ -55,6 +56,16 @@ pub(crate) struct PullArgs {
     take: bool,
     #[serde(default)]
     strict: bool,
+}
+
+/// The restore op's arguments: the dump (relative to the project root) and the remote (none
+/// for the default).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RestoreArgs {
+    dump: PathBuf,
+    #[serde(default)]
+    remote: Option<String>,
 }
 
 /// The sync wire of one call, built on its first request.
@@ -185,6 +196,22 @@ pub(crate) fn pull(
     pull_json(&out)
 }
 
+/// Restores the dump of `args` for `session` into the hub repo of the project's share remote at
+/// `root`, and replies with the restore's ends. The project's store is not opened: the restore
+/// holds no writer.
+pub(crate) fn restore(
+    root: &Path,
+    session: &Session,
+    args: RestoreArgs,
+) -> Result<Value, RdyError> {
+    let request = RestoreRequest {
+        dump: vec![root.join(&args.dump)],
+        remote: args.remote,
+    };
+    let out = with_service(root, |s| s.restore(session, request))?;
+    Ok(restore_json(&out))
+}
+
 fn sent_json(s: &HistorySent) -> Value {
     json!({"batches": s.batches, "records": s.records, "bytes": s.bytes})
 }
@@ -246,7 +273,18 @@ fn lookup_json(r: &Option<Resolved>) -> Value {
     let Some(r) = r else {
         return Value::Null;
     };
-    let outcome = match &r.outcome {
+    let outcome = outcome_json(&r.outcome);
+    json!({
+        "push": r.push,
+        "kind": if r.kind == KIND_VIEW { "view" } else { "canon" },
+        "view": r.view,
+        "result": outcome,
+        "fetched": r.fetched,
+    })
+}
+
+fn outcome_json(o: &LookupOutcome) -> Value {
+    match o {
         LookupOutcome::Taken { tip } => json!({"outcome": "taken", "tip": tip.hash.to_string()}),
         LookupOutcome::Held { request, tip } => json!({
             "outcome": "held",
@@ -255,13 +293,29 @@ fn lookup_json(r: &Option<Resolved>) -> Value {
         }),
         LookupOutcome::Refused { code } => json!({"outcome": "refused", "code": code}),
         LookupOutcome::Unknown => json!({"outcome": "unknown"}),
-    };
+    }
+}
+
+fn restore_json(out: &RestoreOutcome) -> Value {
+    let views: Vec<Value> = out
+        .views
+        .iter()
+        .map(|(name, end)| json!({"view": name, "end": end_json(end)}))
+        .collect();
+    let lookups: Vec<Value> = out
+        .lookups
+        .iter()
+        .map(|l| json!({"push": l.push, "view": l.view, "result": outcome_json(&l.outcome)}))
+        .collect();
     json!({
-        "push": r.push,
-        "kind": if r.kind == KIND_VIEW { "view" } else { "canon" },
-        "view": r.view,
-        "result": outcome,
-        "fetched": r.fetched,
+        "remote": out.remote,
+        "holder": out.holder,
+        "canon": out.canon.as_ref().map(end_json),
+        "lookups": lookups,
+        "without_inputs": out.without_inputs,
+        "views": views,
+        "kept": out.kept,
+        "cleanup": out.cleanup,
     })
 }
 
