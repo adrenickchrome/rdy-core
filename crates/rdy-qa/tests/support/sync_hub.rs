@@ -355,7 +355,7 @@ fn history(
         read.seq(),
     )
     .expect("a history closure");
-    found.records.iter().copied().collect()
+    found.records.to_vec()
 }
 
 fn parse_hash(v: &Value) -> Option<Hash> {
