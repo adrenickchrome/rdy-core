@@ -30,7 +30,7 @@
 //!   and failure suppression above; its body streams with its exact length and its reply cap is
 //!   the caller's, never over 16 MiB. Sign-in and key requests stay on the install alone.
 use crate::error::{
-    E_BAD_INPUT, E_UPSTREAM_ORIGIN, RdyError, actor_unbound, signing_selector, upload_body,
+    E_BAD_INPUT, E_IO, E_UPSTREAM_ORIGIN, RdyError, actor_unbound, signing_selector, upload_body,
     upstream_auth, upstream_ca, upstream_key_proof, upstream_origin, upstream_protocol,
     upstream_token,
 };
@@ -51,7 +51,7 @@ use ssh_encoding::base64::{Base64, Encoding};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -137,6 +137,14 @@ impl fmt::Debug for UploadHttpRequest<'_> {
             .field("reply_limit", &self.reply_limit)
             .finish_non_exhaustive()
     }
+}
+
+/// Where [`HttpHubTransport::upload_streamed`] writes the reply of one status: `out`, at most
+/// `limit` bytes.
+pub struct ReplySink<'a> {
+    pub status: u16,
+    pub out: &'a mut dyn Write,
+    pub limit: u64,
 }
 
 /// The bounds of one JSON document: its bytes, nesting depth, members and elements in total,
@@ -275,7 +283,7 @@ impl HubTransport for HttpHubTransport {
     fn exchange(&self, call: HubCall) -> Result<HubReply, HubFailure> {
         let prepared = self.prepare(&call)?;
         let roots = self.roots(call.ca_file.as_deref())?;
-        let (status, body) = send(prepared, roots)?;
+        let (status, body, _) = send(prepared, roots, None)?;
         decode(&call, status, &body)
     }
 }
@@ -300,7 +308,30 @@ impl HttpHubTransport {
     ) -> Result<(u16, Vec<u8>), HubFailure> {
         let prepared = self.prepare_upload(install, claim, bearer, request)?;
         let roots = self.roots(ca_file)?;
-        send(prepared, roots)
+        send(prepared, roots, None).map(|(status, body, _)| (status, body))
+    }
+
+    /// [`upload`](Self::upload), with the reply of the status `sink.status` written to
+    /// `sink.out` as it arrives, never held whole in memory: at most `sink.limit` bytes, else
+    /// [`HubFailure::Protocol`]. A reply of any other status is read as `upload` reads it, within
+    /// the request's reply cap. Returns the status, the body read into memory (empty for a
+    /// streamed reply) and the bytes written to the sink. A sink that refuses a write is `E_IO`.
+    pub fn upload_streamed(
+        &self,
+        install: &Origin,
+        ca_file: Option<&Path>,
+        claim: &RequestClaim,
+        bearer: &Secret,
+        request: UploadHttpRequest<'_>,
+        sink: ReplySink<'_>,
+    ) -> Result<(u16, Vec<u8>, u64), HubFailure> {
+        let mut prepared = self.prepare_upload(install, claim, bearer, request)?;
+        // a slow link gets time in proportion to the bytes the sink may take
+        prepared.timeout = prepared
+            .timeout
+            .saturating_add(Duration::from_secs(sink.limit.div_ceil(UPLOAD_MIN_RATE)));
+        let roots = self.roots(ca_file)?;
+        send(prepared, roots, Some(sink))
     }
 
     /// Every check of an upload before a connection, in the contract's order.
@@ -956,8 +987,13 @@ fn at_end(r: &mut dyn Read) -> bool {
     matches!(read_some(r, &mut probe), Ok(0))
 }
 
-/// Sends one request on a fresh agent and reads the bounded reply: its status and body.
-fn send(p: Prepared<'_>, roots: Vec<Certificate<'static>>) -> Result<(u16, Vec<u8>), HubFailure> {
+/// Sends one request on a fresh agent and reads the bounded reply: its status and body, or, for
+/// the status of `sink`, the bytes it streamed there.
+fn send(
+    p: Prepared<'_>,
+    roots: Vec<Certificate<'static>>,
+    sink: Option<ReplySink<'_>>,
+) -> Result<(u16, Vec<u8>, u64), HubFailure> {
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .https_only(true)
@@ -1024,6 +1060,12 @@ fn send(p: Prepared<'_>, roots: Vec<Certificate<'static>>) -> Result<(u16, Vec<u
     if status.is_redirection() {
         return Err(HubFailure::Protocol);
     }
+    if let Some(sink) = sink
+        && sink.status == status.as_u16()
+    {
+        let n = stream_reply(response.body_mut(), sink)?;
+        return Ok((status.as_u16(), Vec::new(), n));
+    }
     // Read one byte past the limit, so an over-long body is seen.
     let read_limit = u64::try_from(p.reply_limit)
         .unwrap_or(u64::MAX)
@@ -1037,7 +1079,45 @@ fn send(p: Prepared<'_>, roots: Vec<Certificate<'static>>) -> Result<(u16, Vec<u
     if body.len() > p.reply_limit {
         return Err(HubFailure::Protocol);
     }
-    Ok((status.as_u16(), body))
+    Ok((status.as_u16(), body, 0))
+}
+
+/// Copies `body` to `sink.out`, reading one byte past `sink.limit` so an over-long body is seen:
+/// the bytes copied. A body past the limit is a contract mismatch; a sink that refuses a write is
+/// `E_IO`; any other read failure may have come after the hub acted.
+fn stream_reply(body: &mut ureq::Body, sink: ReplySink<'_>) -> Result<u64, HubFailure> {
+    let mut reader = body
+        .with_config()
+        .limit(sink.limit.saturating_add(1))
+        .reader();
+    let mut buf = vec![0u8; UPLOAD_BUFFER_BYTES];
+    let mut n: u64 = 0;
+    loop {
+        let k = match read_some(&mut reader, &mut buf) {
+            Ok(0) => return Ok(n),
+            Ok(k) => k,
+            Err(e) => {
+                let inner = e.get_ref().and_then(|x| x.downcast_ref::<ureq::Error>());
+                return Err(match inner {
+                    Some(u) => failure(u, true),
+                    None => HubFailure::Transport {
+                        may_have_sent: true,
+                    },
+                });
+            }
+        };
+        n = n.saturating_add(k as u64);
+        if n > sink.limit {
+            return Err(HubFailure::Protocol);
+        }
+        sink.out.write_all(&buf[..k]).map_err(|_| {
+            HubFailure::Local(RdyError::new(
+                E_IO,
+                "the hub reply could not be written to its scratch file",
+                "check the temporary directory and available disk space",
+            ))
+        })?;
+    }
 }
 
 /// A library error as a closed failure. Before the connection was ready nothing was sent; after

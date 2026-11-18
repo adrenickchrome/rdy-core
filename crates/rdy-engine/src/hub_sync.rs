@@ -1,87 +1,196 @@
-//! The sync exchange's push through put (D-H0BZN, D-3RSCW, D-4XHPH, D-5Y8Y1, D-47HVF, D-0SC9C):
-//! the steps that rdyhub's wire fixture v1 covers.
+//! The sync exchange's push and pull (D-H0BZN, D-3RSCW, D-4XHPH, D-5Y8Y1, D-47HVF, D-0SC9C,
+//! D-KE83X, D-DZDB7, D-QMZ92, D-0WWYR, D-QCE8M).
 //!
 //! 1. **Remote.** The named remote, else the share remote, else the only remote, else
 //!    `E_REMOTE_REQUIRED`. A remote that is not a share remote is `E_BAD_INPUT`
-//!    (`SYNC_REMOTE_MODE`).
+//!    (`SYNC_REMOTE_MODE`). The named views pass Plan A's checks first: at most 256, each once.
 //! 2. **Guard.** One push or pull per remote of a project runs in this process; a second is
 //!    `E_LOCKED` and sends nothing ([`RemoteGuard`]).
 //! 3. **Trust and access.** The install's origin fence, its `ca_file`, the session's bound
 //!    claim and the machine's sign-in credential, as `rdy publish` uses them. Access is asked
 //!    for immediately before every request.
-//! 4. **Discovery, then state** in its publish-upload form, with no views.
+//! 4. **Discovery, then state** with the named views. A push and a pull use only the tip and
+//!    heads that their own state step returned.
 //! 5. **Checks before any transfer.** The hub's `min_rdy` (`E_STORE_FORMAT`), the hub repo's id
-//!    (`E_REPO_MISMATCH`) and the history stream format. A `pending` write found here stops the
-//!    push with [`PushOutcome::PendingWrite`]; both refs stay. Then the base rule: a null hub tip
-//!    seeds, a tip local canon holds is the base, any other tip is `E_DIVERGED`.
-//! 6. **Upload.** The records are Plan A's closure of local canon's head above the hub tip
-//!    (D-KE83X). When the hub tip is the head, they are the attachments made since (later tags,
-//!    signatures and answers); with none, the push is up to date. One push id per upload: the
-//!    `upload` ref's, when one names this remote's canon upload (a stopped put resumes), else a
-//!    new one. Known names the keys neither the hub's store nor the push's quarantine holds;
-//!    only those travel, in Plan A's format-4 batches. The `upload` ref is written before the
-//!    first put. A push at the hub tip that sends nothing and resumes no upload is up to date.
-//! 7. **End.** After the last put the upload stays for the write step. A push that fails
-//!    clears only an `upload` it wrote itself, and only when no put of it may have reached the
-//!    quarantine.
-//!
-//! Seams for the steps that wire fixture v2 freezes: the outcome lookup runs where a found
-//! `pending` stops the push now; the write step (with the render inputs and the gate settings)
-//! follows the last put, where [`PushOutcome::Uploaded`] is returned now.
-use crate::engine::Engine;
+//!    (`E_REPO_MISMATCH`) and the history stream format.
+//! 6. **Outcome lookup.** A `pending` write found here is looked up before any known, put, get
+//!    or write step: taken and held apply the write reply's rules (a taken tip other than the
+//!    pushed head is fetched first), refused clears it, and unknown stops with the uncertain
+//!    words until the quarantine life has passed since it was sent. A refusal of the lookup
+//!    keeps it. An outcome is never inferred from store facts.
+//! 7. **Push.** One render-input capture per push, at the pushed head's scope, with the gate
+//!    settings of the same read state. Canon first, then each named view in Plan A's push
+//!    order. Each has its own push id, upload, known, put and write; a view write starts only
+//!    after the canon write has its reply, and a canon refusal does not stop the views. Canon's
+//!    base rule: a null hub tip seeds, a tip local canon holds is the base, any other tip is
+//!    `E_DIVERGED` unless the push forces. While local canon's head is the held head, canon
+//!    sends no write and reports the open request.
+//! 8. **Write.** `[Upload (when this run wrote none), Send]`, then the write. `taken` records
+//!    the tip as applied (and clears a held request the tip reaches); `held` records the held
+//!    head and request; a refusal clears `pending` only. A write that may have reached the hub
+//!    with no reply keeps `pending` and stops with `E_UPSTREAM_UNCERTAIN` and the sync words;
+//!    it is never sent again. A write that was certainly not sent restores the upload.
+//! 9. **Pull.** For hub canon and each named view: the known pull pages from this store's
+//!    fetched tip or head (when the store holds it), the keys this store lacks fetched in
+//!    batches within the hub's limits, each streamed to a scratch file and checked, then Plan
+//!    A's fetch and replay.
+use crate::engine::{Engine, with_writer_result};
 use crate::error::{
-    E_DIVERGED, E_STORE_FORMAT, E_UPSTREAM_ACTOR_CLAIM, E_UPSTREAM_UNCERTAIN, RdyError,
-    SYNC_DIVERGED_FIX, SYNC_DIVERGED_MESSAGE, SYNC_MIN_RDY_FIX, SYNC_MIN_RDY_MESSAGE,
-    upstream_auth, upstream_protocol,
+    E_BAD_INPUT, E_DIVERGED, E_STORE_FORMAT, E_UPSTREAM_ACTOR_CLAIM, E_UPSTREAM_UNCERTAIN,
+    RdyError, SYNC_DIVERGED_FIX, SYNC_DIVERGED_MESSAGE, SYNC_MIN_RDY_FIX, SYNC_MIN_RDY_MESSAGE,
+    sync_uncertain, upstream_auth, upstream_protocol,
 };
 use crate::formats::formats;
 use crate::hub_config::{BAD_REMOTE_NAME_FIX, BAD_REMOTE_NAME_MESSAGE, HubConfig, RemoteMode};
 use crate::hub_credentials::HubCredentials;
-use crate::hub_publish::{not_share_remote, repo_mismatch};
+use crate::hub_publish::{PublishRenderer, not_share_remote, repo_mismatch};
 use crate::hub_publish_stream::{
-    BatchLimits, HistorySent, ObjectWire, PreparedHistory, PushId, missing_with, send_objects,
+    BatchLimits, HistorySent, ObjectWire, PreparedHistory, PushId, missing_with, scratch_error,
+    send_objects,
 };
-use crate::hub_publish_wire::{ObjectPut, PublishState, UploadContext};
-use crate::hub_sync_wire::{SyncStateRequest, SyncWire};
+use crate::hub_publish_wire::{MAX_KNOWN_KEYS, ObjectPut, PublishState, UploadContext};
+use crate::hub_sync_wire::{
+    GateSettings, GetRequest, HubRequest, KnownPull, LookupOutcome, ProposeGate, SyncState,
+    SyncStateRequest, SyncWire, WriteFailure, WriteKind, WriteOutcome, WriteReply, WriteRequest,
+    WriteTag, check_view_names, encode_write,
+};
 use crate::hub_types::{HubClock, HubTransport, Origin, RequestClaim};
-use crate::session::Session;
+use crate::landing_check::CheckInputs;
+use crate::readiness::assessment::pack_digest;
+use crate::render_inputs::{RenderInputs, validate_inputs};
+use crate::session::{Scope, Session};
+use crate::sync_fetch::{FetchOutcome, HubState, usable_canon_state, usable_view_state};
 use crate::sync_state::{RemoteGuard, remote_refs, write_steps};
-use crate::{ReadState, hub_config};
+use crate::sync_views::{
+    ViewPullRequest, ViewPulled, pull_views, push_plan, view_diverged, view_missing,
+};
+use crate::{ReadState, hub_config, sync_replay};
 use rdy_model::Hash;
 use rdy_schema::Issue;
+use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
-use rdy_store::sync_state::{KIND_CANON, SyncStep, SyncUpload};
-use rdy_store::sync_stream::HISTORY_FORMAT;
-use std::io::Read;
+use rdy_store::sync_state::{
+    KIND_CANON, KIND_VIEW, SyncCanon, SyncHeld, SyncPending, SyncStep, SyncUpload, SyncView,
+};
+use rdy_store::sync_stream::{HISTORY_FORMAT, StreamPurpose};
+use rdy_store::take_batch::FetchTarget;
+use rdy_store::{StoreError, StoreReader};
+use std::collections::BTreeSet;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// A push's request: the remote to push to, or none for the default one.
+/// A push's request: the remote (none for the default one), the named views, and whether it
+/// forces hub canon to local canon's head.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PushRequest {
     pub remote: Option<String>,
+    pub views: Vec<String>,
+    pub force: bool,
 }
 
-/// How a push ended without an error.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PushOutcome {
-    /// The hub tip is local canon's head (or both are empty), and the hub holds every
-    /// attachment of the head's history: nothing to upload.
+/// A pull's request: the remote (none for the default one), the named views, whether it takes
+/// the hub's tip (or, with views, the hub's view heads) with no replay, and whether it stops at
+/// the first replay.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PullRequest {
+    pub remote: Option<String>,
+    pub views: Vec<String>,
+    pub take: bool,
+    pub strict: bool,
+}
+
+/// How one canon or view upload of a push ended.
+#[derive(Clone, Debug)]
+pub enum WriteEnd {
+    /// The hub tip or head is the local one, and the hub holds every attachment of its
+    /// history: nothing was sent.
     UpToDate { tip: Option<Hash> },
-    /// Every record the hub lacked is in the quarantine of `push`, from local canon's `head`
-    /// above the hub tip `base`. `base` is `head` when only later attachments travel. The
-    /// `upload` ref stays for the write step.
-    Uploaded {
+    /// The hub took the write of push `push`: `head` above `base` (the hub tip or head it
+    /// extended), now at `tip`.
+    Taken {
         push: String,
         base: Option<Hash>,
         head: Hash,
-        /// The push id came from an `upload` ref an earlier push left.
+        tip: Hash,
         resumed: bool,
         sent: HistorySent,
+        min_rdy_raised: bool,
     },
-    /// A write of push `push` was sent and has no reply: the push stopped before known or put,
-    /// and both refs stay.
-    PendingWrite { push: String },
+    /// The hub held the write of push `push` as the landing request `request`.
+    Held {
+        push: String,
+        head: Hash,
+        request: HubRequest,
+        resumed: bool,
+        sent: HistorySent,
+        min_rdy_raised: bool,
+    },
+    /// The write was refused: by the hub (the write of push `push`), or here before any request
+    /// (no push).
+    Refused {
+        push: Option<String>,
+        error: RdyError,
+    },
+    /// Local canon's head is the held head of the open request `request`: no write was sent.
+    HeldOpen { head: Hash, request: u64 },
+}
+
+/// What the outcome lookup of a found `pending` write did: its push, kind and view, the hub's
+/// answer, and whether a changed tip or head was fetched first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolved {
+    pub push: String,
+    pub kind: u8,
+    pub view: Option<String>,
+    pub outcome: LookupOutcome,
+    pub fetched: bool,
+}
+
+/// How a push ended without an error: the remote, the outcome lookup of a found pending write,
+/// canon's end, whether a forced push found force not needed, and each named view's end in the
+/// order it was sent.
+#[derive(Clone, Debug)]
+pub struct PushOutcome {
+    pub remote: String,
+    pub lookup: Option<Resolved>,
+    pub canon: WriteEnd,
+    pub force_not_needed: bool,
+    pub views: Vec<(String, WriteEnd)>,
+}
+
+/// How a pull ended without an error: the remote, the outcome lookup of a found pending write,
+/// canon's fetch (None when nothing was fetched) and replay (None for a null hub canon), and
+/// each named view's fetch and pull.
+#[derive(Clone, Debug)]
+pub struct PullOutcome {
+    pub remote: String,
+    pub lookup: Option<Resolved>,
+    pub fetched: Option<FetchOutcome>,
+    pub canon: Option<sync_replay::PullOutcome>,
+    pub views_fetched: Vec<(String, FetchOutcome)>,
+    pub views: Vec<ViewPulled>,
+}
+
+/// Which canon move a preview names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewKind {
+    /// A forced push: hub canon moves to local canon's head.
+    ForcePush,
+    /// A pull that takes the hub tip: local canon moves to it.
+    TakePull,
+}
+
+/// What a canon move removes, for the person's card: the remote, canon's tip before and after
+/// the move, and each landing that leaves that canon, oldest first. `complete` is false when
+/// this store lacks part of the chain kept, so the list may name a landing the move keeps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonPreview {
+    pub remote: String,
+    pub before: Option<Hash>,
+    pub after: Option<Hash>,
+    pub leaving: Vec<Hash>,
+    pub complete: bool,
 }
 
 /// E_STORE_FORMAT when the hub repo `name` needs a newer rdy than this one (D-4XHPH).
@@ -136,6 +245,66 @@ fn canon_holds(read: &ReadState, head: Option<Hash>, tip: &Hash) -> Result<bool,
     Ok(false)
 }
 
+/// The landings of the chain from `head` back, newest first, as far as this store holds them,
+/// and whether the walk reached the chain's first landing.
+fn chain(reader: &StoreReader, head: Option<Hash>) -> (Vec<Hash>, bool) {
+    let mut out = Vec::new();
+    let mut at = head;
+    while let Some(h) = at {
+        match reader.landing(&h) {
+            Ok(l) => {
+                out.push(h);
+                at = l.prev;
+            }
+            Err(_) => return (out, false),
+        }
+    }
+    (out, true)
+}
+
+/// Whether the chain from `from` back holds `target`, as far as this store holds it.
+fn chain_holds(reader: &StoreReader, from: Option<Hash>, target: &Hash) -> bool {
+    chain(reader, from).0.contains(target)
+}
+
+/// What a canon move of `kind` removes, read from this store alone: no request and no write.
+/// `hub_tip` is the hub's tip from a state step.
+pub fn canon_preview(
+    read: &ReadState,
+    remote: &str,
+    hub_tip: Option<Hash>,
+    kind: PreviewKind,
+) -> Result<CanonPreview, RdyError> {
+    let reader = read.reader();
+    let local = read.canon_head();
+    let (before, after) = match kind {
+        PreviewKind::ForcePush => (hub_tip, local),
+        PreviewKind::TakePull => (local, hub_tip),
+    };
+    let (gone, _) = chain(reader, before);
+    let (kept, complete) = chain(reader, after);
+    let kept: BTreeSet<Hash> = kept.into_iter().collect();
+    let mut leaving: Vec<Hash> = gone.into_iter().filter(|h| !kept.contains(h)).collect();
+    leaving.reverse();
+    let complete = complete || leaving.is_empty();
+    Ok(CanonPreview {
+        remote: remote.to_string(),
+        before,
+        after,
+        leaving,
+        complete,
+    })
+}
+
+/// E_BAD_INPUT: a pull that takes the hub tip cannot also stop at the first replay.
+fn take_and_strict() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "a pull cannot both take the hub tip and stop at the first replay",
+        "pass take or strict, not both",
+    )
+}
+
 /// The selected remote's install and trust.
 struct Target {
     name: String,
@@ -147,14 +316,44 @@ struct Target {
     account: String,
 }
 
+/// The render inputs a push captured once, with the gate settings of the same read state, and
+/// the head whose scope they hold.
+struct Capture {
+    inputs: RenderInputs,
+    gate: GateSettings,
+    head: Option<Hash>,
+}
+
+/// Whose upload the `upload` ref holds, as a push reads it.
+enum Slot {
+    Free,
+    Canon(PushId),
+    View(String, PushId),
+    Foreign,
+}
+
+/// One canon or view upload and its write.
+struct Job {
+    kind: WriteKind,
+    view: Option<String>,
+    head: Hash,
+    base: Option<Hash>,
+    expected: Option<Hash>,
+    at_tip: bool,
+    history: PreparedHistory,
+    resumed: Option<PushId>,
+}
+
 /// The sync coordinator of one project for the user config at `user_file`, with the credential
-/// transport `api`, the clock `clock` and the sync wire `wire`.
+/// transport `api`, the clock `clock`, the sync wire `wire` and the render-input capture of
+/// `renderer`.
 pub struct SyncService<'a> {
     project: PathBuf,
     user_file: PathBuf,
     api: &'a dyn HubTransport,
     clock: &'a dyn HubClock,
     wire: &'a dyn SyncWire,
+    renderer: &'a dyn PublishRenderer,
 }
 
 /// The sync wire's known and put steps for the history sender.
@@ -181,6 +380,23 @@ impl ObjectWire for SyncObjects<'_> {
     }
 }
 
+fn store(e: StoreError) -> RdyError {
+    e.into()
+}
+
+/// `E_LOCKED`: another upload or write of remote `remote` holds its sync state.
+fn busy(remote: &str) -> RdyError {
+    RdyError::from(StoreError::SyncBusy(remote.to_string()))
+}
+
+/// A canon or view end for an upload that waits behind another upload of the remote.
+fn busy_end(remote: &str) -> WriteEnd {
+    WriteEnd::Refused {
+        push: None,
+        error: busy(remote),
+    }
+}
+
 impl<'a> SyncService<'a> {
     /// The coordinator of the project at `project` with the user config `user_file`
     /// (`<home>/rdy/config.yaml`), whose sibling `credentials.yaml` holds the sign-ins.
@@ -190,6 +406,7 @@ impl<'a> SyncService<'a> {
         api: &'a dyn HubTransport,
         clock: &'a dyn HubClock,
         wire: &'a dyn SyncWire,
+        renderer: &'a dyn PublishRenderer,
     ) -> SyncService<'a> {
         SyncService {
             project: project.to_path_buf(),
@@ -197,6 +414,7 @@ impl<'a> SyncService<'a> {
             api,
             clock,
             wire,
+            renderer,
         }
     }
 
@@ -248,19 +466,19 @@ impl<'a> SyncService<'a> {
         e
     }
 
-    /// Pushes local canon to the share remote `request.remote` (see the module docs).
-    pub fn push(
+    /// Steps 1 to 3: the remote, its guard and its trust; then `run` on them.
+    fn with_target<T>(
         &self,
-        engine: &dyn Engine,
         session: &Session,
-        request: PushRequest,
-    ) -> Result<PushOutcome, RdyError> {
+        remote: Option<&str>,
+        run: impl FnOnce(&Target) -> Result<T, RdyError>,
+    ) -> Result<T, RdyError> {
         // 1. the remote
-        if let Some(name) = &request.remote
+        if let Some(name) = remote
             && !hub_config::is_remote_name(name)
         {
             return Err(RdyError::new(
-                crate::error::E_BAD_INPUT,
+                E_BAD_INPUT,
                 BAD_REMOTE_NAME_MESSAGE,
                 BAD_REMOTE_NAME_FIX,
             ));
@@ -268,7 +486,7 @@ impl<'a> SyncService<'a> {
         let settings = HubConfig::load(Some(&self.project), Some(&self.user_file))?;
         let warnings = settings.warnings.clone();
         let remote = settings
-            .select_remote(request.remote.as_deref())
+            .select_remote(remote)
             .map_err(|e| self.fail(None, &warnings, e))?;
         if remote.mode != RemoteMode::Share {
             return Err(self.fail(None, &warnings, not_share_remote(&remote.name)));
@@ -298,22 +516,68 @@ impl<'a> SyncService<'a> {
             bound: first.claim,
             account: first.account,
         };
-        self.exchange(engine, &target)
-            .map_err(|e| self.fail(Some(&target), &warnings, e))
+        run(&target).map_err(|e| self.fail(Some(&target), &warnings, e))
     }
 
-    /// Steps 4 to 7 on the selected `t`.
-    fn exchange(&self, engine: &dyn Engine, t: &Target) -> Result<PushOutcome, RdyError> {
-        let read = engine.read();
-        // 4. discovery, then state
-        let cx = self.context(t, &read, None)?;
-        let base_url = self.wire.discovery(&cx, &t.url)?.sync_base;
-        let cx = self.context(t, &read, Some(&base_url))?;
-        // Seam (8a2): a push with views names them in this request.
-        let state = self.wire.state(&cx, &SyncStateRequest::new(&cx.claim))?;
-        drop(cx);
+    /// Pushes local canon and the named views to the share remote (see the module docs).
+    pub fn push(
+        &self,
+        engine: &dyn Engine,
+        session: &Session,
+        request: PushRequest,
+    ) -> Result<PushOutcome, RdyError> {
+        check_view_names(&request.views)?;
+        self.with_target(session, request.remote.as_deref(), |t| {
+            self.push_exchange(engine, t, &request)
+        })
+    }
 
-        // 5. the minimum, the repo, the stream format, a pending write, the base rule
+    /// Pulls hub canon and the named views from the share remote (see the module docs).
+    pub fn pull(
+        &self,
+        engine: &dyn Engine,
+        session: &Session,
+        request: PullRequest,
+    ) -> Result<PullOutcome, RdyError> {
+        if request.take && request.strict && request.views.is_empty() {
+            return Err(take_and_strict());
+        }
+        check_view_names(&request.views)?;
+        self.with_target(session, request.remote.as_deref(), |t| {
+            self.pull_exchange(engine, session, t, &request)
+        })
+    }
+
+    /// What a forced push or a taking pull would remove from canon (see [`canon_preview`]),
+    /// after discovery and the state step. It sends no write and writes nothing.
+    pub fn preview(
+        &self,
+        engine: &dyn Engine,
+        session: &Session,
+        remote: Option<&str>,
+        kind: PreviewKind,
+    ) -> Result<CanonPreview, RdyError> {
+        self.with_target(session, remote, |t| {
+            let read = engine.read();
+            let (_, state) = self.open(t, &read, &[])?;
+            canon_preview(&read, &t.name, state.canon, kind)
+        })
+    }
+
+    /// Steps 4 and 5: discovery, state with `views`, and the checks before any transfer.
+    /// Returns the sync base and the state.
+    fn open(
+        &self,
+        t: &Target,
+        read: &ReadState,
+        views: &[String],
+    ) -> Result<(String, SyncState), RdyError> {
+        let cx = self.context(t, read, None)?;
+        let base_url = self.wire.discovery(&cx, &t.url)?.sync_base;
+        let cx = self.context(t, read, Some(&base_url))?;
+        let request = SyncStateRequest::new(&cx.claim).with_views(views);
+        let state = self.wire.state(&cx, &request)?;
+        drop(cx);
         check_minimum(&state, &repo_name(&t.url))?;
         let repo_id = read.repo_id()?;
         if state.repo_id.is_some_and(|r| r != repo_id) {
@@ -324,46 +588,441 @@ impl<'a> SyncService<'a> {
         {
             return Err(upstream_protocol());
         }
-        let refs = remote_refs(engine, &t.name)?;
-        if let Some(p) = refs.pending {
-            // Seam (8a2): the outcome lookup runs here, before any put or write.
-            return Ok(PushOutcome::PendingWrite { push: p.push });
+        Ok((base_url, state))
+    }
+
+    /// Step 6 for the `pending` ref found on `t`.
+    fn lookup(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+    ) -> Result<Option<Resolved>, RdyError> {
+        let Some(p) = remote_refs(engine, &t.name)?.pending else {
+            return Ok(None);
+        };
+        let read = engine.read();
+        if p.url != t.url || p.repo_id != read.repo_id()? {
+            // another hub repo's write: never looked up or cleared here
+            return Err(busy(&t.name));
         }
+        let cx = self.context(t, &read, Some(base_url))?;
+        let reply = self.wire.outcome(&cx, &p.push)?;
+        drop(cx);
+        let want = if p.kind == KIND_VIEW {
+            kinds::VIEW_OP
+        } else {
+            kinds::LANDING
+        };
+        let mut fetched = false;
+        match &reply.outcome {
+            LookupOutcome::Taken { tip } => {
+                if tip.kind != want {
+                    return Err(upstream_protocol());
+                }
+                fetched = self.apply_taken(engine, t, base_url, state, &p, tip.hash)?;
+            }
+            LookupOutcome::Held { request, .. } => {
+                self.apply_held(engine, t, &p, request.number)?
+            }
+            LookupOutcome::Refused { .. } => self.reply_only(engine, t, &p.push)?,
+            LookupOutcome::Unknown => {
+                let life = i64::try_from(state.quarantine_seconds.saturating_mul(1000))
+                    .unwrap_or(i64::MAX);
+                if self.clock.now_ms().saturating_sub(p.at_ms) < life {
+                    // a late write may still take the quarantine
+                    return Err(sync_uncertain(&p.push));
+                }
+                self.reply_only(engine, t, &p.push)?;
+            }
+        }
+        Ok(Some(Resolved {
+            push: p.push,
+            kind: p.kind,
+            view: p.view,
+            outcome: reply.outcome,
+            fetched,
+        }))
+    }
+
+    /// Clears `pending` of push `push`.
+    fn reply_only(&self, engine: &dyn Engine, t: &Target, push: &str) -> Result<(), RdyError> {
+        write_steps(
+            engine,
+            &t.name,
+            vec![SyncStep::Reply {
+                push: push.to_string(),
+            }],
+        )
+    }
+
+    /// The taken rule for the write `p`, whose tip or head is now `tip`: a tip other than the
+    /// pushed head is fetched first (D-KE83X); then `pending` clears and `applied` is `tip`. A
+    /// canon tip that reaches the held head clears `held`. Returns whether it fetched.
+    fn apply_taken(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+        p: &SyncPending,
+        tip: Hash,
+    ) -> Result<bool, RdyError> {
+        let view = if p.kind == KIND_VIEW {
+            Some(p.view.clone().ok_or_else(upstream_protocol)?)
+        } else {
+            None
+        };
+        let fetched = tip != p.head;
+        if fetched {
+            let purpose = if view.is_some() {
+                StreamPurpose::ViewHistory
+            } else {
+                StreamPurpose::CanonHistory
+            };
+            self.fetch_history(engine, t, base_url, state, purpose, tip, view.as_deref())?;
+        }
+        let read = engine.read();
+        let reader = read.reader();
+        let step = match view {
+            Some(name) => {
+                let cur = reader
+                    .sync_view(&t.name, &name)
+                    .map_err(store)?
+                    .filter(|c| c.repo_id == p.repo_id);
+                let root = match &cur {
+                    Some(c) => c.root,
+                    None => reader.view_chain_root(&name, &p.head).map_err(store)?,
+                };
+                SyncStep::View {
+                    name,
+                    value: SyncView {
+                        repo_id: p.repo_id,
+                        url: t.url.clone(),
+                        root,
+                        fetched: cur.and_then(|c| c.fetched),
+                        applied: Some(tip),
+                    },
+                }
+            }
+            None => {
+                let cur = reader
+                    .sync_canon(&t.name)
+                    .map_err(store)?
+                    .filter(|c| c.repo_id == p.repo_id);
+                let held = cur
+                    .as_ref()
+                    .and_then(|c| c.held.clone())
+                    .filter(|h| !chain_holds(reader, Some(tip), &h.head));
+                SyncStep::Canon(SyncCanon {
+                    repo_id: p.repo_id,
+                    url: t.url.clone(),
+                    fetched: cur.and_then(|c| c.fetched),
+                    applied: Some(tip),
+                    held,
+                })
+            }
+        };
+        write_steps(
+            engine,
+            &t.name,
+            vec![
+                SyncStep::Reply {
+                    push: p.push.clone(),
+                },
+                step,
+            ],
+        )?;
+        Ok(fetched)
+    }
+
+    /// The held rule for the write `p`: `pending` clears, and a canon write records its head
+    /// and request `number` as held. `applied` does not move (D-QCE8M).
+    fn apply_held(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        p: &SyncPending,
+        number: u64,
+    ) -> Result<(), RdyError> {
+        let mut steps = vec![SyncStep::Reply {
+            push: p.push.clone(),
+        }];
+        if p.kind == KIND_CANON {
+            let read = engine.read();
+            let cur = read
+                .reader()
+                .sync_canon(&t.name)
+                .map_err(store)?
+                .filter(|c| c.repo_id == p.repo_id);
+            steps.push(SyncStep::Canon(SyncCanon {
+                repo_id: p.repo_id,
+                url: t.url.clone(),
+                fetched: cur.as_ref().and_then(|c| c.fetched),
+                applied: cur.as_ref().and_then(|c| c.applied),
+                held: Some(SyncHeld {
+                    head: p.head,
+                    request: number,
+                }),
+            }));
+        }
+        write_steps(engine, &t.name, steps)
+    }
+
+    /// The render inputs at the scope of local canon's head and the gate settings, from `read`.
+    fn capture(&self, read: &ReadState) -> Result<Capture, RdyError> {
         let head = read.canon_head();
-        let base = state.canon;
-        if let Some(tip) = &base
-            && !canon_holds(&read, head, tip)?
+        let scope = head.map_or(Scope::Canon, Scope::At);
+        let inputs = self.renderer.capture(read, &scope)?;
+        validate_inputs(&inputs)?;
+        let gate = CheckInputs::of_state(read);
+        let gate = GateSettings {
+            coverage_gate: gate.coverage_gate.as_str().to_string(),
+            coverage_target: gate.coverage_target,
+            decisions_home: gate.decisions_home,
+            pack_digest: pack_digest(&inputs.pack),
+            propose: ProposeGate {
+                cadence: gate.propose_cadence.as_str().to_string(),
+                changes: gate.propose_changes,
+            },
+        };
+        Ok(Capture { inputs, gate, head })
+    }
+
+    /// The tags a write carries that the hub lacks: the TAG records of `pool` (the keys known
+    /// named missing, or a resumed upload's whole record set), each with the disagreements at
+    /// its scope, by name.
+    fn tags(
+        &self,
+        read: &ReadState,
+        capture: &Capture,
+        pool: &[ObjectKey],
+    ) -> Result<Vec<WriteTag>, RdyError> {
+        let mut out = Vec::new();
+        for k in pool.iter().filter(|k| k.kind == kinds::TAG) {
+            let tag = read.reader().read_tag(&k.hash).map_err(store)?;
+            let disagreements = if Some(tag.landing) == capture.head {
+                capture.inputs.disagreements.clone()
+            } else {
+                self.renderer
+                    .capture(read, &Scope::At(tag.landing))?
+                    .disagreements
+            };
+            out.push(WriteTag {
+                name: tag.name,
+                disagreements,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    /// Whose upload the `upload` ref of `t` holds, for a push naming `views`.
+    fn slot(&self, engine: &dyn Engine, t: &Target, views: &[String]) -> Result<Slot, RdyError> {
+        let Some(u) = remote_refs(engine, &t.name)?.upload else {
+            return Ok(Slot::Free);
+        };
+        let repo_id = engine.read().repo_id()?;
+        if u.url != t.url || u.repo_id != repo_id {
+            return Ok(Slot::Foreign);
+        }
+        let Some(push) = PushId::parse(&u.push) else {
+            return Ok(Slot::Foreign);
+        };
+        Ok(match (u.kind, u.view) {
+            (KIND_CANON, None) => Slot::Canon(push),
+            (KIND_VIEW, Some(v)) if views.contains(&v) => Slot::View(v, push),
+            _ => Slot::Foreign,
+        })
+    }
+
+    /// Steps 4 to 8 of a push on the selected `t`.
+    fn push_exchange(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        request: &PushRequest,
+    ) -> Result<PushOutcome, RdyError> {
+        let read = engine.read();
+        let (base_url, state) = self.open(t, &read, &request.views)?;
+        let hub_views = state.hub_views();
+        // the view rules refuse before any write
+        if !request.views.is_empty() {
+            push_plan(&read, &request.views, &hub_views)?;
+        }
+        drop(read);
+        let lookup = self.lookup(engine, t, &base_url, &state)?;
+
+        let read = engine.read();
+        let capture = self.capture(&read)?;
+        let (canon, force_not_needed) =
+            self.push_canon(engine, t, &base_url, &read, &state, &capture, request)?;
+        let mut views = Vec::new();
+        if !request.views.is_empty() {
+            for plan in push_plan(&read, &request.views, &hub_views)? {
+                let name = plan.view.clone();
+                if !plan.holds_hub_head {
+                    let base = plan.base.map(|b| b.to_string()).unwrap_or_default();
+                    let error = view_diverged(&name, &base);
+                    views.push((name, WriteEnd::Refused { push: None, error }));
+                    continue;
+                }
+                let history = PreparedHistory::view(Arc::clone(&read), plan.head, plan.base)?;
+                let at_tip = plan.base == Some(plan.head);
+                let resumed = match self.slot(engine, t, &request.views)? {
+                    Slot::View(v, p) if v == name => Some(p),
+                    Slot::Free => None,
+                    _ if at_tip && history.keys().is_empty() => None,
+                    _ => {
+                        views.push((name, busy_end(&t.name)));
+                        continue;
+                    }
+                };
+                let end = if at_tip && history.keys().is_empty() && resumed.is_none() {
+                    WriteEnd::UpToDate {
+                        tip: Some(plan.head),
+                    }
+                } else {
+                    let job = Job {
+                        kind: WriteKind::View,
+                        view: Some(name.clone()),
+                        head: plan.head,
+                        base: plan.base,
+                        expected: plan.base,
+                        at_tip,
+                        history,
+                        resumed,
+                    };
+                    self.send_job(engine, t, &base_url, &read, &state, &capture, job)?
+                };
+                views.push((name, end));
+            }
+        }
+        Ok(PushOutcome {
+            remote: t.name.clone(),
+            lookup,
+            canon,
+            force_not_needed,
+            views,
+        })
+    }
+
+    /// Canon's part of a push: the held rule, the base rule (or force), then its upload and
+    /// write. Returns its end and whether a forced push found force not needed.
+    #[allow(clippy::too_many_arguments)]
+    fn push_canon(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+        read: &Arc<ReadState>,
+        state: &SyncState,
+        capture: &Capture,
+        request: &PushRequest,
+    ) -> Result<(WriteEnd, bool), RdyError> {
+        let repo_id = read.repo_id()?;
+        let head = read.canon_head();
+        let tip = state.canon;
+        let holds = match &tip {
+            Some(tip) => canon_holds(read, head, tip)?,
+            None => true,
+        };
+        if let Some(tip) = &tip
+            && !holds
+            && (!request.force || head.is_none())
         {
             return Err(diverged(tip));
         }
+        let force_not_needed = request.force && holds;
         let Some(head) = head else {
             // both are empty: the base rule refused any hub tip
-            return Ok(PushOutcome::UpToDate { tip: base });
+            return Ok((WriteEnd::UpToDate { tip }, force_not_needed));
         };
+        // the held rule: at the held head, no write (D-QCE8M)
+        let held = read
+            .reader()
+            .sync_canon(&t.name)
+            .map_err(store)?
+            .filter(|c| c.repo_id == repo_id && c.url == t.url)
+            .and_then(|c| c.held);
+        if let Some(h) = held
+            && h.head == head
+        {
+            let end = WriteEnd::HeldOpen {
+                head,
+                request: h.request,
+            };
+            return Ok((end, force_not_needed));
+        }
+        let base = if holds { tip } else { None };
         // at the hub tip, the history is the attachments made since (D-KE83X)
-        let history = PreparedHistory::canon(Arc::clone(&read), head, base)?;
-        let keys = history.keys();
-        let at_tip = base == Some(head);
-        if at_tip && keys.is_empty() {
-            return Ok(PushOutcome::UpToDate { tip: base });
-        }
-
-        // 6. the upload: a stopped one of this remote's canon resumes under its push id
-        let resumed = refs.upload.as_ref().and_then(|u| {
-            let same =
-                u.kind == KIND_CANON && u.view.is_none() && u.url == t.url && u.repo_id == repo_id;
-            if same { PushId::parse(&u.push) } else { None }
-        });
-        if refs.upload.is_some() && resumed.is_none() {
+        let history = PreparedHistory::canon(Arc::clone(read), head, base)?;
+        let at_tip = tip == Some(head);
+        let nothing = at_tip && history.keys().is_empty();
+        let resumed = match self.slot(engine, t, &request.views)? {
+            Slot::Canon(p) => Some(p),
+            Slot::Free => None,
+            _ if nothing => None,
+            // a stopped upload of a view this push names waits for its own write first
+            Slot::View(..) => return Ok((busy_end(&t.name), force_not_needed)),
             // another upload of this remote waits for its write: never replaced
-            return Err(RdyError::from(rdy_store::StoreError::SyncBusy(
-                t.name.clone(),
-            )));
+            Slot::Foreign => return Err(busy(&t.name)),
+        };
+        if nothing && resumed.is_none() {
+            return Ok((WriteEnd::UpToDate { tip }, force_not_needed));
         }
-        let was_resumed = resumed.is_some();
-        let push = resumed.unwrap_or_else(PushId::new);
+        let kind = if holds {
+            WriteKind::Landings
+        } else {
+            WriteKind::Force
+        };
+        let job = Job {
+            kind,
+            view: None,
+            head,
+            base,
+            expected: tip,
+            at_tip,
+            history,
+            resumed,
+        };
+        let end = self.send_job(engine, t, base_url, read, state, capture, job)?;
+        Ok((end, force_not_needed))
+    }
+
+    /// One upload and its write (step 8).
+    #[allow(clippy::too_many_arguments)]
+    fn send_job(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+        read: &Arc<ReadState>,
+        state: &SyncState,
+        capture: &Capture,
+        job: Job,
+    ) -> Result<WriteEnd, RdyError> {
+        let repo_id = read.repo_id()?;
+        let keys = job.history.keys();
+        let was_resumed = job.resumed.is_some();
+        let push = job.resumed.clone().unwrap_or_else(PushId::new);
+        let id = push.as_str().to_string();
+        let ref_kind = if job.kind == WriteKind::View {
+            KIND_VIEW
+        } else {
+            KIND_CANON
+        };
+        let upload = SyncUpload {
+            repo_id,
+            url: t.url.clone(),
+            push: id.clone(),
+            kind: ref_kind,
+            view: job.view.clone(),
+            at_ms: self.clock.now_ms(),
+        };
         let wire = SyncObjects(self.wire);
-        let mut context = || self.context(t, &read, Some(&base_url));
+        let mut context = || self.context(t, read, Some(base_url));
         let missing = missing_with(&keys, &push, &wire, &mut context)?;
         let limits = BatchLimits {
             bytes: state.batch_bytes,
@@ -373,24 +1032,13 @@ impl<'a> SyncService<'a> {
         let mut sent = HistorySent::default();
         let mut before_put = || {
             if !was_resumed {
-                write_steps(
-                    engine,
-                    &t.name,
-                    vec![SyncStep::Upload(SyncUpload {
-                        repo_id,
-                        url: t.url.clone(),
-                        push: push.as_str().to_string(),
-                        kind: KIND_CANON,
-                        view: None,
-                        at_ms: self.clock.now_ms(),
-                    })],
-                )?;
+                write_steps(engine, &t.name, vec![SyncStep::Upload(upload.clone())])?;
                 wrote = true;
             }
             Ok(())
         };
         let result = send_objects(
-            &history,
+            &job.history,
             &missing,
             &push,
             limits,
@@ -400,31 +1048,361 @@ impl<'a> SyncService<'a> {
             &mut sent,
         );
         if let Err(e) = result {
-            // 7. a failed push clears only its own upload, and only when no put of it may have
+            // a failed push clears only its own upload, and only when no put of it may have
             // reached the quarantine
             if wrote && sent.batches == 0 && e.code != E_UPSTREAM_UNCERTAIN {
                 let _ = write_steps(
                     engine,
                     &t.name,
-                    vec![SyncStep::ClearUpload {
-                        push: push.as_str().to_string(),
-                    }],
+                    vec![SyncStep::ClearUpload { push: id.clone() }],
                 );
             }
             return Err(e);
         }
-        if at_tip && sent.batches == 0 && !was_resumed {
+        if job.at_tip && sent.batches == 0 && !was_resumed {
             // the hub holds every attachment: no upload was recorded
-            return Ok(PushOutcome::UpToDate { tip: base });
+            return Ok(WriteEnd::UpToDate {
+                tip: Some(job.head),
+            });
         }
-        // Seam (8a2): the write step follows here, with the render inputs and, for canon, the
-        // gate settings; it sends the write under this push id.
-        Ok(PushOutcome::Uploaded {
-            push: push.as_str().to_string(),
-            base,
-            head,
-            resumed: was_resumed,
-            sent,
+
+        // the write: checked before it is recorded, so a local refusal leaves no pending
+        let pool = if was_resumed { &keys } else { &missing };
+        let tags = self.tags(read, capture, pool)?;
+        let root_kind = if job.kind == WriteKind::View {
+            kinds::VIEW_OP
+        } else {
+            kinds::LANDING
+        };
+        let request = WriteRequest {
+            expected: job.expected.map(|hash| ObjectKey {
+                kind: root_kind,
+                hash,
+            }),
+            gate: (job.kind != WriteKind::View).then(|| capture.gate.clone()),
+            kind: job.kind,
+            push: id.clone(),
+            render_inputs: capture.inputs.clone(),
+            tags,
+            view: job.view.clone(),
+        };
+        encode_write(&request)?;
+        let cx = self.context(t, read, Some(base_url))?;
+        let pending = SyncPending {
+            repo_id,
+            url: t.url.clone(),
+            push: id.clone(),
+            kind: ref_kind,
+            view: job.view.clone(),
+            // the store keeps a pending tip only when it holds it: a forced write's hub tip
+            // may be one this store never fetched; the lookup reads the push id alone
+            expected: match job.expected {
+                Some(h) if read.reader().has_kind(root_kind, &h).map_err(store)? => Some(h),
+                _ => None,
+            },
+            head: job.head,
+            at_ms: self.clock.now_ms(),
+        };
+        let mut steps = Vec::new();
+        if !was_resumed && !wrote {
+            steps.push(SyncStep::Upload(upload.clone()));
+        }
+        steps.push(SyncStep::Send(pending.clone()));
+        write_steps(engine, &t.name, steps)?;
+        let reply: WriteReply = match self.wire.write(&cx, &request) {
+            Ok(r) => r,
+            Err(WriteFailure::Refused(error)) => {
+                self.reply_only(engine, t, &id)?;
+                return Ok(WriteEnd::Refused {
+                    push: Some(id),
+                    error,
+                });
+            }
+            Err(WriteFailure::Uncertain) => return Err(sync_uncertain(&id)),
+            Err(WriteFailure::NotSent(e)) => {
+                // certainly not sent: the upload comes back, so the next push resumes it
+                let _ = write_steps(
+                    engine,
+                    &t.name,
+                    vec![
+                        SyncStep::Reply { push: id.clone() },
+                        SyncStep::Upload(upload),
+                    ],
+                );
+                return Err(e);
+            }
+        };
+        drop(cx);
+        match (reply.outcome, reply.tip, reply.request) {
+            (WriteOutcome::Taken, Some(tip), _) => {
+                self.apply_taken(engine, t, base_url, state, &pending, tip.hash)?;
+                Ok(WriteEnd::Taken {
+                    push: id,
+                    base: job.base,
+                    head: job.head,
+                    tip: tip.hash,
+                    resumed: was_resumed,
+                    sent,
+                    min_rdy_raised: reply.min_rdy_raised,
+                })
+            }
+            (WriteOutcome::Held, _, Some(request)) => {
+                self.apply_held(engine, t, &pending, request.number)?;
+                Ok(WriteEnd::Held {
+                    push: id,
+                    head: job.head,
+                    request,
+                    resumed: was_resumed,
+                    sent,
+                    min_rdy_raised: reply.min_rdy_raised,
+                })
+            }
+            // a reply the wire should not have passed: not one to apply
+            _ => Err(sync_uncertain(&id)),
+        }
+    }
+
+    /// Steps 4 to 6 and 9 of a pull on the selected `t`.
+    fn pull_exchange(
+        &self,
+        engine: &dyn Engine,
+        session: &Session,
+        t: &Target,
+        request: &PullRequest,
+    ) -> Result<PullOutcome, RdyError> {
+        let read = engine.read();
+        let (base_url, state) = self.open(t, &read, &request.views)?;
+        drop(read);
+        for name in &request.views {
+            if state.view_head(name).is_none() {
+                return Err(view_missing(name, &t.name));
+            }
+        }
+        let lookup = self.lookup(engine, t, &base_url, &state)?;
+        let hub = HubState {
+            repo_id: state.repo_id,
+            canon: state.canon,
+        };
+        let mut out = PullOutcome {
+            remote: t.name.clone(),
+            lookup,
+            fetched: None,
+            canon: None,
+            views_fetched: Vec::new(),
+            views: Vec::new(),
+        };
+        if let Some(tip) = state.canon {
+            out.fetched = self.fetch_history(
+                engine,
+                t,
+                &base_url,
+                &state,
+                StreamPurpose::CanonHistory,
+                tip,
+                None,
+            )?;
+            let req = sync_replay::PullRequest {
+                remote: t.name.clone(),
+                hub,
+                // with views, take takes only those views (D-4E32E)
+                take: request.take && request.views.is_empty(),
+                strict: request.strict,
+            };
+            let s = session.clone();
+            out.canon = Some(with_writer_result(engine, move |rdy| {
+                sync_replay::pull(rdy, &s, &req)
+            })?);
+            self.clear_held(engine, t)?;
+        }
+        if !request.views.is_empty() {
+            let mut named = Vec::new();
+            for name in &request.views {
+                let head = state
+                    .view_head(name)
+                    .ok_or_else(|| view_missing(name, &t.name))?;
+                if let Some(f) = self.fetch_history(
+                    engine,
+                    t,
+                    &base_url,
+                    &state,
+                    StreamPurpose::ViewHistory,
+                    head,
+                    Some(name),
+                )? {
+                    out.views_fetched.push((name.clone(), f));
+                }
+                named.push((name.clone(), Some(head)));
+            }
+            let req = ViewPullRequest {
+                remote: t.name.clone(),
+                hub,
+                views: named,
+                take: request.take,
+            };
+            let s = session.clone();
+            out.views = with_writer_result(engine, move |rdy| pull_views(rdy, &s, &req))?;
+        }
+        Ok(out)
+    }
+
+    /// Clears the held request of `t` once `applied` reaches its head (D-H0BZN "Held").
+    fn clear_held(&self, engine: &dyn Engine, t: &Target) -> Result<(), RdyError> {
+        let read = engine.read();
+        let reader = read.reader();
+        let Some(c) = reader.sync_canon(&t.name).map_err(store)? else {
+            return Ok(());
+        };
+        let Some(h) = &c.held else {
+            return Ok(());
+        };
+        if !chain_holds(reader, c.applied, &h.head) {
+            return Ok(());
+        }
+        let step = SyncStep::Canon(SyncCanon { held: None, ..c });
+        write_steps(engine, &t.name, vec![step])
+    }
+
+    /// The fetch batch of one history (D-KE83X): the known pull pages of `root` from this
+    /// store's fetched tip or head (when it holds it), the keys it lacks fetched in batches
+    /// within the hub's limits, each streamed to a scratch file and checked, then Plan A's
+    /// fetch. None when the store already fetched `root` and lacks no key of it.
+    #[allow(clippy::too_many_arguments)]
+    fn fetch_history(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+        purpose: StreamPurpose,
+        root: Hash,
+        view: Option<&str>,
+    ) -> Result<Option<FetchOutcome>, RdyError> {
+        let read = engine.read();
+        let reader = read.reader();
+        let repo_id = read.repo_id()?;
+        let hub = HubState {
+            repo_id: state.repo_id,
+            canon: state.canon,
+        };
+        let kind = purpose.root_kind();
+        let fetched = match view {
+            None => usable_canon_state(reader, &t.name, &hub)?.and_then(|s| s.fetched),
+            Some(n) => usable_view_state(reader, &t.name, n, &hub)?.and_then(|s| s.fetched),
+        };
+        let mut base = None;
+        if let Some(f) = fetched
+            && reader.has_kind(kind, &f).map_err(store)?
+        {
+            base = Some(ObjectKey { kind, hash: f });
+        }
+        let root_key = ObjectKey { kind, hash: root };
+        // the known pages, in the hub's order; the keys this store holds stay home
+        let mut want = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut after = None;
+        loop {
+            let cx = self.context(t, &read, Some(base_url))?;
+            let page = self.wire.known_pull(
+                &cx,
+                &KnownPull {
+                    after,
+                    base,
+                    purpose,
+                    root: root_key,
+                },
+            )?;
+            for k in page.keys {
+                if !seen.insert(k) {
+                    return Err(upstream_protocol());
+                }
+                if !reader.has_kind(k.kind, &k.hash).map_err(store)? {
+                    want.push(k);
+                }
+            }
+            match page.next {
+                None => break,
+                Some(n) => after = Some(n),
+            }
+        }
+        if want.is_empty() {
+            if fetched == Some(root) {
+                return Ok(None);
+            }
+            // the store holds the whole history: record the fetched tip or head with no get
+            let Some(hub_repo) = state.repo_id else {
+                return Err(upstream_protocol());
+            };
+            if !reader.has_kind(kind, &root).map_err(store)? {
+                return Err(upstream_protocol());
+            }
+            let step = match view {
+                None => {
+                    let old = reader
+                        .sync_canon(&t.name)
+                        .map_err(store)?
+                        .filter(|o| o.repo_id == hub_repo);
+                    SyncStep::Canon(SyncCanon {
+                        repo_id: hub_repo,
+                        url: t.url.clone(),
+                        fetched: Some(root),
+                        applied: old.as_ref().and_then(|o| o.applied),
+                        held: old.and_then(|o| o.held),
+                    })
+                }
+                Some(name) => {
+                    let old = reader
+                        .sync_view(&t.name, name)
+                        .map_err(store)?
+                        .filter(|o| o.repo_id == hub_repo);
+                    SyncStep::View {
+                        name: name.to_string(),
+                        value: SyncView {
+                            repo_id: hub_repo,
+                            url: t.url.clone(),
+                            root: reader.view_chain_root(name, &root).map_err(store)?,
+                            fetched: Some(root),
+                            applied: old.and_then(|o| o.applied),
+                        },
+                    }
+                }
+            };
+            drop(read);
+            write_steps(engine, &t.name, vec![step])?;
+            return Ok(None);
+        }
+        let per = usize::try_from(state.batch_records)
+            .unwrap_or(MAX_KNOWN_KEYS)
+            .clamp(1, MAX_KNOWN_KEYS);
+        let mut files = Vec::new();
+        for keys in want.chunks(per) {
+            let mut file = tempfile::tempfile().map_err(|_| scratch_error())?;
+            let cx = self.context(t, &read, Some(base_url))?;
+            let request = GetRequest {
+                keys: keys.to_vec(),
+                purpose,
+                root: root_key,
+            };
+            self.wire.get(&cx, &request, &mut file, state.batch_bytes)?;
+            file.seek(SeekFrom::Start(0)).map_err(|_| scratch_error())?;
+            let report =
+                crate::stream_check::check_batch(BufReader::new(&mut file), Some(repo_id))?;
+            if report.header.purpose != purpose || report.header.root() != root_key {
+                return Err(upstream_protocol());
+            }
+            file.seek(SeekFrom::Start(0)).map_err(|_| scratch_error())?;
+            files.push(file);
+        }
+        let target = FetchTarget {
+            remote: t.name.clone(),
+            url: t.url.clone(),
+            purpose,
+            root,
+            view: view.map(str::to_string),
+        };
+        drop(read);
+        with_writer_result(engine, move |rdy| {
+            crate::sync_fetch::fetch(rdy, &files, &target)
         })
+        .map(Some)
     }
 }

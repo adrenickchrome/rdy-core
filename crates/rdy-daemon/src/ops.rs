@@ -43,6 +43,7 @@ mod search;
 mod signing;
 mod site;
 mod site_url;
+mod sync;
 mod wc;
 
 use brief::brief;
@@ -183,6 +184,8 @@ pub const OPS: &[&str] = &[
     "key_revoke",
     "publish",
     "hook",
+    "push",
+    "pull",
 ];
 
 /// ain5: the ops whose successful replies carry the reminder while it is owed, the CLI's
@@ -686,6 +689,15 @@ pub fn dispatch_with(
         "publish" => {
             let req = parse(op, args, "{tag, to, site, keep_latest?}")?;
             publish::run(cx.engine.read(), &cx.engine.root(), cx.session, req)
+        }
+        // the sync coordinator holds the writer only for its local steps
+        "push" => {
+            let req = parse(op, args, "{remote?, views?, force?}")?;
+            sync::push(cx.engine, &cx.engine.root(), cx.session, req)
+        }
+        "pull" => {
+            let req = parse(op, args, "{remote?, views?, take?, strict?}")?;
+            sync::pull(cx.engine, &cx.engine.root(), cx.session, req)
         }
         "instructions" => instructions(cx, parse(op, args, "{full?, load?, part?}")?),
         "links" => links(cx, parse(op, args, "{op?, alias?}")?),

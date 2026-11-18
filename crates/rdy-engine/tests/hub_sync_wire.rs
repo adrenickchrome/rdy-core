@@ -1,33 +1,50 @@
-//! scc8 (D-H0BZN, D-N8PR2, D-4XHPH): the sync wire's steps that rdyhub's frozen wire fixture v1
-//! covers: discovery, state (the publish-upload form, no views), known (push form) and put.
-//! Every test drives the real HTTPS wire against loopback TLS fixtures with generated CAs. The
-//! fixture is a byte copy of the hub's file; its SHA-256 is pinned here.
+//! scc8 (D-H0BZN, D-N8PR2, D-4XHPH): the sync wire's steps against rdyhub's frozen wire
+//! fixtures. Fixture v1 covers discovery, state (the publish-upload form, no views), known (push
+//! form) and put; fixture v2 adds state with named views, known's pull form, get, write and the
+//! outcome lookup. Every test drives the real HTTPS wire against loopback TLS fixtures with
+//! generated CAs; the exchange-level pins run the sync service over the fake hub of
+//! `support/sync_env.rs`. Each fixture is a byte copy of the hub's file; its SHA-256 is pinned.
+mod common;
 #[path = "support/hub_tls.rs"]
 mod hub_tls;
+#[path = "support/sync_env.rs"]
+mod sync_env;
 
 use hub_tls::{Recorded, Reply, Server};
+use rdy_engine::Engine;
 use rdy_engine::hub_http::HttpHubTransport;
 use rdy_engine::hub_publish_wire::{
-    KNOWN_REPLY_BYTES, MAX_JSON_DEPTH, MAX_KNOWN_KEYS, ObjectPut, PublishState, REPLY_BYTES,
-    SYNC_MEDIA_TYPE, UploadContext,
+    KNOWN_REPLY_BYTES, MAX_JSON_DEPTH, MAX_KNOWN_KEYS, ObjectPut, REPLY_BYTES, SYNC_MEDIA_TYPE,
+    UploadContext,
 };
-use rdy_engine::hub_sync::check_minimum;
-use rdy_engine::hub_sync_wire::{HttpSyncWire, SyncStateRequest, SyncWire};
+use rdy_engine::hub_sync::{PullRequest, check_minimum};
+use rdy_engine::hub_sync_wire::{
+    GateSettings, GetRequest, HttpSyncWire, KnownPull, LookupOutcome, MAX_STATE_VIEWS, ProposeGate,
+    SyncStateRequest, SyncWire, WRITE_REQUEST_BYTES, WriteFailure, WriteKind, WriteOutcome,
+    WriteRequest as SyncWrite, WriteTag,
+};
 use rdy_engine::hub_types::{Origin, OriginFence, RequestClaim, Secret};
+use rdy_engine::render_inputs::RenderInputs;
 use rdy_engine::{
-    E_BAD_INPUT, E_LIMIT, E_STORE_FORMAT, E_UPSTREAM_ORIGIN, E_UPSTREAM_PROTOCOL,
-    E_UPSTREAM_UNCERTAIN, RdyError, Session, SessionKind,
+    E_BAD_INPUT, E_BAD_RECORD, E_LIMIT, E_STORE_FORMAT, E_UPSTREAM_ORIGIN, E_UPSTREAM_PROTOCOL,
+    E_UPSTREAM_REFUSED, E_UPSTREAM_UNCERTAIN, RdyError, Session, SessionKind, UPSTREAM_REFUSED_FIX,
+    UPSTREAM_REFUSED_MESSAGE,
 };
 use rdy_model::{Hash, Role};
+use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
-use rdy_store::sync_stream::HISTORY_FORMAT;
+use rdy_store::sync_stream::{HISTORY_FORMAT, StreamPurpose};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::net::TcpListener;
+use std::sync::{Arc, OnceLock};
 
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
 const FIXTURE: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v1.json");
 const FIXTURE_SHA256: &str = "18ade8e2c1a301d780270f20fe49fc116110a6aa512baf624d768ef5ba39711f";
+const FIXTURE_V2: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v2.json");
+const FIXTURE_V2_SHA256: &str = "37aba1e73101e071f38a42f515968aae28f0232a2a886890b40a5fcc340fd45d";
 const PUSH: &str = "0123456789abcdefghjkmnpqrs";
 const REPO_PATH: &str = "/acme/docs";
 
@@ -185,18 +202,451 @@ fn matches_request(got: &Recorded, s: &Value) {
     }
 }
 
-/// The error the hub's fixture refusal `s` becomes: its code, message and fix, then the
-/// request id notice.
+/// The error the hub's fixture refusal `s` becomes: its code, message and fix, with the request
+/// id notice (and a busy hub's wait).
 #[track_caller]
 fn matches_refusal(e: &RdyError, s: &Value) {
     let body = &s["reply"]["body"];
     assert_eq!(e.code, body["code"].as_str().unwrap());
     assert_eq!(e.message, body["message"].as_str().unwrap());
     assert_eq!(e.fix, body["fix"].as_str().unwrap());
+    let id = format!("hub request {}", body["request_id"].as_str().unwrap());
+    assert!(e.issues.iter().any(|i| i.message == id), "{:?}", e.issues);
+    // a busy hub's wait comes with it
+    if let Some(n) = body["retry_after"].as_u64() {
+        let wait = format!("retry after {n} seconds");
+        assert!(e.issues.iter().any(|i| i.message == wait), "{:?}", e.issues);
+    }
+}
+
+fn sha256(b: &[u8]) -> String {
+    Sha256::digest(b)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn fixture_v2() -> Value {
+    serde_json::from_slice(FIXTURE_V2).unwrap()
+}
+
+/// An object key in the fixture's form.
+fn key_of(v: &Value) -> ObjectKey {
+    serde_json::from_value(v.clone()).unwrap()
+}
+
+/// A write of the fixture's write body `b`, with this client's gate values in place of the
+/// fixture's nulls (open question Q2: the client sends its effective gate values).
+fn write_of(b: &Value) -> SyncWrite {
+    let render_inputs: RenderInputs = serde_json::from_value(b["render_inputs"].clone()).unwrap();
+    SyncWrite {
+        expected: (!b["expected"].is_null()).then(|| key_of(&b["expected"])),
+        gate: Some(GateSettings {
+            coverage_gate: "off".into(),
+            coverage_target: 0,
+            decisions_home: None,
+            pack_digest: Hash::of(b"the test's pack"),
+            propose: ProposeGate {
+                cadence: "break".into(),
+                changes: 1,
+            },
+        }),
+        kind: WriteKind::Landings,
+        push: b["push"].as_str().unwrap().into(),
+        render_inputs,
+        tags: vec![],
+        view: None,
+    }
+}
+
+/// The fixture's first write body: a valid write the tests reuse.
+fn a_write() -> SyncWrite {
+    let f = fixture_v2();
+    write_of(&f["steps"][10]["request"]["body"])
+}
+
+#[track_caller]
+fn refused<T: std::fmt::Debug>(r: Result<T, WriteFailure>) -> RdyError {
+    match r {
+        Err(WriteFailure::Refused(e)) => e,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// A body that is `v` without its member `name`.
+fn without(v: &Value, name: &str) -> Value {
+    let mut v = v.clone();
+    v.as_object_mut().unwrap().remove(name);
+    v
+}
+
+/// A loopback install origin on a port made at run time; nothing connects to it.
+fn install() -> &'static str {
+    static ORIGIN: OnceLock<String> = OnceLock::new();
+    ORIGIN.get_or_init(|| {
+        let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        format!("https://127.0.0.1:{}", held.local_addr().unwrap().port())
+    })
+}
+
+fn fake_env(landings: usize) -> sync_env::Env {
+    sync_env::env_with(install(), "# person settings\n", Some("shared"), landings)
+}
+
+/// Fixture v2 (8a2): every step the client sends, its request against the fixture's (headers
+/// as a subset, the token normalized; the client sends stream format 4 alone), and every reply
+/// the client decodes. The hub's refusals map as publish maps them, and `E_HUB_SHARE_OFF`, in
+/// no table, is `E_UPSTREAM_REFUSED` with core's text (Q3). The settings steps are Task 9b's.
+fn fixture_v2_steps() {
+    assert_eq!(sha256(FIXTURE_V2), FIXTURE_V2_SHA256);
+    let f = fixture_v2();
+    assert_eq!(f["fixture"], "sync-client-wire");
+    assert_eq!(f["version"], 2);
+    assert_eq!(f["media_type"], SYNC_MEDIA_TYPE);
+    let st: Vec<Value> = f["steps"].as_array().unwrap().clone();
+    assert_eq!(st.len(), 30);
+    let named: Vec<&str> = st.iter().map(|s| s["step"].as_str().unwrap()).collect();
     assert_eq!(
-        e.issues.last().unwrap().message,
-        format!("hub request {}", body["request_id"].as_str().unwrap())
+        named,
+        [
+            "discovery",
+            "discovery",
+            "state",
+            "state",
+            "state",
+            "settings",
+            "put",
+            "write",
+            "put",
+            "known",
+            "write",
+            "outcome",
+            "settings",
+            "state",
+            "known",
+            "known",
+            "get",
+            "get",
+            "write",
+            "settings",
+            "write",
+            "outcome",
+            "write",
+            "write",
+            "write",
+            "outcome",
+            "outcome",
+            "outcome",
+            "outcome",
+            "write"
+        ]
     );
+    // the cases the hub does not serve yet: nine, each with its step
+    let skipped: Vec<&str> = f["not_served"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["step"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        skipped,
+        [
+            "dump", "state", "write", "write", "write", "outcome", "write", "write", "write"
+        ]
+    );
+
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let origin = s.origin().to_string();
+
+    // discovery (0, 1)
+    let cx = hub.cx_with(None);
+    let path = |x: &Value| format!("{origin}{}", x["request"]["path"].as_str().unwrap());
+    let (r, req) = served(&mut s, reply_of(&st[0]), || {
+        hub.wire.discovery(&cx, &path(&st[0]))
+    });
+    matches_request(&req, &st[0]);
+    let d = r.unwrap();
+    assert_eq!(d.sync_base, format!("{origin}/sync{REPO_PATH}"));
+    let (r, _) = served(&mut s, reply_of(&st[1]), || {
+        hub.wire.discovery(&cx, &path(&st[1]))
+    });
+    matches_refusal(&err(r), &st[1]);
+
+    // state (2, 3, 13; 4 decoded through the mock)
+    let cx = hub.cx_with(Some(d.sync_base.clone()));
+    let plain = SyncStateRequest::new(&cx.claim);
+    let (r, req) = served(&mut s, reply_of(&st[2]), || hub.wire.state(&cx, &plain));
+    matches_request(&req, &st[2]);
+    let sent: Value = serde_json::from_slice(&req.body).unwrap();
+    let want = &st[2]["request"]["body"];
+    assert_eq!(object_keys(&sent), object_keys(want));
+    for m in ["actor", "run", "site"] {
+        assert_eq!(sent[m], want[m], "{m}");
+    }
+    // the client's formats are a subset of the fixture client's
+    for m in ["stream_read", "stream_write"] {
+        assert_eq!(sent[m], json!([HISTORY_FORMAT]));
+        assert!(want[m].as_array().unwrap().contains(&json!(HISTORY_FORMAT)));
+    }
+    let state = r.unwrap();
+    assert_eq!(
+        (state.canon, state.min_rdy.as_deref()),
+        (None, Some("0.52.0"))
+    );
+    assert!(state.repo_id.is_some());
+    assert!(state.views.is_empty());
+    let (r, _) = served(&mut s, reply_of(&st[3]), || hub.wire.state(&cx, &plain));
+    matches_refusal(&err(r), &st[3]);
+    let two = SyncStateRequest::new(&cx.claim).with_views(&["main".into(), "drafts".into()]);
+    let (r, req) = served(&mut s, reply_of(&st[13]), || hub.wire.state(&cx, &two));
+    matches_request(&req, &st[13]);
+    let sent: Value = serde_json::from_slice(&req.body).unwrap();
+    assert_eq!(object_keys(&sent), object_keys(&st[13]["request"]["body"]));
+    assert_eq!(sent["views"], st[13]["request"]["body"]["views"]);
+    let state = r.unwrap();
+    let seed = key_of(&st[13]["reply"]["body"]["canon"]);
+    assert_eq!(state.canon, Some(seed.hash));
+    assert_eq!(
+        state
+            .views
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>(),
+        ["main", "drafts"]
+    );
+    assert!(
+        state
+            .views
+            .iter()
+            .all(|v| v.head.is_none() && v.root.is_none())
+    );
+    assert!(state.hub_views().is_empty());
+    // 4: 257 names never leave; the hub's refusal of them maps as given
+    let many: Vec<String> = (0..=MAX_STATE_VIEWS).map(|i| format!("v{i}")).collect();
+    assert_eq!(
+        many.len(),
+        st[4]["request"]["body"]["views"].as_array().unwrap().len()
+    );
+    let over = SyncStateRequest::new(&cx.claim).with_views(&many);
+    assert_eq!(
+        err(unsent(&[&s], || hub.wire.state(&cx, &over))).code,
+        E_LIMIT
+    );
+    let (r, _) = served(&mut s, reply_of(&st[4]), || hub.wire.state(&cx, &two));
+    matches_refusal(&err(r), &st[4]);
+
+    // put (6, 8): one binary batch under the push id in the query
+    for i in [6, 8] {
+        let put = &st[i];
+        let p = put["request"]["path"].as_str().unwrap();
+        let push = p.rsplit_once("push=").unwrap().1;
+        let len = put["request"]["body"]["bytes"].as_u64().unwrap();
+        let batch = vec![0u8; len as usize];
+        let (r, req) = served(&mut s, reply_of(put), || {
+            hub.wire.put(&cx, push, &mut &batch[..], len)
+        });
+        matches_request(&req, put);
+        assert_eq!(req.body.len() as u64, len);
+        let rep = &put["reply"]["body"];
+        assert_eq!(
+            r.unwrap(),
+            ObjectPut {
+                records: rep["records"].as_u64().unwrap(),
+                bytes: rep["bytes"].as_u64().unwrap()
+            }
+        );
+    }
+
+    // known, push form (9)
+    let k = &st[9];
+    let keys: Vec<ObjectKey> = k["request"]["body"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(key_of)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let push = k["request"]["body"]["push"].as_str().unwrap();
+    let (r, req) = served(&mut s, reply_of(k), || hub.wire.known(&cx, push, &keys));
+    matches_request(&req, k);
+    let missing: Vec<ObjectKey> = k["reply"]["body"]["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(key_of)
+        .collect();
+    assert_eq!(r.unwrap(), missing);
+
+    // known, pull form (14, 15): the request is the fixture's; the page keeps the hub's order
+    let pull_of = |b: &Value| KnownPull {
+        after: (!b["after"].is_null()).then(|| key_of(&b["after"])),
+        base: (!b["base"].is_null()).then(|| key_of(&b["base"])),
+        purpose: StreamPurpose::CanonHistory,
+        root: key_of(&b["root"]),
+    };
+    let k = &st[14];
+    let pull = pull_of(&k["request"]["body"]);
+    let (r, req) = served(&mut s, reply_of(k), || hub.wire.known_pull(&cx, &pull));
+    matches_request(&req, k);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&req.body).unwrap(),
+        k["request"]["body"]
+    );
+    let page = r.unwrap();
+    let order: Vec<ObjectKey> = k["reply"]["body"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(key_of)
+        .collect();
+    let mut sorted = order.clone();
+    sorted.sort();
+    assert_ne!(order, sorted, "the fixture's page is in export order");
+    assert_eq!((page.keys, page.next), (order.clone(), None));
+    let (r, _) = served(&mut s, reply_of(&st[15]), || {
+        hub.wire
+            .known_pull(&cx, &pull_of(&st[15]["request"]["body"]))
+    });
+    matches_refusal(&err(r), &st[15]);
+
+    // get (16, 17): the request is the fixture's; the reply streams to the sink
+    let g = &st[16];
+    let b = &g["request"]["body"];
+    let get_of = |b: &Value| GetRequest {
+        keys: b["keys"].as_array().unwrap().iter().map(key_of).collect(),
+        purpose: StreamPurpose::CanonHistory,
+        root: key_of(&b["root"]),
+    };
+    let len = g["reply"]["body"]["bytes"].as_u64().unwrap();
+    let batch = vec![7u8; len as usize];
+    let reply = Reply::with_headers(
+        200,
+        &[
+            "content-type: application/octet-stream".into(),
+            format!("content-length: {len}"),
+            "connection: close".into(),
+        ],
+        &batch,
+    );
+    let mut sink = Vec::new();
+    let (r, req) = served(&mut s, reply, || {
+        hub.wire.get(&cx, &get_of(b), &mut sink, len)
+    });
+    matches_request(&req, g);
+    assert_eq!(serde_json::from_slice::<Value>(&req.body).unwrap(), *b);
+    assert_eq!(r.unwrap(), len);
+    assert_eq!(sink, batch);
+    let (r, _) = served(&mut s, reply_of(&st[17]), || {
+        hub.wire.get(
+            &cx,
+            &get_of(&st[17]["request"]["body"]),
+            &mut Vec::new(),
+            len,
+        )
+    });
+    matches_refusal(&err(r), &st[17]);
+
+    // write (10, 18): the fixture's body but the gate's values; the gate's members as given
+    for i in [10, 18] {
+        let w = &st[i];
+        let b = &w["request"]["body"];
+        let (r, req) = served(&mut s, reply_of(w), || hub.wire.write(&cx, &write_of(b)));
+        matches_request(&req, w);
+        let sent: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(without(&sent, "gate"), without(b, "gate"), "step {i}");
+        assert_eq!(object_keys(&sent["gate"]), object_keys(&b["gate"]));
+        assert_eq!(
+            object_keys(&sent["gate"]["propose"]),
+            BTreeSet::from(["cadence".into(), "changes".into()])
+        );
+        let rep = &w["reply"]["body"];
+        let got = r.unwrap();
+        assert_eq!(
+            (got.outcome, got.tip, got.request, got.min_rdy_raised),
+            (
+                WriteOutcome::Taken,
+                Some(key_of(&rep["tip"])),
+                None,
+                rep["min_rdy_raised"].as_bool().unwrap()
+            )
+        );
+    }
+    // the hub's refusals of a write (7, 20, 23): its words and request id
+    for i in [7, 20, 23] {
+        let e = refused(served(&mut s, reply_of(&st[i]), || hub.wire.write(&cx, &a_write())).0);
+        matches_refusal(&e, &st[i]);
+    }
+    // 22 and 24: the client never sends such a write (inputs 33 deep do not form its render
+    // inputs; a landings write with no gate is refused before sending); their replies decode as
+    // given
+    assert!(
+        serde_json::from_value::<RenderInputs>(st[22]["request"]["body"]["render_inputs"].clone())
+            .is_err()
+    );
+    let mut no_gate = a_write();
+    no_gate.gate = None;
+    match unsent(&[&s], || hub.wire.write(&cx, &no_gate)) {
+        Err(WriteFailure::NotSent(e)) => assert_eq!(e.code, E_BAD_INPUT),
+        other => panic!("{other:?}"),
+    }
+    for i in [22, 24] {
+        let e = refused(served(&mut s, reply_of(&st[i]), || hub.wire.write(&cx, &a_write())).0);
+        matches_refusal(&e, &st[i]);
+    }
+    // 29: E_HUB_SHARE_OFF is in no table: core's text
+    let e = refused(
+        served(&mut s, reply_of(&st[29]), || {
+            hub.wire.write(&cx, &a_write())
+        })
+        .0,
+    );
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_UPSTREAM_REFUSED,
+            UPSTREAM_REFUSED_MESSAGE,
+            UPSTREAM_REFUSED_FIX
+        )
+    );
+
+    // outcome (11, 21, 25, 28; refusals 26, 27)
+    for (i, want) in [
+        (11, LookupOutcome::Taken { tip: seed }),
+        (
+            21,
+            LookupOutcome::Refused {
+                code: "E_HUB_BEHIND".into(),
+            },
+        ),
+        (25, LookupOutcome::Unknown),
+        (
+            28,
+            LookupOutcome::Refused {
+                code: "E_HUB_BUSY".into(),
+            },
+        ),
+    ] {
+        let o = &st[i];
+        let push = o["request"]["body"]["push"].as_str().unwrap();
+        let (r, req) = served(&mut s, reply_of(o), || hub.wire.outcome(&cx, push));
+        matches_request(&req, o);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&req.body).unwrap(),
+            o["request"]["body"]
+        );
+        let got = r.unwrap();
+        assert_eq!(got.outcome, want, "step {i}");
+        assert_eq!(got.kind.as_deref(), o["reply"]["body"]["kind"].as_str());
+        assert_eq!((got.view, got.request_state), (None, None));
+    }
+    for i in [26, 27] {
+        let push = st[i]["request"]["body"]["push"].as_str().unwrap();
+        let (r, _) = served(&mut s, reply_of(&st[i]), || hub.wire.outcome(&cx, push));
+        matches_refusal(&err(r), &st[i]);
+    }
+    assert_eq!(s.finish(), 0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -206,14 +656,12 @@ fn matches_refusal(e: &RdyError, s: &Value) {
 /// The four v1 steps against rdyhub's frozen fixture: discovery (both cases), state in the
 /// publish-upload form (both cases), known in the push form (both cases) and put. The client's
 /// requests carry the fixture's method, path, query, headers and member names; it decodes each
-/// reply. Fixture v2 adds get, write, outcome, the pull form of known and dump (8a2).
+/// reply. Then fixture v2's steps (8a2): state with views, the pull form of known, get, write
+/// and the outcome lookup, with its list of the cases the hub does not serve yet.
 #[test]
 fn scc8_wire_fixture_matches_state_known_get_put_write() {
-    let digest: String = Sha256::digest(FIXTURE)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    assert_eq!(digest, FIXTURE_SHA256);
+    // v1 stays pinned beside v2
+    assert_eq!(sha256(FIXTURE), FIXTURE_SHA256);
     let f = fixture();
     assert_eq!(f["fixture"], "sync-client-wire");
     assert_eq!(f["version"], 1);
@@ -267,7 +715,7 @@ fn scc8_wire_fixture_matches_state_known_get_put_write() {
     assert_eq!(sent["rdy"], rdy_engine::formats::formats().rdy);
     assert_eq!(sent["stream_read"], json!([HISTORY_FORMAT]));
     assert_eq!(sent["stream_write"], json!([HISTORY_FORMAT]));
-    let st: PublishState = r.unwrap();
+    let st = r.unwrap();
     assert_eq!(
         (st.canon, st.repo_id, st.min_rdy.clone()),
         (None, None, None)
@@ -342,10 +790,13 @@ fn scc8_wire_fixture_matches_state_known_get_put_write() {
         }
     );
     assert_eq!(s.finish(), 0);
+
+    fixture_v2_steps();
 }
 
 /// D-H0BZN, D-5Y8Y1: no request leaves before discovery passes the origin fence, and every
-/// later request goes to the fenced sync base only.
+/// later request (state, both known forms, put, get, write and outcome) goes to the fenced sync
+/// base only.
 #[test]
 fn scc8_discovery_fence_precedes_every_request() {
     let mut a = Server::start();
@@ -381,6 +832,29 @@ fn scc8_discovery_fence_precedes_every_request() {
     err(unsent(&servers, || {
         hub.wire.put(&cx, PUSH, &mut &b"x"[..], 1)
     }));
+    // v2: the pull form, get, write and outcome too
+    let root = key(kinds::LANDING, 1);
+    let pull = KnownPull {
+        after: None,
+        base: None,
+        purpose: StreamPurpose::CanonHistory,
+        root,
+    };
+    let get = GetRequest {
+        keys: vec![key(1, 1)],
+        purpose: StreamPurpose::CanonHistory,
+        root,
+    };
+    let write = a_write();
+    err(unsent(&servers, || hub.wire.known_pull(&cx, &pull)));
+    err(unsent(&servers, || {
+        hub.wire.get(&cx, &get, &mut Vec::new(), 1 << 20)
+    }));
+    assert!(matches!(
+        unsent(&servers, || hub.wire.write(&cx, &write)),
+        Err(WriteFailure::NotSent(_))
+    ));
+    err(unsent(&servers, || hub.wire.outcome(&cx, PUSH)));
 
     // a sync base outside the fence that skipped discovery: refused before connecting
     let stray = hub.cx_with(Some(format!("{}/sync", other.origin())));
@@ -390,11 +864,25 @@ fn scc8_discovery_fence_precedes_every_request() {
         hub.wire.put(&stray, PUSH, &mut &b"x"[..], 1)
     }));
     assert_eq!(e.code, E_UPSTREAM_ORIGIN);
+    for e in [
+        err(unsent(&servers, || hub.wire.known_pull(&stray, &pull))),
+        err(unsent(&servers, || {
+            hub.wire.get(&stray, &get, &mut Vec::new(), 1 << 20)
+        })),
+        err(unsent(&servers, || hub.wire.outcome(&stray, PUSH))),
+        match unsent(&servers, || hub.wire.write(&stray, &write)) {
+            Err(WriteFailure::NotSent(e)) => e,
+            other => panic!("{other:?}"),
+        },
+    ] {
+        assert_eq!(e.code, E_UPSTREAM_ORIGIN);
+    }
     assert_eq!(a.finish(), 0);
 }
 
-/// D-N8PR2: discovery, state, known and put replies ignore unknown members, and a token in any
-/// key or string, ignored member or not, discards the reply.
+/// D-N8PR2: discovery, state, both known forms, put, write and outcome replies ignore unknown
+/// members, and a token in any key or string, ignored member or not, discards the reply (a
+/// write's reply so discarded is uncertain).
 #[test]
 fn scc8_additive_replies_scan_hidden_tokens() {
     let mut s = Server::start();
@@ -468,11 +956,74 @@ fn scc8_additive_replies_scan_hidden_tokens() {
             "{extra}"
         );
     }
+
+    // v2: the pull form's page, the write reply and the outcome reply
+    let root = key(kinds::LANDING, 1);
+    let pull = KnownPull {
+        after: None,
+        base: None,
+        purpose: StreamPurpose::CanonHistory,
+        root,
+    };
+    let write = a_write();
+    let v2 = |extra: &str| {
+        [
+            format!(r#"{{"keys":[],"next":null{extra}}}"#),
+            format!(
+                r#"{{"min_rdy_raised":false,"outcome":"taken","request":null,"tip":{{"hash":"{}","kind":4}}{extra}}}"#,
+                root.hash
+            ),
+            format!(
+                r#"{{"code":null,"kind":null,"outcome":"unknown","request":null,"request_state":null,"tip":null,"view":null{extra}}}"#
+            ),
+        ]
+    };
+    let run2 = |s: &mut Server, bodies: [String; 3]| -> Vec<Option<&'static str>> {
+        let [k, w, o] = bodies;
+        vec![
+            served(s, Reply::json(200, &k), || hub.wire.known_pull(&cx, &pull))
+                .0
+                .err()
+                .map(|e| e.code),
+            match served(s, Reply::json(200, &w), || hub.wire.write(&cx, &write)).0 {
+                Ok(_) => None,
+                Err(WriteFailure::Uncertain) => Some(E_UPSTREAM_UNCERTAIN),
+                Err(other) => panic!("{other:?}"),
+            },
+            served(s, Reply::json(200, &o), || hub.wire.outcome(&cx, PUSH))
+                .0
+                .err()
+                .map(|e| e.code),
+        ]
+    };
+    assert_eq!(
+        run2(
+            &mut s,
+            v2(r#","later":{"nested":[1,"text",{"k":null}]},"flag":true"#)
+        ),
+        [None, None, None]
+    );
+    for extra in [
+        format!(r#","note":"{ACCESS}""#),
+        r#","note":{"deep":["rdyh_r_x"]}"#.to_string(),
+        r#","rdyh_a_key":1"#.to_string(),
+    ] {
+        assert_eq!(
+            run2(&mut s, v2(&extra)),
+            [
+                Some(E_UPSTREAM_PROTOCOL),
+                Some(E_UPSTREAM_UNCERTAIN),
+                Some(E_UPSTREAM_PROTOCOL)
+            ],
+            "{extra}"
+        );
+    }
     assert_eq!(s.finish(), 0);
 }
 
-/// D-4XHPH: a state `min_rdy` above this rdy stops the exchange before any known or put
-/// request; the feature check reads the real feature registry, not an empty list.
+/// D-4XHPH: a state `min_rdy` above this rdy stops the exchange, push or pull, before any known,
+/// put, known pull or get request; the feature check reads the real feature registry, not an
+/// empty list.
 #[test]
 fn scc8_minimum_stops_before_transfer() {
     let mut s = Server::start();
@@ -546,11 +1097,23 @@ fn scc8_minimum_stops_before_transfer() {
     // only the state requests reached the hub
     assert!(s.requests().iter().all(|r| r.target.ends_with("/state")));
     assert_eq!(s.finish(), 0);
+
+    // the exchange: a pull stops after state too, before any known pull or get
+    let e = fake_env(1);
+    let fake = sync_env::Hub::new().with_state(|st| st.min_rdy = Some("999.0.0".into()));
+    let x = err(sync_env::Sync::new(&e, &fake).pull(PullRequest::default()));
+    assert_eq!(
+        (x.code, x.message.as_str()),
+        (E_STORE_FORMAT, "hub repo acme/docs needs rdy 999.0.0")
+    );
+    assert_eq!(fake.steps(), ["discovery", "state"]);
 }
 
-/// Bounds, redirects, type, size and status checks on the four v1 steps: known takes at most
-/// 100,000 keys in at most 16,777,216 bytes; replies take 1,048,576 bytes (known's 16,777,216)
-/// and depth 32. A redirect is never followed.
+/// Bounds, redirects, type, size and status checks on every step: known takes at most 100,000
+/// keys in at most 16,777,216 bytes; replies take 1,048,576 bytes (known's 16,777,216) and depth
+/// 32; a pull page at most 100,000 distinct keys ending at `next`; a get reply at most its
+/// limit (the hub's `batch_bytes`); a write body at most 16,777,216 bytes. A redirect is never
+/// followed.
 #[test]
 fn scc8_wire_bounds_and_redirects_fail_closed() {
     let mut s = Server::start();
@@ -667,6 +1230,531 @@ fn scc8_wire_bounds_and_redirects_fail_closed() {
         hub.wire.put(&cx, PUSH, &mut &b"x"[..], 1)
     });
     assert_eq!(err(r).code, E_UPSTREAM_UNCERTAIN);
+    // v2 bounds: a pull page over 100,000 keys; a get body over its limit; a write body over
+    // 16,777,216 bytes never leaves; write and outcome replies over 1,048,576 bytes
+    let root = key(kinds::LANDING, 1);
+    let pull = KnownPull {
+        after: None,
+        base: None,
+        purpose: StreamPurpose::CanonHistory,
+        root,
+    };
+    let page: Vec<Value> = (0..=MAX_KNOWN_KEYS as u32)
+        .map(|i| json!({"hash": Hash::of(&i.to_be_bytes()).to_string(), "kind": 1}))
+        .collect();
+    let body = json!({"keys": page, "next": null}).to_string();
+    assert!(body.len() <= KNOWN_REPLY_BYTES);
+    let (r, _) = served(&mut s, Reply::json(200, &body), || {
+        hub.wire.known_pull(&cx, &pull)
+    });
+    assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL);
+    // a page whose next is not its last key, or that repeats a key
+    let k1 = json!({"hash": key(1, 1).hash.to_string(), "kind": 1});
+    let k2 = json!({"hash": key(1, 2).hash.to_string(), "kind": 1});
+    for bad in [
+        json!({"keys": [k1, k2], "next": k1}),
+        json!({"keys": [k1, k1], "next": null}),
+    ] {
+        let (r, _) = served(&mut s, Reply::json(200, &bad.to_string()), || {
+            hub.wire.known_pull(&cx, &pull)
+        });
+        assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL);
+    }
+    let get = GetRequest {
+        keys: vec![key(1, 1)],
+        purpose: StreamPurpose::CanonHistory,
+        root,
+    };
+    let octets = |n: usize| {
+        Reply::with_headers(
+            200,
+            &[
+                "content-type: application/octet-stream".into(),
+                format!("content-length: {n}"),
+                "connection: close".into(),
+            ],
+            &vec![1u8; n],
+        )
+    };
+    let mut sink = Vec::new();
+    let (r, _) = served(&mut s, octets(11), || {
+        hub.wire.get(&cx, &get, &mut sink, 10)
+    });
+    assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL);
+    assert!(sink.len() <= 10);
+    let (r, _) = served(&mut s, octets(10), || {
+        hub.wire.get(&cx, &get, &mut Vec::new(), 10)
+    });
+    assert_eq!(r.unwrap(), 10);
+    // a get of no key or of more than 100,000 keys never leaves
+    let none = GetRequest {
+        keys: vec![],
+        ..get.clone()
+    };
+    assert_eq!(
+        err(unsent(&[&s], || hub.wire.get(
+            &cx,
+            &none,
+            &mut Vec::new(),
+            10
+        )))
+        .code,
+        E_LIMIT
+    );
+    // a write body past its bound: tags the hub lacks, each a long name
+    assert_eq!(WRITE_REQUEST_BYTES, 16_777_216);
+    let mut big = a_write();
+    big.tags = (0..17)
+        .map(|i| WriteTag {
+            name: format!("{i}{}", "t".repeat(1 << 20)),
+            disagreements: vec![],
+        })
+        .collect();
+    match unsent(&[&s], || hub.wire.write(&cx, &big)) {
+        Err(WriteFailure::NotSent(e)) => assert_eq!(e.code, E_LIMIT),
+        other => panic!("{other:?}"),
+    }
+    let w = format!(
+        r#"{{"min_rdy_raised":false,"outcome":"taken","request":null,"tip":{{"hash":"{}","kind":4}}}}"#,
+        root.hash
+    );
+    let over = format!("{w}{}", pad(REPLY_BYTES + 1 - w.len()));
+    match served(&mut s, Reply::json(200, &over), || {
+        hub.wire.write(&cx, &a_write())
+    })
+    .0
+    {
+        Err(WriteFailure::Uncertain) => {}
+        other => panic!("{other:?}"),
+    }
+    let o = r#"{"code":null,"kind":null,"outcome":"unknown","request":null,"request_state":null,"tip":null,"view":null}"#;
+    let over = format!("{o}{}", pad(REPLY_BYTES + 1 - o.len()));
+    let (r, _) = served(&mut s, Reply::json(200, &over), || {
+        hub.wire.outcome(&cx, PUSH)
+    });
+    assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL);
+    // a held reply to a view write, a taken reply with no tip, a tip of another kind: uncertain
+    let mut view = a_write();
+    view.kind = WriteKind::View;
+    view.gate = None;
+    view.view = Some("drafts".into());
+    for (req, body) in [
+        (
+            view.clone(),
+            r#"{"min_rdy_raised":false,"outcome":"held","request":{"number":1,"version":1},"tip":null}"#.to_string(),
+        ),
+        (
+            a_write(),
+            r#"{"min_rdy_raised":false,"outcome":"taken","request":null,"tip":null}"#.to_string(),
+        ),
+        (
+            a_write(),
+            format!(
+                r#"{{"min_rdy_raised":false,"outcome":"taken","request":null,"tip":{{"hash":"{}","kind":13}}}}"#,
+                root.hash
+            ),
+        ),
+    ] {
+        match served(&mut s, Reply::json(200, &body), || hub.wire.write(&cx, &req)).0 {
+            Err(WriteFailure::Uncertain) => {}
+            other => panic!("{body}: {other:?}"),
+        }
+    }
+    // an outcome with a request state outside open, landed and closed
+    let o = r#"{"code":null,"kind":"landings","outcome":"held","request":{"number":1,"version":1},"request_state":"lost","tip":null,"view":null}"#;
+    let (r, _) = served(&mut s, Reply::json(200, o), || hub.wire.outcome(&cx, PUSH));
+    assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL);
+    // redirects: never followed on the v2 steps either
+    let (r, _) = served(&mut s, redirect(), || hub.wire.known_pull(&cx, &pull));
+    assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL);
+    let (r, _) = served(&mut s, redirect(), || {
+        hub.wire.get(&cx, &get, &mut Vec::new(), 10)
+    });
+    assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL);
+    let (r, _) = served(&mut s, redirect(), || hub.wire.outcome(&cx, PUSH));
+    assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL);
+    match served(&mut s, redirect(), || hub.wire.write(&cx, &a_write())).0 {
+        Err(WriteFailure::Uncertain) => {}
+        other => panic!("{other:?}"),
+    }
     assert_eq!(other.accepted(), 0);
+    assert_eq!(s.finish(), 0);
+}
+
+/// D-H0BZN "State": the request names the views of this exchange, in order, and at most 256 of
+/// them, each once; the reply gives each named view's head and root (both view ops, or both
+/// null) in that order and nothing else, and a push names only its selected views.
+#[test]
+fn scc8_state_captures_only_named_heads_and_bounds_256() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let names: Vec<String> = vec!["main".into(), "drafts".into()];
+    let two = SyncStateRequest::new(&cx.claim).with_views(&names);
+    let op = |n: u8| json!({"hash": Hash::of(&[n]).to_string(), "kind": kinds::VIEW_OP});
+    let with_views = |views: Value| state_reply(json!({ "views": views }));
+    let (r, req) = served(
+        &mut s,
+        Reply::json(
+            200,
+            &with_views(json!([
+                {"name": "main", "head": op(2), "root": op(1)},
+                {"name": "drafts", "head": null, "root": null}
+            ])),
+        ),
+        || hub.wire.state(&cx, &two),
+    );
+    let sent: Value = serde_json::from_slice(&req.body).unwrap();
+    assert_eq!(sent["views"], json!(["main", "drafts"]));
+    let st = r.unwrap();
+    assert_eq!(st.view_head("main"), Some(Hash::of(&[2])));
+    assert_eq!(st.view_head("drafts"), None);
+    assert_eq!(st.view_head("other"), None);
+    let hub_views = st.hub_views();
+    assert_eq!(hub_views.len(), 1);
+    assert_eq!(hub_views["main"].root, Hash::of(&[1]));
+    // no views named: no member sent
+    let plain = SyncStateRequest::new(&cx.claim);
+    let (r, req) = served(&mut s, Reply::json(200, &state_reply(json!({}))), || {
+        hub.wire.state(&cx, &plain)
+    });
+    r.unwrap();
+    let sent: Value = serde_json::from_slice(&req.body).unwrap();
+    assert!(sent.get("views").is_none());
+    // replies outside the form: another order, a missing or extra view, half a head, another kind
+    for views in [
+        json!([{"name": "drafts", "head": null, "root": null}, {"name": "main", "head": null, "root": null}]),
+        json!([{"name": "main", "head": null, "root": null}]),
+        json!([
+            {"name": "main", "head": null, "root": null},
+            {"name": "drafts", "head": null, "root": null},
+            {"name": "extra", "head": null, "root": null}
+        ]),
+        json!([{"name": "main", "head": op(2), "root": null}, {"name": "drafts", "head": null, "root": null}]),
+        json!([
+            {"name": "main", "head": {"hash": Hash::of(&[2]).to_string(), "kind": kinds::LANDING}, "root": op(1)},
+            {"name": "drafts", "head": null, "root": null}
+        ]),
+    ] {
+        let (r, _) = served(&mut s, Reply::json(200, &with_views(views.clone())), || {
+            hub.wire.state(&cx, &two)
+        });
+        assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL, "{views}");
+    }
+    // 256 names go; 257, or a name twice, never leave
+    assert_eq!(MAX_STATE_VIEWS, 256);
+    let most: Vec<String> = (0..MAX_STATE_VIEWS).map(|i| format!("v{i}")).collect();
+    let views: Vec<Value> = most
+        .iter()
+        .map(|n| json!({"name": n, "head": null, "root": null}))
+        .collect();
+    let (r, _) = served(&mut s, Reply::json(200, &with_views(json!(views))), || {
+        hub.wire
+            .state(&cx, &SyncStateRequest::new(&cx.claim).with_views(&most))
+    });
+    assert_eq!(r.unwrap().views.len(), MAX_STATE_VIEWS);
+    let mut over = most.clone();
+    over.push("one-more".into());
+    let e = err(unsent(&[&s], || {
+        hub.wire
+            .state(&cx, &SyncStateRequest::new(&cx.claim).with_views(&over))
+    }));
+    assert_eq!(e.code, E_LIMIT);
+    let twice: Vec<String> = vec!["main".into(), "main".into()];
+    let e = err(unsent(&[&s], || {
+        hub.wire
+            .state(&cx, &SyncStateRequest::new(&cx.claim).with_views(&twice))
+    }));
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(s.finish(), 0);
+
+    // the exchange names only the push's selected views, and refuses 257 before any request
+    let e = fake_env(1);
+    sync_env::write_in(&e.engine, "alpha", "a1");
+    sync_env::write_in(&e.engine, "beta", "b1");
+    let fake = sync_env::Hub::new();
+    let sync = sync_env::Sync::new(&e, &fake);
+    sync.push(rdy_engine::hub_sync::PushRequest {
+        views: vec!["beta".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        fake.states.lock().unwrap()[0].views,
+        Some(vec!["beta".to_string()])
+    );
+    fake.clear();
+    let x = err(sync.push(rdy_engine::hub_sync::PushRequest {
+        views: over,
+        ..Default::default()
+    }));
+    assert_eq!(x.code, E_LIMIT);
+    assert!(fake.steps().is_empty());
+}
+
+/// D-H0BZN "Pull known": pages follow `next` until null and keep the hub's order; the first
+/// pull sends no base, and a later one sends the store's fetched tip once the store holds it.
+#[test]
+fn scc8_known_pages_in_export_order_from_fetched_base() {
+    let e = fake_env(2);
+    let (_dir, hub_store) = sync_env::copy_project(&e);
+    let later = sync_env::land_in(&hub_store, "later");
+    let fake = sync_env::Hub::new();
+    fake.serve(hub_store.read());
+    fake.state.lock().unwrap().canon = Some(later);
+    *fake.page.lock().unwrap() = 2;
+    let sync = sync_env::Sync::new(&e, &fake);
+    sync.pull(PullRequest::default()).unwrap();
+    let pulls = fake.pulls.lock().unwrap().clone();
+    assert!(pulls.len() > 2, "{pulls:?}");
+    let root = ObjectKey {
+        kind: kinds::LANDING,
+        hash: later,
+    };
+    assert!(pulls.iter().all(|p| p.root == root && p.base.is_none()));
+    assert!(
+        pulls
+            .iter()
+            .all(|p| p.purpose == StreamPurpose::CanonHistory)
+    );
+    // each page asks after the last key of the one before, in the hub's order
+    let order = fake.history(StreamPurpose::CanonHistory, later, None);
+    assert_eq!(pulls[0].after, None);
+    for (i, p) in pulls.iter().enumerate().skip(1) {
+        assert_eq!(p.after, Some(order[2 * i - 1]), "page {i}");
+    }
+    // the get asked for the keys this store lacked, in the hub's order
+    let gets = fake.gets.lock().unwrap().clone();
+    assert_eq!(gets.len(), 1);
+    let read = e.engine.read();
+    let held_before: Vec<ObjectKey> = order
+        .iter()
+        .filter(|k| !gets[0].keys.contains(k))
+        .copied()
+        .collect();
+    let want: Vec<ObjectKey> = order
+        .iter()
+        .filter(|k| !held_before.contains(k))
+        .copied()
+        .collect();
+    assert_eq!(gets[0].keys, want);
+    assert!(read.reader().has_kind(kinds::LANDING, &later).unwrap());
+    drop(read);
+    assert_eq!(
+        sync_env::canon_of(&e, "shared").unwrap().fetched,
+        Some(later)
+    );
+
+    // the next pull sends the fetched tip as its base, and has nothing to get
+    fake.clear();
+    fake.pulls.lock().unwrap().clear();
+    sync.pull(PullRequest::default()).unwrap();
+    let pulls = fake.pulls.lock().unwrap().clone();
+    assert_eq!(pulls[0].base, Some(root));
+    assert!(!fake.steps().contains(&"get"));
+}
+
+/// D-H0BZN "Pull known": a key that reaches the hub before the cursor while a pull pages is not
+/// in that pull; the next pull, from the fetched tip, fetches it.
+#[test]
+fn scc8_late_attachment_before_cursor_arrives_next_pull() {
+    let e = fake_env(2);
+    let (_dir, hub_store) = sync_env::copy_project(&e);
+    let later = sync_env::land_in(&hub_store, "later");
+    let hub_store = Arc::new(hub_store);
+    let fake = Arc::new(sync_env::Hub::new());
+    fake.serve(hub_store.read());
+    fake.state.lock().unwrap().canon = Some(later);
+    *fake.page.lock().unwrap() = 2;
+    let tag_key: Arc<std::sync::Mutex<Option<ObjectKey>>> = Arc::default();
+    {
+        // at the first known pull, arm a second hook: before the second page, a tag on the hub
+        // tip lands at the front of the hub's order, before the cursor
+        let (fake2, store2, tag2) = (fake.clone(), hub_store.clone(), tag_key.clone());
+        *fake.hook.lock().unwrap() = Some((
+            "known_pull",
+            Box::new(move |_| {
+                let (fake3, store3, tag3) = (fake2.clone(), store2.clone(), tag2.clone());
+                *fake2.hook.lock().unwrap() = Some((
+                    "known_pull",
+                    Box::new(move |_| {
+                        let tag: Hash = rdy_engine::engine::with_writer_result(&*store3, |r| {
+                            let v = r.tag(&sync_env::founder(), "v9.0.0", None, None)?;
+                            Ok(v.tag.parse().unwrap())
+                        })
+                        .unwrap();
+                        let k = ObjectKey {
+                            kind: kinds::TAG,
+                            hash: tag,
+                        };
+                        fake3.late.lock().unwrap().insert(k);
+                        fake3.serve(store3.read());
+                        *tag3.lock().unwrap() = Some(k);
+                    }),
+                ));
+            }),
+        ));
+    }
+    let sync = sync_env::Sync::new(&e, &fake);
+    sync.pull(PullRequest::default()).unwrap();
+    let tag = tag_key
+        .lock()
+        .unwrap()
+        .expect("the tag landed during the pull");
+    assert!(fake.pulls.lock().unwrap().len() > 2);
+    assert!(
+        !e.engine
+            .read()
+            .reader()
+            .has_kind(kinds::TAG, &tag.hash)
+            .unwrap()
+    );
+    assert!(!fake.gets.lock().unwrap()[0].keys.contains(&tag));
+
+    // the next pull: from the fetched tip, the tag is all that is missing
+    fake.clear();
+    fake.gets.lock().unwrap().clear();
+    sync.pull(PullRequest::default()).unwrap();
+    let gets = fake.gets.lock().unwrap().clone();
+    assert_eq!(gets.len(), 1);
+    assert_eq!(gets[0].keys, [tag]);
+    assert!(
+        e.engine
+            .read()
+            .reader()
+            .has_kind(kinds::TAG, &tag.hash)
+            .unwrap()
+    );
+}
+
+/// D-H0BZN "Get": each batch is checked before anything is taken. A batch of another purpose or
+/// root, one past `batch_bytes`, or one that breaks the closure of a landing's snapshot delta
+/// (SD1, kind 30) is refused, and the store takes nothing.
+#[test]
+fn scc8_get_checks_purpose_root_and_sd1_delta_closure() {
+    let e = fake_env(2);
+    let (_dir, hub_store) = sync_env::copy_project(&e);
+    sync_env::write_in(&hub_store, "drafts", "draft-one");
+    let later = sync_env::land_in(&hub_store, "later");
+    let hub_read = hub_store.read();
+    let batch = |purpose: StreamPurpose, root: Hash, known: &BTreeSet<ObjectKey>| {
+        let mut out = Vec::new();
+        rdy_engine::stream_export::write_history(&hub_read, purpose, root, None, known, &mut out)
+            .unwrap();
+        out
+    };
+    let nothing = BTreeSet::new();
+    let view = hub_read.view_head("drafts").unwrap().head;
+    // the hub's whole history above nothing, less only the tip: its landing needs the snapshot
+    // its delta names, which the batch neither carries nor lists
+    let all: BTreeSet<ObjectKey> = rdy_store::closure::history_closure_before(
+        hub_read.reader(),
+        StreamPurpose::CanonHistory,
+        later,
+        &BTreeSet::new(),
+        None,
+        hub_read.seq(),
+    )
+    .unwrap()
+    .records
+    .into_iter()
+    .collect();
+    let tip = ObjectKey {
+        kind: kinds::LANDING,
+        hash: later,
+    };
+    let less_tip: BTreeSet<ObjectKey> = all.iter().filter(|k| **k != tip).copied().collect();
+    let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+        (
+            "another purpose",
+            batch(StreamPurpose::ViewHistory, view, &nothing),
+            E_UPSTREAM_PROTOCOL,
+        ),
+        (
+            "another root",
+            batch(StreamPurpose::CanonHistory, e.landings[1], &nothing),
+            E_UPSTREAM_PROTOCOL,
+        ),
+        (
+            "the snapshot delta's closure",
+            batch(StreamPurpose::CanonHistory, later, &less_tip),
+            E_BAD_RECORD,
+        ),
+    ];
+    for (case, bytes, code) in cases {
+        let fake = sync_env::Hub::new();
+        fake.serve(hub_store.read());
+        fake.state.lock().unwrap().canon = Some(later);
+        *fake.get_bytes.lock().unwrap() = Some(bytes);
+        let x = err(sync_env::Sync::new(&e, &fake).pull(PullRequest::default()));
+        assert_eq!(x.code, code, "{case}: {x:?}");
+        if code == E_BAD_RECORD {
+            assert!(
+                x.message.contains("unlisted dependency 5:"),
+                "{}",
+                x.message
+            );
+        }
+        assert!(
+            !e.engine
+                .read()
+                .reader()
+                .has_kind(kinds::LANDING, &later)
+                .unwrap()
+        );
+        assert_eq!(sync_env::canon_of(&e, "shared"), None, "{case}");
+    }
+    // a batch past the hub's batch_bytes: the get's limit
+    let fake = sync_env::Hub::new();
+    fake.serve(hub_store.read());
+    fake.state.lock().unwrap().canon = Some(later);
+    fake.state.lock().unwrap().batch_bytes = 64;
+    let x = err(sync_env::Sync::new(&e, &fake).pull(PullRequest::default()));
+    assert_eq!(x.code, E_UPSTREAM_PROTOCOL);
+    assert!(
+        !e.engine
+            .read()
+            .reader()
+            .has_kind(kinds::LANDING, &later)
+            .unwrap()
+    );
+    assert_eq!(sync_env::canon_of(&e, "shared"), None);
+}
+
+/// D-H0BZN "State": hub canon's tip reads from a landing's object key (Share on) and from a hex
+/// hash (Share off) alike; a key of another kind, or a malformed one, is a protocol failure.
+#[test]
+fn scc8_state_canon_reads_object_key_and_hex_forms() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let request = SyncStateRequest::new(&cx.claim);
+    let tip = Hash::of(b"hub tip");
+    let repo = json!("397fd4b98bae3dfed53504ef0e4f9d91");
+    for canon in [
+        json!({"hash": tip.to_string(), "kind": kinds::LANDING}),
+        json!(tip.to_string()),
+    ] {
+        let (r, _) = served(
+            &mut s,
+            Reply::json(200, &state_reply(json!({"canon": canon, "repo_id": repo}))),
+            || hub.wire.state(&cx, &request),
+        );
+        assert_eq!(r.unwrap().canon, Some(tip), "{canon}");
+    }
+    for canon in [
+        json!({"hash": tip.to_string(), "kind": kinds::VIEW_OP}),
+        json!({"hash": tip.to_string()}),
+        json!({"hash": "not hex", "kind": kinds::LANDING}),
+        json!("not hex"),
+        json!(4),
+    ] {
+        let (r, _) = served(
+            &mut s,
+            Reply::json(200, &state_reply(json!({"canon": canon, "repo_id": repo}))),
+            || hub.wire.state(&cx, &request),
+        );
+        assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL, "{canon}");
+    }
     assert_eq!(s.finish(), 0);
 }

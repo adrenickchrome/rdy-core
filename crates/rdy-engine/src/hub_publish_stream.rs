@@ -178,7 +178,7 @@ impl std::fmt::Debug for PreparedHistory {
 }
 
 /// E_IO: the upload scratch file could not be made, written or read.
-fn scratch_error() -> RdyError {
+pub(crate) fn scratch_error() -> RdyError {
     RdyError::new(
         E_IO,
         "the upload scratch file could not be used",
@@ -338,18 +338,33 @@ impl PreparedHistory {
         head: Hash,
         base: Option<Hash>,
     ) -> Result<PreparedHistory, RdyError> {
+        Self::history(read, StreamPurpose::CanonHistory, head, base)
+    }
+
+    /// The view history from the head view op `head` above the hub's view head `base` that
+    /// `read` captured, in the canon form's way ([`PreparedHistory::canon`]): purpose
+    /// `view_history`, the root a VIEW_OP.
+    pub fn view(
+        read: Arc<ReadState>,
+        head: Hash,
+        base: Option<Hash>,
+    ) -> Result<PreparedHistory, RdyError> {
+        Self::history(read, StreamPurpose::ViewHistory, head, base)
+    }
+
+    /// The canon or view history of `purpose` from `head` above `base`.
+    fn history(
+        read: Arc<ReadState>,
+        purpose: StreamPurpose,
+        head: Hash,
+        base: Option<Hash>,
+    ) -> Result<PreparedHistory, RdyError> {
         read.ensure_current_epoch()?;
         let repo_id = read.repo_id()?;
         let end = read.seq();
-        let found = history_closure_before(
-            read.reader(),
-            StreamPurpose::CanonHistory,
-            head,
-            &BTreeSet::new(),
-            base,
-            end,
-        )
-        .map_err(to_rdy)?;
+        let found =
+            history_closure_before(read.reader(), purpose, head, &BTreeSet::new(), base, end)
+                .map_err(to_rdy)?;
         let records = found.records.len();
         let mut order = found.records;
         order.extend(found.prerequisites.iter().copied());
@@ -363,7 +378,7 @@ impl PreparedHistory {
         }
         let at = |k: &ObjectKey| place.get(k).copied().ok_or_else(inconsistent);
         let root = at(&ObjectKey {
-            kind: kinds::LANDING,
+            kind: purpose.root_kind(),
             hash: head,
         })?;
         // the root is a record, unless the base's links hold it: then the base is the head
@@ -443,7 +458,7 @@ impl PreparedHistory {
         read.ensure_current_epoch()?;
         Ok(PreparedHistory {
             source: Source::State(read),
-            purpose: StreamPurpose::CanonHistory,
+            purpose,
             externals: order.len() - records,
             features,
             manifest,
@@ -733,6 +748,12 @@ fn write_batch(
         .map_err(|_| scratch_error())?;
     let header = match history.purpose {
         StreamPurpose::CanonHistory => StreamHeader::canon_history(
+            history.features.clone(),
+            history.repo_id,
+            history.tag,
+            batch.prerequisites.clone(),
+        ),
+        StreamPurpose::ViewHistory => StreamHeader::view_history(
             history.features.clone(),
             history.repo_id,
             history.tag,

@@ -1,9 +1,9 @@
 //! scc8 (D-TXFHR; D-H0BZN, D-47HVF, D-4XHPH, D-0SC9C; ruling R-F2): Sync client B's contract
 //! fixture. `sync-client-b-v1.json` is the current fixture: it starts as a byte copy of
-//! `sync-client-v1.json`, which is frozen from here on, and Task 8a1 adds only the sync wire's
+//! `sync-client-v1.json`, which is frozen from here on. Task 8a1 adds only the sync wire's
 //! fixture digest and the exchange's error values: the code `E_DIVERGED` and the texts of
-//! `SYNC_DIVERGED`, `SYNC_REMOTE_MODE` and `SYNC_MIN_RDY`. Every other member is the
-//! predecessor's.
+//! `SYNC_DIVERGED`, `SYNC_REMOTE_MODE` and `SYNC_MIN_RDY`. Task 8a2 adds wire fixture v2's
+//! digest and the texts of `SYNC_UNCERTAIN`. Every other member is the predecessor's.
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -26,7 +26,7 @@ const SELECTORS: [&str; 3] = [
     "crates/rdy-qa/tests/cli/cli_rules.rs",
 ];
 
-/// The members Task 8a1 adds to [`CURRENT`], each with the reason it moves.
+/// The members Tasks 8a1 and 8a2 add to [`CURRENT`], each with the reason it moves.
 const SCC8_CHANGES: &[(&str, &str)] = &[
     (
         "added /errors_warnings/codes/E_DIVERGED",
@@ -57,8 +57,20 @@ const SCC8_CHANGES: &[(&str, &str)] = &[
         "the text of a remote that is not a share remote",
     ),
     (
+        "added /errors_warnings/templates/SYNC_UNCERTAIN_FIX",
+        "the fix of a sync write with no reply: find its outcome first (D-H0BZN, Task 8a2)",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_UNCERTAIN_MESSAGE",
+        "the text of a sync write with no reply (D-H0BZN, Task 8a2)",
+    ),
+    (
         "added /sync/fixture_digests/sync-client-wire-v1.json",
         "rdyhub's frozen sync wire fixture v1, a byte copy",
+    ),
+    (
+        "added /sync/fixture_digests/sync-client-wire-v2.json",
+        "rdyhub's frozen sync wire fixture v2, a byte copy (Task 8a2); v1 stays beside it",
     ),
 ];
 
@@ -209,6 +221,18 @@ fn scc8_contract_adds_only_sync_wire_and_errors() {
         now["sync"]["fixture_digests"]["sync-client-wire-v1.json"],
         format!("{} {}", wire.len(), rdy_model::Hash::of(&wire))
     );
+    let wire2 = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/sync/sync-client-wire-v2.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        sha(&wire2),
+        "37aba1e73101e071f38a42f515968aae28f0232a2a886890b40a5fcc340fd45d"
+    );
+    assert_eq!(
+        now["sync"]["fixture_digests"]["sync-client-wire-v2.json"],
+        format!("{} {}", wire2.len(), rdy_model::Hash::of(&wire2))
+    );
     assert_eq!(
         now["errors_warnings"]["codes"]["E_DIVERGED"],
         "\"E_DIVERGED\""
@@ -236,6 +260,14 @@ fn scc8_contract_adds_only_sync_wire_and_errors() {
             "hub repo <name> needs rdy <version>",
         ),
         ("SYNC_MIN_RDY_FIX", "update rdy to <version> or later"),
+        (
+            "SYNC_UNCERTAIN_MESSAGE",
+            "the sync write of push <push> may have completed",
+        ),
+        (
+            "SYNC_UNCERTAIN_FIX",
+            "run rdy push or rdy pull again: rdy finds the outcome of push <push> before it writes again",
+        ),
     ] {
         assert_eq!(templates[name], format!("\"{text}\""), "{name}");
     }

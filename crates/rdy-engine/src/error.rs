@@ -320,6 +320,12 @@ pub const SYNC_REMOTE_MODE_FIX: &str = "set its mode to share, or choose a share
 pub const SYNC_MIN_RDY_MESSAGE: &str = "hub repo <name> needs rdy <version>";
 /// The fix of `E_STORE_FORMAT` when the hub repo's `min_rdy` is above this rdy.
 pub const SYNC_MIN_RDY_FIX: &str = "update rdy to <version> or later";
+/// The message of `E_UPSTREAM_UNCERTAIN` when a sync write of push `<push>` has no reply
+/// (D-H0BZN "Uncertain text").
+pub const SYNC_UNCERTAIN_MESSAGE: &str = "the sync write of push <push> may have completed";
+/// The fix of `SYNC_UNCERTAIN_MESSAGE`.
+pub const SYNC_UNCERTAIN_FIX: &str =
+    "run rdy push or rdy pull again: rdy finds the outcome of push <push> before it writes again";
 /// An org publication profile whose selection references blocks outside it (D-0VCQ5): a warning
 /// on its output.
 pub const W_PUBLICATION_REFERENCE: &str = "W_PUBLICATION_REFERENCE";
@@ -1188,6 +1194,15 @@ pub fn upstream_refused() -> RdyError {
 }
 
 /// `E_UPSTREAM_UNCERTAIN`.
+/// `E_UPSTREAM_UNCERTAIN` for the sync write of push `push` (D-H0BZN).
+pub fn sync_uncertain(push: &str) -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_UNCERTAIN,
+        SYNC_UNCERTAIN_MESSAGE.replace("<push>", push),
+        SYNC_UNCERTAIN_FIX.replace("<push>", push),
+    )
+}
+
 pub fn upstream_uncertain() -> RdyError {
     RdyError::new(
         E_UPSTREAM_UNCERTAIN,
