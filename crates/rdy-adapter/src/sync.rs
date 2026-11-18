@@ -28,7 +28,7 @@ use crate::store::{Snapshot, StoreHandle};
 use rdy_engine::engine::with_writer_result;
 use rdy_engine::stream_error::to_rdy;
 use rdy_engine::{E_BAD_INPUT, E_INTERNAL, E_IO, RdyError, ReadState, stream_check};
-use rdy_model::{Hash, LandingRecord, RepoId};
+use rdy_model::{Hash, LandingRecord, RepoId, Tag};
 use rdy_store::format::{FEATURE_HUB_CANON, StoreFeatures, registered_features, required_features};
 use rdy_store::hub_canon::MoveBatch;
 use rdy_store::kinds;
@@ -491,6 +491,37 @@ impl Snapshot {
             facts,
             scratch: Mutex::new(None),
         })
+    }
+
+    /// The tags the push `checked` carries, before the hub's move: each version the move of the
+    /// pushed chain to canon would name that this snapshot's holder does not name yet, as
+    /// (tag hash, tag), with the landing the tag names in the pushed history. They are read in
+    /// the push's scratch holder, as [`Snapshot::check_pushed_landing`] reads a pushed landing,
+    /// where the push moves in as a seed, an extend or a force (never a hold), so a held chain's
+    /// tags are carried by the push that names its head. A version the holder already names at
+    /// the same landing is not carried; one it names at another landing is never moved, and the
+    /// read refuses that push with the move's own `E_TAG_EXISTS`. Oldest version first, as
+    /// [`Snapshot::tags`] orders them; once the push has moved in as a seed, an extend or a
+    /// force, [`Snapshot::tags`] gives each row unchanged. A view push carries none. `checked`
+    /// must have been checked on this snapshot (`E_BAD_INPUT` otherwise). A removal since the
+    /// snapshot is `E_REDACTED_STATE`.
+    pub fn pushed_tags(&self, checked: &CheckedQuarantine) -> Result<Vec<(Hash, Tag)>, RdyError> {
+        checked.ensure_bound(self)?;
+        let read = self.read_state();
+        read.ensure_current_epoch()?;
+        if checked.facts.purpose != StreamPurpose::CanonHistory {
+            return Ok(vec![]);
+        }
+        let named = self.captured_tags();
+        let scratch = checked.scratch(self)?;
+        let out = scratch
+            .snapshot()
+            .tags()?
+            .into_iter()
+            .filter(|(_, t)| !named.contains_key(&t.name))
+            .collect();
+        read.ensure_current_epoch()?;
+        Ok(out)
     }
 
     /// The chain facts of `checked`, a landing push checked on this snapshot (ruling
