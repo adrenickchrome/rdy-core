@@ -9,9 +9,10 @@
 //!   to the bytes of the target's whole build.
 //! - [`PreparedReview::check`] runs the complete warnings pass of that state.
 //!
-//! A review target has the manifest's file count and per-file limits and no artifact limit
-//! (D-SMP5A): its preparation counts the files it can serve, and each requested file is held to
-//! the per-file limit on its own. Nothing adds up the target's files.
+//! A review target has the manifest's per-file limit and no artifact limit: each requested file
+//! is held to the per-file limit on its own, and nothing adds up the target's files. A profile
+//! route also has the manifest's file count, which its preparation checks; a source view or a
+//! proposal version has no file-count bound.
 use crate::live::{self, Facts, ProfileHistoryMemo};
 use crate::page::{self, Kind};
 use crate::prepare::{self, Detached};
@@ -130,7 +131,7 @@ pub fn prepare_profile_review(
 }
 
 /// The prepared review of `prepared`: its detached inputs, its label and header facts, its file
-/// count held to `budget`, and its retained estimate.
+/// count (held to `budget` for a profile route), and its retained estimate.
 fn detach(
     st: &ReadState,
     mut prepared: prepare::Prepared,
@@ -150,7 +151,10 @@ fn detach(
         None,
         |sh, _, extras| Ok((sh.label().text, sh.header_html(""), files_of(sh, &extras))),
     )?;
-    budget.count(files)?;
+    // a source view or a proposal version has no file-count bound; a profile route keeps it
+    if profile.is_some() {
+        budget.count(files)?;
+    }
     let label_rev = live::label_rev(&label, &header);
     let m_bytes = retained::materialized(&d.m);
     let g_bytes = retained::graph(&d.g, &d.m);
@@ -1152,9 +1156,41 @@ mod tests {
         assert!(source_whole.warnings.contains(&broken.warnings[0]));
     }
 
+    /// A source view and a proposal version have no file-count bound, as before review pages
+    /// rendered on request: above the file limit each prepares and renders its requested page.
+    /// A profile route above the same limit is refused with the manifest's words.
+    #[test]
+    fn sod1_source_and_proposal_reviews_have_no_file_count_bound() {
+        let fx = fixture();
+        let st = fx.r.read();
+        let (scope, src) = view();
+        let proposal = SiteTarget::Source(ScopeRef::Proposal(fx.proposal.clone()));
+        for (scope, target) in [(scope, src), (fx.proposal_scope.clone(), proposal)] {
+            let whole = live::build_live(&st, &scope, &target).expect("whole");
+            let limit = whole.files.len() - 1;
+            within((limit, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES), || {
+                let prep = prepare_review(&st, &scope, &target).expect("no file-count bound");
+                assert!(prep.files() > limit, "{} > {limit}", prep.files());
+                let file = prep
+                    .render(&st, "overview.html")
+                    .expect("render")
+                    .expect("file");
+                same_as_whole(&prep, &file, &whole, "overview.html", &target);
+            });
+        }
+        let route = profile(ScopeRef::View("work".into()));
+        let files = prep_profile(&st, &route).files();
+        let e = within((files - 1, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES), || {
+            prepare_profile_review(&st, &route, &mut ProfileHistoryMemo::default())
+                .err()
+                .expect("the profile route keeps the file-count bound")
+        });
+        over(&e, format!("{} files", files - 1));
+    }
+
     /// Selection, attachment and path bounds refuse a profile review as they refuse its whole
-    /// build, with the same errors; the file count bounds source and profile reviews, counted
-    /// without rendering a page body.
+    /// build, with the same errors; the file count bounds a profile review, counted without
+    /// rendering a page body.
     #[test]
     fn sod1_review_requests_keep_selection_attachment_path_and_file_count_bounds() {
         use rdy_engine::publication::{Limits as Bounds, limits, override_limits_for_tests};
@@ -1189,15 +1225,12 @@ mod tests {
                 (whole.code, &whole.message, &whole.fix)
             );
         }
-        let (scope, src) = view();
-        let source_whole = live::build_live(&st, &scope, &src).expect("whole");
-        for target in [src.clone(), route.clone()] {
-            let prepare = || match &target {
-                SiteTarget::Profile { .. } => {
-                    prepare_profile_review(&st, &target, &mut ProfileHistoryMemo::default())
-                }
-                _ => prepare_review(&st, &scope, &target),
-            };
+        // a source view or a proposal version has no file-count bound
+        // (sod1_source_and_proposal_reviews_have_no_file_count_bound)
+        {
+            let target = route.clone();
+            let prepare =
+                || prepare_profile_review(&st, &target, &mut ProfileHistoryMemo::default());
             let (builds, renders) = (page_builds(), page_renders());
             let files = prepare().expect("prepare").files();
             assert_eq!(
@@ -1205,11 +1238,6 @@ mod tests {
                 (builds, renders),
                 "counted without a page body"
             );
-            if matches!(target, SiteTarget::Source(_)) {
-                // every file of the whole build is counted; a diagram that does not draw counts
-                // as a file too
-                assert!(files > source_whole.files.len(), "{files}");
-            }
             within((files, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES), || {
                 prepare().expect("the exact count")
             });
