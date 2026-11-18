@@ -483,7 +483,7 @@ fn sod2_oversize_page_is_served_and_not_kept() {
             !kept(&sh).iter().any(|(_, p)| p == "note-a.html"),
             "request {n}: a page past the cap is not kept"
         );
-        assert!(sh.site.ledger().total <= size - 1);
+        assert!(sh.site.ledger().total < size);
         assert_eq!(sh.site.streams(), 1, "request {n}: the stream stays");
         assert!(empty(&mut stream));
     }
