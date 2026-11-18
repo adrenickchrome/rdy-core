@@ -2116,11 +2116,13 @@ name = "rdy-adapter"
 version = "0.53.0"
 dependencies = [
  "postcard",
+ "rcgen",
  "rdy-engine",
  "rdy-model",
  "rdy-render",
  "rdy-schema",
  "rdy-store",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
