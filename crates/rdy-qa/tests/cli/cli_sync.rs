@@ -12,7 +12,7 @@ mod sync_hub;
 use rdy_engine::Rdy;
 use rdy_model::Hash;
 use rdy_qa::fixtures::{land, writer};
-use serde_json::json;
+use serde_json::{Value, json};
 use sync_hub::*;
 
 /// The hub tip no project here holds: a landing that only the hub has.
@@ -434,4 +434,508 @@ impl Drop for Served<'_> {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// rdy clone <url> (D-D5J18, D-7PYYS, D-47HVF)
+// ---------------------------------------------------------------------------------------------
+
+/// A parent directory for a clone, and the clone's path in it (absent).
+fn target() -> (tempfile::TempDir, std::path::PathBuf) {
+    let parent = tempfile::tempdir().unwrap();
+    let dir = parent.path().join("clone");
+    (parent, dir)
+}
+
+/// The names in `dir`.
+fn names(dir: &std::path::Path) -> Vec<String> {
+    let mut n: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    n.sort();
+    n
+}
+
+/// `rdy --json clone <url> <dir>` from `at`, as the kit's person: its JSON and whether it passed.
+fn clone_at(k: &Kit, at: &std::path::Path, url: &str, dir: &std::path::Path) -> (bool, Value) {
+    let o = command(
+        at,
+        &k.home,
+        &["--json", "clone", url, dir.to_str().unwrap()],
+    )
+    .output()
+    .unwrap();
+    parsed(&o)
+}
+
+/// The words of an error reply.
+fn words(v: &Value) -> (&str, &str, &str) {
+    (
+        v["code"].as_str().unwrap_or_default(),
+        v["message"].as_str().unwrap_or_default(),
+        v["fix"].as_str().unwrap_or_default(),
+    )
+}
+
+/// scc9: a URL clone installs in one step: the parent then holds the clone alone, with the
+/// hub's repo id, the origin at the captured tip, the remote `hub` (mode share, the URL in
+/// canonical form) and the sync state fetched and applied at that tip. It writes no
+/// credential, no local config and no user config, and sends hub read steps only.
+#[test]
+fn scc9_clone_url_is_atomic_and_records_origin() {
+    let k = kit(&["a", "b"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    let tip = k.proj.landings[1];
+    let (parent, dir) = target();
+    let creds = std::fs::read(k.home.creds()).unwrap();
+    let config = std::fs::read(k.home.config()).unwrap();
+    let url = hub_url(&k);
+    // a scheme in capitals is the same URL: the clone records its canonical form
+    let given = url.replace("https://", "HTTPS://");
+    let v = cli_ok(&k, &["clone", &given, dir.to_str().unwrap()]);
+    assert_eq!(v["url"], url, "{v}");
+    assert_eq!(v["remote"], "hub");
+    assert_eq!(v["repo_id"], k.proj.repo_id());
+    assert_eq!(v["fork"], false);
+    assert_eq!(v["canon"], tip.to_string());
+    assert_eq!(v["origin"]["repo_id"], k.proj.repo_id());
+    assert_eq!(v["origin"]["landing"], tip.to_string());
+    assert_eq!(v["landings"], 2);
+    assert_eq!(
+        v["fetched"]["records_taken"].as_u64().map(|n| n > 0),
+        Some(true)
+    );
+    // one step: nothing beside the clone, no temporary directory left
+    assert_eq!(names(parent.path()), ["clone"]);
+    let r = Rdy::open(&dir).unwrap();
+    let st = r.read();
+    assert_eq!(st.canon_head(), Some(tip));
+    assert_eq!(st.repo_id().unwrap().to_string(), k.proj.repo_id());
+    let reader = st.reader();
+    assert_eq!(reader.sync_remotes().unwrap(), ["hub"]);
+    let sync = reader.sync_canon("hub").unwrap().expect("sync state");
+    assert_eq!(sync.url, url);
+    assert_eq!(sync.repo_id.to_string(), k.proj.repo_id());
+    assert_eq!(
+        (sync.fetched, sync.applied, sync.held),
+        (Some(tip), Some(tip), None)
+    );
+    drop(st);
+    r.close().unwrap();
+    let hub = rdy_engine::hub_config::HubConfig::load(Some(&dir), Some(&k.home.config())).unwrap();
+    let remote = hub.remote("hub").expect("the hub remote");
+    assert_eq!(remote.url.as_str(), url);
+    assert_eq!(remote.mode, rdy_engine::hub_config::RemoteMode::Share);
+    assert_eq!(hub.remotes().len(), 1);
+    // no credential, local config or user config write
+    assert_eq!(std::fs::read(k.home.creds()).unwrap(), creds);
+    assert_eq!(std::fs::read(k.home.config()).unwrap(), config);
+    assert!(!dir.join(".rdy/local.yaml").exists());
+    // hub read steps only, the settings read before any fetch
+    let routes = k.hub.routes();
+    assert!(
+        routes.iter().all(|r| READ_ROUTES.contains(&r.as_str())),
+        "{routes:?}"
+    );
+    assert_eq!(&routes[..3], ["discovery", "state", "settings"]);
+}
+
+/// scc9: a source with another URL scheme gets `rdy remote add`'s refusal of an address that is
+/// not HTTPS; a hub repo whose batches carry another repo id is `E_REPO_MISMATCH`. Each leaves
+/// the target as it was: absent, or an empty directory.
+#[test]
+fn scc9_clone_unsupported_scheme_and_repo_mismatch_leave_target() {
+    let k = kit(&["a"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    let added = cli_err(
+        &k,
+        &[
+            "remote",
+            "add",
+            "--mode",
+            "share",
+            "x",
+            "ftp://127.0.0.1/acme/docs",
+        ],
+    );
+    assert_eq!(
+        words(&added),
+        (
+            "E_BAD_INPUT",
+            rdy_engine::hub_types::BAD_URL_MESSAGE,
+            rdy_engine::hub_types::BAD_URL_FIX
+        )
+    );
+    for url in [
+        "ftp://127.0.0.1/acme/docs",
+        "rdy://hub/acme/docs",
+        "file:///tmp/x",
+    ] {
+        for existing in [false, true] {
+            let (parent, dir) = target();
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+            }
+            let before = tree(&dir);
+            let (ok, v) = clone_at(&k, k.proj.path(), url, &dir);
+            assert!(!ok, "{url}: {v}");
+            assert_eq!(words(&v), words(&added), "{url}");
+            assert_eq!(tree(&dir), before, "{url}");
+            assert_eq!(names(parent.path()).len(), usize::from(existing));
+        }
+    }
+    assert!(k.hub.requests().is_empty());
+    // the hub repo names another repo id than its batches carry
+    k.hub.set_canon(
+        Some(k.proj.landings[0]),
+        Some("0123456789abcdef0123456789abcdef".into()),
+    );
+    for existing in [false, true] {
+        let (parent, dir) = target();
+        if existing {
+            std::fs::create_dir(&dir).unwrap();
+        }
+        let before = tree(&dir);
+        let (ok, v) = clone_at(&k, k.proj.path(), &hub_url(&k), &dir);
+        assert!(!ok, "{v}");
+        assert_eq!(v["code"], "E_REPO_MISMATCH", "{v}");
+        assert_eq!(tree(&dir), before);
+        assert_eq!(names(parent.path()).len(), usize::from(existing));
+    }
+}
+
+/// scc9: the clone keeps the tip its state step captured, though hub canon moves after the
+/// settings read; the tags come as a pull takes them, and no view comes.
+#[test]
+fn scc9_clone_uses_captured_canon_and_tags_without_views() {
+    let k = kit(&["a", "b"]);
+    {
+        let mut r = Rdy::open(k.proj.path()).unwrap();
+        r.tag(&rdy_qa::fixtures::approver(), "v1.0.0", None, None)
+            .unwrap();
+        r.close().unwrap();
+    }
+    let (_copy, store) = serve_copy(&k, &["c"]);
+    let captured = k.proj.landings[1];
+    let moved = store.read().canon_head().unwrap();
+    assert_ne!(captured, moved);
+    assert!(
+        !store.read().view_names().is_empty(),
+        "the source has a view"
+    );
+    k.hub.set_canon(Some(captured), Some(k.proj.repo_id()));
+    k.hub.move_on_settings(moved);
+    let (_parent, dir) = target();
+    let v = cli_ok(&k, &["clone", &hub_url(&k), dir.to_str().unwrap()]);
+    assert_eq!(v["canon"], captured.to_string(), "{v}");
+    assert_eq!(k.hub.canon(), Some(moved.to_string()));
+    assert_eq!(v["fetched"]["tags_taken"], json!(["v1.0.0"]));
+    assert_eq!(
+        (v["tags"].as_u64(), v["views"].as_u64()),
+        (Some(1), Some(0))
+    );
+    assert_eq!(v["origin"]["tag"], "v1.0.0");
+    // every fetch request is rooted at the captured tip, with no base
+    for r in k.hub.of("/known") {
+        let b = r.json();
+        assert_eq!(b["root"]["hash"], captured.to_string());
+        assert!(b["base"].is_null());
+    }
+    let r = Rdy::open(&dir).unwrap();
+    let st = r.read();
+    assert_eq!(st.canon_head(), Some(captured));
+    assert!(st.view_names().is_empty());
+    assert_eq!(st.versions().unwrap().len(), 1);
+    drop(st);
+    r.close().unwrap();
+}
+
+/// scc9: a user config that already holds a share remote refuses the clone with the present
+/// `E_REMOTE_EXISTS`, before any hub request and before anything is written.
+#[test]
+fn scc9_clone_share_remote_conflict_refuses_before_writes() {
+    let k = kit(&["a"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    let mut config = std::fs::read_to_string(k.home.config()).unwrap();
+    config.push_str(&format!(
+        "remotes:\n  team:\n    url: {}\n    mode: share\n",
+        hub_url(&k)
+    ));
+    std::fs::write(k.home.config(), &config).unwrap();
+    let (parent, dir) = target();
+    let (ok, v) = clone_at(&k, parent.path(), &hub_url(&k), &dir);
+    assert!(!ok, "{v}");
+    assert_eq!(
+        words(&v),
+        (
+            "E_REMOTE_EXISTS",
+            rdy_engine::REMOTE_EXISTS_MESSAGE,
+            rdy_engine::REMOTE_EXISTS_FIX
+        )
+    );
+    assert!(k.hub.requests().is_empty(), "{:?}", k.hub.routes());
+    assert!(names(parent.path()).is_empty());
+    assert_eq!(std::fs::read_to_string(k.home.config()).unwrap(), config);
+}
+
+/// scc9: a hub repo with no canon (fixture v2's step 2: an upload and no canon) refuses with
+/// D-D5J18's words exactly, before the settings read.
+#[test]
+fn scc9_clone_no_canon_refusal_is_exact() {
+    let k = kit(&["a"]);
+    let f = fixture_v2();
+    let state = &f["steps"][2]["reply"]["body"];
+    assert!(state["canon"].is_null());
+    k.hub
+        .set_canon(None, state["repo_id"].as_str().map(str::to_string));
+    let (parent, dir) = target();
+    let url = hub_url(&k);
+    let (ok, v) = clone_at(&k, k.proj.path(), &url, &dir);
+    assert!(!ok, "{v}");
+    assert_eq!(
+        words(&v),
+        (
+            "E_BAD_INPUT",
+            format!("hub repo {url} has no canon to clone").as_str(),
+            "make the project with rdy init, add this hub repo as a share remote, then push"
+        )
+    );
+    assert_eq!(k.hub.routes(), ["discovery", "state"]);
+    assert!(names(parent.path()).is_empty());
+}
+
+/// The bundle a clone writes in full: every captured member set, with a pack of its own.
+fn full_bundle() -> Value {
+    let mut pack = builtin_pack();
+    pack["name"] = json!("team-pack");
+    let mut b = pack_settings(pack, Some(&this_rdy()));
+    b["coverage_gate"] = json!("no_lower");
+    b["coverage_target"] = json!(70);
+    b["decisions_home"] = json!("decisions");
+    b["propose"] = json!({"cadence": "task", "changes": 5});
+    b["title"] = json!("Team docs");
+    b["description"] = json!("The team's docs.");
+    b
+}
+
+/// The entries of a project outside its store, `.rdy.yaml` and its packs.
+fn layout(dir: &std::path::Path) -> Vec<String> {
+    tree(dir)
+        .unwrap()
+        .into_keys()
+        .filter(|p| !p.starts_with(".rdy/store/") && !p.starts_with(".rdy/packs/"))
+        .collect()
+}
+
+/// scc9: a URL clone writes the bundle's settings into `.rdy.yaml`, its pack into one file
+/// under `.rdy/packs/` in the source form that resolves to it, the one remote `hub`, and the
+/// sync state; nothing else beside what `rdy init` makes.
+#[test]
+fn scc9_clone_writes_only_bundle_settings_hub_remote_and_sync_state() {
+    let k = kit(&["a"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    let bundle = full_bundle();
+    k.hub.settings(bundle.clone());
+    let (_parent, dir) = target();
+    let url = hub_url(&k);
+    let v = cli_ok(&k, &["clone", &url, dir.to_str().unwrap()]);
+    assert_eq!(
+        v["settings"]["hub"],
+        json!([
+            "pack",
+            "coverage_gate",
+            "coverage_target",
+            "decisions_home",
+            "propose",
+            "title",
+            "description"
+        ])
+    );
+    assert_eq!(v["settings"]["defaults"], json!([]));
+    assert_eq!(v["warnings"], json!([]));
+    // the layout rdy init makes, and no more
+    let fresh = tempfile::tempdir().unwrap();
+    Rdy::init(fresh.path(), "rdy-standard")
+        .unwrap()
+        .close()
+        .unwrap();
+    assert_eq!(layout(&dir), layout(fresh.path()));
+    let packs: Vec<String> = tree(&dir)
+        .unwrap()
+        .into_keys()
+        .filter(|p| p.starts_with(".rdy/packs/"))
+        .collect();
+    assert_eq!(packs, [".rdy/packs/", ".rdy/packs/team-pack.yaml"]);
+    // the file holds the pack's source form: the effective pack less what the engine adds
+    let pack: Value =
+        serde_yaml_ng::from_slice(&std::fs::read(dir.join(".rdy/packs/team-pack.yaml")).unwrap())
+            .unwrap();
+    let effective: rdy_schema::Pack = serde_json::from_value(bundle["pack"].clone()).unwrap();
+    assert_eq!(
+        pack,
+        serde_json::to_value(rdy_schema::source_form(&effective)).unwrap()
+    );
+    assert_ne!(pack, bundle["pack"]);
+    let config: Value =
+        serde_yaml_ng::from_slice(&std::fs::read(dir.join(".rdy.yaml")).unwrap()).unwrap();
+    assert_eq!(
+        config,
+        json!({
+            "pack": "team-pack",
+            "name": "Team docs",
+            "description": "The team's docs.",
+            "decisions": {"home": "decisions"},
+            "coverage": {"gate": "no_lower", "target": 70},
+            "propose": {"cadence": "task", "changes": 5},
+            "remotes": {"hub": {"url": url, "mode": "share"}},
+        })
+    );
+    // the effective settings are the bundle's
+    let r = Rdy::open(&dir).unwrap();
+    let st = r.read();
+    assert_eq!(serde_json::to_value(st.pack()).unwrap(), bundle["pack"]);
+    assert_eq!(st.project_name(), "Team docs");
+    let reader = st.reader();
+    assert_eq!(reader.sync_remotes().unwrap(), ["hub"]);
+    assert!(
+        reader
+            .sync_unsent("hub")
+            .unwrap()
+            .is_none_or(|u| u.counts().0 == 0)
+    );
+    drop(st);
+    r.close().unwrap();
+    assert!(!dir.join(".rdy/local.yaml").exists());
+}
+
+/// scc9: a failing settings load, a failing `fsck` and a broken SD1 closure each refuse before
+/// the install and leave the target as it was; so does the hub's `min_rdy` stop. A clone that
+/// passes keeps the SD1 deltas and the `snapshot_delta` feature.
+#[test]
+fn scc9_clone_checks_fsck_settings_and_sd1_before_install() {
+    let k = kit(&["a", "b"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    let url = hub_url(&k);
+    let session = rdy_engine::classify("human:qa", None, None, rdy_model::Role::Reader).unwrap();
+    let run = |hook: &mut dyn FnMut(&std::path::Path) -> Result<(), rdy_engine::RdyError>| {
+        let (parent, dir) = target();
+        let got = rdy_engine::clone::clone_url_checked(
+            &session,
+            &url,
+            &dir,
+            &k.home.config(),
+            Some(hook),
+        );
+        (got.map(|_| ()), parent, dir)
+    };
+    // a settings load that fails: a pack the edited settings name, but no file holds
+    let (got, parent, dir) = run(&mut |p| {
+        let cfg = p.join(".rdy.yaml");
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(
+            &cfg,
+            text.replace("pack: rdy-standard", "pack: no-such-pack"),
+        )
+        .unwrap();
+        Ok(())
+    });
+    assert_eq!(got.unwrap_err().code, "E_CONFIG");
+    assert!(!dir.exists());
+    assert!(names(parent.path()).is_empty());
+    // a store that fails its checks: one byte in the middle of its largest log segment changed
+    let (got, parent, dir) = run(&mut |p| {
+        let mut files: Vec<_> = tree(&p.join(".rdy/store"))
+            .unwrap()
+            .into_iter()
+            .filter(|(n, b)| n.starts_with("segments/") && n.ends_with(".log") && b.len() > 64)
+            .collect();
+        files.sort_by_key(|(_, b)| std::cmp::Reverse(b.len()));
+        let (name, mut bytes) = files.remove(0);
+        let at = bytes.len() / 2;
+        bytes[at] ^= 0xff;
+        std::fs::write(p.join(".rdy/store").join(name), bytes).unwrap();
+        Ok(())
+    });
+    assert!(got.is_err());
+    assert!(!dir.exists());
+    assert!(names(parent.path()).is_empty());
+    // the hook sees a full project; with no fault, the clone passes
+    let (got, _parent, dir) = run(&mut |_| Ok(()));
+    got.unwrap();
+    let r = Rdy::open(&dir).unwrap();
+    assert!(r.fsck().is_ok());
+    // the snapshot_delta feature, and one SD1 delta for every landing
+    assert!(
+        r.store()
+            .features()
+            .features
+            .iter()
+            .any(|f| f.name == rdy_store::format::FEATURE_SNAPSHOT_DELTA)
+    );
+    let st = r.read();
+    let mut at = st.canon_head();
+    let mut landings = 0;
+    while let Some(h) = at {
+        assert!(
+            st.reader().snapshot_delta_of(&h).unwrap().is_some(),
+            "landing {h}"
+        );
+        at = st.reader().landing(&h).unwrap().prev;
+        landings += 1;
+    }
+    assert_eq!(landings, 2);
+    drop(st);
+    r.close().unwrap();
+    // a broken SD1 closure: the hub's batches leave out every delta
+    k.hub.get_omits(rdy_store::kinds::SNAPSHOT_DELTA);
+    let (parent, dir) = target();
+    let (ok, v) = clone_at(&k, k.proj.path(), &url, &dir);
+    assert!(!ok, "{v}");
+    assert!(!dir.exists());
+    assert!(names(parent.path()).is_empty());
+    // the hub's min_rdy above this rdy stops the clone before its settings read
+    k.hub.min_rdy("99.0.0");
+    let before = k.hub.requests().len();
+    let (ok, v) = clone_at(&k, k.proj.path(), &url, &dir);
+    assert!(!ok, "{v}");
+    assert_eq!(v["code"], "E_STORE_FORMAT", "{v}");
+    assert_eq!(&k.hub.routes()[before..], ["discovery", "state"]);
+    assert!(names(parent.path()).is_empty());
+}
+
+/// scc9 (CLI part): each settings refusal comes after discovery, state and the `min_rdy` check
+/// and before any fetch, and leaves the target as it was.
+#[test]
+fn scc9_clone_settings_refusal_fetches_nothing_and_leaves_dir() {
+    let k = kit(&["a"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    let url = hub_url(&k);
+    for (label, body, member, captured) in refusal_cases() {
+        k.hub.settings(body);
+        for existing in [false, true] {
+            let (parent, dir) = target();
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+            }
+            let before = tree(&dir);
+            let from = k.hub.requests().len();
+            let (ok, v) = clone_at(&k, k.proj.path(), &url, &dir);
+            assert!(!ok, "{label}: {v}");
+            let (message, fix) = unfit_words(member, &url, captured.as_deref());
+            assert_eq!(
+                words(&v),
+                ("E_BAD_INPUT", message.as_str(), fix.as_str()),
+                "{label}"
+            );
+            assert_eq!(
+                &k.hub.routes()[from..],
+                ["discovery", "state", "settings"],
+                "{label}"
+            );
+            assert_eq!(tree(&dir), before, "{label}");
+            assert_eq!(names(parent.path()).len(), usize::from(existing), "{label}");
+        }
+    }
+    assert_eq!(fetches(&k), 0);
 }

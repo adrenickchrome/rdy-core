@@ -91,6 +91,14 @@ pub struct Repo {
     pub outcomes: BTreeMap<String, (String, String)>,
     /// The project whose history known and get serve.
     pub store: Option<Arc<ReadState>>,
+    /// The settings step's reply body; None serves fixture v2's "none" case.
+    pub settings: Option<Value>,
+    /// The state step's `min_rdy`.
+    pub min_rdy: Option<String>,
+    /// Hub canon's tip after the settings step: a hub move during a clone.
+    pub move_on_settings: Option<String>,
+    /// A get batch that leaves out every record of this kind, as if the client held them.
+    pub get_omits: Option<u8>,
 }
 
 pub struct Shared {
@@ -175,6 +183,37 @@ impl Hub {
     /// Serves known and get from `read`'s history.
     pub fn serve(&self, read: Arc<ReadState>) {
         self.shared.repo.lock().unwrap().store = Some(read);
+    }
+
+    /// The settings step replies with `body`.
+    pub fn settings(&self, body: Value) {
+        self.shared.repo.lock().unwrap().settings = Some(body);
+    }
+
+    /// The state step names `min_rdy`.
+    pub fn min_rdy(&self, v: &str) {
+        self.shared.repo.lock().unwrap().min_rdy = Some(v.to_string());
+    }
+
+    /// Hub canon moves to `tip` once the settings step is served.
+    pub fn move_on_settings(&self, tip: Hash) {
+        self.shared.repo.lock().unwrap().move_on_settings = Some(tip.to_string());
+    }
+
+    /// Each get batch leaves out the records of `kind`.
+    pub fn get_omits(&self, kind: u8) {
+        self.shared.repo.lock().unwrap().get_omits = Some(kind);
+    }
+
+    /// The routes of every request so far, in order (`discovery` for the remote's GET).
+    pub fn routes(&self) -> Vec<String> {
+        self.requests()
+            .iter()
+            .map(|r| match r.route() {
+                "" => "discovery".to_string(),
+                route => route.trim_start_matches('/').to_string(),
+            })
+            .collect()
     }
 
     /// Hub canon's tip now.
@@ -402,7 +441,7 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
                 &json!({"canon": repo.canon.as_deref().map(|h| key_json(LANDING, h)),
                     "repo_id": repo.repo_id, "rdy": r["rdy"],
                     "stream_read": [2, 4], "stream_write": [2, 4], "features": [],
-                    "min_rdy": null, "batch_bytes": 104_857_600u64,
+                    "min_rdy": repo.min_rdy, "batch_bytes": 104_857_600u64,
                     "batch_records": 100_000, "quarantine_seconds": 86_400,
                     "profile": null, "audience": null, "artifact_bytes": 1_073_741_824u64,
                     "artifact_files": 32_000, "views": views}),
@@ -477,7 +516,10 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
             let all: BTreeSet<ObjectKey> = history(&read, purpose, root.hash, None)
                 .into_iter()
                 .collect();
-            let known: BTreeSet<ObjectKey> = all.difference(&want).copied().collect();
+            let mut known: BTreeSet<ObjectKey> = all.difference(&want).copied().collect();
+            if let Some(kind) = repo.get_omits {
+                known.extend(all.iter().filter(|k| k.kind == kind).copied());
+            }
             let mut out = Vec::new();
             stream_export::write_history(&read, purpose, root.hash, None, &known, &mut out).ok()?;
             Some(reply_bytes(200, "application/octet-stream", &out))
@@ -537,6 +579,13 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
                 ))
             }
         },
+        ("POST", _, "/settings") => {
+            let body = repo.settings.clone().unwrap_or_else(|| settings_step(5));
+            if let Some(tip) = repo.move_on_settings.take() {
+                repo.canon = Some(tip);
+            }
+            Some(reply(200, &body))
+        }
         ("POST", _, "/outcome") => {
             let r = req.json();
             let push = r["push"].as_str().unwrap_or_default();
@@ -553,6 +602,20 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
         }
         _ => Some(reply(404, &json!({}))),
     }
+}
+
+/// The steps of rdyhub's wire fixture v2.
+pub fn fixture_v2() -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/sync/sync-client-wire-v2.json");
+    serde_json::from_slice(&std::fs::read(path).expect("fixture v2")).expect("fixture v2 JSON")
+}
+
+/// The settings reply body of fixture v2's step `i` (5 "none", 12 "mismatch", 19 "pack").
+pub fn settings_step(i: usize) -> Value {
+    let f = fixture_v2();
+    let step = &f["steps"][i];
+    assert_eq!(step["step"], "settings", "step {i}");
+    step["reply"]["body"].clone()
 }
 
 /// A private user config home: `rdy/config.yaml` names the person and trusts the hub's CA; the
@@ -847,3 +910,216 @@ pub fn mcp_err(c: &mut McpClient, tool: &str, args: Value) -> Value {
         other => panic!("{tool} {args}: expected a refusal, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// URL clones
+// ---------------------------------------------------------------------------------------------
+
+/// The hub URL of the kit's remote, in canonical form.
+pub fn hub_url(k: &Kit) -> String {
+    format!("{}{REMOTE_PATH}", k.hub.origin())
+}
+
+/// The hub serves a copy of the kit's project as hub canon, with its repo id, after `more`
+/// landings in the copy. Keep the returned copy while the hub serves it.
+pub fn serve_copy(k: &Kit, more: &[&str]) -> (tempfile::TempDir, Rdy) {
+    let (dir, mut r) = k.proj.copy(&k.home);
+    for d in more {
+        land_doc(&mut r, d);
+    }
+    k.hub.serve(r.read());
+    k.hub
+        .set_canon(r.read().canon_head(), Some(k.proj.repo_id()));
+    (dir, r)
+}
+
+/// Every entry under `dir`, by relative path, with a file's bytes (a directory's are empty);
+/// None when `dir` is absent.
+pub fn tree(dir: &Path) -> Option<BTreeMap<String, Vec<u8>>> {
+    fn walk(root: &Path, at: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        for entry in std::fs::read_dir(at).unwrap() {
+            let p = entry.unwrap().path();
+            let rel = p
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if p.is_dir() {
+                out.insert(format!("{rel}/"), Vec::new());
+                walk(root, &p, out);
+            } else {
+                out.insert(rel, std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    if !dir.exists() {
+        return None;
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    Some(out)
+}
+
+/// The routes a URL clone may send: hub read steps only.
+pub const READ_ROUTES: [&str; 5] = ["discovery", "state", "settings", "known", "objects/get"];
+
+/// The fetch routes: none follows a refused settings read.
+pub fn fetches(k: &Kit) -> usize {
+    k.hub
+        .routes()
+        .iter()
+        .filter(|r| *r == "known" || *r == "objects/get")
+        .count()
+}
+
+/// The built-in pack as the render inputs carry it: resolved, in full.
+pub fn builtin_pack() -> Value {
+    let pack = rdy_schema::PackSet::with_builtin()
+        .resolve("rdy-standard")
+        .unwrap();
+    serde_json::to_value(pack).unwrap()
+}
+
+/// A settings reply holding `pack` in full, captured by rdy `rdy` (none when None).
+pub fn pack_settings(pack: Value, rdy: Option<&str>) -> Value {
+    let mut b = settings_step(19);
+    b["pack"] = pack;
+    b["rdy"] = rdy.map_or(Value::Null, |v| json!(v));
+    b
+}
+
+/// This rdy's version.
+pub fn this_rdy() -> String {
+    rdy_engine::render_inputs::RDY_VERSION.to_string()
+}
+
+/// A plain `major.minor.patch` version as numbers.
+pub fn version(v: &str) -> (u64, u64, u64) {
+    let n: Vec<u64> = v.split('.').map(|p| p.parse().unwrap()).collect();
+    (n[0], n[1], n[2])
+}
+
+/// A version newer than this rdy.
+pub fn newer_rdy() -> String {
+    let (major, minor, _) = version(&this_rdy());
+    format!("{major}.{}.0", minor + 1)
+}
+
+/// A version older than this rdy.
+pub fn older_rdy() -> String {
+    "0.1.0".to_string()
+}
+
+/// D-7PYYS's refusal of `member` from hub repo `url`, captured by rdy `captured`: its message
+/// and fix, filled in.
+pub fn unfit_words(member: &str, url: &str, captured: Option<&str>) -> (String, String) {
+    let this = this_rdy();
+    match captured {
+        Some(c) => {
+            let message = format!(
+                "the {member} of hub repo {url} comes from rdy {c} and does not fit rdy {this}"
+            );
+            let newer = version(c) > version(&this);
+            let fix = if newer {
+                format!("update rdy to {c} or later, then clone again")
+            } else {
+                format!("have the hub repo's next push come from rdy {this}, then clone again")
+            };
+            (message, fix)
+        }
+        None => (
+            format!("the {member} of hub repo {url} does not fit rdy {this}"),
+            format!("update rdy, or have the hub repo's next push come from rdy {this}"),
+        ),
+    }
+}
+
+/// The settings refusals of D-7PYYS: a label, the settings reply, the member the refusal names,
+/// and the capturing rdy (none for a bundle with no `rdy`). Every case carries the sentinels
+/// [`SENTINELS`] where this rdy cannot read them.
+pub fn refusal_cases() -> Vec<(String, Value, &'static str, Option<String>)> {
+    let mut out = Vec::new();
+    for captured in [Some(newer_rdy()), Some(older_rdy()), Some(this_rdy()), None] {
+        let named = captured.clone().unwrap_or_else(|| "none".into());
+        let c = captured.as_deref();
+        // the pack: an unknown key, an unreadable value, an unknown key in a nested part
+        let mut p = builtin_pack();
+        p["sentinel_key_q7"] = json!("sentinel_value_q7");
+        out.push((
+            format!("pack key, rdy {named}"),
+            pack_settings(p, c),
+            "pack",
+            captured.clone(),
+        ));
+        let mut p = builtin_pack();
+        p["version"] = json!({"sentinel_key_v3": "sentinel_value_v3"});
+        out.push((
+            format!("pack value, rdy {named}"),
+            pack_settings(p, c),
+            "pack",
+            captured.clone(),
+        ));
+        let mut p = builtin_pack();
+        let first = p["block_types"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        p["block_types"][&first]["sentinel_key_n5"] = json!(1);
+        out.push((
+            format!("nested pack key, rdy {named}"),
+            pack_settings(p, c),
+            "pack",
+            captured.clone(),
+        ));
+        let mut p = builtin_pack();
+        p["block_types"][&first]["body"] = json!("sentinel_value_n6");
+        out.push((
+            format!("nested pack value, rdy {named}"),
+            pack_settings(p, c),
+            "pack",
+            captured.clone(),
+        ));
+        // a setting: an unknown word, a number outside its range, an unknown key
+        let mut b = settings_step(12);
+        b["rdy"] = c.map_or(Value::Null, |v| json!(v));
+        let mut gate = b.clone();
+        gate["coverage_gate"] = json!("sentinel_value_g1");
+        out.push((
+            format!("gate word, rdy {named}"),
+            gate,
+            "coverage_gate",
+            captured.clone(),
+        ));
+        let mut target = b.clone();
+        target["coverage_target"] = json!(101);
+        out.push((
+            format!("target range, rdy {named}"),
+            target,
+            "coverage_target",
+            captured.clone(),
+        ));
+        let mut propose = b.clone();
+        propose["propose"] = json!({"cadence": "task", "sentinel_key_p2": "sentinel_value_p2"});
+        out.push((
+            format!("propose key, rdy {named}"),
+            propose,
+            "propose",
+            captured.clone(),
+        ));
+        let mut title = b.clone();
+        title["title"] = json!({"sentinel_key_t4": "sentinel_value_t4"});
+        out.push((
+            format!("title value, rdy {named}"),
+            title,
+            "title",
+            captured.clone(),
+        ));
+    }
+    out
+}
+
+/// The sentinel keys and values of [`refusal_cases`]: no refusal quotes one.
+pub const SENTINELS: [&str; 5] = ["sentinel", "q7", "v3", "n5", "g1"];

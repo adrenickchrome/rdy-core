@@ -328,8 +328,9 @@ fn f(kind: FieldKind, required: bool, values: &[&str]) -> FieldDef {
     }
 }
 
-fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
-    let doc_core: BTreeMap<String, FieldDef> = [
+/// The core fields the engine gives every doc.
+fn doc_core() -> BTreeMap<String, FieldDef> {
+    [
         ("name", f(FieldKind::Str, true, &[])),
         ("title", f(FieldKind::Str, true, &[])),
         ("doc_type", f(FieldKind::Str, true, &[])),
@@ -342,7 +343,81 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
-    .collect();
+    .collect()
+}
+
+/// The core fields the engine gives every decision.
+fn decision_core() -> BTreeMap<String, FieldDef> {
+    [
+        ("statement", f(FieldKind::Str, true, &[])),
+        (
+            "status",
+            f(FieldKind::Enum, true, &["proposed", "accepted", "rejected"]),
+        ),
+        ("options", f(FieldKind::List, false, &[])),
+        (
+            "authority_basis",
+            f(
+                FieldKind::Enum,
+                false,
+                &[
+                    "direct_ruling",
+                    "recorded_ruling",
+                    "delegated",
+                    "precedent",
+                    "elimination",
+                    "none",
+                    "reconstructed",
+                ],
+            ),
+        ),
+        ("attested_by", f(FieldKind::Str, false, &[])),
+        (
+            "reversibility",
+            f(FieldKind::Enum, false, &["one_way", "two_way"]),
+        ),
+        ("decided_at", f(FieldKind::Str, false, &[])),
+        ("recorded_at", f(FieldKind::Str, false, &[])),
+        ("effective_from", f(FieldKind::Str, false, &[])),
+        ("review_by", f(FieldKind::Str, false, &[])),
+        ("kind", f(FieldKind::Str, false, &[])),
+        ("placeholders", f(FieldKind::List, false, &[])),
+        ("needs_content", f(FieldKind::Bool, false, &[])),
+        // The authored words of the decision's card (FW-I1).
+        ("title", f(FieldKind::Str, false, &[])),
+        ("why", f(FieldKind::Str, false, &[])),
+        (
+            "recommend",
+            f(FieldKind::Enum, false, &["confirm", "reject"]),
+        ),
+        ("recommend_reason", f(FieldKind::Str, false, &[])),
+        // How the team knows the decision is kept (D-JQD5X): part of the ruling's frozen content.
+        (
+            crate::validate::CONFIRMATION_FIELD,
+            f(FieldKind::Str, false, &[]),
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+/// The authored words of the question's card (FW-I1): `options` holds two to four labels.
+fn question_core() -> BTreeMap<String, FieldDef> {
+    [
+        ("prompt", f(FieldKind::Str, true, &[])),
+        ("title", f(FieldKind::Str, false, &[])),
+        ("why", f(FieldKind::Str, false, &[])),
+        ("options", f(FieldKind::List, false, &[])),
+        ("recommended", f(FieldKind::Str, false, &[])),
+        ("recommend_reason", f(FieldKind::Str, false, &[])),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
     // rf1: every children list that holds decision may hold a finding and a source too; done
     // before the doc's publication profile is placed, which closes the doc's list
     for def in pack.block_types.values_mut() {
@@ -354,7 +429,7 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
             }
         }
     }
-    force(pack, tree::DOC, "d", Trait::Structural, doc_core, None);
+    force(pack, tree::DOC, "d", Trait::Structural, doc_core(), None);
     force(
         pack,
         tree::FOLDER,
@@ -414,77 +489,13 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
         .children;
     doc_children.retain(|c| c != policy::POLICY_TYPE);
     doc_children.push(policy::POLICY_TYPE.to_string());
-    let decision_core: BTreeMap<String, FieldDef> = [
-        ("statement", f(FieldKind::Str, true, &[])),
-        (
-            "status",
-            f(FieldKind::Enum, true, &["proposed", "accepted", "rejected"]),
-        ),
-        ("options", f(FieldKind::List, false, &[])),
-        (
-            "authority_basis",
-            f(
-                FieldKind::Enum,
-                false,
-                &[
-                    "direct_ruling",
-                    "recorded_ruling",
-                    "delegated",
-                    "precedent",
-                    "elimination",
-                    "none",
-                    "reconstructed",
-                ],
-            ),
-        ),
-        ("attested_by", f(FieldKind::Str, false, &[])),
-        (
-            "reversibility",
-            f(FieldKind::Enum, false, &["one_way", "two_way"]),
-        ),
-        ("decided_at", f(FieldKind::Str, false, &[])),
-        ("recorded_at", f(FieldKind::Str, false, &[])),
-        ("effective_from", f(FieldKind::Str, false, &[])),
-        ("review_by", f(FieldKind::Str, false, &[])),
-        ("kind", f(FieldKind::Str, false, &[])),
-        ("placeholders", f(FieldKind::List, false, &[])),
-        ("needs_content", f(FieldKind::Bool, false, &[])),
-        // The authored words of the decision's card (FW-I1).
-        ("title", f(FieldKind::Str, false, &[])),
-        ("why", f(FieldKind::Str, false, &[])),
-        (
-            "recommend",
-            f(FieldKind::Enum, false, &["confirm", "reject"]),
-        ),
-        ("recommend_reason", f(FieldKind::Str, false, &[])),
-        // How the team knows the decision is kept (D-JQD5X): part of the ruling's frozen content.
-        (
-            crate::validate::CONFIRMATION_FIELD,
-            f(FieldKind::Str, false, &[]),
-        ),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v))
-    .collect();
-    // The authored words of the question's card (FW-I1): `options` holds two to four labels.
-    let question_core: BTreeMap<String, FieldDef> = [
-        ("prompt", f(FieldKind::Str, true, &[])),
-        ("title", f(FieldKind::Str, false, &[])),
-        ("why", f(FieldKind::Str, false, &[])),
-        ("options", f(FieldKind::List, false, &[])),
-        ("recommended", f(FieldKind::Str, false, &[])),
-        ("recommend_reason", f(FieldKind::Str, false, &[])),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v))
-    .collect();
 
     force(
         pack,
         d::DECISION,
         "D",
         Trait::Normative,
-        decision_core,
+        decision_core(),
         Some(TypeClass::Supporting),
     );
     force(
@@ -492,7 +503,7 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
         d::QUESTION,
         "Q",
         Trait::Informative,
-        question_core,
+        question_core(),
         Some(TypeClass::Supporting),
     );
     // rf1 (D-Z8P09): a finding and a source, informative supporting types with an optional body
@@ -526,23 +537,145 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
             decision.children.push("rationale".to_string());
         }
     }
-    for l in [
-        d::SUPERSEDES,
-        d::REFINES,
-        d::DEPENDS_ON,
-        d::CONDITIONAL_ON,
-        d::REVOKES,
-        d::ANSWERS,
-        d::DECIDED_BY,
-        d::IMPLEMENTS,
-        d::DESCRIBES,
-        d::AFFECTS,
-        supporting::REFLECTS_LINK,
-    ] {
+    for l in ENGINE_LINKS {
         pack.link_types.insert(l.to_string());
     }
     inject_everyday(pack)?;
     inject_as_built(pack)
+}
+
+/// The link kinds the engine adds to every pack.
+const ENGINE_LINKS: [&str; 11] = [
+    d::SUPERSEDES,
+    d::REFINES,
+    d::DEPENDS_ON,
+    d::CONDITIONAL_ON,
+    d::REVOKES,
+    d::ANSWERS,
+    d::DECIDED_BY,
+    d::IMPLEMENTS,
+    d::DESCRIBES,
+    d::AFFECTS,
+    supporting::REFLECTS_LINK,
+];
+
+/// The types the engine forces into every pack, each with its core fields, its trait, and the
+/// body rule it has when no pack declares it.
+fn forced_types() -> [(&'static str, BTreeMap<String, FieldDef>, Trait, BodyRule); 7] {
+    [
+        (
+            tree::DOC,
+            doc_core(),
+            Trait::Structural,
+            BodyRule::Forbidden,
+        ),
+        (
+            tree::FOLDER,
+            folder_core(),
+            Trait::Structural,
+            BodyRule::Forbidden,
+        ),
+        (
+            d::DECISION,
+            decision_core(),
+            Trait::Normative,
+            BodyRule::Optional,
+        ),
+        (
+            d::QUESTION,
+            question_core(),
+            Trait::Informative,
+            BodyRule::Optional,
+        ),
+        (
+            supporting::FINDING,
+            supporting::finding_core(),
+            Trait::Informative,
+            BodyRule::Optional,
+        ),
+        (
+            supporting::SOURCE,
+            supporting::source_core(),
+            Trait::Informative,
+            BodyRule::Optional,
+        ),
+        (
+            instruction::INSTRUCTION,
+            instruction::core(),
+            Trait::Normative,
+            BodyRule::Required,
+        ),
+    ]
+}
+
+/// The source form of the resolved pack `pack`: a pack that a `.rdy/packs` file can hold, which
+/// [`PackSet::resolve`] turns back into `pack`. It takes out what [`inject_engine_types`] adds:
+/// the engine types (the repo link, the publication profile and the policy), the engine link
+/// kinds, the core fields of each forced type, the fields the engine gives every type that
+/// defines something or holds content, a folder's children, the instruction's place among the
+/// children, and the decision's `built` tracking. A forced type with nothing of the pack's own
+/// left goes too. Every other member stays as `pack` holds it.
+///
+/// The inverse follows this rdy's engine types. A caller proves that nothing is lost by comparing
+/// the resolved source form with `pack`.
+pub fn source_form(pack: &Pack) -> Pack {
+    use crate::as_built::{
+        BUILT_FIELD, PLANNED_FIELD, SINCE_FIELD, is_content_type, optional_bool, optional_str,
+    };
+    let engine_types = [
+        publication::PROFILE_TYPE,
+        repo_link::REPO_LINK,
+        policy::POLICY_TYPE,
+    ];
+    let mut out = pack.clone();
+    for t in engine_types {
+        out.block_types.remove(t);
+    }
+    for l in ENGINE_LINKS {
+        out.link_types.remove(l);
+    }
+    let everyday = f(FieldKind::Bool, false, &[]);
+    for (name, def) in out.block_types.iter_mut() {
+        def.children
+            .retain(|c| c != instruction::INSTRUCTION && !engine_types.contains(&c.as_str()));
+        let mut drop_field = |field: &str, want: &FieldDef| {
+            if def.fields.get(field) == Some(want) {
+                def.fields.remove(field);
+            }
+        };
+        if def.traits.contains(&Trait::Defines) {
+            drop_field(EVERYDAY_FIELD, &everyday);
+        }
+        if is_content_type(pack, name) {
+            drop_field(PLANNED_FIELD, &optional_bool());
+            drop_field(SINCE_FIELD, &optional_str());
+        }
+        if name == tree::DOC {
+            drop_field(PLANNED_FIELD, &optional_bool());
+        }
+        if name == d::DECISION {
+            drop_field(BUILT_FIELD, &optional_str());
+            def.tracking.remove(BUILT_FIELD);
+        }
+        if name == tree::FOLDER {
+            def.children.clear();
+        }
+    }
+    for (name, core, tr, body) in forced_types() {
+        let Some(def) = out.block_types.get_mut(name) else {
+            continue;
+        };
+        def.fields.retain(|k, _| !core.contains_key(k));
+        let bare = def.fields.is_empty()
+            && def.children.is_empty()
+            && def.tracking.is_empty()
+            && def.traits == BTreeSet::from([tr])
+            && def.body == body;
+        if bare {
+            out.block_types.remove(name);
+        }
+    }
+    out
 }
 
 /// The field a type that defines something may set to make its mentions count only when linked
@@ -990,5 +1123,122 @@ mod tests {
         s.add_yaml_from(&pack_yaml(&name, "1"), "max.yaml")
             .expect("a name of 256 bytes is in bounds");
         assert_eq!(s.resolve(&name).unwrap().name, name);
+    }
+
+    /// Resolves the source form of `effective` from a pack file named `name`, beside the
+    /// built-in packs.
+    fn resolve_source(effective: &Pack, name: &str) -> Pack {
+        let mut source = source_form(effective);
+        source.name = name.to_string();
+        let yaml = serde_yaml_ng::to_string(&source).unwrap();
+        let mut set = PackSet::with_builtin();
+        set.add_yaml_from(&yaml, "source.yaml").unwrap();
+        let mut back = set.resolve(name).unwrap();
+        back.name = effective.name.clone();
+        back
+    }
+
+    /// The source form holds none of the members the engine adds.
+    fn assert_no_engine_members(source: &Pack) {
+        for t in [
+            publication::PROFILE_TYPE,
+            repo_link::REPO_LINK,
+            policy::POLICY_TYPE,
+        ] {
+            assert!(!source.block_types.contains_key(t), "{t}");
+            assert!(
+                source
+                    .block_types
+                    .values()
+                    .all(|def| !def.children.iter().any(|c| c == t)),
+                "{t}"
+            );
+        }
+        for l in ENGINE_LINKS {
+            assert!(!source.link_types.contains(l), "{l}");
+        }
+        for (name, core, _, _) in forced_types() {
+            if let Some(def) = source.block_types.get(name) {
+                assert!(core.keys().all(|k| !def.fields.contains_key(k)), "{name}");
+            }
+        }
+    }
+
+    /// scc9: the source form of a resolved pack resolves to that pack again, for the built-in
+    /// pack and for a custom pack that extends it, adds optional fields to the engine types it may
+    /// extend, and declares types of its own.
+    #[test]
+    fn scc9_source_form_resolves_to_the_effective_pack() {
+        let builtin = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+        let source = source_form(&builtin);
+        assert_no_engine_members(&source);
+        assert!(!source.block_types.contains_key(tree::FOLDER));
+        assert!(!source.block_types.contains_key(instruction::INSTRUCTION));
+        assert_eq!(resolve_source(&builtin, "copy"), builtin);
+        let custom = r#"
+name: team
+version: "2"
+extends: rdy-standard
+link_types: [cites]
+block_types:
+  folder:
+    prefix: fd
+    traits: [structural]
+    fields:
+      owner: { kind: str }
+  finding:
+    prefix: F
+    fields:
+      severity: { kind: enum, values: [low, high] }
+  source:
+    prefix: S
+    fields:
+      publisher: { kind: str }
+  instruction:
+    prefix: ai
+    fields:
+      audience: { kind: str }
+  glossary_entry:
+    prefix: ge
+    traits: [defines]
+    fields:
+      name: { kind: str, required: true }
+  risk:
+    prefix: rk
+    traits: [normative]
+    body: required
+    children: [decision, note]
+  section:
+    prefix: s
+    traits: [structural]
+    fields:
+      title: { kind: str, required: true }
+    children: [section, prose, risk, glossary_entry, decision]
+tensions:
+  area_overlap: blocking
+tensions_across:
+  value_disagreement: blocking
+areas:
+  api:
+    description: The API docs
+    paths: ["api/**"]
+"#;
+        let mut set = PackSet::with_builtin();
+        set.add_yaml_from(custom, "team.yaml").unwrap();
+        let team = set.resolve("team").unwrap();
+        let source = source_form(&team);
+        assert_no_engine_members(&source);
+        // the pack's own members stay: its fields on the engine types and its own types
+        for (ty, field) in [
+            (tree::FOLDER, "owner"),
+            (supporting::FINDING, "severity"),
+            (supporting::SOURCE, "publisher"),
+            (instruction::INSTRUCTION, "audience"),
+            ("glossary_entry", "name"),
+        ] {
+            assert!(source.block_types[ty].fields.contains_key(field), "{ty}");
+        }
+        assert!(source.link_types.contains("cites"));
+        assert_eq!(resolve_source(&team, "team"), team);
     }
 }

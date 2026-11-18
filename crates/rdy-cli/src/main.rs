@@ -225,7 +225,7 @@ enum Cmd {
     ///
     /// To move a project across a store format change, in this order: close every session on this project; with rdy 0.3.0 or a later rdy that reads store format <n>, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy.
     Load(dump_cmd::LoadArgs),
-    /// Make a new project from a project directory or a dump file, in a directory with no store (default: --project, else the current directory); every hash is kept, and the clone records its origin. --fork gives the clone a new repo id. Cloning from a hub comes with the sync client.
+    /// Make a new project from a project directory, a dump file or a hub URL, in a directory with no store (default: --project, else the current directory); every hash is kept, and the clone records its origin. --fork gives the clone a new repo id. An https source clones that hub repo, with its settings and a share remote named hub; a hub clone never forks.
     Clone(dump_cmd::CloneArgs),
     Reindex,
     Fsck(project_cmd::FsckArgs),

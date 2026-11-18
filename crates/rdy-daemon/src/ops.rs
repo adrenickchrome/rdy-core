@@ -492,7 +492,7 @@ pub fn dispatch_with(
         }
         "export" => export(cx, parse(op, args, EXPORT_SHAPE)?),
         "dump" => dump(cx, parse(op, args, "{out, after?}")?),
-        "clone" => clone(cx, parse(op, args, "{dir, fork?}")?),
+        "clone" => clone(cx, parse(op, args, "{dir, fork?, url?}")?),
         "redact" => redact(
             cx,
             parse(

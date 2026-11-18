@@ -19925,6 +19925,7 @@
       "W_STOP_BEFORE_REDACTION": "\"W_STOP_BEFORE_REDACTION\"",
       "W_UNAPPLIED_DECISION": "\"W_UNAPPLIED_DECISION\"",
       "W_UPSTREAM_HANDLE_CHANGED": "\"W_UPSTREAM_HANDLE_CHANGED\"",
+      "W_UPSTREAM_PACK_MISMATCH": "\"W_UPSTREAM_PACK_MISMATCH\"",
       "W_UPSTREAM_SIGNOUT_LOCAL": "\"W_UPSTREAM_SIGNOUT_LOCAL\"",
       "W_WC_KEPT": "\"W_WC_KEPT\"",
       "W_WC_UNSTAGED_MOVE": "\"W_WC_UNSTAGED_MOVE\"",
@@ -20624,6 +20625,17 @@
       "CHAIN_LIMIT_FIX": "\"exclude the replayed change and import the source tree into a new view\"",
       "CHALLENGE_EXPIRED_FIX": "\"start key binding again\"",
       "CHALLENGE_EXPIRED_MESSAGE": "\"the key binding challenge expired\"",
+      "CLONE_NO_CANON_FIX": "\"make the project with rdy init, add this hub repo as a share remote, then push\"",
+      "CLONE_NO_CANON_MESSAGE": "\"hub repo <url> has no canon to clone\"",
+      "CLONE_SETTING_MESSAGE": "\"the <member> of hub repo <url> comes from rdy <captured> and does not fit rdy <this>\"",
+      "CLONE_SETTING_NEWER_FIX": "\"update rdy to <captured> or later, then clone again\"",
+      "CLONE_SETTING_OLDER_FIX": "\"have the hub repo's next push come from rdy <this>, then clone again\"",
+      "CLONE_SETTING_UNNAMED_FIX": "\"update rdy, or have the hub repo's next push come from rdy <this>\"",
+      "CLONE_SETTING_UNNAMED_MESSAGE": "\"the <member> of hub repo <url> does not fit rdy <this>\"",
+      "CLONE_URL_FILE_FIX": "\"remove file or url\"",
+      "CLONE_URL_FILE_MESSAGE": "\"file is not used by clone with url\"",
+      "CLONE_URL_FORK_FIX": "\"clone the hub repo, then run rdy clone --fork <that project> <dir>\"",
+      "CLONE_URL_FORK_MESSAGE": "\"a fork starts from a project or a dump, not from a hub URL\"",
       "CODE_KEPT_FIX": "\"check the block against its code, then repin it with code: true\"",
       "CONFIG_LIMIT_FIX": "\"reduce the config file to the stated limit\"",
       "CONFLICT_FIX": "\"write the block from the version you want (rdy_context lists the sides), or exclude one side's change\"",
@@ -20811,6 +20823,8 @@
       "UPSTREAM_KEY_PROOF_FIX": "\"check the configured public key and SSH agent, then bind again\"",
       "UPSTREAM_KEY_PROOF_MESSAGE": "\"the agent's key proof is invalid\"",
       "UPSTREAM_ORIGIN_FIX": "\"use the install origin\"",
+      "UPSTREAM_PACK_MISMATCH_FIX": "\"push the project to the hub repo again from a machine that has its pack, then clone again\"",
+      "UPSTREAM_PACK_MISMATCH_MESSAGE": "\"hub repo <url> holds gate settings for another pack, so this clone uses rdy's default pack\"",
       "UPSTREAM_PROTOCOL_FIX": "\"check that this rdy version supports the hub's API\"",
       "UPSTREAM_PROTOCOL_MESSAGE": "\"the hub reply does not match the client contract\"",
       "UPSTREAM_PUBLISH_ORIGIN_FIX": "\"use the install origin, or add its destination to the pinned origins of this install (hub.installs.<install>.pinned_origins)\"",
@@ -26412,6 +26426,13 @@
               "description": "true: the clone gets a new repo id and records forked_from.",
               "type": [
                 "boolean",
+                "null"
+              ]
+            },
+            "url": {
+              "description": "An https hub repo URL to clone instead, with the hub's settings and a share remote named hub. Not with file or fork.",
+              "type": [
+                "string",
                 "null"
               ]
             }

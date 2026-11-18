@@ -226,6 +226,126 @@ fn view_op(k: Option<KeyWire>) -> Result<Option<Hash>, RdyError> {
     }
 }
 
+/// Why a settings reply holds no pack (rdyhub-design D-BYZR0): the hub keeps no render inputs
+/// for hub canon (`none`), or its kept gate settings name another pack's digest (`mismatch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackReason {
+    None,
+    Mismatch,
+}
+
+/// The settings step's reply (D-D5J18, D-7PYYS, rdyhub-design D-BYZR0). The hub's own members
+/// (`rdy` among them, as a version) are read here; the captured members are kept whole, each
+/// None when null or absent, for the clone to read in full. A member this client does not know
+/// is left out, as every reply allows (D-N8PR2).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SettingsBundle {
+    /// The version of the rdy that captured the settings.
+    pub rdy: Option<semver::Version>,
+    pub pack_reason: Option<PackReason>,
+    pub gate_source: Option<ObjectKey>,
+    pub render_source: Option<ObjectKey>,
+    pub pack: Option<serde_json::Value>,
+    pub coverage_gate: Option<serde_json::Value>,
+    pub coverage_target: Option<serde_json::Value>,
+    pub decisions_home: Option<serde_json::Value>,
+    pub propose: Option<serde_json::Value>,
+    pub title: Option<serde_json::Value>,
+    pub description: Option<serde_json::Value>,
+}
+
+/// The captured members of a settings reply, in the order a clone reads them.
+pub const SETTINGS_MEMBERS: [&str; 7] = [
+    "pack",
+    "coverage_gate",
+    "coverage_target",
+    "decisions_home",
+    "propose",
+    "title",
+    "description",
+];
+
+impl SettingsBundle {
+    /// The captured member `name` of [`SETTINGS_MEMBERS`], None when the bundle lacks it.
+    pub fn member(&self, name: &str) -> Option<&serde_json::Value> {
+        match name {
+            "pack" => self.pack.as_ref(),
+            "coverage_gate" => self.coverage_gate.as_ref(),
+            "coverage_target" => self.coverage_target.as_ref(),
+            "decisions_home" => self.decisions_home.as_ref(),
+            "propose" => self.propose.as_ref(),
+            "title" => self.title.as_ref(),
+            "description" => self.description.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// Decodes a settings reply `body`: at most 16,777,216 bytes, its members one level deeper than
+/// a reply's depth bound and within eight render inputs' values. `pack_reason` is `none`,
+/// `mismatch` or null; `rdy` is null or a version; each source is null or a landing's key.
+/// Anything else is `E_UPSTREAM_PROTOCOL`.
+pub fn decode_settings(body: &[u8], bearer: &Secret) -> Result<SettingsBundle, RdyError> {
+    let limits = crate::hub_http::JsonLimits {
+        bytes: KNOWN_REPLY_BYTES,
+        depth: crate::hub_publish_wire::MAX_JSON_DEPTH + 1,
+        values: 8 * crate::render_inputs::MAX_INPUT_VALUES + 64,
+        scalar_bytes: crate::render_inputs::MAX_INPUT_SCALAR_BYTES,
+    };
+    let value: serde_json::Value = reply(body, limits, Effect::Read, bearer)?;
+    let mut obj = match value {
+        serde_json::Value::Object(o) => o,
+        _ => return Err(upstream_protocol()),
+    };
+    let mut take = |name: &str| obj.remove(name).filter(|v| !v.is_null());
+    let rdy = match take("rdy") {
+        None => None,
+        Some(serde_json::Value::String(t)) => {
+            Some(semver::Version::parse(&t).map_err(|_| upstream_protocol())?)
+        }
+        Some(_) => return Err(upstream_protocol()),
+    };
+    let pack_reason = match take("pack_reason") {
+        None => None,
+        Some(serde_json::Value::String(t)) if t == "none" => Some(PackReason::None),
+        Some(serde_json::Value::String(t)) if t == "mismatch" => Some(PackReason::Mismatch),
+        Some(_) => return Err(upstream_protocol()),
+    };
+    let source = |v: Option<serde_json::Value>| -> Result<Option<ObjectKey>, RdyError> {
+        match v {
+            None => Ok(None),
+            Some(v) => {
+                let key: KeyWire = serde_json::from_value(v).map_err(|_| upstream_protocol())?;
+                let key = ObjectKey::from(key);
+                if key.kind != kinds::LANDING {
+                    return Err(upstream_protocol());
+                }
+                Ok(Some(key))
+            }
+        }
+    };
+    let gate_source = source(take("gate_source"))?;
+    let render_source = source(take("render_source"))?;
+    let bundle = SettingsBundle {
+        rdy,
+        pack_reason,
+        gate_source,
+        render_source,
+        pack: take("pack"),
+        coverage_gate: take("coverage_gate"),
+        coverage_target: take("coverage_target"),
+        decisions_home: take("decisions_home"),
+        propose: take("propose"),
+        title: take("title"),
+        description: take("description"),
+    };
+    // a pack comes with no reason; a reason comes with no pack
+    if bundle.pack.is_some() == bundle.pack_reason.is_some() {
+        return Err(upstream_protocol());
+    }
+    Ok(bundle)
+}
+
 /// The known step's pull form (D-H0BZN): the keys of `root`'s closure less `base`'s link
 /// closure, after `after`, of a history of `purpose`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -580,6 +700,11 @@ pub trait SyncWire: Send + Sync {
     -> Result<WriteReply, WriteFailure>;
     /// `POST <base>/outcome`: the outcome of the write of push `push`.
     fn outcome(&self, cx: &UploadContext, push: &str) -> Result<OutcomeReply, RdyError>;
+    /// `POST <base>/settings` with an empty body: the hub repo's settings bundle. A wire with no
+    /// settings step refuses with `E_UPSTREAM_PROTOCOL`.
+    fn settings(&self, _cx: &UploadContext) -> Result<SettingsBundle, RdyError> {
+        Err(upstream_protocol())
+    }
 }
 
 /// The sync wire over [`HttpHubTransport::upload`], through the publication upload's code.
@@ -755,5 +880,10 @@ impl SyncWire for HttpSyncWire {
         let json = encode(&Body { push }, REPLY_BYTES)?;
         let body = self.read_post(cx, &["outcome"], json, REPLY_BYTES)?;
         decode_outcome(&body, &cx.bearer)
+    }
+
+    fn settings(&self, cx: &UploadContext) -> Result<SettingsBundle, RdyError> {
+        let body = self.read_post(cx, &["settings"], b"{}".to_vec(), KNOWN_REPLY_BYTES)?;
+        decode_settings(&body, &cx.bearer)
     }
 }

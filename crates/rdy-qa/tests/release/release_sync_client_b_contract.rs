@@ -75,8 +75,9 @@ const SCC8_CHANGES: &[(&str, &str)] = &[
 ];
 
 /// The members Task 9a adds to [`CURRENT`] (D-47HVF, D-2VM48): the chat tools, the command
-/// trees, the one error row, and the changed fix of an existing row, each with the reason it moves.
-/// A list of names that gains an entry changes as a list, one level under its section.
+/// trees, the one error row, and the changed fix of an existing row; then the URL clone's
+/// selector, warning and texts (D-D5J18, D-7PYYS). Each has the reason it moves. A list of names
+/// that gains an entry changes as a list, one level under its section.
 const SCC9_CHANGES: &[(&str, &str)] = &[
     (
         "added /cli/runtime/not_probed_commands/pull",
@@ -129,6 +130,67 @@ const SCC9_CHANGES: &[(&str, &str)] = &[
     (
         "changed /mcp/tool_names",
         "the list of tool names gains rdy_pull and rdy_push",
+    ),
+    // the URL clone (D-D5J18, D-7PYYS, D-47HVF, D-FYSG5)
+    (
+        "added /errors_warnings/codes/W_UPSTREAM_PACK_MISMATCH",
+        "a URL clone whose hub repo holds gate settings for another pack uses rdy's default pack",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_NO_CANON_FIX",
+        "the fix of a URL clone of a hub repo with no canon",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_NO_CANON_MESSAGE",
+        "the text of a URL clone of a hub repo with no canon",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_SETTING_MESSAGE",
+        "the text of a hub setting this rdy cannot read, with its capturing rdy",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_SETTING_NEWER_FIX",
+        "the fix of a hub setting from a newer rdy",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_SETTING_OLDER_FIX",
+        "the fix of a hub setting from this rdy or an older one",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_SETTING_UNNAMED_FIX",
+        "the fix of a hub setting that names no capturing rdy",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_SETTING_UNNAMED_MESSAGE",
+        "the text of a hub setting that names no capturing rdy",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_URL_FILE_FIX",
+        "the fix of a clone that names both a hub URL and a dump file",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_URL_FILE_MESSAGE",
+        "the text of a clone that names both a hub URL and a dump file",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_URL_FORK_FIX",
+        "the fix of a fork from a hub URL",
+    ),
+    (
+        "added /errors_warnings/templates/CLONE_URL_FORK_MESSAGE",
+        "the text of a fork from a hub URL",
+    ),
+    (
+        "added /errors_warnings/templates/UPSTREAM_PACK_MISMATCH_FIX",
+        "the fix of W_UPSTREAM_PACK_MISMATCH",
+    ),
+    (
+        "added /errors_warnings/templates/UPSTREAM_PACK_MISMATCH_MESSAGE",
+        "the text of W_UPSTREAM_PACK_MISMATCH",
+    ),
+    (
+        "added /mcp/tools/rdy_clone/input_schema/properties/url",
+        "rdy_clone takes an https hub repo URL, exclusive with file",
     ),
 ];
 
@@ -336,9 +398,10 @@ fn scc8_contract_adds_only_sync_wire_and_errors() {
     }
 }
 
-/// scc9: the successor adds only the sync surfaces of Task 9a ([`SCC9_CHANGES`]) beside Task 8's:
-/// the two tools, the two command trees and one error row. No whole top-level section moves: each
-/// leaf is a member below a section, and no member of an earlier task changes.
+/// scc9: the successor adds only the sync surfaces of Task 9 ([`SCC9_CHANGES`]) beside Task 8's:
+/// the two tools, the two command trees and one error row; then the clone's `url` selector, its
+/// warning code and its texts. No whole top-level section moves: each leaf is a member below a
+/// section, and no member of an earlier task changes.
 #[test]
 fn scc9_contract_adds_only_sync_surfaces() {
     let mut want: Vec<String> = SCC8_CHANGES
@@ -366,5 +429,65 @@ fn scc9_contract_adds_only_sync_surfaces() {
     let subs = &keyed_now["cli"]["tree"]["subcommands"];
     for c in ["pull", "push"] {
         assert_eq!(subs[format!("name={c}")]["name"], c);
+    }
+    // the URL clone: its selector and its texts, exactly
+    assert!(now["mcp"]["tools"]["rdy_clone"]["input_schema"]["properties"]["url"].is_object());
+    assert_eq!(
+        now["errors_warnings"]["codes"]["W_UPSTREAM_PACK_MISMATCH"],
+        "\"W_UPSTREAM_PACK_MISMATCH\""
+    );
+    let templates = &now["errors_warnings"]["templates"];
+    for (name, text) in [
+        (
+            "CLONE_NO_CANON_MESSAGE",
+            "hub repo <url> has no canon to clone",
+        ),
+        (
+            "CLONE_NO_CANON_FIX",
+            "make the project with rdy init, add this hub repo as a share remote, then push",
+        ),
+        (
+            "CLONE_URL_FORK_MESSAGE",
+            "a fork starts from a project or a dump, not from a hub URL",
+        ),
+        (
+            "CLONE_URL_FORK_FIX",
+            "clone the hub repo, then run rdy clone --fork <that project> <dir>",
+        ),
+        (
+            "CLONE_URL_FILE_MESSAGE",
+            "file is not used by clone with url",
+        ),
+        ("CLONE_URL_FILE_FIX", "remove file or url"),
+        (
+            "CLONE_SETTING_MESSAGE",
+            "the <member> of hub repo <url> comes from rdy <captured> and does not fit rdy <this>",
+        ),
+        (
+            "CLONE_SETTING_NEWER_FIX",
+            "update rdy to <captured> or later, then clone again",
+        ),
+        (
+            "CLONE_SETTING_OLDER_FIX",
+            "have the hub repo's next push come from rdy <this>, then clone again",
+        ),
+        (
+            "CLONE_SETTING_UNNAMED_MESSAGE",
+            "the <member> of hub repo <url> does not fit rdy <this>",
+        ),
+        (
+            "CLONE_SETTING_UNNAMED_FIX",
+            "update rdy, or have the hub repo's next push come from rdy <this>",
+        ),
+        (
+            "UPSTREAM_PACK_MISMATCH_MESSAGE",
+            "hub repo <url> holds gate settings for another pack, so this clone uses rdy's default pack",
+        ),
+        (
+            "UPSTREAM_PACK_MISMATCH_FIX",
+            "push the project to the hub repo again from a machine that has its pack, then clone again",
+        ),
+    ] {
+        assert_eq!(templates[name], format!("\"{text}\""), "{name}");
     }
 }

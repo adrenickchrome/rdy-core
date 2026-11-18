@@ -19,9 +19,9 @@ use rdy_engine::hub_publish_wire::{
 };
 use rdy_engine::hub_sync::{PullRequest, check_minimum};
 use rdy_engine::hub_sync_wire::{
-    GateSettings, GetRequest, HttpSyncWire, KnownPull, LookupOutcome, MAX_STATE_VIEWS, ProposeGate,
-    SyncStateRequest, SyncWire, WRITE_REQUEST_BYTES, WriteFailure, WriteKind, WriteOutcome,
-    WriteRequest as SyncWrite, WriteTag,
+    GateSettings, GetRequest, HttpSyncWire, KnownPull, LookupOutcome, MAX_STATE_VIEWS, PackReason,
+    ProposeGate, SETTINGS_MEMBERS, SyncStateRequest, SyncWire, WRITE_REQUEST_BYTES, WriteFailure,
+    WriteKind, WriteOutcome, WriteRequest as SyncWrite, WriteTag, decode_settings,
 };
 use rdy_engine::hub_types::{Origin, OriginFence, RequestClaim, Secret};
 use rdy_engine::render_inputs::RenderInputs;
@@ -309,7 +309,8 @@ fn fake_env(landings: usize) -> sync_env::Env {
 /// Fixture v2 (8a2): every step the client sends, its request against the fixture's (headers
 /// as a subset, the token normalized; the client sends stream format 4 alone), and every reply
 /// the client decodes. The hub's refusals map as publish maps them, and `E_HUB_SHARE_OFF`, in
-/// no table, is `E_UPSTREAM_REFUSED` with core's text (Q3). The settings steps are Task 9b's.
+/// no table, is `E_UPSTREAM_REFUSED` with core's text (Q3). The settings steps are a URL clone's
+/// settings read.
 fn fixture_v2_steps() {
     assert_eq!(sha256(FIXTURE_V2), FIXTURE_V2_SHA256);
     let f = fixture_v2();
@@ -375,8 +376,8 @@ fn fixture_v2_steps() {
             assert!(!n[m].as_str().unwrap().is_empty(), "{n}");
         }
     }
-    // the settings steps are Task 9b's (pull of the hub's gate settings); every other step is
-    // pinned below
+    // the settings steps (5, 12, 19), a URL clone's settings read, are pinned below with every
+    // other step
     let settings: Vec<usize> = (0..st.len()).filter(|i| named[*i] == "settings").collect();
     assert_eq!(settings, [5, 12, 19]);
 
@@ -720,6 +721,107 @@ fn fixture_v2_steps() {
         let (r, _) = served(&mut s, reply_of(&st[i]), || hub.wire.outcome(&cx, push));
         matches_refusal(&err(r), &st[i]);
     }
+
+    // settings (5, 12, 19): POST <sync base>/settings with {}; the hub's own members read, the
+    // captured members kept whole as the hub gave them
+    let cases: Vec<&str> = settings
+        .iter()
+        .map(|i| st[*i]["case"].as_str().unwrap().split(':').next().unwrap())
+        .collect();
+    assert_eq!(cases, ["none", "mismatch", "pack"]);
+    for i in settings {
+        let step = &st[i];
+        let (r, req) = served(&mut s, reply_of(step), || hub.wire.settings(&cx));
+        matches_request(&req, step);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&req.body).unwrap(),
+            json!({})
+        );
+        let rep = &step["reply"]["body"];
+        let got = r.unwrap();
+        let version = rep["rdy"]
+            .as_str()
+            .map(|v| semver::Version::parse(v).unwrap());
+        assert_eq!(got.rdy, version, "step {i}");
+        let reason = match rep["pack_reason"].as_str() {
+            None => None,
+            Some("none") => Some(PackReason::None),
+            Some("mismatch") => Some(PackReason::Mismatch),
+            Some(other) => panic!("step {i}: {other}"),
+        };
+        assert_eq!(got.pack_reason, reason, "step {i}");
+        for (m, k) in [
+            ("gate_source", got.gate_source),
+            ("render_source", got.render_source),
+        ] {
+            assert_eq!(
+                k,
+                (!rep[m].is_null()).then(|| key_of(&rep[m])),
+                "step {i} {m}"
+            );
+        }
+        for m in SETTINGS_MEMBERS {
+            assert_eq!(
+                got.member(m),
+                (!rep[m].is_null()).then_some(&rep[m]),
+                "step {i} {m}"
+            );
+        }
+        // every member the fixture names is read: the hub's own, rdy, and the captured ones
+        let mut known: BTreeSet<String> = SETTINGS_MEMBERS.iter().map(|m| m.to_string()).collect();
+        known.extend(["gate_source", "pack_reason", "rdy", "render_source"].map(String::from));
+        assert_eq!(object_keys(rep), known, "step {i}");
+    }
+    // the cases: none holds no member; mismatch holds the gate and title but no pack; pack holds
+    // the pack in full with no reason
+    assert!(
+        SETTINGS_MEMBERS
+            .iter()
+            .all(|m| st[5]["reply"]["body"][m].is_null())
+    );
+    assert!(st[12]["reply"]["body"]["pack"].is_null());
+    assert!(st[12]["reply"]["body"]["coverage_gate"].is_string());
+    assert!(st[19]["reply"]["body"]["pack"].is_object());
+    assert!(st[19]["reply"]["body"]["pack_reason"].is_null());
+    // a reply outside the form is a protocol failure
+    let token = Secret::new(ACCESS);
+    let base = st[5]["reply"]["body"].clone();
+    let with = |m: &str, v: Value| {
+        let mut b = base.clone();
+        b[m] = v;
+        b.to_string().into_bytes()
+    };
+    for bad in [
+        with("pack_reason", json!("other")),
+        with("pack", json!({})),
+        with("rdy", json!("not a version")),
+        with("rdy", json!(53)),
+        with(
+            "gate_source",
+            json!({"hash": Hash::of(b"g").to_string(), "kind": 13}),
+        ),
+        b"[]".to_vec(),
+    ] {
+        assert_eq!(
+            decode_settings(&bad, &token).unwrap_err().code,
+            E_UPSTREAM_PROTOCOL
+        );
+    }
+    let mut big = base.clone();
+    big["description"] = json!("d".repeat(KNOWN_REPLY_BYTES));
+    assert_eq!(
+        decode_settings(big.to_string().as_bytes(), &token)
+            .unwrap_err()
+            .code,
+        E_UPSTREAM_PROTOCOL
+    );
+    // a member this client does not know is left out
+    let mut more = base.clone();
+    more["added"] = json!({"x": 1});
+    assert_eq!(
+        decode_settings(more.to_string().as_bytes(), &token).unwrap(),
+        decode_settings(base.to_string().as_bytes(), &token).unwrap()
+    );
     assert_eq!(s.finish(), 0);
 }
 

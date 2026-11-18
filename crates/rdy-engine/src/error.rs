@@ -320,6 +320,37 @@ pub const SYNC_REMOTE_MODE_FIX: &str = "set its mode to share, or choose a share
 pub const SYNC_MIN_RDY_MESSAGE: &str = "hub repo <name> needs rdy <version>";
 /// The fix of `E_STORE_FORMAT` when the hub repo's `min_rdy` is above this rdy.
 pub const SYNC_MIN_RDY_FIX: &str = "update rdy to <version> or later";
+/// The message of `E_BAD_INPUT` when a URL clone meets a hub repo with no canon (D-D5J18).
+pub const CLONE_NO_CANON_MESSAGE: &str = "hub repo <url> has no canon to clone";
+/// The fix of `CLONE_NO_CANON_MESSAGE`.
+pub const CLONE_NO_CANON_FIX: &str =
+    "make the project with rdy init, add this hub repo as a share remote, then push";
+/// The message of `E_BAD_INPUT` when a clone from a hub URL asks for a fork (D-47HVF).
+pub const CLONE_URL_FORK_MESSAGE: &str =
+    "a fork starts from a project or a dump, not from a hub URL";
+/// The fix of `CLONE_URL_FORK_MESSAGE`.
+pub const CLONE_URL_FORK_FIX: &str =
+    "clone the hub repo, then run rdy clone --fork <that project> <dir>";
+/// The message of `E_BAD_INPUT` when a clone names both a hub URL and a dump file (D-47HVF).
+pub const CLONE_URL_FILE_MESSAGE: &str = "file is not used by clone with url";
+/// The fix of `CLONE_URL_FILE_MESSAGE`.
+pub const CLONE_URL_FILE_FIX: &str = "remove file or url";
+/// The message of `E_BAD_INPUT` when a member of a hub repo's settings, captured by rdy
+/// `<captured>`, does not fit this rdy (D-7PYYS). `<member>` is `pack` or a setting's name.
+pub const CLONE_SETTING_MESSAGE: &str =
+    "the <member> of hub repo <url> comes from rdy <captured> and does not fit rdy <this>";
+/// The fix of `CLONE_SETTING_MESSAGE` when `<captured>` is newer than this rdy.
+pub const CLONE_SETTING_NEWER_FIX: &str = "update rdy to <captured> or later, then clone again";
+/// The fix of `CLONE_SETTING_MESSAGE` when `<captured>` is this rdy or older.
+pub const CLONE_SETTING_OLDER_FIX: &str =
+    "have the hub repo's next push come from rdy <this>, then clone again";
+/// The message of `E_BAD_INPUT` when a member of a hub repo's settings, with no capturing rdy,
+/// does not fit this rdy (D-7PYYS).
+pub const CLONE_SETTING_UNNAMED_MESSAGE: &str =
+    "the <member> of hub repo <url> does not fit rdy <this>";
+/// The fix of `CLONE_SETTING_UNNAMED_MESSAGE`.
+pub const CLONE_SETTING_UNNAMED_FIX: &str =
+    "update rdy, or have the hub repo's next push come from rdy <this>";
 /// The message of `E_UPSTREAM_UNCERTAIN` when a sync write of push `<push>` has no reply
 /// (D-H0BZN "Uncertain text").
 pub const SYNC_UNCERTAIN_MESSAGE: &str = "the sync write of push <push> may have completed";
@@ -1035,6 +1066,9 @@ pub const W_UPSTREAM_HANDLE_CHANGED: &str = "W_UPSTREAM_HANDLE_CHANGED";
 /// The local credential was removed but the hub did not confirm the sign-out. Built by
 /// [`upstream_signout_local`].
 pub const W_UPSTREAM_SIGNOUT_LOCAL: &str = "W_UPSTREAM_SIGNOUT_LOCAL";
+/// A URL clone whose hub repo holds gate settings for another pack: the clone uses rdy's
+/// default pack (D-FYSG5).
+pub const W_UPSTREAM_PACK_MISMATCH: &str = "W_UPSTREAM_PACK_MISMATCH";
 
 /// The message of `E_ACTOR_UNBOUND`.
 pub const ACTOR_UNBOUND_MESSAGE: &str = "the session actor is not a hub actor";
@@ -1106,6 +1140,12 @@ pub const UPSTREAM_SIGNOUT_LOCAL_MESSAGE: &str =
     "the local credential was removed; hub sign-out was not confirmed";
 /// The fix of `W_UPSTREAM_SIGNOUT_LOCAL`.
 pub const UPSTREAM_SIGNOUT_LOCAL_FIX: &str = "end the credential on the hub if it is still active";
+/// The message of `W_UPSTREAM_PACK_MISMATCH`.
+pub const UPSTREAM_PACK_MISMATCH_MESSAGE: &str =
+    "hub repo <url> holds gate settings for another pack, so this clone uses rdy's default pack";
+/// The fix of `W_UPSTREAM_PACK_MISMATCH`.
+pub const UPSTREAM_PACK_MISMATCH_FIX: &str =
+    "push the project to the hub repo again from a machine that has its pack, then clone again";
 
 /// `E_ACTOR_UNBOUND`.
 pub fn actor_unbound() -> RdyError {

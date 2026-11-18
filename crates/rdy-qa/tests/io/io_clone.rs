@@ -466,16 +466,32 @@ fn ec5_the_origin_batch_holds_only_its_refs() {
 #[test]
 fn ec5_a_url_and_a_plain_directory_are_refused_with_their_texts() {
     let scratch = tempfile::tempdir().unwrap();
-    for url in ["https://hub.example/acme/design", "file:///tmp/x"] {
-        let e = source_kind(Path::new(url)).unwrap_err();
-        assert_eq!(e.code, "E_BAD_INPUT", "{url}");
+    // an https URL is a hub URL (D-47HVF); any other scheme gets rdy remote add's refusal of an
+    // address that is not HTTPS
+    for url in [
+        "https://127.0.0.1/acme/design",
+        "HTTPS://127.0.0.1:8443/acme/design",
+    ] {
         assert_eq!(
-            e.message,
-            format!("{url} is a URL: cloning from a hub comes with the sync client")
+            source_kind(Path::new(url)).unwrap(),
+            SourceKind::Url,
+            "{url}"
         );
+    }
+    for url in [
+        "file:///tmp/x",
+        "rdy://hub/team/project",
+        "http://127.0.0.1/acme/design",
+    ] {
+        let e = source_kind(Path::new(url)).unwrap_err();
         assert_eq!(
-            e.fix,
-            "run rdy dump --out <file> in that project, then clone the file"
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                "E_BAD_INPUT",
+                rdy_engine::hub_types::BAD_URL_MESSAGE,
+                rdy_engine::hub_types::BAD_URL_FIX
+            ),
+            "{url}"
         );
     }
     let plain = scratch.path().join("plain");

@@ -409,6 +409,8 @@ struct Job {
 /// `renderer`.
 pub struct SyncService<'a> {
     project: PathBuf,
+    /// A URL clone's coordinator: no project yet, so the credentials read the user config alone.
+    projectless: bool,
     user_file: PathBuf,
     api: &'a dyn HubTransport,
     clock: &'a dyn HubClock,
@@ -478,6 +480,23 @@ impl<'a> SyncService<'a> {
             wire,
             renderer,
             scratch: None,
+            projectless: false,
+        }
+    }
+
+    /// The coordinator of a URL clone (`crate::clone::clone_url`): it has no project, so its
+    /// credentials and trust come from the user config `user_file` alone. It runs only
+    /// [`SyncService::clone_target`] and the clone steps below it.
+    pub(crate) fn for_clone(
+        user_file: &Path,
+        api: &'a dyn HubTransport,
+        clock: &'a dyn HubClock,
+        wire: &'a dyn SyncWire,
+        renderer: &'a dyn PublishRenderer,
+    ) -> SyncService<'a> {
+        SyncService {
+            projectless: true,
+            ..SyncService::new(Path::new(""), user_file, api, clock, wire, renderer)
         }
     }
 
@@ -490,7 +509,8 @@ impl<'a> SyncService<'a> {
     }
 
     fn credentials(&self) -> HubCredentials<'a> {
-        HubCredentials::new(Some(&self.project), &self.user_file, self.api, self.clock)
+        let project = (!self.projectless).then_some(self.project.as_path());
+        HubCredentials::new(project, &self.user_file, self.api, self.clock)
     }
 
     /// The context of one request on `t`: current access to its install (renewed when it
@@ -502,11 +522,24 @@ impl<'a> SyncService<'a> {
         read: &ReadState,
         sync_base: Option<&str>,
     ) -> Result<UploadContext, RdyError> {
+        self.context_at(t, Some(read), sync_base)
+    }
+
+    /// [`SyncService::context`] with no state to check when `read` is None: a URL clone's
+    /// steps before its project exists.
+    fn context_at(
+        &self,
+        t: &Target,
+        read: Option<&ReadState>,
+        sync_base: Option<&str>,
+    ) -> Result<UploadContext, RdyError> {
         let grant = self.credentials().access(&t.install, &t.claim)?;
         if grant.account != t.account || grant.claim != t.bound {
             return Err(upstream_auth(t.install.as_str()));
         }
-        read.ensure_current_epoch()?;
+        if let Some(read) = read {
+            read.ensure_current_epoch()?;
+        }
         Ok(UploadContext {
             install: t.install.clone(),
             sync_base: sync_base.map(str::to_string),
@@ -588,6 +621,111 @@ impl<'a> SyncService<'a> {
             account: first.account,
         };
         run(&target).map_err(|e| self.fail(Some(&target), &warnings, e))
+    }
+
+    /// A URL clone's steps 1 to 3 (D-D5J18): the remote `hub` at `url`, refused with
+    /// `E_REMOTE_EXISTS` when the user config already holds a share remote; then the install's
+    /// fence, its `ca_file`, the session's claim and access, from the user config alone. No
+    /// project exists yet, so no remote guard is taken: the clone's directory is new.
+    pub(crate) fn clone_target<T>(
+        &self,
+        session: &Session,
+        url: &crate::hub_types::RemoteUrl,
+        run: impl FnOnce(&Target) -> Result<T, RdyError>,
+    ) -> Result<T, RdyError> {
+        let settings = HubConfig::load(None, Some(&self.user_file))?;
+        let warnings = settings.warnings.clone();
+        if settings
+            .remotes()
+            .iter()
+            .any(|r| r.mode == RemoteMode::Share)
+        {
+            return Err(self.fail(None, &warnings, crate::error::remote_exists()));
+        }
+        let install = url.origin().clone();
+        settings
+            .fence(&install)
+            .map_err(|e| self.fail(None, &warnings, e))?;
+        let ca_file = settings.install(&install).and_then(|i| i.ca_file.clone());
+        let claim =
+            RequestClaim::from_session(session).map_err(|e| self.fail(None, &warnings, e))?;
+        let first = self
+            .credentials()
+            .access_on_use(&install, &claim)
+            .map_err(|e| self.fail(None, &warnings, e))?;
+        let target = Target {
+            name: crate::clone::HUB_REMOTE.to_string(),
+            url: url.as_str().to_string(),
+            install,
+            ca_file,
+            claim,
+            bound: first.claim,
+            account: first.account,
+        };
+        run(&target).map_err(|e| self.fail(Some(&target), &warnings, e))
+    }
+
+    /// A URL clone's discovery and state step, then the `min_rdy` stop and the stream format
+    /// check. No repo id is compared: the clone takes the hub repo's.
+    pub(crate) fn clone_open(&self, t: &Target) -> Result<(String, SyncState), RdyError> {
+        let cx = self.context_at(t, None, None)?;
+        let base_url = self.wire.discovery(&cx, &t.url)?.sync_base;
+        let cx = self.context_at(t, None, Some(&base_url))?;
+        let state = self.wire.state(&cx, &SyncStateRequest::new(&cx.claim))?;
+        drop(cx);
+        check_minimum(&state, &repo_name(&t.url))?;
+        if !state.stream_read.contains(&HISTORY_FORMAT)
+            || !state.stream_write.contains(&HISTORY_FORMAT)
+        {
+            return Err(upstream_protocol());
+        }
+        Ok((base_url, state))
+    }
+
+    /// A URL clone's settings step.
+    pub(crate) fn clone_settings(
+        &self,
+        t: &Target,
+        base_url: &str,
+    ) -> Result<crate::hub_sync_wire::SettingsBundle, RdyError> {
+        let cx = self.context_at(t, None, Some(base_url))?;
+        self.wire.settings(&cx)
+    }
+
+    /// A URL clone's fetch and replay into the new project of `engine`: hub canon's history
+    /// rooted at the captured tip of `state`, with no base, as a pull fetches it (D-KE83X),
+    /// then the pull's second batch, which moves the empty canon to that tip and records it as
+    /// applied.
+    pub(crate) fn clone_fetch(
+        &self,
+        engine: &dyn Engine,
+        session: &Session,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+    ) -> Result<(Option<FetchOutcome>, sync_replay::PullOutcome), RdyError> {
+        let tip = state.canon.ok_or_else(upstream_protocol)?;
+        let fetched = self.fetch_history(
+            engine,
+            t,
+            base_url,
+            state,
+            StreamPurpose::CanonHistory,
+            tip,
+            None,
+        )?;
+        let req = sync_replay::PullRequest {
+            remote: t.name.clone(),
+            hub: HubState {
+                repo_id: state.repo_id,
+                canon: state.canon,
+            },
+            take: false,
+            strict: false,
+        };
+        let s = session.clone();
+        let canon = with_writer_result(engine, move |rdy| sync_replay::pull(rdy, &s, &req))?;
+        Ok((fetched, canon))
     }
 
     /// Pushes local canon and the named views to the share remote (see the module docs).
