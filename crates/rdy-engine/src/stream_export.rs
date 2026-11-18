@@ -17,7 +17,8 @@ use crate::read_state::ReadState;
 use crate::stream_error::to_rdy;
 use rdy_model::Hash;
 use rdy_store::closure::{
-    HistoryClosure, StoreSource, closure_before, history_closure_before, write_batch,
+    HistoryClosure, StoreSource, closure_before, history_closure_before,
+    history_closure_named_before, write_batch,
 };
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
@@ -210,9 +211,10 @@ pub fn history_page(
 /// Writes the records that `keys` name of the canon or view history of `root` as one complete
 /// format-4 batch with that purpose and root, in the order [`write_history`] writes a batch of
 /// that set. The header names as prerequisites what a written record needs and the batch omits,
-/// and the root when the batch does not hold it. A landing carries its one snapshot delta (the
-/// batch holds it though the keys omit it), and a named delta travels only with its landing. At
-/// most [`MAX_KEYS`] keys count; a repeated key counts once. A key that the root's history, as `read` captured it, does not hold is
+/// and the root when the batch does not hold it. The batch holds exactly the named keys, the
+/// snapshot deltas (kind 30) included: a landing and its delta may travel in separate batches of
+/// one upload. At most [`MAX_KEYS`] keys count; a repeated key counts once. A key that the
+/// root's history, as `read` captured it, does not hold is
 /// `E_UNRESOLVED_REF` for that key, and nothing is written. A root that `read` does not hold is
 /// `E_UNRESOLVED_REF`; a purpose other than canon_history or view_history is `E_STREAM_PURPOSE`.
 /// It checks the redaction epoch before and after, as [`write_history`] does.
@@ -236,43 +238,24 @@ pub fn write_history_keys(
     if let Some(k) = wanted.iter().find(|k| !held.contains(k)) {
         return Err(to_rdy(StreamError::unresolved(0, 0, *k)));
     }
-    // A landing travels with its one snapshot delta, and the delta travels only with it
-    // (D-918YB): the walk attaches the delta of every landing it emits, and never reaches the
-    // delta of one it leaves out. So a named delta adds nothing by itself. The delta of a
-    // landing the batch leaves out stays known (a delta links the delta before it).
-    let named: BTreeSet<ObjectKey> = wanted
-        .into_iter()
-        .filter(|k| k.kind != kinds::SNAPSHOT_DELTA)
-        .collect();
-    let mut source = StoreSource { reader, end };
-    let mut carried: BTreeSet<ObjectKey> = BTreeSet::new();
-    for k in named.iter().filter(|k| k.kind == kinds::LANDING) {
-        if let Some(d) = source.snapshot_delta_of(&k.hash).map_err(to_rdy)? {
-            carried.insert(ObjectKey {
-                kind: kinds::SNAPSHOT_DELTA,
-                hash: d,
-            });
-        }
-    }
     // the closure less everything not named: the walk goes through what it leaves out, so the
-    // batch holds exactly the named records and the deltas of their landings
-    let known: BTreeSet<ObjectKey> = held
+    // batch holds exactly the named records. A named delta of a landing the batch leaves out
+    // is reached on its own; it names that landing as a prerequisite. An unnamed delta of a
+    // named landing stays out and is a later batch's (the upload holds one delta per landing
+    // across its batches, D-7K4Z0).
+    let known: BTreeSet<ObjectKey> = held.difference(&wanted).copied().collect();
+    let deltas: Vec<ObjectKey> = wanted
         .iter()
         .copied()
-        .filter(|k| !named.contains(k) && !carried.contains(k))
+        .filter(|k| k.kind == kinds::SNAPSHOT_DELTA)
         .collect();
-    let mut found =
-        history_closure_before(reader, purpose, root, &known, None, end).map_err(to_rdy)?;
+    let mut found = history_closure_named_before(reader, purpose, root, &known, &deltas, end)
+        .map_err(to_rdy)?;
     // every batch of one history lists the features its whole closure needs, so the batches of
     // one get carry one header, as the files of one upload must (`batch header differs`)
     found.features = whole.features;
-    let emitted: BTreeSet<ObjectKey> = found
-        .records
-        .iter()
-        .copied()
-        .filter(|k| k.kind != kinds::SNAPSHOT_DELTA)
-        .collect();
-    if emitted != named {
+    let emitted: BTreeSet<ObjectKey> = found.records.iter().copied().collect();
+    if emitted != wanted {
         return Err(RdyError::new(
             E_INTERNAL,
             "the named keys are not the records of their batch",

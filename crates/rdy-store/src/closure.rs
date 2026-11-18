@@ -207,8 +207,15 @@ pub fn closure_within(
         kind: kinds::TAG,
         hash: tag,
     };
-    let (records, prerequisites, _) =
-        batch_of(reader, StreamPurpose::TagHistory, root, known, end, bounds)?;
+    let (records, prerequisites, _) = batch_of(
+        reader,
+        StreamPurpose::TagHistory,
+        root,
+        &[],
+        known,
+        end,
+        bounds,
+    )?;
     Ok(Closure {
         records,
         prerequisites,
@@ -259,7 +266,56 @@ pub fn history_closure_before(
         link_closure(&mut source, base, &mut held)?;
     }
     let (records, prerequisites, features) =
-        batch_of(reader, purpose, root, &held, end, WalkBounds::UPLOAD)?;
+        batch_of(reader, purpose, root, &[], &held, end, WalkBounds::UPLOAD)?;
+    Ok(HistoryClosure {
+        records,
+        prerequisites,
+        features,
+    })
+}
+
+/// [`history_closure_before`] with no base, for a batch of chosen records: every key of the
+/// history that `known` holds is walked through and left out, and each key of `deltas` (the
+/// snapshot deltas the batch must hold) is reached as a record though the walk does not attach
+/// the delta of a landing it leaves out. A delta whose landing or base delta the batch omits
+/// names it as a prerequisite. The caller has checked that each key of `deltas` belongs to the
+/// history; a key the store does not hold is E_UNRESOLVED_REF.
+pub fn history_closure_named_before(
+    reader: &StoreReader,
+    purpose: StreamPurpose,
+    root: Hash,
+    known: &BTreeSet<ObjectKey>,
+    deltas: &[ObjectKey],
+    end: Location,
+) -> Result<HistoryClosure, StreamError> {
+    if !matches!(
+        purpose,
+        StreamPurpose::CanonHistory | StreamPurpose::ViewHistory
+    ) {
+        return Err(StreamError::purpose_for(
+            None,
+            0,
+            purpose.byte(),
+            StreamPurpose::CanonHistory.name(),
+        ));
+    }
+    let root = ObjectKey {
+        kind: purpose.root_kind(),
+        hash: root,
+    };
+    let source = StoreSource { reader, end };
+    if !source.holds(root.kind, &root.hash)? {
+        return Err(StreamError::unresolved(0, 0, root));
+    }
+    let (records, prerequisites, features) = batch_of(
+        reader,
+        purpose,
+        root,
+        deltas,
+        known,
+        end,
+        WalkBounds::UPLOAD,
+    )?;
     Ok(HistoryClosure {
         records,
         prerequisites,
@@ -347,11 +403,14 @@ fn batch_of(
     reader: &StoreReader,
     purpose: StreamPurpose,
     root: ObjectKey,
+    extra: &[ObjectKey],
     known: &BTreeSet<ObjectKey>,
     end: Location,
     bounds: WalkBounds,
 ) -> Result<(Vec<ObjectKey>, Vec<ObjectKey>, crate::format::StoreFeatures), StreamError> {
-    let w = walk(reader, purpose, root, known, end, bounds)?;
+    let mut roots = vec![root];
+    roots.extend_from_slice(extra);
+    let w = walk_from(reader, purpose, &roots, known, end, bounds, false)?;
     // the batch: every record found that the receiver does not hold
     let children: BTreeMap<ObjectKey, Vec<ObjectKey>> = w
         .nodes

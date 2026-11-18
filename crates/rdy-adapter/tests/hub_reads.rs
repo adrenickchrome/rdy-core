@@ -362,25 +362,11 @@ fn scc8r_named_keys_batch_has_its_purpose_root_and_only_those_records() {
             assert_eq!(checked.header.purpose, purpose);
             assert_eq!(checked.header.tag, root);
             assert_eq!(report.header, checked.header);
-            // exactly the named records, in the order core writes that set; a landing carries
-            // its one snapshot delta, and a delta alone adds nothing
-            let is_delta = |k: &&ObjectKey| k.kind == kinds::SNAPSHOT_DELTA;
-            let named: BTreeSet<ObjectKey> =
-                p.keys.iter().filter(|k| !is_delta(k)).copied().collect();
-            let written: BTreeSet<ObjectKey> = report
-                .keys
-                .iter()
-                .filter(|k| !is_delta(k))
-                .copied()
-                .collect();
+            // exactly the named records, deltas (kind 30) included, in the order core writes
+            // that set
+            let named: BTreeSet<ObjectKey> = p.keys.iter().copied().collect();
+            let written: BTreeSet<ObjectKey> = report.keys.iter().copied().collect();
             assert_eq!(written, named);
-            let landings = report
-                .keys
-                .iter()
-                .filter(|k| k.kind == kinds::LANDING)
-                .count();
-            assert_eq!(report.keys.iter().filter(is_delta).count(), landings);
-            let named: BTreeSet<ObjectKey> = report.keys.iter().copied().collect();
             let known: BTreeSet<ObjectKey> = whole
                 .keys
                 .iter()
@@ -391,11 +377,29 @@ fn scc8r_named_keys_batch_has_its_purpose_root_and_only_those_records() {
             let core = snap
                 .write_history(purpose, root, None, &known, &mut by_core)
                 .unwrap();
-            assert_eq!(report.keys, core.keys);
+            // core's export of the set cannot reach the delta of a landing it leaves out, so
+            // it is the oracle for the other records, in order
+            let without = |ks: &[ObjectKey]| -> Vec<ObjectKey> {
+                ks.iter()
+                    .copied()
+                    .filter(|k| k.kind != kinds::SNAPSHOT_DELTA)
+                    .collect()
+            };
+            assert_eq!(without(&report.keys), without(&core.keys));
             // every batch lists the features of the whole history, so batches of one get share
             // one header; core's export of the same set lists only what it needs
             assert_eq!(report.header.features, whole.header.features);
-            assert_eq!(report.header.prerequisites, core.header.prerequisites);
+            // a delta of a landing the batch omits adds that landing (or its base delta) as a
+            // prerequisite; check_batch has refused any prerequisite no record needs
+            assert!(
+                core.header
+                    .prerequisites
+                    .iter()
+                    .all(|k| report.header.prerequisites.contains(k))
+            );
+            if !report.keys.iter().any(|k| k.kind == kinds::SNAPSHOT_DELTA) {
+                assert_eq!(report.header.prerequisites, core.header.prerequisites);
+            }
             // the root is a prerequisite exactly when it is not a record
             let rk = root_key(purpose, root);
             assert_eq!(
@@ -439,6 +443,90 @@ fn put(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let p = dir.join(name);
     std::fs::write(&p, bytes).unwrap();
     p
+}
+
+#[test]
+fn scc8r_named_keys_split_landings_and_deltas_into_separate_batches() {
+    let w = world();
+    let source = StoreHandle::open(&w.path()).unwrap();
+    let s = source.snapshot().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (whole_bytes, whole) = oracle(&s, CANON, w.p2, None);
+    let one = put(scratch.path(), "whole.rdysync", &whole_bytes);
+    let is_delta = |k: &ObjectKey| k.kind == kinds::SNAPSHOT_DELTA;
+    let deltas: Vec<ObjectKey> = whole.keys.iter().copied().filter(is_delta).collect();
+    let rest: Vec<ObjectKey> = whole
+        .keys
+        .iter()
+        .copied()
+        .filter(|k| !is_delta(k))
+        .collect();
+    assert!(deltas.len() >= 2, "each landing has its delta");
+    // a request of deltas alone gives exactly those records, with no landing
+    let mut d_out = Vec::new();
+    let d = s
+        .write_history_keys(CANON, w.p2, &deltas, &mut d_out)
+        .unwrap();
+    assert_eq!(
+        d.keys.iter().copied().collect::<BTreeSet<_>>(),
+        deltas.iter().copied().collect()
+    );
+    assert!(d.keys.iter().all(is_delta));
+    let checked = check_batch(d_out.as_slice(), Some(w.repo)).unwrap();
+    assert_eq!(checked.keys, d.keys);
+    // a request of landings and everything else but the deltas gives no delta
+    let mut r_out = Vec::new();
+    let r = s
+        .write_history_keys(CANON, w.p2, &rest, &mut r_out)
+        .unwrap();
+    assert_eq!(
+        r.keys.iter().copied().collect::<BTreeSet<_>>(),
+        rest.iter().copied().collect()
+    );
+    assert!(r.keys.iter().any(|k| k.kind == kinds::LANDING));
+    assert!(!r.keys.iter().any(is_delta));
+    check_batch(r_out.as_slice(), Some(w.repo)).unwrap();
+    // the two batches share one header shape (repo, purpose, root, features)
+    assert_eq!(d.header.features, r.header.features);
+    assert_eq!(d.header.tag, r.header.tag);
+    // a single landing and a single delta, each alone
+    let l0 = *rest.iter().find(|k| k.kind == kinds::LANDING).unwrap();
+    let mut l_out = Vec::new();
+    let l = s
+        .write_history_keys(CANON, w.p2, &[l0], &mut l_out)
+        .unwrap();
+    assert_eq!(l.keys, vec![l0]);
+    let mut x_out = Vec::new();
+    let x = s
+        .write_history_keys(CANON, w.p2, &[deltas[0]], &mut x_out)
+        .unwrap();
+    assert_eq!(x.keys, vec![deltas[0]]);
+    check_batch(x_out.as_slice(), Some(w.repo)).unwrap();
+    let d_file = put(scratch.path(), "deltas.rdysync", &d_out);
+    let r_file = put(scratch.path(), "rest.rdysync", &r_out);
+    drop(s);
+    source.close().unwrap();
+
+    // taken together (delta batch first, then the rest), they give what one export gives
+    let _clock = rdy_engine::pin_clock(AT);
+    let take = |name: &str, files: &[&PathBuf]| {
+        let h = StoreHandle::create_holder(&scratch.path().join(name), w.repo).unwrap();
+        let before = h.snapshot().unwrap();
+        let handles: Vec<File> = files.iter().map(|p| File::open(p).unwrap()).collect();
+        let q = before.check_quarantine(&handles).unwrap();
+        let facts = q.facts().clone();
+        assert_eq!(
+            h.move_canon(&q, CanonMove::Seed, None).unwrap(),
+            Moved::Moved { tip: w.p2 }
+        );
+        drop((before, q));
+        h.close().unwrap();
+        facts
+    };
+    let a = take("whole", &[&one]);
+    let b = take("split", &[&d_file, &r_file]);
+    assert_eq!(a.objects, b.objects);
+    assert_eq!(a.min_rdy_after, b.min_rdy_after);
 }
 
 #[test]
