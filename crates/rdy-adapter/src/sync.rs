@@ -111,6 +111,19 @@ impl CheckedQuarantine {
         Arc::ptr_eq(&self.state, snap.shared_state())
     }
 
+    /// `E_BAD_INPUT` unless `snap` is the snapshot this quarantine was checked on: the refusal
+    /// of every read of a checked push.
+    pub(crate) fn ensure_bound(&self, snap: &Snapshot) -> Result<(), RdyError> {
+        if self.bound_to(snap) {
+            return Ok(());
+        }
+        Err(RdyError::new(
+            E_BAD_INPUT,
+            "the checked quarantine is bound to another snapshot",
+            "check the landing on the snapshot that checked the push",
+        ))
+    }
+
     /// Whether the push's own records hold landing `landing`.
     pub(crate) fn pushes(&self, landing: &Hash) -> bool {
         self.landings.contains_key(landing)
