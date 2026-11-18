@@ -355,10 +355,15 @@ impl Engine for DaemonEngine {
         }
     }
 
-    /// The profile, summary page and warnings of the one build the site holds for `target`,
-    /// built first when it has none or its inputs changed.
+    /// The profile, summary page and warnings of `target` as of the latest publish: for a review
+    /// target, from its preparation and the complete warnings pass of its state, which renders
+    /// no page (D-F44G6, D-WYZ97); for an eager target, from the one build the site holds for
+    /// it, built first when it has none or its inputs changed.
     fn site_facts(&self, target: &SiteTarget) -> Result<SiteFacts, RdyError> {
         let target = crate::site::live::normalize(target);
+        if crate::site::live::is_review(&target) {
+            return self.0.site.review_facts(&self.0, &target);
+        }
         let build = self.0.site.refresh(&self.0, &target)?;
         Ok(SiteFacts {
             profile: build.profile.clone(),
@@ -483,7 +488,11 @@ mod tests {
             ]),
             "{v}"
         );
-        assert_eq!(sh.site.builds(), 1, "the scope was built for its warnings");
+        assert_eq!(
+            (sh.site.checks(), sh.site.page_renders(), sh.site.builds()),
+            (1, 0, 0),
+            "one complete warnings pass, and no page rendered or built"
+        );
         let canon = site_reply(&*e, None, None, false).unwrap();
         assert!(canon.get("warnings").is_none(), "{canon}");
         // the site logs the warning of the scope it built

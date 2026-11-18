@@ -26,6 +26,7 @@ mod daemon_short_socket_unix;
 mod daemon_site_http;
 mod daemon_site_live;
 mod daemon_site_not_found;
+mod daemon_site_on_demand;
 mod daemon_site_profile_listeners;
 mod daemon_site_profile_routes;
 mod daemon_site_routes;

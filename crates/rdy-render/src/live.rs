@@ -54,7 +54,7 @@ pub fn rev(bytes: &[u8]) -> String {
 
 /// The revision of a page: the bytes between the slot ranges (the label's and the header's), each
 /// piece after its length, so a change of the label or the header alone does not change it.
-fn page_rev(bytes: &[u8], label_at: &[Slot]) -> String {
+pub(crate) fn page_rev(bytes: &[u8], label_at: &[Slot]) -> String {
     let mut cut: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut from = 0;
     for (_, r) in label_at {
@@ -70,7 +70,7 @@ fn page_rev(bytes: &[u8], label_at: &[Slot]) -> String {
 }
 
 /// Whether `bytes` is a permalink page (`redirect.html`), which names its kind in the opening tag.
-fn is_redirect(bytes: &[u8]) -> bool {
+pub(crate) fn is_redirect(bytes: &[u8]) -> bool {
     const KIND: &[u8] = b"data-rdy-kind=\"redirect\"";
     bytes[..bytes.len().min(96)]
         .windows(KIND.len())
@@ -78,7 +78,7 @@ fn is_redirect(bytes: &[u8]) -> bool {
 }
 
 /// The revision of the label and the header: each after its length.
-fn label_rev(label: &str, header: &str) -> String {
+pub(crate) fn label_rev(label: &str, header: &str) -> String {
     let mut k = Key(Vec::with_capacity(label.len() + header.len() + 16));
     k.text(label).text(header);
     rev(&k.0)
@@ -293,39 +293,78 @@ pub fn diff(old: &LiveBuild, new: &LiveBuild) -> Change {
 /// the page, its revision and the label's, so the stream it opens is of the target it was
 /// served for.
 pub fn page(build: &LiveBuild, path: &str, target: &SiteTarget) -> Option<Vec<u8>> {
-    let mut bytes = build.files.get(path)?.clone();
+    let bytes = build.files.get(path)?;
+    let slots = build.label_at.get(path).map_or(&[][..], Vec::as_slice);
+    let facts = Facts {
+        label: &build.label,
+        header: &build.header,
+        label_rev: &build.label_rev,
+    };
+    Some(fill(
+        bytes,
+        path,
+        slots,
+        build.revs.get(path),
+        &facts,
+        target,
+    ))
+}
+
+/// The label and header facts the server fills into a live file: the label's text, the header's
+/// markup and the revision of both.
+pub(crate) struct Facts<'a> {
+    pub label: &'a str,
+    pub header: &'a str,
+    pub label_rev: &'a str,
+}
+
+/// The bytes the server sends for the file at `path` whose bytes as built are `bytes`, with the
+/// label and header ranges `slots` and the page revision `rev` (none for a permalink page and
+/// any file but a page): the label and header of `facts` go into exactly those ranges, last
+/// range first, and a page with a revision gets the live script tag right before its first
+/// `</head>`, with `target`'s event query ([`page`]). A whole build's file and a review target's
+/// requested file are filled alike.
+pub(crate) fn fill(
+    bytes: &[u8],
+    path: &str,
+    slots: &[Slot],
+    rev: Option<&String>,
+    facts: &Facts,
+    target: &SiteTarget,
+) -> Vec<u8> {
+    let mut bytes = bytes.to_vec();
     let html = path.ends_with(".html");
-    if let Some(ranges) = build.label_at.get(path) {
+    if !slots.is_empty() {
         // as the static build writes it: escaped in a page, on one line in the llms files
         let text = if html {
-            escape(&build.label)
+            escape(facts.label)
         } else {
-            crate::llms::one_line(&build.label)
+            crate::llms::one_line(facts.label)
         };
-        for (kind, r) in ranges.iter().rev() {
+        for (kind, r) in slots.iter().rev() {
             let fill = match kind {
-                SlotKind::Label => &text,
-                SlotKind::Header => &build.header,
+                SlotKind::Label => text.as_str(),
+                SlotKind::Header => facts.header,
             };
             bytes.splice(r.clone(), fill.bytes());
         }
     }
     // a permalink page has no revision and takes no script
-    if let (true, Some(rev)) = (html, build.revs.get(path)) {
+    if let (true, Some(rev)) = (html, rev) {
         // the query's values are encoded: only its separators need the attribute's escape
         let tag = format!(
             "<script src=\"/_rdy/live.js\" data-events=\"/_rdy/events?{}&amp;page={}&amp;rev={}&amp;label={}\" defer></script>",
             target.events_query().replace('&', "&amp;"),
             path,
             rev,
-            build.label_rev
+            facts.label_rev
         );
         // the head comes before any content, and content is escaped: the first one is the page's
         if let Some(at) = bytes.windows(7).position(|w| w == b"</head>") {
             bytes.splice(at..at, tag.bytes());
         }
     }
-    Some(bytes)
+    bytes
 }
 
 #[cfg(test)]

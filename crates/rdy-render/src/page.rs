@@ -30,8 +30,9 @@ pub struct Shared<'a> {
     pub versions: &'a [VersionInfo],
     /// Landing hash (hex) to the time it was approved, in milliseconds.
     pub landed_ms: &'a BTreeMap<String, i64>,
-    /// The figure blobs the store holds, by hash, with their bytes.
-    pub blobs: &'a BTreeMap<Hash, Vec<u8>>,
+    /// The readable figure blobs the pages show, by hash, with their lengths: a page reads only
+    /// that a blob is there and its size, never its bytes.
+    pub blob_lens: &'a BTreeMap<Hash, u64>,
     /// The figure blobs a redaction removed content of, by the request that did: a figure that
     /// shows one reads as removed ([`Shared::shows_removed`]).
     pub removed_blobs: &'a BTreeMap<Hash, Hash>,
@@ -68,7 +69,7 @@ pub struct Shared<'a> {
     pub mode: Mode<'a>,
     /// The word diff of each changed block of a review render, by id: an edited block on its
     /// page carries it for Show diff (sr6). Empty for canon and tags.
-    pub inline_diffs: BTreeMap<BlockId, String>,
+    pub inline_diffs: &'a BTreeMap<BlockId, String>,
     /// The build writes `changes.html` (a review render whose path no doc owns); the review
     /// chip links it only then.
     pub changes_page: bool,
@@ -475,6 +476,15 @@ impl DiagramAssets {
     /// The site-relative path of the file of the drawing whose standalone bytes hash to `h`.
     pub fn path(h: &Hash) -> String {
         format!("assets/diagrams/{h}.svg")
+    }
+
+    /// The file of drawing `h` when some page built so far shows it: its standalone bytes.
+    pub(crate) fn file(&self, h: &Hash) -> Option<Vec<u8>> {
+        self.used
+            .contains(h)
+            .then(|| self.standalone.get(h))
+            .flatten()
+            .map(|svg| svg.as_bytes().to_vec())
     }
 
     /// The files of the drawings some page shows, by path, with their bytes.
@@ -1471,7 +1481,7 @@ fn doc_parts(
                 .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == decision::DESCRIBES))
                 .filter_map(|e| sh.link(page, &e.from))
                 .collect();
-        let present = |h: &Hash| sh.blobs.contains_key(h);
+        let present = |h: &Hash| sh.blob_lens.contains_key(h);
         let asset_href = |h: &Hash, media: &str| {
             let path = assets::blob_path(&h.to_string(), media);
             used.borrow_mut()
@@ -1479,7 +1489,7 @@ fn doc_parts(
                 .or_insert_with(|| (*h, media.to_string()));
             rel(page, &path)
         };
-        let blob_len = |h: &Hash| sh.blobs.get(h).map(|b| b.len() as u64);
+        let blob_len = |h: &Hash| sh.blob_lens.get(h).copied();
         let ctx = BlockCtx {
             depth,
             anchor: &anchor,
@@ -1768,7 +1778,7 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
         local_link: sh.local_link(&local),
     };
     let used = &sh.used_blobs;
-    let present = |h: &Hash| sh.blobs.contains_key(h);
+    let present = |h: &Hash| sh.blob_lens.contains_key(h);
     let asset_href = |h: &Hash, media: &str| {
         let path = assets::blob_path(&h.to_string(), media);
         used.borrow_mut()
@@ -1776,7 +1786,7 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
             .or_insert_with(|| (*h, media.to_string()));
         rel(page, &path)
     };
-    let blob_len = |h: &Hash| sh.blobs.get(h).map(|b| b.len() as u64);
+    let blob_len = |h: &Hash| sh.blob_lens.get(h).copied();
     let ctx = BlockCtx {
         depth: 1,
         anchor: "",
