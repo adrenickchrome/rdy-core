@@ -9,6 +9,7 @@
 use rdy_daemon::Shared;
 use rdy_daemon::site::ensure_profile_site;
 use rdy_daemon::site::guard::{Refusal, ScopeRef, SiteTarget, refusal};
+use rdy_daemon::site::live::is_review;
 use rdy_engine::Rdy;
 use rdy_engine::engine::write_typed;
 use rdy_engine::redaction::RedactInput;
@@ -658,6 +659,39 @@ fn dgm11_404_never_subscribes_or_enters_indexes() {
             assert!(text(&r).contains(MARKER), "{root}{path}: {}", r.head);
             assert_inert(&text(&r), &format!("{root}{path}"));
         }
+        // a review target renders on request: each file is asked for by name, and a missing
+        // path is neither rendered nor kept
+        if is_review(&target) {
+            for path in ["nosuch.html", "404.html"] {
+                let got = sh.site.review_page(&sh, &target, path).unwrap();
+                assert!(got.is_none(), "{root}: a file {path}");
+            }
+            assert!(
+                !sh.site
+                    .ledger()
+                    .kept
+                    .iter()
+                    .any(|(_, p, _)| p == "nosuch.html" || p == "404.html"),
+                "{root}: a kept missing path"
+            );
+            for path in [
+                "index.html",
+                "search-index.json",
+                "llms.txt",
+                "llms-full.txt",
+            ] {
+                let Some(page) = sh.site.review_page(&sh, &target, path).unwrap() else {
+                    continue;
+                };
+                let t = String::from_utf8_lossy(&page.bytes);
+                if path != "index.html" {
+                    assert!(!t.contains("Page not found"), "{root}{path}");
+                    assert!(!t.contains("404.html"), "{root}{path}");
+                }
+                assert!(!t.contains(MARKER), "{root}{path}: a generated page");
+            }
+            continue;
+        }
         let b = sh.site.refresh(&sh, &target).unwrap();
         for path in ["nosuch.html", "404.html"] {
             assert!(
@@ -881,14 +915,14 @@ fn dgm11_explicit_404_and_authored_collision_follow_the_matrix() {
         assert_eq!((h.status, headers(&h)), (404, headers(&r)), "HEAD {path}");
         assert!(h.body.is_empty(), "HEAD {path}");
     }
-    // and a live build never gives the local collision warning
-    let b = sh
+    // and a live complete check never gives the local collision warning
+    let f = sh
         .site
-        .refresh(&sh, &SiteTarget::Source(ScopeRef::View("authored".into())))
+        .review_facts(&sh, &SiteTarget::Source(ScopeRef::View("authored".into())))
         .unwrap();
     assert!(
-        !b.live.warnings.iter().any(|w| w.contains("404")),
+        !f.warnings.iter().any(|w| w.contains("404")),
         "{:?}",
-        b.live.warnings
+        f.warnings
     );
 }

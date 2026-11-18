@@ -43,21 +43,37 @@
 //! a new request. After a removal, each open page of a rebuilt scope that was opened in an older
 //! epoch gets `Reload`, which carries nothing. No response lease or drain holds a removal back:
 //! a response begun before it may complete as an outside copy.
+//!
+//! A review target ([`is_review`]: a view, a proposal version, or a profile route under one) is
+//! rendered on request (D-F44G6, refined by D-WYZ97 and D-SMP5A), never built whole. Its slot keeps
+//! the detached render preparation of one captured state, the pages a request asked for, each
+//! with its own recency, and its complete warnings pass with the warnings logged for it. One
+//! ledger, the site's cap, counts the eager builds and every review target's pages, shared parts
+//! and warning state. Under pressure the review pages go first, least recently used across every
+//! target, then the shared parts of review targets that keep no page; canon and tag builds are
+//! never dropped for a review target. A write that changes a review target's inputs drops its
+//! pages and preparation; the worker renders again only the pages that have an open stream.
 use crate::daemon::log;
 use crate::shared::Shared;
 use crate::site::guard::{Refusal, ScopeRef, SiteTarget};
 use crate::site::profiles::Availability;
 use crate::writer::panic_text;
+use rdy_engine::engine::SiteFacts;
 use rdy_engine::publication::ResolvedProfile;
 use rdy_engine::site_scope::{CHANGES_PAGE, SINCE_PAGE, summary_page_taken};
-use rdy_engine::{E_REDACTED_STATE, RdyError, ReadState, Scope, serve_config};
+use rdy_engine::{E_BAD_INPUT, E_REDACTED_STATE, RdyError, ReadState, Scope, serve_config};
 use rdy_model::Hash;
 use rdy_render::live::{
     LiveBuild, ProfileHistoryMemo, build_live, build_profile_live, diff, inputs_key,
 };
+use rdy_render::live_review::{
+    PreparedReview, ReviewCheck, ReviewFile, prepare_profile_review, prepare_review,
+};
 use rdy_render::menu::{build_versions_for, docs_changed, menu_key_for};
-use rdy_render::review;
-use std::collections::BTreeMap;
+use rdy_render::retained::RetainedAllocations;
+use rdy_render::{NotFoundKind, Slot, review};
+use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
@@ -206,13 +222,39 @@ pub fn resolve(st: &ReadState, scope: &ScopeRef) -> Result<Scope, RdyError> {
     }
 }
 
+/// Whether `target` (normalized) is a review target, rendered on request: a view, a proposal
+/// version, or a profile route under one (D-F44G6). Canon, tags, their profile routes, the
+/// profile-only site and every versions menu keep their whole builds.
+pub fn is_review(target: &SiteTarget) -> bool {
+    matches!(
+        target,
+        SiteTarget::Source(ScopeRef::View(_) | ScopeRef::Proposal(_))
+            | SiteTarget::Profile {
+                scope: ScopeRef::View(_) | ScopeRef::Proposal(_),
+                ..
+            }
+    )
+}
+
+/// The error of an eager-only call on a review target: the invalid live target.
+fn not_eager() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "invalid live site target",
+        "use a source scope and a publication profile key",
+    )
+}
+
 /// One open page: its stream's sender and what it shows.
 struct Stream {
     id: u64,
     page: String,
-    /// The page's revision and the label's when the stream opened.
-    rev: String,
+    /// The page's revision and the label's when the stream opened; for a review target, what the
+    /// page shows now as far as the stream told it (`None`: the page is gone).
+    rev: Option<String>,
     label_rev: String,
+    /// A review target's stream: the input key it was last compared at (`None`: never).
+    key: Option<(u64, Hash)>,
     /// The redaction epoch the page was compared in: the epoch of the build it was compared
     /// with on subscribe, else the store's epoch when it opened. A build of another epoch sends
     /// it `Reload`.
@@ -227,7 +269,7 @@ impl Stream {
     /// What the page needs to show what `b` built: `Reload` when `b` has the page at another
     /// revision or not at all, else the label when only it differs.
     fn against(&self, b: &LiveBuild) -> Option<LiveEvent> {
-        if b.revs.get(&self.page) != Some(&self.rev) {
+        if b.revs.get(&self.page) != self.rev.as_ref() {
             Some(LiveEvent::Reload)
         } else if b.label_rev != self.label_rev {
             Some(LiveEvent::Label {
@@ -238,6 +280,165 @@ impl Stream {
             None
         }
     }
+
+    /// What a review page needs to show `now`, the page as the target's state at `key` renders
+    /// it: `Reload` when the page was compared in another epoch, or its revision moved or it is
+    /// gone, else the label when only the label or the header moved. The stream then holds what
+    /// it told its page, so a later state is compared with it.
+    fn follow(&mut self, now: &PageFacts, key: (u64, Hash)) -> Option<LiveEvent> {
+        let event = if self.epoch != now.epoch || self.rev != now.rev {
+            Some(LiveEvent::Reload)
+        } else if self.label_rev != now.label_rev {
+            Some(LiveEvent::Label {
+                text: now.label.clone(),
+                html: now.header.clone(),
+            })
+        } else {
+            None
+        };
+        self.rev.clone_from(&now.rev);
+        self.label_rev.clone_from(&now.label_rev);
+        self.key = Some(key);
+        self.checked = true;
+        event
+    }
+}
+
+/// What a stream compares a review page with: the page's revision as its target's state renders
+/// it (`None`: no page there), and that state's label facts and epoch.
+#[derive(Clone, Debug)]
+struct PageFacts {
+    rev: Option<String>,
+    label: String,
+    header: String,
+    label_rev: String,
+    epoch: u64,
+}
+
+impl PageFacts {
+    fn of(prep: &PreparedReview, file: Option<&ReviewFile>) -> PageFacts {
+        PageFacts {
+            rev: file.and_then(|f| f.rev.clone()),
+            label: prep.label().to_string(),
+            header: prep.header().to_string(),
+            label_rev: prep.label_rev().to_string(),
+            epoch: prep.epoch(),
+        }
+    }
+}
+
+/// The state a review request reads: the published state (request-scoped, never kept), its
+/// input key with its redaction epoch, and the publish count read before it.
+struct Fresh {
+    st: Arc<ReadState>,
+    key: (u64, Hash),
+    now: u64,
+}
+
+/// A review target's preparation for one request: kept, or new with the profile memo it
+/// continued.
+struct Prep {
+    prep: Arc<PreparedReview>,
+    new: bool,
+    memo: Option<ProfileHistoryMemo>,
+}
+
+/// One requested file of a review target, as the server sends it ([`LiveSite::review_page`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewPage {
+    /// The bytes sent: the label and header filled in, and a page's live script.
+    pub bytes: Vec<u8>,
+    /// The page's revision: none for a permalink page and any file but a page.
+    pub rev: Option<String>,
+    /// The version label's text, the header's markup and their revision, of the target's state.
+    pub label: String,
+    pub header: String,
+    pub label_rev: String,
+    /// The redaction epoch the target's state captured.
+    pub epoch: u64,
+}
+
+/// A requested page of a review target that the site keeps.
+struct KeptPage {
+    file: Arc<ReviewFile>,
+    /// What the page counts in the ledger ([`page_charge`]), set when it is kept.
+    bytes: u64,
+    /// When the page was last requested, on `Inner::clock`.
+    used: u64,
+}
+
+/// What a review target keeps for one captured state (the input key `key`): its detached
+/// preparation, its requested pages and its complete warnings pass. The warnings logged for the
+/// target stay across its states while the target is kept (D-SMP5A): a full drop of the target
+/// takes them, a page's eviction does not.
+#[derive(Default)]
+struct Review {
+    key: Option<(u64, Hash)>,
+    prep: Option<Arc<PreparedReview>>,
+    pages: BTreeMap<String, KeptPage>,
+    check: Option<Arc<ReviewCheck>>,
+    /// The warnings logged for the target: added by every pass and page render, and replaced by
+    /// a complete pass, which alone proves a warning gone.
+    logged: BTreeSet<String>,
+}
+
+impl Review {
+    /// Whether the target keeps anything for its state or its warnings.
+    fn holds(&self) -> bool {
+        self.prep.is_some()
+            || !self.pages.is_empty()
+            || self.check.is_some()
+            || !self.logged.is_empty()
+    }
+
+    /// Drops the pages, preparation and pass of the state the target kept; the logged warnings
+    /// stay. Returns whether anything was dropped.
+    fn forget_state(&mut self) -> bool {
+        let had = self.prep.is_some() || !self.pages.is_empty() || self.check.is_some();
+        self.key = None;
+        self.prep = None;
+        self.pages.clear();
+        self.check = None;
+        had
+    }
+
+    /// The bytes the target's warning state counts: each logged warning, and the kept pass.
+    fn warning_bytes(&self) -> u64 {
+        let text = |s: &String| s.capacity() as u64 + size_of::<String>() as u64;
+        let logged: u64 = self.logged.iter().map(|w| text(w) + FILE_OVERHEAD).sum();
+        let check = self.check.as_ref().map_or(0, |c| {
+            ARC_HEADER
+                + size_of::<ReviewCheck>() as u64
+                + (c.warnings.capacity() - c.warnings.len()) as u64 * size_of::<String>() as u64
+                + c.warnings.iter().map(text).sum::<u64>()
+        });
+        logged + check
+    }
+}
+
+/// The bytes of an `Arc`'s counts, beside its value.
+const ARC_HEADER: u64 = 16;
+
+/// What a kept review page at `path` counts in the ledger: its bytes' buffer, its slots,
+/// revision, warnings and path, the file's own size and [`FILE_OVERHEAD`] for its entry.
+fn page_charge(path: &str, f: &ReviewFile) -> u64 {
+    let text = |s: &String| s.capacity() as u64 + size_of::<String>() as u64;
+    path.len() as u64
+        + FILE_OVERHEAD
+        + ARC_HEADER
+        + size_of::<ReviewFile>() as u64
+        + f.bytes.capacity() as u64
+        + (f.label_at.capacity() * size_of::<Slot>()) as u64
+        + f.rev.as_ref().map_or(0, text)
+        + f.warnings.iter().map(text).sum::<u64>()
+}
+
+/// What a review target's preparation counts on its own, beside none other: the renderer's
+/// retained estimate, and the site's handle of it.
+fn prep_alone(prep: &PreparedReview) -> u64 {
+    ARC_HEADER
+        + size_of::<PreparedReview>() as u64
+        + prep.retained_bytes(&mut RetainedAllocations::new())
 }
 
 /// One served target: its last build and the open pages of it.
@@ -259,6 +460,39 @@ struct ScopeState {
     /// A profile target's neutral-chip memo, kept across its successful builds (empty for any
     /// other target). Taken out for a build and put back only when the build is published.
     memo: ProfileHistoryMemo,
+    /// A review target's kept state (empty for any other target).
+    review: Review,
+}
+
+impl ScopeState {
+    /// Whether the target keeps anything but its streams: a build, or a review target's state
+    /// or warnings.
+    fn holds(&self) -> bool {
+        self.build.is_some() || self.review.holds()
+    }
+}
+
+/// The ledger of the site's cap, as a test reads it ([`LiveSite::ledger`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ledger {
+    /// Everything the cap counts: the four parts below.
+    pub total: u64,
+    /// The eager builds (canon, tags, their profiles, the profile-only site, the menus).
+    pub eager: u64,
+    /// The review targets' preparations, each shared allocation counted once.
+    pub shared: u64,
+    /// The kept review pages.
+    pub pages: u64,
+    /// The review targets' warning state: logged warnings and kept passes.
+    pub warnings: u64,
+    /// The kept review pages, least recently used first, each with what it counts.
+    pub kept: Vec<(SiteTarget, String, u64)>,
+    /// The review targets that keep a preparation.
+    pub prepared: Vec<SiteTarget>,
+    /// The logged warnings the review targets keep, across every target.
+    pub logged: usize,
+    /// The targets the site keeps state for.
+    pub targets: usize,
 }
 
 /// What a stream is the stream of: a target of the site, or the approval pages.
@@ -313,19 +547,63 @@ impl Inner {
             .sum()
     }
 
-    /// Drops inactive targets (a build and no open stream) past [`MAX_SCOPES`], least recently
-    /// used first, with their memos; a target with neither a build nor a stream goes too. Then,
-    /// while the held builds of every target hold more than [`Inner::cap`] bytes together and
-    /// more than one is held, drops the least recently used build: an inactive target goes with
-    /// it, and a target with an open stream keeps its streams and memo and loses only its build
-    /// and key. The most recently used build always stays. A dropped build is built again on its
-    /// next request. Returns whether a build was dropped, so the caller can give the memory back
-    /// once it releases the lock.
+    /// The bytes the eager builds hold.
+    fn eager_bytes(&self) -> u64 {
+        self.scopes.values().map(|s| s.bytes).sum()
+    }
+
+    /// The bytes the review targets' preparations hold, each shared allocation counted once.
+    fn shared_bytes(&self) -> u64 {
+        let mut seen = RetainedAllocations::new();
+        self.scopes
+            .values()
+            .filter_map(|s| s.review.prep.as_ref())
+            .map(|p| ARC_HEADER + size_of::<PreparedReview>() as u64 + p.retained_bytes(&mut seen))
+            .sum()
+    }
+
+    /// The bytes the kept review pages hold.
+    fn page_bytes(&self) -> u64 {
+        let pages = self.scopes.values().flat_map(|s| s.review.pages.values());
+        pages.map(|p| p.bytes).sum()
+    }
+
+    /// The bytes the review targets' warning state holds.
+    fn warning_bytes(&self) -> u64 {
+        self.scopes.values().map(|s| s.review.warning_bytes()).sum()
+    }
+
+    /// Everything the cap counts.
+    fn total(&self) -> u64 {
+        self.eager_bytes() + self.shared_bytes() + self.page_bytes() + self.warning_bytes()
+    }
+
+    /// The least recently used kept review page, across every target.
+    fn oldest_page(&self) -> Option<(SiteTarget, String)> {
+        self.scopes
+            .iter()
+            .flat_map(|(t, s)| s.review.pages.iter().map(move |(p, k)| (k.used, t, p)))
+            .min_by_key(|(used, ..)| *used)
+            .map(|(_, t, p)| (t.clone(), p.clone()))
+    }
+
+    /// Drops inactive targets (no open stream, and a build, or a review target's state or
+    /// warnings) past [`MAX_SCOPES`], least recently used first, with their memos; a target that
+    /// keeps nothing and has no stream goes too. Then, while the ledger holds more than
+    /// [`Inner::cap`] bytes (D-WYZ97): first the review pages go, least recently used across
+    /// every target, open pages' too; then each review target that keeps no page goes whole, least
+    /// recently used first: its preparation, its pass and its logged warnings (D-SMP5A), an open
+    /// target keeping its streams and memo; then, while more than one is held, the least recently
+    /// used eager build: an inactive target goes with it, and a target with an open stream keeps
+    /// its streams and memo and loses only its build and key. Canon and tags are never dropped
+    /// for a review target, and the most recently used eager build always stays. What was
+    /// dropped is built or rendered again on its next request. Returns whether anything was
+    /// dropped, so the caller can give the memory back once it releases the lock.
     fn evict(&mut self) -> bool {
         let cap = self.cap;
         self.scopes
-            .retain(|_, s| s.build.is_some() || !s.streams.is_empty());
-        let inactive = |s: &ScopeState| s.build.is_some() && s.streams.is_empty();
+            .retain(|_, s| s.holds() || !s.streams.is_empty());
+        let inactive = |s: &ScopeState| s.holds() && s.streams.is_empty();
         let mut dropped = false;
         while self.scopes.values().filter(|s| inactive(s)).count() > MAX_SCOPES {
             let Some(oldest) = self
@@ -338,6 +616,35 @@ impl Inner {
                 break;
             };
             self.scopes.remove(&oldest);
+            dropped = true;
+        }
+        while self.total() > cap {
+            // the review pages first, by global recency
+            if let Some((target, path)) = self.oldest_page() {
+                if let Some(s) = self.scopes.get_mut(&target) {
+                    s.review.pages.remove(&path);
+                }
+                dropped = true;
+                continue;
+            }
+            // then the review targets that keep no page, whole
+            let Some((oldest, open)) = self
+                .scopes
+                .iter()
+                .filter(|(_, s)| s.review.holds())
+                .min_by_key(|(_, s)| s.used)
+                .map(|(k, s)| (k.clone(), !s.streams.is_empty()))
+            else {
+                break;
+            };
+            if open {
+                // its streams keep what they told their pages, and are compared with that
+                if let Some(s) = self.scopes.get_mut(&oldest) {
+                    s.review = Review::default();
+                }
+            } else {
+                self.scopes.remove(&oldest);
+            }
             dropped = true;
         }
         loop {
@@ -404,7 +711,14 @@ pub struct LiveSite {
     building: Mutex<()>,
     /// Shared with each [`Subscription`], which removes its stream when dropped.
     inner: Arc<Mutex<Inner>>,
+    /// Whole builds of eager targets.
     builds: AtomicU64,
+    /// Whole builds asked of a review target: none, by construction ([`LiveSite::build`]).
+    review_builds: AtomicU64,
+    /// Review preparations, requested files rendered, and complete warnings passes.
+    preparations: AtomicU64,
+    renders: AtomicU64,
+    checks: AtomicU64,
     /// The times the site gave the allocator's free memory back
     /// ([`crate::sys::release_free_memory`]): after a build, or after an eviction that dropped a
     /// build. Shared with each [`Subscription`].
@@ -586,6 +900,10 @@ impl LiveSite {
                 ..Inner::default()
             })),
             builds: AtomicU64::new(0),
+            review_builds: AtomicU64::new(0),
+            preparations: AtomicU64::new(0),
+            renders: AtomicU64::new(0),
+            checks: AtomicU64::new(0),
             memory_releases: Arc::new(AtomicU64::new(0)),
             counts: Mutex::new(BTreeMap::new()),
             docs_changed: Mutex::new(None),
@@ -622,10 +940,96 @@ impl LiveSite {
             .count()
     }
 
-    /// Test hook: the bytes of every build the site holds.
+    /// Test hook: everything the site's cap counts: the eager builds, and the review targets'
+    /// pages, shared parts and warning state.
     #[doc(hidden)]
     pub fn held_bytes(&self) -> u64 {
-        lock(&self.inner).scopes.values().map(|s| s.bytes).sum()
+        lock(&self.inner).total()
+    }
+
+    /// Test hook: the ledger of the site's cap, part by part.
+    #[doc(hidden)]
+    pub fn ledger(&self) -> Ledger {
+        let inner = lock(&self.inner);
+        let mut kept: Vec<(u64, SiteTarget, String, u64)> = inner
+            .scopes
+            .iter()
+            .flat_map(|(t, s)| {
+                s.review
+                    .pages
+                    .iter()
+                    .map(move |(p, k)| (k.used, t.clone(), p.clone(), k.bytes))
+            })
+            .collect();
+        kept.sort_by_key(|(used, ..)| *used);
+        let (eager, shared, pages, warnings) = (
+            inner.eager_bytes(),
+            inner.shared_bytes(),
+            inner.page_bytes(),
+            inner.warning_bytes(),
+        );
+        Ledger {
+            total: eager + shared + pages + warnings,
+            eager,
+            shared,
+            pages,
+            warnings,
+            kept: kept.into_iter().map(|(_, t, p, b)| (t, p, b)).collect(),
+            prepared: inner
+                .scopes
+                .iter()
+                .filter(|(_, s)| s.review.prep.is_some())
+                .map(|(t, _)| t.clone())
+                .collect(),
+            logged: inner.scopes.values().map(|s| s.review.logged.len()).sum(),
+            targets: inner.scopes.len(),
+        }
+    }
+
+    /// Test hook: what the preparation `target` keeps counts on its own, if it keeps one.
+    #[doc(hidden)]
+    pub fn prepared_bytes(&self, target: &SiteTarget) -> Option<u64> {
+        let inner = lock(&self.inner);
+        let prep = inner.scopes.get(&normalize(target))?.review.prep.clone()?;
+        drop(inner);
+        Some(prep_alone(&prep))
+    }
+
+    /// Test hook: a weak handle of the preparation `target` keeps, if it keeps one, to prove
+    /// its release.
+    #[doc(hidden)]
+    pub fn prepared_handle(&self, target: &SiteTarget) -> Option<Weak<PreparedReview>> {
+        let inner = lock(&self.inner);
+        let s = inner.scopes.get(&normalize(target))?;
+        s.review.prep.as_ref().map(Arc::downgrade)
+    }
+
+    /// Test hook: the warnings logged for `target` that the site keeps, if it keeps the target.
+    #[doc(hidden)]
+    pub fn logged_warnings(&self, target: &SiteTarget) -> Option<Vec<String>> {
+        let inner = lock(&self.inner);
+        let s = inner.scopes.get(&normalize(target))?;
+        Some(s.review.logged.iter().cloned().collect())
+    }
+
+    /// Whole builds asked of a review target; none is ever made.
+    pub fn review_builds(&self) -> u64 {
+        self.review_builds.load(Ordering::SeqCst)
+    }
+
+    /// Review target preparations made so far.
+    pub fn preparations(&self) -> u64 {
+        self.preparations.load(Ordering::SeqCst)
+    }
+
+    /// Requested files of review targets rendered so far (a kept page is not rendered again).
+    pub fn page_renders(&self) -> u64 {
+        self.renders.load(Ordering::SeqCst)
+    }
+
+    /// Complete warnings passes of review targets run so far.
+    pub fn checks(&self) -> u64 {
+        self.checks.load(Ordering::SeqCst)
     }
 
     /// Test hook: the bytes of the inactive targets' builds (a build and no open stream).
@@ -720,10 +1124,12 @@ impl LiveSite {
         }
     }
 
-    /// The build of `target` as of the latest publish, built when its inputs changed. A new
-    /// build sends each open page of the target what changed for it (see the module docs). A
+    /// The build of eager `target` as of the latest publish, built when its inputs changed. A
+    /// new build sends each open page of the target what changed for it (see the module docs). A
     /// failed build is the error, and the last build stays. `Source(Versions)` is the menu of
-    /// canon; an invalid target is refused before anything is kept.
+    /// canon; an invalid target is refused before anything is kept. A review target has no whole
+    /// build: it is refused with the invalid-target error, and its files come from
+    /// [`Self::review_page`].
     pub fn refresh(&self, sh: &Shared, target: &SiteTarget) -> Result<Arc<SiteBuild>, RdyError> {
         self.refresh_counted(sh, target).map(|(b, _)| b)
     }
@@ -736,6 +1142,9 @@ impl LiveSite {
     ) -> Result<(Arc<SiteBuild>, bool), RdyError> {
         let scope = &normalize(target);
         scope.validate()?;
+        if is_review(scope) {
+            return Err(not_eager());
+        }
         let _one = lock(&self.building);
         // the count before the state: a publish after this load counts past `now`, so the next
         // refresh reads it
@@ -872,7 +1281,8 @@ impl LiveSite {
         release_free_memory(&self.memory_releases);
     }
 
-    /// Builds `target` (normalized and valid) from `st`, with `memo` for a profile's history.
+    /// Builds eager `target` (normalized and valid) from `st`, with `memo` for a profile's
+    /// history. A review target is counted and refused: it has no whole build.
     fn build(
         &self,
         st: &ReadState,
@@ -880,6 +1290,10 @@ impl LiveSite {
         generation: u64,
         memo: &mut ProfileHistoryMemo,
     ) -> Result<SiteBuild, RdyError> {
+        if is_review(target) {
+            self.review_builds.fetch_add(1, Ordering::SeqCst);
+            return Err(not_eager());
+        }
         match target {
             SiteTarget::Source(scope) => {
                 let resolved = resolve(st, scope)?;
@@ -909,6 +1323,373 @@ impl LiveSite {
         }
     }
 
+    /// The state of review target `scope` (normalized) as of the latest publish: the published
+    /// state, its input key and the publish count it read. A kept state of another key is dropped
+    /// here with every page of it, before anything of the new state is kept: a request never gets
+    /// a page of an older state while the worker catches up. The logged warnings stay. Called
+    /// holding the one-build lock; also says whether kept data was dropped.
+    fn review_fresh(&self, sh: &Shared, scope: &SiteTarget) -> Result<(Fresh, bool), RdyError> {
+        // the count, then the generation, then the state, as for a build
+        let now = self.published.load(Ordering::SeqCst);
+        let generation = sh.pack_gen.load(Ordering::SeqCst);
+        let st = sh.state.load_full();
+        // a state older than a removal renders nothing: the writer publishes the fresh one next
+        st.ensure_current_epoch()?;
+        let epoch = st.redaction_epoch();
+        // a key found at this publish count needs no new reading
+        let known = lock(&self.inner)
+            .scopes
+            .get(scope)
+            .and_then(|s| s.review.key.filter(|k| s.seen == now && k.0 == epoch));
+        let key = match known {
+            Some(key) => key,
+            None => (epoch, target_key(&st, scope, generation)?),
+        };
+        let mut dropped = false;
+        if let Some(s) = lock(&self.inner).scopes.get_mut(scope) {
+            if s.review.key.is_some_and(|k| k != key) {
+                dropped = s.review.forget_state();
+            }
+            if s.review.key == Some(key) {
+                s.seen = now;
+            }
+        }
+        Ok((Fresh { st, key, now }, dropped))
+    }
+
+    /// The preparation of review target `scope` at `fresh`: the one it keeps, or a new one
+    /// (counted). A profile route continues its slot's memo, which goes back with the admission
+    /// of the new preparation; a failed preparation leaves no new memo state behind.
+    fn review_prep(&self, scope: &SiteTarget, fresh: &Fresh) -> Result<Prep, RdyError> {
+        let kept = lock(&self.inner)
+            .scopes
+            .get(scope)
+            .filter(|s| s.review.key == Some(fresh.key))
+            .and_then(|s| s.review.prep.clone());
+        if let Some(prep) = kept {
+            return Ok(Prep {
+                prep,
+                new: false,
+                memo: None,
+            });
+        }
+        let st = &*fresh.st;
+        let (prep, memo) = match scope {
+            SiteTarget::Source(s) => (prepare_review(st, &resolve(st, s)?, scope)?, None),
+            _ => {
+                let mut memo = lock(&self.inner)
+                    .scopes
+                    .get_mut(scope)
+                    .map(|s| std::mem::take(&mut s.memo))
+                    .unwrap_or_default();
+                memo.set_ceiling_for_tests(*lock(&self.history_ceiling));
+                (prepare_profile_review(st, scope, &mut memo)?, Some(memo))
+            }
+        };
+        self.preparations.fetch_add(1, Ordering::SeqCst);
+        Ok(Prep {
+            prep: Arc::new(prep),
+            new: true,
+            memo,
+        })
+    }
+
+    /// Keeps what a review request of `scope` at `fresh` made, under the lock that publishes it,
+    /// only while its state is of the store's epoch (else nothing is kept, and the request fails
+    /// as a discarded build does). Each warning the request found that the target has not logged
+    /// is logged once: a new preparation's, a page's diagrams', a complete pass's in its order. A
+    /// complete pass replaces the logged set, as it alone proves a warning gone. A page larger
+    /// than the cap is not kept; a preparation and warning state that cannot fit beside the
+    /// eager builds served this request and are dropped with the target's other records. Then
+    /// the cap holds. Says whether kept data was dropped.
+    fn review_admit(
+        &self,
+        scope: &SiteTarget,
+        fresh: &Fresh,
+        prep: &mut Prep,
+        page: Option<(&str, &Arc<ReviewFile>)>,
+        check: Option<&Arc<ReviewCheck>>,
+    ) -> Result<bool, RdyError> {
+        let hook = lock(&self.before_publish).clone();
+        if let Some(hook) = hook {
+            hook(scope);
+        }
+        let mut inner = lock(&self.inner);
+        // the publication check: a state a removal made old keeps nothing
+        fresh.st.ensure_current_epoch()?;
+        let (cap, eager) = (inner.cap, inner.eager_bytes());
+        inner.clock += 1;
+        let now = inner.clock;
+        let s = inner.scopes.entry(scope.clone()).or_default();
+        s.used = now;
+        s.seen = fresh.now;
+        let mut dropped = false;
+        if s.review.key != Some(fresh.key) {
+            dropped |= s.review.forget_state();
+            s.review.key = Some(fresh.key);
+        }
+        if let Some(memo) = prep.memo.take() {
+            s.memo = memo;
+        }
+        let mut found: Vec<&String> = vec![];
+        if prep.new {
+            found.extend(prep.prep.warnings());
+        }
+        if let Some((_, f)) = page {
+            found.extend(&f.warnings);
+        }
+        if let Some(c) = check {
+            found.extend(&c.warnings);
+        }
+        let mut lines = vec![];
+        for w in found {
+            if s.review.logged.insert(w.clone()) {
+                lines.push(format!("site: {}: warning: {w}", label(scope)));
+            }
+        }
+        if let Some(c) = check {
+            s.review.logged = c.warnings.iter().cloned().collect();
+            s.review.check = Some(Arc::clone(c));
+        }
+        if s.review.prep.is_none() {
+            s.review.prep = Some(Arc::clone(&prep.prep));
+        }
+        if let Some((path, f)) = page {
+            let bytes = page_charge(path, f);
+            if bytes <= cap {
+                let file = Arc::clone(f);
+                s.review.pages.insert(
+                    path.to_string(),
+                    KeptPage {
+                        file,
+                        bytes,
+                        used: now,
+                    },
+                );
+            }
+        }
+        // shared parts and warning state that cannot fit beside the eager builds served this
+        // request only: the target keeps its streams' facts and nothing else (D-WYZ97, D-SMP5A)
+        if eager + prep_alone(&prep.prep) + s.review.warning_bytes() > cap {
+            s.review = Review::default();
+            dropped = true;
+        }
+        for line in &lines {
+            self.log(line);
+        }
+        dropped |= inner.evict();
+        Ok(dropped)
+    }
+
+    /// The file at `path` of review target `scope` at `fresh`: the kept page, or the file
+    /// rendered alone (counted) and admitted. None for a path the target has no file at; only
+    /// the preparation is then kept. Also says whether kept data was dropped.
+    fn review_file(
+        &self,
+        scope: &SiteTarget,
+        fresh: &Fresh,
+        path: &str,
+    ) -> Result<(Arc<PreparedReview>, Option<Arc<ReviewFile>>, bool), RdyError> {
+        {
+            let mut inner = lock(&self.inner);
+            inner.clock += 1;
+            let now = inner.clock;
+            if let Some(s) = inner.scopes.get_mut(scope)
+                && s.review.key == Some(fresh.key)
+                && let Some(prep) = s.review.prep.clone()
+                && let Some(p) = s.review.pages.get_mut(path)
+            {
+                // a hit moves only this page's recency
+                p.used = now;
+                s.used = now;
+                s.seen = fresh.now;
+                return Ok((prep, Some(Arc::clone(&p.file)), false));
+            }
+        }
+        let mut prep = self.review_prep(scope, fresh)?;
+        let file = prep.prep.render(&fresh.st, path)?.map(|mut f| {
+            f.bytes.shrink_to_fit();
+            Arc::new(f)
+        });
+        if file.is_some() {
+            self.renders.fetch_add(1, Ordering::SeqCst);
+        }
+        let page = file.as_ref().map(|f| (path, f));
+        let dropped = self.review_admit(scope, fresh, &mut prep, page, None)?;
+        Ok((prep.prep, file, dropped))
+    }
+
+    /// Compares each open page of review target `scope` not yet compared at `fresh` with the
+    /// page as that state renders it: each distinct page renders once (or comes from the cache),
+    /// and every stream on it shares that render. Other pages are not rendered. Also says
+    /// whether kept data was dropped.
+    fn review_fanout(&self, scope: &SiteTarget, fresh: &Fresh) -> Result<bool, RdyError> {
+        let pages: BTreeSet<String> = lock(&self.inner)
+            .scopes
+            .get(scope)
+            .map(|s| {
+                s.streams
+                    .iter()
+                    .filter(|st| st.key != Some(fresh.key))
+                    .map(|st| st.page.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut dropped = false;
+        let mut facts = BTreeMap::new();
+        for page in pages {
+            let (prep, file, d) = self.review_file(scope, fresh, &page)?;
+            dropped |= d;
+            facts.insert(page, PageFacts::of(&prep, file.as_deref()));
+        }
+        if facts.is_empty() {
+            return Ok(dropped);
+        }
+        let mut inner = lock(&self.inner);
+        if let Some(s) = inner.scopes.get_mut(scope) {
+            s.streams.retain_mut(|stream| {
+                if stream.key == Some(fresh.key) {
+                    return true;
+                }
+                // a stream registered since is compared by its own subscribe
+                let Some(now) = facts.get(&stream.page) else {
+                    return true;
+                };
+                match stream.follow(now, fresh.key) {
+                    // a full or closed queue drops the stream: its page reconnects with its
+                    // revision
+                    Some(event) => stream.tx.try_send(event).is_ok(),
+                    None => true,
+                }
+            });
+        }
+        Ok(dropped)
+    }
+
+    /// Review target `scope` (normalized) brought to the latest publish: a changed state drops
+    /// what it kept, and each open page not yet compared with the new state is. Gives the
+    /// dropped memory back. Takes the one-build lock.
+    fn review_refresh(&self, sh: &Shared, scope: &SiteTarget) -> Result<(), RdyError> {
+        let _one = lock(&self.building);
+        let (fresh, dropped) = self.review_fresh(sh, scope)?;
+        let out = self.review_fanout(scope, &fresh);
+        if dropped || matches!(out, Ok(true)) {
+            self.release_free_memory();
+        }
+        out.map(|_| ())
+    }
+
+    /// Refuses a target that is not a review target, after it is normalized and valid.
+    fn review_target(target: &SiteTarget) -> Result<SiteTarget, RdyError> {
+        let scope = normalize(target);
+        scope.validate()?;
+        if !is_review(&scope) {
+            return Err(not_eager());
+        }
+        Ok(scope)
+    }
+
+    /// The file at `path` of review target `target` as of the latest publish, as the server
+    /// sends it: rendered alone on request, or the kept page (D-F44G6). The target's open pages
+    /// hear of a new state first, as a build fans out. None for a path the target has no file
+    /// at. A target that does not resolve is the error, and keeps nothing; an eager target is
+    /// refused with the invalid-target error.
+    pub fn review_page(
+        &self,
+        sh: &Shared,
+        target: &SiteTarget,
+        path: &str,
+    ) -> Result<Option<ReviewPage>, RdyError> {
+        let scope = &Self::review_target(target)?;
+        let _one = lock(&self.building);
+        let (fresh, mut dropped) = self.review_fresh(sh, scope)?;
+        let out = self.review_fanout(scope, &fresh).and_then(|d| {
+            dropped |= d;
+            self.review_file(scope, &fresh, path)
+        });
+        let out = out.map(|(prep, file, d)| {
+            dropped |= d;
+            file.map(|f| ReviewPage {
+                bytes: prep.serve(&f, path, target),
+                rev: f.rev.clone(),
+                label: prep.label().to_string(),
+                header: prep.header().to_string(),
+                label_rev: prep.label_rev().to_string(),
+                epoch: prep.epoch(),
+            })
+        });
+        if dropped {
+            self.release_free_memory();
+        }
+        out
+    }
+
+    /// The not-found page of review target `target` as of the latest publish (the Page variant,
+    /// rooted at its root), rendered on request from its preparation, with the epoch its state
+    /// captured. It has no stream, revision or index entry, and no missing path is kept.
+    pub fn review_not_found(
+        &self,
+        sh: &Shared,
+        target: &SiteTarget,
+    ) -> Result<Option<(u64, Vec<u8>)>, RdyError> {
+        let scope = &Self::review_target(target)?;
+        let _one = lock(&self.building);
+        let (fresh, mut dropped) = self.review_fresh(sh, scope)?;
+        let mut prep = self.review_prep(scope, &fresh)?;
+        if prep.new {
+            dropped |= self.review_admit(scope, &fresh, &mut prep, None, None)?;
+        }
+        if dropped {
+            self.release_free_memory();
+        }
+        let html = prep.prep.not_found(NotFoundKind::Page);
+        Ok(html.map(|h| (prep.prep.epoch(), h)))
+    }
+
+    /// The link facts of review target `target` as of the latest publish: the profile it resolves
+    /// to, its change summary's page, and the complete warnings pass of its state, in the whole
+    /// build's order (p-BFXZS). The pass runs once per kept state, renders no page, and logs
+    /// each warning the target has not logged; concurrent asks share it.
+    pub fn review_facts(&self, sh: &Shared, target: &SiteTarget) -> Result<SiteFacts, RdyError> {
+        let scope = &Self::review_target(target)?;
+        let _one = lock(&self.building);
+        let (fresh, mut dropped) = self.review_fresh(sh, scope)?;
+        let facts = |prep: &PreparedReview, check: &ReviewCheck| SiteFacts {
+            profile: prep.profile().cloned(),
+            changes: prep.changes(),
+            warnings: check.warnings.clone(),
+        };
+        let kept = {
+            let mut inner = lock(&self.inner);
+            inner.clock += 1;
+            let now = inner.clock;
+            inner.scopes.get_mut(scope).and_then(|s| {
+                let r = &s.review;
+                let kept = (r.key == Some(fresh.key))
+                    .then(|| r.prep.clone().zip(r.check.clone()))
+                    .flatten();
+                if kept.is_some() {
+                    s.used = now;
+                    s.seen = fresh.now;
+                }
+                kept
+            })
+        };
+        let out = match kept {
+            Some((prep, check)) => Ok(facts(&prep, &check)),
+            None => self.review_prep(scope, &fresh).and_then(|mut prep| {
+                let check = Arc::new(prep.prep.check(&fresh.st)?);
+                self.checks.fetch_add(1, Ordering::SeqCst);
+                dropped |= self.review_admit(scope, &fresh, &mut prep, None, Some(&check))?;
+                Ok(facts(&prep.prep, &check))
+            }),
+        };
+        if dropped {
+            self.release_free_memory();
+        }
+        out
+    }
+
     /// One wake of the worker: reloads the UI streams, then refreshes each target with an open
     /// stream, and returns how many it built. A failure is logged once per run of failures of a
     /// target.
@@ -917,13 +1698,26 @@ impl LiveSite {
         // every profile-only key against one captured canon state, open pages or not; a key
         // canon no longer holds has its target removed before anything builds (D-DK03K)
         sh.profile_sites.inspect(sh);
-        let open: Vec<SiteTarget> = lock(&self.inner)
-            .scopes
-            .iter()
-            .filter(|(_, s)| !s.streams.is_empty())
-            .map(|(k, _)| k.clone())
-            .collect();
-        let mut built = 0;
+        let (open, review): (Vec<SiteTarget>, Vec<SiteTarget>) = {
+            let inner = lock(&self.inner);
+            let open = inner
+                .scopes
+                .iter()
+                .filter(|(k, s)| !is_review(k) && !s.streams.is_empty())
+                .map(|(k, _)| k.clone())
+                .collect();
+            // every kept review target, open or not: a changed state drops what it kept
+            let review = inner
+                .scopes
+                .iter()
+                .filter(|(k, s)| is_review(k) && (s.review.holds() || !s.streams.is_empty()))
+                .map(|(k, _)| k.clone())
+                .collect();
+            (open, review)
+        };
+        let renders = self.page_renders();
+        self.step_review(sh, review);
+        let mut built = (self.page_renders() - renders) as usize;
         for scope in open {
             let out = self.refresh_counted(sh, &scope);
             let mut inner = lock(&self.inner);
@@ -953,6 +1747,46 @@ impl LiveSite {
         built
     }
 
+    /// The worker's review targets: each is brought to the latest publish ([`Self::
+    /// review_refresh`]): a changed state drops its pages and preparation, and only the pages
+    /// with an open stream render again. A target that no longer reads drops what it kept of
+    /// its older state; its open pages keep what they show, and the failure is logged once per
+    /// run of failures of a target with an open page.
+    fn step_review(&self, sh: &Shared, targets: Vec<SiteTarget>) {
+        for scope in targets {
+            match self.review_refresh(sh, &scope) {
+                Ok(()) => {
+                    if let Some(s) = lock(&self.inner).scopes.get_mut(&scope) {
+                        s.failing = false;
+                    }
+                }
+                // the fresh state's publish wakes the worker again
+                Err(e) if e.code == E_REDACTED_STATE => {}
+                Err(e) => {
+                    let mut inner = lock(&self.inner);
+                    let Some(s) = inner.scopes.get_mut(&scope) else {
+                        continue;
+                    };
+                    let mut dropped = s.review.forget_state();
+                    let open = !s.streams.is_empty();
+                    let first = open && !s.failing;
+                    s.failing |= open;
+                    dropped |= inner.evict();
+                    drop(inner);
+                    if first {
+                        self.log(&format!(
+                            "site: the {} pages did not build ({e}); open pages keep what they show until a build succeeds",
+                            label(&scope)
+                        ));
+                    }
+                    if dropped {
+                        self.release_free_memory();
+                    }
+                }
+            }
+        }
+    }
+
     /// Opens a stream for `page` of `target`, which the reader has at revision `rev` with the
     /// label at `label_rev`. The target is refreshed first. A page the build does not have, or
     /// has at another revision, gets `Reload` at once; else a page with another label gets the
@@ -974,6 +1808,9 @@ impl LiveSite {
             if inner.closed || inner.streams() >= MAX_STREAMS {
                 return Err(NoStream::Busy);
             }
+        }
+        if is_review(scope) {
+            return self.subscribe_review(sh, scope, page, rev, label_rev);
         }
         let first = self.refresh(sh, scope);
         // the build read a state that a removal made old: the stream is compared again below
@@ -1009,8 +1846,9 @@ impl LiveSite {
         let mut stream = Stream {
             id,
             page: page.to_string(),
-            rev: rev.to_string(),
+            rev: Some(rev.to_string()),
             label_rev: label_rev.to_string(),
+            key: None,
             epoch: current,
             checked: false,
             tx,
@@ -1051,6 +1889,88 @@ impl LiveSite {
             && let Ok(b) = self.refresh(sh, scope)
         {
             self.compare(scope, id, &b.live);
+        }
+        Ok(sub)
+    }
+
+    /// [`Self::subscribe`] of review target `scope` (normalized): the requested page as the
+    /// latest state renders it (the kept page, or rendered alone) is compared with what the reader
+    /// has, as a subscribe compares a build. Once the stream is registered, the target is brought
+    /// to the latest publish, so a state published meanwhile is compared with it too; a removal
+    /// between the render and the comparison is repaired the same way.
+    fn subscribe_review(
+        &self,
+        sh: &Shared,
+        scope: &SiteTarget,
+        page: &str,
+        rev: &str,
+        label_rev: &str,
+    ) -> Result<Subscription, NoStream> {
+        let first = {
+            let _one = lock(&self.building);
+            let mut dropped = false;
+            let out = self.review_fresh(sh, scope).and_then(|(fresh, d)| {
+                dropped |= d;
+                dropped |= self.review_fanout(scope, &fresh)?;
+                let (prep, file, d) = self.review_file(scope, &fresh, page)?;
+                dropped |= d;
+                Ok((PageFacts::of(&prep, file.as_deref()), fresh.key))
+            });
+            if dropped {
+                self.release_free_memory();
+            }
+            out
+        };
+        // the render read a state that a removal made old: the stream is compared again below
+        let stale = matches!(&first, Err(e) if e.code == E_REDACTED_STATE);
+        let hook = lock(&self.after_subscribe_refresh).clone();
+        if let Some(hook) = hook {
+            hook(scope);
+        }
+        let mut inner = lock(&self.inner);
+        if inner.closed || inner.streams() >= MAX_STREAMS {
+            return Err(NoStream::Busy);
+        }
+        // the store's epoch, sampled under the lock a fan-out takes, as for a build
+        let current = sh.state.load().reader().redaction_epoch();
+        inner.next_id += 1;
+        let id = inner.next_id;
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE);
+        let s = inner.touch(scope);
+        let mut stream = Stream {
+            id,
+            page: page.to_string(),
+            rev: Some(rev.to_string()),
+            label_rev: label_rev.to_string(),
+            key: None,
+            epoch: current,
+            checked: false,
+            tx,
+        };
+        if let Ok((facts, key)) = &first
+            && facts.epoch == current
+            && let Some(event) = stream.follow(facts, *key)
+        {
+            let _ = stream.tx.try_send(event);
+        }
+        let epoch = stream.epoch;
+        let resolves = stale || first.is_ok();
+        s.streams.push(stream);
+        drop(inner);
+        let sub = Subscription {
+            id,
+            rx,
+            epoch,
+            key: StreamKey::Site(scope.clone()),
+            inner: Arc::downgrade(&self.inner),
+            releases: Arc::clone(&self.memory_releases),
+        };
+        // a state published since the render may have fanned out before the stream was
+        // registered, and a render of an older epoch was compared with nothing: nothing else
+        // would compare the stream with the latest state. A target that does not resolve opens
+        // with no comparison, and its first state is compared by its next refresh.
+        if resolves && sh.state.load().ensure_current_epoch().is_ok() {
+            let _ = self.review_refresh(sh, scope);
         }
         Ok(sub)
     }
