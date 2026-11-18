@@ -69,14 +69,20 @@ const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
 const REFRESH: &str = "rdyh_r_efghijklmnopqrstuvwxyz0123456789ABCDEFGH3qAvLC";
 const ACCOUNT: &str = "acc_00000000000000000000000001";
 
-#[cfg(unix)]
-fn private(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+/// Make a directory or a file private to this user through the store's platform seam
+/// (0o700 or 0o600 on Unix, an owner-only ACL on Windows).
+fn private(path: &Path) {
+    if path.is_dir() {
+        rdy_store::pio::make_private_dir(path).unwrap();
+    } else {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        rdy_store::pio::make_private_file(&f).unwrap();
+    }
 }
-
-#[cfg(not(unix))]
-fn private(_path: &Path, _mode: u32) {}
 
 /// A directory short enough for the daemon's socket path under it.
 fn short_dir(prefix: &str) -> tempfile::TempDir {
@@ -161,9 +167,9 @@ impl Machine {
     /// A machine whose home trusts `hub` and is signed in there. Its project directory is empty.
     fn new(name: &'static str, hub: &Hub) -> Machine {
         let home = tempfile::tempdir().expect("a home");
-        private(home.path(), 0o700);
+        private(home.path());
         std::fs::create_dir(home.path().join("rdy")).unwrap();
-        private(&home.path().join("rdy"), 0o700);
+        private(&home.path().join("rdy"));
         let pem = home.path().join("ca.pem");
         std::fs::write(&pem, &hub.ca_pem).unwrap();
         std::fs::write(
@@ -188,7 +194,7 @@ impl Machine {
         );
         let creds = home.path().join("rdy/credentials.yaml");
         std::fs::write(&creds, encode_credentials(&file).unwrap()).unwrap();
-        private(&creds, 0o600);
+        private(&creds);
         Machine {
             name,
             home,
