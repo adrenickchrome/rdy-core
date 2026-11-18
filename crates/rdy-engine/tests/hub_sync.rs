@@ -1858,13 +1858,16 @@ fn view_root(read: &ReadState, head: Hash) -> Hash {
     at
 }
 
+/// A held chain beside canon: its sync frames and its head.
+type HeldChain = (Vec<(u8, Vec<u8>)>, Hash);
+
 /// The dump at `dir/name` of a hub store (a holder of `e`'s repo, D-DZDB7) that holds `e`'s
 /// canon, each view of `views` at its head in `e`, and, when given, the held chain `held`
 /// (its frames and head) beside canon.
 fn hub_dump(
     e: &Env,
     views: &[&str],
-    held: Option<(Vec<(u8, Vec<u8>)>, Hash)>,
+    held: Option<HeldChain>,
     dir: &std::path::Path,
     name: &str,
 ) -> std::path::PathBuf {
