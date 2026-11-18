@@ -311,6 +311,7 @@ fn scc2_sync_meta_shapes_bounds_targets_and_secrets_are_closed() {
     let held = SyncHeld {
         head: l2,
         request: u64::MAX,
+        push: "p-held".into(),
     };
     // every closed value round-trips with every field, null cases included
     let values = [
@@ -465,6 +466,21 @@ fn scc2_sync_meta_shapes_bounds_targets_and_secrets_are_closed() {
     check_ref(&up, &SyncValue::Upload(upload(r, &"p".repeat(64))).encode())
         .unwrap()
         .unwrap();
+    // the held request keeps the push id of the write the hub held, with the push id rule
+    for push in ["", &"p".repeat(65), "p/1"] {
+        let v = SyncValue::Canon(SyncCanon {
+            held: Some(SyncHeld {
+                push: push.into(),
+                ..held.clone()
+            }),
+            ..canon(r, Some(l2), Some(l1))
+        });
+        assert_eq!(
+            check_ref(&name, &v.encode()).unwrap_err(),
+            format!("ref {name}: invalid push id"),
+            "{push:?}"
+        );
+    }
 
     // only the store writes them: a public write and set_refs are refused
     let item = |name: &str, value: Vec<u8>| {
@@ -801,6 +817,7 @@ fn scc2_unsent_rebuilds_from_applied_and_held() {
                 held: Some(SyncHeld {
                     head: ls[2],
                     request: 7,
+                    push: "p-7".into(),
                 }),
                 ..canon(r, Some(ls[0]), Some(ls[0]))
             }),
@@ -856,6 +873,15 @@ fn scc2_unsent_rebuilds_from_applied_and_held() {
     drop(s);
     let mut s = Store::open(&dir).unwrap();
     want(&s);
+    // the held request's push id survives the reopen
+    assert_eq!(
+        s.reader().sync_canon("origin").unwrap().unwrap().held,
+        Some(SyncHeld {
+            head: ls[2],
+            request: 7,
+            push: "p-7".into(),
+        })
+    );
     // applied null: the whole chain is unsent or held; applied at the tip leaves nothing
     s.write_sync(
         "origin",
@@ -863,6 +889,7 @@ fn scc2_unsent_rebuilds_from_applied_and_held() {
             held: Some(SyncHeld {
                 head: ls[0],
                 request: 1,
+                push: "p-1".into(),
             }),
             ..canon(r, None, None)
         })],

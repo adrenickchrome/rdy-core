@@ -183,7 +183,10 @@ pub enum PreviewKind {
 
 /// What a canon move removes, for the person's card: the remote, canon's tip before and after
 /// the move, and each landing that leaves that canon, oldest first. `complete` is false when
-/// this store lacks part of the chain kept, so the list may name a landing the move keeps.
+/// this store lacks part of either chain: part of the chain before the move (the list may miss a
+/// landing that leaves, and may be empty), or part of the chain kept (the list may name a
+/// landing the move keeps). A complete preview needs that history here first, as a pull fetches
+/// it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonPreview {
     pub remote: String,
@@ -281,12 +284,29 @@ pub fn canon_preview(
         PreviewKind::ForcePush => (hub_tip, local),
         PreviewKind::TakePull => (local, hub_tip),
     };
-    let (gone, _) = chain(reader, before);
-    let (kept, complete) = chain(reader, after);
+    let (kept, kept_complete) = chain(reader, after);
     let kept: BTreeSet<Hash> = kept.into_iter().collect();
-    let mut leaving: Vec<Hash> = gone.into_iter().filter(|h| !kept.contains(h)).collect();
+    // the chain before the move, back to the first landing it shares with the chain kept (all
+    // older landings are shared too) or to its first landing
+    let mut leaving = Vec::new();
+    let mut gone_known = true;
+    let mut at = before;
+    while let Some(h) = at.filter(|h| !kept.contains(h)) {
+        match reader.landing(&h) {
+            Ok(l) => {
+                leaving.push(h);
+                at = l.prev;
+            }
+            Err(_) => {
+                gone_known = false;
+                break;
+            }
+        }
+    }
     leaving.reverse();
-    let complete = complete || leaving.is_empty();
+    // a list is complete only when this store holds the chain that leaves, and holds enough of
+    // the chain kept to show that no listed landing stays
+    let complete = gone_known && (kept_complete || leaving.is_empty());
     Ok(CanonPreview {
         remote: remote.to_string(),
         before,
@@ -737,8 +757,9 @@ impl<'a> SyncService<'a> {
         Ok(fetched)
     }
 
-    /// The held rule for the write `p`: `pending` clears, and a canon write records its head
-    /// and request `number` as held. `applied` does not move (D-QCE8M).
+    /// The held rule for the write `p`: `pending` clears, and a canon write records its head,
+    /// request `number` and push id as held, in the same batch (D-PGQZM). `applied` does not
+    /// move (D-QCE8M).
     fn apply_held(
         &self,
         engine: &dyn Engine,
@@ -764,6 +785,7 @@ impl<'a> SyncService<'a> {
                 held: Some(SyncHeld {
                     head: p.head,
                     request: number,
+                    push: p.push.clone(),
                 }),
             }));
         }

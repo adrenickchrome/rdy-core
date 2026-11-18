@@ -954,6 +954,7 @@ fn scc8_held_request_does_not_advance_known_canon() {
     );
     let out = push(&e, &hub, None).unwrap();
     let WriteEnd::Held {
+        push: held_push,
         head: held_head,
         request,
         ..
@@ -971,10 +972,26 @@ fn scc8_held_request_does_not_advance_known_canon() {
             }
         )
     );
+    // D-PGQZM: held keeps the push id of the pending ref that the held reply clears
+    let held = SyncHeld {
+        head,
+        request: 7,
+        push: held_push.clone(),
+    };
+    assert_eq!(hub.writes()[0].push, *held_push);
     let c = canon_of(&e, "shared").unwrap();
+    assert_eq!((c.applied, c.held), (None, Some(held.clone())));
+    // it is durable: a reopened copy of the store reads the same held request
+    let (_copy_dir, reopened) = copy_project(&e);
     assert_eq!(
-        (c.applied, c.held),
-        (None, Some(SyncHeld { head, request: 7 }))
+        reopened
+            .read()
+            .reader()
+            .sync_canon("shared")
+            .unwrap()
+            .unwrap()
+            .held,
+        Some(held)
     );
     assert_eq!(hub.state.lock().unwrap().canon, Some(tip));
     assert_eq!(e.engine.read().canon_head(), Some(head));
@@ -1167,6 +1184,7 @@ fn scc8_write_reply_records_outcome_request_version_and_minimum() {
     );
     let out = push(&e, &hub, None).unwrap();
     let WriteEnd::Held {
+        push: held_push,
         request,
         min_rdy_raised,
         ..
@@ -1186,7 +1204,11 @@ fn scc8_write_reply_records_outcome_request_version_and_minimum() {
     );
     assert_eq!(
         canon_of(&e, "shared").unwrap().held,
-        Some(SyncHeld { head, request: 3 })
+        Some(SyncHeld {
+            head,
+            request: 3,
+            push: held_push.clone(),
+        })
     );
 }
 
@@ -1227,7 +1249,10 @@ fn scc8_held_head_suppresses_write_and_longer_chain_versions_request() {
     );
     let out = push(&e, &hub, None).unwrap();
     let WriteEnd::Held {
-        request, head: h, ..
+        push: held_push,
+        request,
+        head: h,
+        ..
     } = &out.canon
     else {
         panic!("{out:?}")
@@ -1253,14 +1278,16 @@ fn scc8_held_head_suppresses_write_and_longer_chain_versions_request() {
         canon_of(&e, "shared").unwrap().held,
         Some(SyncHeld {
             head: next,
-            request: 7
+            request: 7,
+            push: held_push.clone(),
         })
     );
 }
 
 /// D-H0BZN "Held": `held` clears when `applied` reaches its head, by a taken write or by a
-/// pull. The clear on a request that closed with no landing needs the held push's outcome
-/// (open question Q1); it waits for the held pins of the hub's fixture v3.
+/// pull. `held` keeps the held push's id (D-PGQZM). The clear on a request that closed with no
+/// landing (the pull's lookup of that push reads `request_state` `closed`) waits for the held
+/// pins of the hub's fixture v3.
 #[test]
 fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
     // a taken write whose tip reaches the held head
@@ -1295,7 +1322,13 @@ fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
             version: 1,
         },
     );
-    push(&e, &hub, None).unwrap();
+    let out = push(&e, &hub, None).unwrap();
+    let WriteEnd::Held {
+        push: held_push, ..
+    } = &out.canon
+    else {
+        panic!("{out:?}")
+    };
     // a pull while hub canon is below the held head keeps held
     let (_dir, hub_store) = copy_project(&e);
     hub.serve(hub_store.read());
@@ -1308,7 +1341,8 @@ fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
             Some(tip),
             Some(SyncHeld {
                 head: head2,
-                request: 5
+                request: 5,
+                push: held_push.clone(),
             })
         )
     );
@@ -1317,7 +1351,8 @@ fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
     let c = canon_of(&e, "shared").unwrap();
     assert_eq!((c.applied, c.held), (Some(head2), None));
     let _ = head;
-    // v3 skip: "the request has closed with no landing" (Q1) has no outcome to read yet
+    // v3 skip: "the request has closed with no landing" (D-PGQZM) needs the outcome's
+    // `request_state`, which fixture v2 does not serve
 }
 
 /// D-H0BZN "Lost reply", "Outcome lookup": a found `pending` is looked up before any known,
@@ -1362,7 +1397,11 @@ fn scc8_pending_lookup_precedes_put_or_write_and_never_resends() {
     assert!(matches!(out.canon, WriteEnd::HeldOpen { request: 4, .. }));
     assert_eq!(
         canon_of(&e, "shared").unwrap().held,
-        Some(SyncHeld { head, request: 4 })
+        Some(SyncHeld {
+            head,
+            request: 4,
+            push: P1.into(),
+        })
     );
 
     // refused with the repair's code: cleared, and the push goes on under a new push id
@@ -1549,7 +1588,8 @@ fn scc8_force_push_moves_hub_canon_and_previews_leaving() {
     let hub = Hub::new().with_state(|s| s.canon = Some(theirs));
     assert_eq!(err(push(&e, &hub, None)).code, E_DIVERGED);
 
-    // the preview reads this store only: the hub tip is not here, so the list is short
+    // the preview reads this store only: the hub tip is not here, so the landings that leave
+    // are unknown and the preview is not complete (it never certifies an empty list)
     let read = e.engine.read();
     let p = canon_preview(&read, "shared", Some(theirs), PreviewKind::ForcePush).unwrap();
     assert_eq!(
@@ -1559,9 +1599,37 @@ fn scc8_force_push_moves_hub_canon_and_previews_leaving() {
             before: Some(theirs),
             after: Some(head),
             leaving: vec![],
-            complete: true,
+            complete: false,
         }
     );
+    // diverged chains: the hub's landing is not here, so nothing certifies what leaves
+    let d = env(2);
+    let (_d_dir, d_hub_store) = copy_project(&d);
+    let hub_side = land_in(&d_hub_store, "theirs");
+    let mine = land_in(&d.engine, "mine");
+    let p = canon_preview(
+        &d.engine.read(),
+        "shared",
+        Some(hub_side),
+        PreviewKind::ForcePush,
+    )
+    .unwrap();
+    assert_eq!(
+        (p.before, p.after, p.leaving.clone(), p.complete),
+        (Some(hub_side), Some(mine), vec![], false)
+    );
+    // once a pull brings the hub's history here, the preview is complete: a hub tip whose chain
+    // this store holds names each landing that leaves
+    let d_hub = Hub::new().with_state(|s| s.canon = Some(hub_side));
+    d_hub.serve(d_hub_store.read());
+    Sync::new(&d, &d_hub).pull(PullRequest::default()).unwrap();
+    let d_read = d.engine.read();
+    assert_ne!(d_read.canon_head(), Some(mine));
+    let p = canon_preview(&d_read, "shared", Some(hub_side), PreviewKind::ForcePush).unwrap();
+    assert_eq!((p.leaving.clone(), p.complete), (vec![], true));
+    let p = canon_preview(&d_read, "shared", Some(mine), PreviewKind::ForcePush).unwrap();
+    assert_eq!((p.leaving.clone(), p.complete), (vec![mine], true));
+    drop(d_read);
     let take = canon_preview(&read, "shared", Some(e.landings[0]), PreviewKind::TakePull).unwrap();
     assert_eq!(take.leaving, [head]);
     drop(read);
