@@ -18,4 +18,5 @@ mod release_readme_contract;
 mod release_repo_links_contract;
 mod release_repo_links_formats;
 mod release_sample;
+mod release_site_on_demand;
 mod release_sync_client_contract;
