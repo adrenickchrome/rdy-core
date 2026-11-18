@@ -1254,7 +1254,7 @@ mod tests {
                     file.bytes
                 );
                 let e = within((MAX_FILES, len - 1, MAX_ARTIFACT_BYTES), || {
-                    free.render(&st, path).err().expect("one byte over")
+                    free.render(&st, path).expect_err("one byte over")
                 });
                 over(&e, format!("{} file bytes", len - 1));
             }
@@ -1341,7 +1341,8 @@ mod tests {
         let m = st.materialized(&canon).unwrap();
         // each path, and the files it writes
         type Files = BTreeMap<String, Vec<u8>>;
-        let paths: Vec<(&str, Box<dyn Fn() -> Result<Files, RdyError> + '_>)> = vec![
+        type Build<'b> = Box<dyn Fn() -> Result<Files, RdyError> + 'b>;
+        let paths: Vec<(&str, Build)> = vec![
             (
                 "publication",
                 Box::new(|| {
@@ -1419,15 +1420,15 @@ mod tests {
                 build().unwrap_or_else(|e| panic!("{name} at its exact limits: {e}"))
             });
             let e = within((n - 1, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES), || {
-                build().err().expect("files")
+                build().expect_err("files")
             });
             over(&e, format!("{} files", n - 1));
             let e = within((MAX_FILES, largest - 1, MAX_ARTIFACT_BYTES), || {
-                build().err().expect("file bytes")
+                build().expect_err("file bytes")
             });
             over(&e, format!("{} file bytes", largest - 1));
             let e = within((MAX_FILES, MAX_FILE_BYTES, total - 1), || {
-                build().err().expect("artifact bytes")
+                build().expect_err("artifact bytes")
             });
             over(&e, format!("{} artifact bytes", total - 1));
             assert!(
