@@ -566,7 +566,7 @@ impl<'a, 's> Exchange<'a, 's> {
                 WriteEnd::Held {
                     push: id.clone(),
                     head: job.head,
-                    request: held.clone(),
+                    request: *held,
                     resumed: false,
                     sent,
                     min_rdy_raised: false,
