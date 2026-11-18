@@ -2115,6 +2115,107 @@ fn scc8_restore_seeds_or_forces_and_keeps_newer_hub_views() {
     assert!(is_empty_dir(scratch.path()));
 }
 
+/// D-J3YA0, D-KE83X: a restore of an older dump whose whole history the hub holds still names
+/// the root it moves to. The hub tip moved past the dump's head, and known names nothing
+/// missing, so one batch of no record names the dump's head as its prerequisite before the
+/// write; the write expects the newer tip and canon ends at the dump's head. A view write whose
+/// ops the hub holds names its head the same way. A canon or view that is already the dump's
+/// sends no batch and no write.
+#[test]
+fn scc8_restore_of_a_known_older_dump_names_its_root() {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let renderer = Renderer::default();
+
+    // canon: the dump is at A, the hub moved on to B and holds every record of both
+    let src = env(1);
+    let a = src.landings[0];
+    let dump = dump_of(&src.engine, dir.path(), "older.rdydump");
+    let b = land_in(&src.engine, "newer");
+    let hub = Hub::new().with_state(|s| {
+        s.repo_id = Some(repo_of(&src));
+        s.canon = Some(b);
+    });
+    *hub.held.lock().unwrap() = closure(&src, b, None);
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &dump).unwrap();
+    assert_eq!(hub.steps(), ["discovery", "state", "known", "put", "write"]);
+    assert_eq!(*hub.roots.lock().unwrap(), [(a, vec![landing(a)])]);
+    let w = &hub.writes()[0];
+    assert_eq!(*hub.puts.lock().unwrap(), [(w.push.clone(), vec![])]);
+    assert_eq!(
+        (w.kind, w.expected, w.view.clone()),
+        (WriteKind::Restore, Some(landing(b)), None)
+    );
+    assert_eq!(taken_end(&out.canon), (None, a, a));
+    assert_eq!(hub.state.lock().unwrap().canon, Some(a));
+    assert!(is_empty_dir(scratch.path()));
+
+    // a hub dump: canon is the hub's tip (no batch, no write); the hub holds every op of v1
+    // and its head is an earlier op of the dump's chain
+    let hsrc = env(1);
+    write_in(&hsrc.engine, "v1", "a");
+    let v1_first = view_head(&hsrc, "v1");
+    write_in(&hsrc.engine, "v1", "b");
+    let v1 = view_head(&hsrc, "v1");
+    let hdump = hub_dump(&hsrc, &["v1"], None, dir.path(), "hub.rdydump");
+    let read = hsrc.engine.read();
+    let head = hsrc.landings[0];
+    let hub = Hub::new().with_state(|s| {
+        s.repo_id = Some(repo_of(&hsrc));
+        s.canon = Some(head);
+    });
+    let ops = rdy_store::closure::history_closure_before(
+        read.reader(),
+        StreamPurpose::ViewHistory,
+        v1,
+        &BTreeSet::new(),
+        None,
+        read.seq(),
+    )
+    .unwrap()
+    .records;
+    {
+        let mut held = hub.held.lock().unwrap();
+        *held = closure(&hsrc, head, None);
+        held.extend(ops);
+    }
+    hub.views
+        .lock()
+        .unwrap()
+        .insert("v1".into(), (view_root(&read, v1), v1_first));
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &hdump).unwrap();
+    assert!(matches!(
+        out.canon,
+        Some(WriteEnd::UpToDate { tip: Some(t) }) if t == head
+    ));
+    assert_eq!(write_kinds(&hub), [(WriteKind::View, Some("v1".into()))]);
+    let op = |hash| ObjectKey {
+        kind: kinds::VIEW_OP,
+        hash,
+    };
+    assert_eq!(*hub.roots.lock().unwrap(), [(v1, vec![op(v1)])]);
+    let w = &hub.writes()[0];
+    assert_eq!(*hub.puts.lock().unwrap(), [(w.push.clone(), vec![])]);
+    assert_eq!(w.expected, Some(op(v1_first)));
+    match &out.views[..] {
+        [(name, WriteEnd::Taken { tip, .. })] => assert_eq!((name.as_str(), *tip), ("v1", v1)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(hub.views.lock().unwrap()["v1"].1, v1);
+
+    // the same restore again: canon and v1 are the dump's, so nothing is sent or written
+    hub.clear();
+    let out = restore_with(&caller, &hub, &renderer, scratch.path(), &hdump).unwrap();
+    assert!(matches!(out.canon, Some(WriteEnd::UpToDate { .. })));
+    assert!(matches!(
+        &out.views[..],
+        [(_, WriteEnd::UpToDate { tip: Some(t) })] if *t == v1
+    ));
+    assert!(!hub.steps().iter().any(|s| *s == "put" || *s == "write"));
+    assert!(is_empty_dir(scratch.path()));
+}
+
 /// D-J3YA0 step 5, D-D2NPN, D-R80JP, D-H0BZN "Lost reply": the temporary store is removed after
 /// success, a hub refusal, a transport failure, a lost reply (looked up once in the same run), a
 /// load refusal and a cancelled call, and the caller's dump keeps its bytes. A hub refusal keeps
