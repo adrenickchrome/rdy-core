@@ -330,6 +330,10 @@ fn status_text(v: &Value) -> String {
             "\n{unlinked} delivered repos have no repo link (rdy links)"
         ));
     }
+    // D-3RSCW: each remote's sync state
+    for row in v["sync"].as_array().into_iter().flatten() {
+        out.push_str(&crate::sync_cmd::status_lines(row));
+    }
     // D-CRXNA: one line per upgrade backup, which the person may delete
     for b in v["upgrade_backups"].as_array().into_iter().flatten() {
         out.push_str(&format!("\n{}", backup_line(b)));

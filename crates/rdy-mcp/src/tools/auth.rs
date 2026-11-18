@@ -63,7 +63,7 @@ impl AuthOp {
 }
 
 /// The person's answer to the sign-in card.
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthAnswerParam {
     Confirm,

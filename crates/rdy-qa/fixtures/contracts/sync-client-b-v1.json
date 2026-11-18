@@ -41,6 +41,8 @@
         "policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
         "publication baseline": "makes a baseline of a tagged publication; cli_sync_baseline pins its replies",
         "publish": "uploads a site to a host",
+        "pull": "pulls from a hub; cli_sync pins its replies",
+        "push": "pushes to a hub; cli_sync pins its replies",
         "reaffirm": "needs a suspect decision; the write op of the same name is an MCP write",
         "redact": "destroys content; no dry run is probed",
         "reindex": "rebuilds derived state; the derived_identities row covers it",
@@ -12808,6 +12810,343 @@
           "args": [
             {
               "action": "set",
+              "id": "remote",
+              "long": "remote",
+              "num_args": "1",
+              "value_names": [
+                "REMOTE"
+              ]
+            },
+            {
+              "action": "append",
+              "id": "views",
+              "long": "view",
+              "num_args": "1",
+              "value_names": [
+                "NAME"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "force",
+              "long": "force",
+              "num_args": "0",
+              "value_names": [
+                "FORCE"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "restore",
+              "long": "restore",
+              "num_args": "1",
+              "value_names": [
+                "DUMP"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "card_hash",
+              "long": "card-hash",
+              "num_args": "1",
+              "value_names": [
+                "CARD_HASH"
+              ]
+            },
+            {
+              "action": "set",
+              "choices": [
+                "confirm",
+                "cancel"
+              ],
+              "id": "answer",
+              "long": "answer",
+              "num_args": "1",
+              "value_names": [
+                "ANSWER"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "relayed_by",
+              "long": "relayed-by",
+              "num_args": "1",
+              "value_names": [
+                "ACTOR"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "evidence",
+              "long": "evidence",
+              "num_args": "1",
+              "value_names": [
+                "EVIDENCE"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "question",
+              "long": "question",
+              "num_args": "1",
+              "value_names": [
+                "QUESTION"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "session_ref",
+              "long": "session-ref",
+              "num_args": "1",
+              "value_names": [
+                "SESSION_REF"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "PushArgs",
+              "multiple": true,
+              "required": false
+            },
+            {
+              "args": [
+                "answer",
+                "card_hash",
+                "evidence",
+                "question",
+                "relayed_by",
+                "session_ref"
+              ],
+              "id": "RelayArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "push",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set",
+              "id": "remote",
+              "long": "remote",
+              "num_args": "1",
+              "value_names": [
+                "REMOTE"
+              ]
+            },
+            {
+              "action": "append",
+              "id": "views",
+              "long": "view",
+              "num_args": "1",
+              "value_names": [
+                "NAME"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "take",
+              "long": "take",
+              "num_args": "0",
+              "value_names": [
+                "TAKE"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "strict",
+              "long": "strict",
+              "num_args": "0",
+              "value_names": [
+                "STRICT"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "card_hash",
+              "long": "card-hash",
+              "num_args": "1",
+              "value_names": [
+                "CARD_HASH"
+              ]
+            },
+            {
+              "action": "set",
+              "choices": [
+                "confirm",
+                "cancel"
+              ],
+              "id": "answer",
+              "long": "answer",
+              "num_args": "1",
+              "value_names": [
+                "ANSWER"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "relayed_by",
+              "long": "relayed-by",
+              "num_args": "1",
+              "value_names": [
+                "ACTOR"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "evidence",
+              "long": "evidence",
+              "num_args": "1",
+              "value_names": [
+                "EVIDENCE"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "question",
+              "long": "question",
+              "num_args": "1",
+              "value_names": [
+                "QUESTION"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "session_ref",
+              "long": "session-ref",
+              "num_args": "1",
+              "value_names": [
+                "SESSION_REF"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "PullArgs",
+              "multiple": true,
+              "required": false
+            },
+            {
+              "args": [
+                "answer",
+                "card_hash",
+                "evidence",
+                "question",
+                "relayed_by",
+                "session_ref"
+              ],
+              "id": "RelayArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "pull",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set",
               "id": "path",
               "index": 1,
               "num_args": "1",
@@ -20031,7 +20370,12 @@
       [
         "E_UPSTREAM_UNCERTAIN",
         "the hub request may have completed",
-        "check its state on the hub before trying again; for a publish upload, check push {push} on the hub"
+        "check its state on the hub before trying again; for a publish upload, check push {push} on the hub; for a sync write, run rdy_push or rdy_pull again: rdy finds the outcome of push {push} before it writes again"
+      ],
+      [
+        "E_DIVERGED",
+        "a push whose local canon does not hold the hub tip <tip>",
+        "run rdy_pull to replay the local landings, then push again; rdy_push with force moves hub canon to local canon after the person confirms its card"
       ],
       [
         "E_UPSTREAM_CONFIRM_HOST",
@@ -20941,6 +21285,7 @@
       "E_UPSTREAM_TRANSPORT",
       "E_UPSTREAM_REFUSED",
       "E_UPSTREAM_UNCERTAIN",
+      "E_DIVERGED",
       "E_UPSTREAM_CONFIRM_HOST",
       "E_UPSTREAM_CA",
       "E_UPSTREAM_KEY_PROOF",
@@ -25526,6 +25871,8 @@
       "rdy_policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
       "rdy_publication_baseline": "makes a baseline of a tagged publication; cli_sync_baseline and mcp_sync_baseline pin its replies",
       "rdy_publish": "uploads a site to a host",
+      "rdy_pull": "pulls from a hub; mcp_sync pins its replies",
+      "rdy_push": "pushes to a hub; mcp_sync pins its replies",
       "rdy_redact": "destroys content; no dry run is probed",
       "rdy_remote": "edits the remotes of the project",
       "rdy_render": "writes a site to a directory; the site_urls row covers its routes",
@@ -25575,6 +25922,8 @@
       "rdy_publication_baseline",
       "rdy_publication_check",
       "rdy_publish",
+      "rdy_pull",
+      "rdy_push",
       "rdy_query",
       "rdy_read",
       "rdy_redact",
@@ -27773,6 +28122,184 @@
             "tag",
             "to"
           ],
+          "type": "object"
+        }
+      },
+      "rdy_pull": {
+        "input_schema": {
+          "$defs": {
+            "AuthAnswerParam": {
+              "description": "The person's answer to the sign-in card.",
+              "enum": [
+                "confirm",
+                "cancel"
+              ],
+              "type": "string"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthAnswerParam"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The person's answer to the card: confirm or cancel. With card_hash."
+            },
+            "card_hash": {
+              "description": "The card_hash of the card the person answered. With answer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "description": "The person's words, quoted (1 to 2000 characters). With card_hash and answer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "The question you asked the person. With evidence.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "remote": {
+              "description": "The share remote to pull from, by its name. Default: the share remote, else the only remote.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_ref": {
+              "description": "The chat session the person spoke in (default: mcp). With evidence.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "strict": {
+              "description": "true stops a replay at its first conflict. Not with take and no views.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "take": {
+              "description": "true takes hub canon with no replay (a card first); with views it takes only those views and canon pulls as usual.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "views": {
+              "description": "Views to pull after canon: at most 256 names, each once. No view is pulled unless named.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "rdy_push": {
+        "input_schema": {
+          "$defs": {
+            "AuthAnswerParam": {
+              "description": "The person's answer to the sign-in card.",
+              "enum": [
+                "confirm",
+                "cancel"
+              ],
+              "type": "string"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthAnswerParam"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The person's answer to the card: confirm or cancel. With card_hash."
+            },
+            "card_hash": {
+              "description": "The card_hash of the card the person answered. With answer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "description": "The person's words, quoted (1 to 2000 characters). With card_hash and answer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "force": {
+              "description": "true forces hub canon to this project's head when local canon does not hold the hub tip. Canon only. Returns a card first.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "The question you asked the person. With evidence.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "remote": {
+              "description": "The share remote to push to, by its name. Default: the share remote, else the only remote.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "restore": {
+              "description": "The path of a dump to restore into the hub repo. Takes no views and no force. Returns a card first when the hub repo holds canon.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_ref": {
+              "description": "The chat session the person spoke in (default: mcp). With evidence.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "views": {
+              "description": "Views to push after canon: at most 256 names, each once. No view travels unless named.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         }
       },

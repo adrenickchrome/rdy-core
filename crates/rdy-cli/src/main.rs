@@ -48,6 +48,7 @@ mod setup_cmd;
 mod signing_cmd;
 mod site_cmd;
 mod stream_cmd;
+mod sync_cmd;
 mod tension_cmd;
 mod trace_text;
 mod upgrade_cmd;
@@ -202,6 +203,10 @@ enum Cmd {
     },
     /// Upload a tag's publication to a publish remote's hub site as a candidate. The site selects the profile, and the tagged profile gives the audience. Prints the candidate and the link to its disclosure review on the hub, which authorizes publication. The chat path is rdy_publish. Through the daemon, hub sign-ins come from the daemon's user config: after changing XDG_CONFIG_HOME, run rdy serve --stop.
     Publish(publish_cmd::PublishArgs),
+    /// Push canon, and the views you name with --view, to a share remote's hub repo, or restore a dump into it with --restore. A forced push that moves hub canon, and a restore into a hub repo that holds canon, ask for your confirmation first. The chat path is rdy_push. Through the daemon, hub sign-ins come from the daemon's user config: after changing XDG_CONFIG_HOME, run rdy serve --stop.
+    Push(sync_cmd::PushArgs),
+    /// Pull canon, and the views you name with --view, from a share remote's hub repo. Local landings replay on hub canon in a pull view; --take moves local canon to hub canon with no replay and asks for your confirmation first. The chat path is rdy_pull. Through the daemon, hub sign-ins come from the daemon's user config: after changing XDG_CONFIG_HOME, run rdy serve --stop.
+    Pull(sync_cmd::PullArgs),
     /// List the folder and doc tree.
     Ls(read_cmd::LsArgs),
     Edit(edit_cmd::EditArgs),
@@ -322,6 +327,8 @@ fn run(cli: Cli, env: &Env, projectless: bool) -> Result<(Value, String), ErrorR
         Cmd::New { what } => edit_cmd::new(env, what),
         Cmd::Publication { cmd } => publication_cmd::publication(env, cmd),
         Cmd::Publish(a) => publish_cmd::publish(env, a),
+        Cmd::Push(a) => sync_cmd::push(env, a, as_json),
+        Cmd::Pull(a) => sync_cmd::pull(env, a, as_json),
         Cmd::Ls(a) => read_cmd::ls(env, a),
         Cmd::Log(a) => read_cmd::log(env, a),
         Cmd::Impact(a) => read_cmd::impact(env, a),

@@ -772,6 +772,9 @@ const REFUSED: &[(&str, &str)] = &[
     ("rdy_site", "E_SITE"),
     ("rdy_publication_baseline", "E_BAD_INPUT"),
     ("rdy_publish", "E_BAD_INPUT"),
+    // the sync tools run in a daemon too (D-47HVF): an engine without one refuses the call
+    ("rdy_push", "E_BAD_INPUT"),
+    ("rdy_pull", "E_BAD_INPUT"),
     ("rdy_render", "E_BAD_INPUT"),
     ("rdy_export", "E_BAD_INPUT"),
     ("rdy_auth", "E_BAD_INPUT"),
@@ -929,6 +932,8 @@ async fn script(x: &mut Run<'_>, tools: &[String]) {
         json!({"tag": "none", "to": "none", "site": "none"}),
     )
     .await;
+    x.ok("rdy_push", json!({})).await;
+    x.ok("rdy_pull", json!({})).await;
     x.ok("rdy_render", json!({"out": s("render"), "scope": "canon"}))
         .await;
     x.ok(

@@ -36,6 +36,8 @@
 {"tool": "rdy_publication_baseline", "ruleset": "rdy:publish", "response": "warn"},
 {"tool": "rdy_publication_check", "ruleset": "rdy:publish", "response": "warn"},
 {"tool": "rdy_publish", "ruleset": "rdy:publish", "response": "warn"},
+{"tool": "rdy_pull", "ruleset": "rdy:publish", "response": "warn"},
+{"tool": "rdy_push", "ruleset": "rdy:publish", "response": "warn"},
 {"tool": "rdy_query", "ruleset": "rdy:bootstrap", "response": "warn"},
 {"tool": "rdy_read", "ruleset": "rdy:bootstrap", "response": "warn"},
 {"tool": "rdy_redact", "ruleset": "rdy:project-ops", "response": "warn"},

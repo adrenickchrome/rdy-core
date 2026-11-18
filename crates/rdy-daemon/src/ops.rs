@@ -43,7 +43,7 @@ mod search;
 mod signing;
 mod site;
 mod site_url;
-mod sync;
+pub(crate) mod sync;
 mod wc;
 
 use brief::brief;
@@ -691,19 +691,32 @@ pub fn dispatch_with(
             let req = parse(op, args, "{tag, to, site, keep_latest?}")?;
             publish::run(cx.engine.read(), &cx.engine.root(), cx.session, req)
         }
-        // the sync coordinator holds the writer only for its local steps
+        // the sync coordinator holds the writer only for its local steps; a move that removes
+        // landings returns the person's card first
         "push" => {
-            let req = parse(op, args, "{remote?, views?, force?}")?;
-            sync::push(cx.engine, &cx.engine.root(), cx.session, req)
+            let inputs = parse(
+                op,
+                args,
+                "{remote?, views?, force?, restore?, card_hash?, answer?, relayed_by?, evidence?, question?, session_ref?}",
+            )?;
+            sync::push(cx.engine, &cx.engine.root(), &sync_who(cx), inputs)
         }
         "pull" => {
-            let req = parse(op, args, "{remote?, views?, take?, strict?}")?;
-            sync::pull(cx.engine, &cx.engine.root(), cx.session, req)
+            let inputs = parse(
+                op,
+                args,
+                "{remote?, views?, take?, strict?, card_hash?, answer?, relayed_by?, evidence?, question?, session_ref?}",
+            )?;
+            sync::pull(cx.engine, &cx.engine.root(), &sync_who(cx), inputs)
         }
         // a restore reads only the dump and its temporary store: the project gives the remote
         "restore" => {
-            let req = parse(op, args, "{dump, remote?}")?;
-            sync::restore(&cx.engine.root(), cx.session, req)
+            let req = parse(
+                op,
+                args,
+                "{dump, remote?, card_hash?, answer?, relayed_by?, evidence?, question?, session_ref?}",
+            )?;
+            sync::restore(cx.engine, &cx.engine.root(), &sync_who(cx), req)
         }
         "instructions" => instructions(cx, parse(op, args, "{full?, load?, part?}")?),
         "links" => links(cx, parse(op, args, "{op?, alias?}")?),
@@ -713,6 +726,15 @@ pub fn dispatch_with(
             format!("unknown op {op:?}"),
             format!("one of: {}", OPS.join(", ")),
         )),
+    }
+}
+
+/// The caller of a sync op at the command line: not implicit, so the relay flags name the relay.
+fn sync_who<'a>(cx: &'a OpContext<'a>) -> sync::Who<'a> {
+    sync::Who {
+        session: cx.session,
+        person: cx.human,
+        implicit: false,
     }
 }
 

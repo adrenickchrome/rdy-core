@@ -74,6 +74,60 @@ const SCC8_CHANGES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The members Task 9a adds to [`CURRENT`] (D-47HVF, D-2VM48): the chat tools, the command
+/// trees, the one error row, and the changed fix of an existing row, each with the reason it moves.
+/// A list of names that gains an entry changes as a list, one level under its section.
+const SCC9_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /cli/runtime/not_probed_commands/pull",
+        "rdy pull needs a hub; cli_sync pins its replies",
+    ),
+    (
+        "added /cli/runtime/not_probed_commands/push",
+        "rdy push needs a hub; cli_sync pins its replies",
+    ),
+    (
+        "added /cli/tree/subcommands/name=pull",
+        "the pull command and its flags: remote, view, take, strict and the relay flags",
+    ),
+    (
+        "added /cli/tree/subcommands/name=push",
+        "the push command and its flags: remote, view, force, restore and the relay flags",
+    ),
+    (
+        "added /errors_warnings/error_rows/row=E_DIVERGED",
+        "the chat row of a push whose local canon does not hold the hub tip",
+    ),
+    (
+        "added /mcp/result_fields_not_captured/rdy_pull",
+        "rdy_pull needs a hub; mcp_sync pins its replies",
+    ),
+    (
+        "added /mcp/result_fields_not_captured/rdy_push",
+        "rdy_push needs a hub; mcp_sync pins its replies",
+    ),
+    (
+        "added /mcp/tools/rdy_pull",
+        "the pull tool: its closed schema and description",
+    ),
+    (
+        "added /mcp/tools/rdy_push",
+        "the push tool: its closed schema and description",
+    ),
+    (
+        "changed /errors_warnings/error_rows/row=E_UPSTREAM_UNCERTAIN",
+        "its fix says what to run after a sync write with no reply",
+    ),
+    (
+        "changed /mcp/refusal_error_rows",
+        "the list of refusal codes gains E_DIVERGED",
+    ),
+    (
+        "changed /mcp/tool_names",
+        "the list of tool names gains rdy_pull and rdy_push",
+    ),
+];
+
 fn contracts() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/contracts")
 }
@@ -201,7 +255,12 @@ fn scc8_successor_starts_from_the_shipped_predecessor() {
 #[test]
 fn scc8_contract_adds_only_sync_wire_and_errors() {
     let want: Vec<String> = SCC8_CHANGES.iter().map(|(c, _)| c.to_string()).collect();
-    assert_eq!(changes(), want);
+    let later: Vec<&str> = SCC9_CHANGES.iter().map(|(c, _)| *c).collect();
+    let found: Vec<String> = changes()
+        .into_iter()
+        .filter(|c| !later.contains(&c.as_str()))
+        .collect();
+    assert_eq!(found, want);
     for (change, why) in SCC8_CHANGES {
         assert!(!why.is_empty(), "{change} has a reason");
         // a leaf at least three levels down: never a whole top-level section or row
@@ -270,5 +329,38 @@ fn scc8_contract_adds_only_sync_wire_and_errors() {
         ),
     ] {
         assert_eq!(templates[name], format!("\"{text}\""), "{name}");
+    }
+}
+
+/// scc9: the successor adds only the sync surfaces of Task 9a ([`SCC9_CHANGES`]) beside Task 8's:
+/// the two tools, the two command trees and one error row. No whole top-level section moves: each
+/// leaf is a member below a section, and no member of an earlier task changes.
+#[test]
+fn scc9_contract_adds_only_sync_surfaces() {
+    let mut want: Vec<String> = SCC8_CHANGES
+        .iter()
+        .chain(SCC9_CHANGES)
+        .map(|(c, _)| c.to_string())
+        .collect();
+    want.sort();
+    assert_eq!(changes(), want);
+    for (change, why) in SCC9_CHANGES {
+        assert!(!why.is_empty(), "{change} has a reason");
+        let path = change.split_once(' ').unwrap().1;
+        assert!(path.matches('/').count() >= 2, "{change}");
+        assert!(!change.starts_with("removed "), "{change}");
+    }
+    let now = read(CURRENT);
+    // the tools and their schemas
+    let tools = now["mcp"]["tool_names"].as_array().unwrap();
+    for t in ["rdy_pull", "rdy_push"] {
+        assert!(tools.iter().any(|n| n == t), "{t}");
+        assert!(now["mcp"]["tools"][t].is_object(), "{t}");
+    }
+    // the command trees
+    let keyed_now = keyed(&now);
+    let subs = &keyed_now["cli"]["tree"]["subcommands"];
+    for c in ["pull", "push"] {
+        assert_eq!(subs[format!("name={c}")]["name"], c);
     }
 }

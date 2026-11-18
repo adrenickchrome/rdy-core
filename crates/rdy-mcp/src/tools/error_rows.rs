@@ -398,7 +398,12 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         E_UPSTREAM_UNCERTAIN,
         UPSTREAM_UNCERTAIN_MESSAGE,
-        "check its state on the hub before trying again; for a publish upload, check push {push} on the hub",
+        "check its state on the hub before trying again; for a publish upload, check push {push} on the hub; for a sync write, run rdy_push or rdy_pull again: rdy finds the outcome of push {push} before it writes again",
+    ),
+    (
+        E_DIVERGED,
+        "a push whose local canon does not hold the hub tip <tip>",
+        "run rdy_pull to replay the local landings, then push again; rdy_push with force moves hub canon to local canon after the person confirms its card",
     ),
     (
         E_UPSTREAM_CONFIRM_HOST,

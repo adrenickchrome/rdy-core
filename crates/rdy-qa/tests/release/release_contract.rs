@@ -2132,6 +2132,8 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "makes a baseline of a tagged publication; cli_sync_baseline pins its replies",
     ),
     ("publish", "uploads a site to a host"),
+    ("pull", "pulls from a hub; cli_sync pins its replies"),
+    ("push", "pushes to a hub; cli_sync pins its replies"),
     (
         "reaffirm",
         "needs a suspect decision; the write op of the same name is an MCP write",
@@ -3283,6 +3285,8 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
         "makes a baseline of a tagged publication; cli_sync_baseline and mcp_sync_baseline pin its replies",
     ),
     ("rdy_publish", "uploads a site to a host"),
+    ("rdy_pull", "pulls from a hub; mcp_sync pins its replies"),
+    ("rdy_push", "pushes to a hub; mcp_sync pins its replies"),
     ("rdy_redact", "destroys content; no dry run is probed"),
     ("rdy_remote", "edits the remotes of the project"),
     (

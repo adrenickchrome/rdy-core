@@ -94,6 +94,7 @@ mod mcp_stream;
 mod mcp_supporting;
 mod mcp_supporting_consequences;
 mod mcp_suspects_paging;
+mod mcp_sync;
 mod mcp_sync_baseline;
 mod mcp_tag_relay;
 mod mcp_tensions;
