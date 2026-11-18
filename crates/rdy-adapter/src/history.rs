@@ -9,9 +9,11 @@
 //! No trust verdict is computed, and no current gate policy or assurance is recomputed.
 
 use crate::store::{Snapshot, StoreHandle};
+use crate::sync::CheckedQuarantine;
 use rdy_engine::RdyError;
 use rdy_engine::history_facts;
 use rdy_model::Hash;
+use std::collections::HashMap;
 
 pub use rdy_engine::history_facts::{
     BlockOp, BlockWrite, DisputeFacts, LandingFacts, ObjectPresence, SignatureFact,
@@ -52,6 +54,45 @@ impl Snapshot {
     /// hashes. All the hashes are found in one walk of the captured histories.
     pub fn landings(&self, hashes: &[Hash]) -> Result<Vec<LandingFacts>, RdyError> {
         history_facts::landings(self.read_state(), &self.history_heads(), hashes)
+    }
+
+    /// [`Snapshot::landings`] over this snapshot and the push `checked`, before the hub's move: a
+    /// landing the push's records hold is read in the push's scratch holder, as
+    /// [`Snapshot::check_pushed_landing`] reads it, and every other landing as
+    /// [`Snapshot::landings`] reads it here. One per distinct hash, in the order each first
+    /// occurs; each equals what [`Snapshot::landings`] gives once the push has moved in. A hash
+    /// that neither the push nor the snapshot's captured histories hold fails the whole call as
+    /// [`Snapshot::landings`] fails it. `checked` must have been checked on this snapshot
+    /// (`E_BAD_INPUT` otherwise). At most 100000 hashes, as for [`Snapshot::landings`]. A
+    /// removal since the snapshot is `E_REDACTED_STATE`.
+    pub fn pushed_landings(
+        &self,
+        checked: &CheckedQuarantine,
+        hashes: &[Hash],
+    ) -> Result<Vec<LandingFacts>, RdyError> {
+        checked.ensure_bound(self)?;
+        let read = self.read_state();
+        read.ensure_current_epoch()?;
+        if hashes.len() > history_facts::MAX_KEYS || !hashes.iter().any(|h| checked.pushes(h)) {
+            return self.landings(hashes);
+        }
+        let (pushed, stored): (Vec<Hash>, Vec<Hash>) =
+            hashes.iter().partition(|h| checked.pushes(h));
+        let mut found: HashMap<Hash, LandingFacts> = self
+            .landings(&stored)?
+            .into_iter()
+            .map(|f| (f.hash, f))
+            .collect();
+        let scratch = checked.scratch(self)?;
+        found.extend(
+            scratch
+                .snapshot()
+                .landings(&pushed)?
+                .into_iter()
+                .map(|f| (f.hash, f)),
+        );
+        read.ensure_current_epoch()?;
+        Ok(hashes.iter().filter_map(|h| found.remove(h)).collect())
     }
 
     /// Every dispute of each landing of `landings`, with its resolution (O26): in input order,
