@@ -319,12 +319,22 @@ fn push_text(v: &Value) -> String {
     lines.join("\n")
 }
 
+fn tag_names(v: &Value) -> (usize, String) {
+    let names: Vec<&str> = v.as_array().into_iter().flatten().map(text).collect();
+    let list = if names.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", names.join(", "))
+    };
+    (names.len(), list)
+}
+
 fn fetched_text(f: &Value) -> String {
+    let (taken, taken_names) = tag_names(&f["tags_taken"]);
+    let (kept, kept_names) = tag_names(&f["tags_kept"]);
     format!(
-        "{} records taken, {} tags taken, {} tags kept",
+        "{} records taken, {taken} tags taken{taken_names}, {kept} tags kept{kept_names}",
         num(&f["records_taken"]),
-        num(&f["tags_taken"]),
-        num(&f["tags_kept"])
     )
 }
 
@@ -547,6 +557,20 @@ mod tests {
             assert_eq!(seen.len(), 1);
             assert!(c.out.is_empty(), "{}", c.out);
         }
+    }
+
+    #[test]
+    fn scc9_fetched_text_lists_taken_and_kept_tags() {
+        let f = json!({"records_taken": 5, "tags_taken": ["v1", "v2"], "tags_kept": ["v0"]});
+        assert_eq!(
+            fetched_text(&f),
+            "5 records taken, 2 tags taken (v1, v2), 1 tags kept (v0)"
+        );
+        let none = json!({"records_taken": 0, "tags_taken": [], "tags_kept": []});
+        assert_eq!(
+            fetched_text(&none),
+            "0 records taken, 0 tags taken, 0 tags kept"
+        );
     }
 
     #[test]
