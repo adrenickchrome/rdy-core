@@ -103,6 +103,20 @@ fn sub(sh: &Arc<Shared>, scope: &SiteTarget, page: &str, b: &SiteBuild) -> Subsc
         .unwrap()
 }
 
+/// The file `path` of review target `t` as a request gets it: rendered on request, never
+/// through a whole build.
+#[track_caller]
+fn review(sh: &Arc<Shared>, t: &SiteTarget, path: &str) -> ReviewPage {
+    sh.site.review_page(sh, t, path).unwrap().unwrap()
+}
+
+/// A stream of `path` of review target `t` that has the page as `p` served it.
+fn review_sub(sh: &Arc<Shared>, t: &SiteTarget, path: &str, p: &ReviewPage) -> Subscription {
+    sh.site
+        .subscribe(sh, t, path, p.rev.as_deref().unwrap(), &p.label_rev)
+        .unwrap()
+}
+
 fn empty(s: &mut Subscription) -> bool {
     s.rx.try_recv() == Err(TryRecvError::Empty)
 }
@@ -136,18 +150,21 @@ fn ls5_a_view_commit_reaches_only_that_view() {
         edit_second_prose(r, "draft", "Alpha", "Draft one.", false)
     });
     let bc = sh.site.refresh(&sh, &C).unwrap();
-    let bd = sh.site.refresh(&sh, &d()).unwrap();
+    let (pa, pb) = (
+        review(&sh, &d(), "alpha.html"),
+        review(&sh, &d(), "beta.html"),
+    );
     let mut ca = sub(&sh, &C, "alpha.html", &bc);
     let mut cb = sub(&sh, &C, "beta.html", &bc);
-    let mut da = sub(&sh, &d(), "alpha.html", &bd);
-    let mut db = sub(&sh, &d(), "beta.html", &bd);
-    let before = sh.site.builds();
+    let mut da = review_sub(&sh, &d(), "alpha.html", &pa);
+    let mut db = review_sub(&sh, &d(), "beta.html", &pb);
+    let (before, renders) = (sh.site.builds(), sh.site.page_renders());
     // another block of Alpha: the view now changes two blocks (the site counts blocks, C9)
     on_writer(&sh, |r| {
         edit_prose(r, "draft", "Alpha", 0, "Draft two.", false)
     });
     sh.site.refresh(&sh, &C).unwrap();
-    let after = sh.site.refresh(&sh, &d()).unwrap();
+    let after = review(&sh, &d(), "beta.html");
     assert_eq!(da.rx.try_recv(), Ok(LiveEvent::Reload));
     match db.rx.try_recv() {
         Ok(LiveEvent::Label { text, html }) => {
@@ -155,10 +172,7 @@ fn ls5_a_view_commit_reaches_only_that_view() {
                 text.ends_with(" · view: draft, 2 changes, not landed"),
                 "{text}"
             );
-            assert!(
-                html.contains(">+2</a>") && html == after.live.header,
-                "{html}"
-            );
+            assert!(html.contains(">+2</a>") && html == after.header, "{html}");
         }
         other => panic!("the view's other page gets the new label and header: {other:?}"),
     }
@@ -168,8 +182,13 @@ fn ls5_a_view_commit_reaches_only_that_view() {
     );
     assert_eq!(
         sh.site.builds(),
-        before + 1,
-        "the view built; canon's inputs did not change"
+        before,
+        "canon's inputs did not change, and the view has no whole build"
+    );
+    assert_eq!(
+        sh.site.page_renders(),
+        renders + 2,
+        "the view's two open pages rendered once each"
     );
 }
 
@@ -219,10 +238,10 @@ fn ls5_a_proposal_version_holds_still_and_its_latest_follows() {
     let stable = pref.split('@').next().unwrap().to_string();
     let v1 = SiteTarget::Source(ScopeRef::Proposal(pref.clone()));
     let latest = SiteTarget::Source(ScopeRef::Proposal(stable));
-    let b1 = sh.site.refresh(&sh, &v1).unwrap();
-    let bl = sh.site.refresh(&sh, &latest).unwrap();
-    let mut s1 = sub(&sh, &v1, "index.html", &b1);
-    let mut sl = sub(&sh, &latest, "index.html", &bl);
+    let b1 = review(&sh, &v1, "index.html");
+    let bl = review(&sh, &latest, "index.html");
+    let mut s1 = review_sub(&sh, &v1, "index.html", &b1);
+    let mut sl = review_sub(&sh, &latest, "index.html", &bl);
     let p2 = on_writer(&sh, |r| {
         // the first prose: the home page shows it
         edit_prose(r, "draft", "Beta", 0, "Beta drafted first.", false);
@@ -232,8 +251,14 @@ fn ls5_a_proposal_version_holds_still_and_its_latest_follows() {
         p2["ref"].as_str().unwrap().ends_with("@2"),
         "guard: version 2: {p2}"
     );
-    sh.site.refresh(&sh, &v1).unwrap();
-    sh.site.refresh(&sh, &latest).unwrap();
+    let renders = sh.site.page_renders();
+    review(&sh, &v1, "index.html");
+    review(&sh, &latest, "index.html");
+    assert_eq!(
+        sh.site.page_renders(),
+        renders + 1,
+        "only the latest alias's open page rendered"
+    );
     assert!(empty(&mut s1), "a proposal version never changes");
     assert_eq!(sl.rx.try_recv(), Ok(LiveEvent::Reload));
 }
@@ -458,7 +483,13 @@ fn ls5_a_page_opened_before_its_scope_builds_gets_reload() {
     on_writer(&sh, |r| {
         edit_second_prose(r, "draft", "Alpha", "Draft one.", false)
     });
-    sh.site.refresh(&sh, &d()).unwrap();
+    let renders = sh.site.page_renders();
+    review(&sh, &d(), "alpha.html");
+    assert_eq!(
+        sh.site.page_renders(),
+        renders + 1,
+        "the open page rendered once"
+    );
     assert_eq!(alpha.rx.try_recv(), Ok(LiveEvent::Reload));
 }
 
@@ -467,8 +498,9 @@ fn ls5_a_page_opened_before_its_scope_builds_gets_reload() {
 const SLB1_CAP: u64 = 16 * 1024 * 1024;
 
 /// A host over a project with one landed doc, Figures, of 8 figures of 1 MiB each (distinct
-/// bytes), and views `v0`..`v9`, each with one unlanded prose edit. Each source build holds
-/// about 8 MiB of figure bytes.
+/// bytes), and tags `v1.0.0`..`v1.9.0`, each after the landing of one more note. Each source
+/// build holds about 8 MiB of figure bytes. Canon and tags are eager targets: each is one whole
+/// build.
 fn figures_host() -> Hosted {
     let (dir, mut r) = tiny();
     let mut ops = vec![
@@ -494,16 +526,19 @@ fn figures_host() -> Hosted {
             ]),
         )
         .unwrap();
+        land(&mut r, &format!("v{v}")).unwrap();
+        r.tag(&approver(), &format!("v1.{v}.0"), None, None)
+            .unwrap();
     }
     host(dir, r)
 }
 
-fn view(v: usize) -> SiteTarget {
-    SiteTarget::Source(ScopeRef::View(format!("v{v}")))
+fn tag(v: usize) -> SiteTarget {
+    SiteTarget::Source(ScopeRef::Tag(format!("v1.{v}.0")))
 }
 
 /// slb1: inactive builds are dropped, least recently used first, past the byte cap, not only
-/// past the count: canon and 10 views of 8 MiB each stay under a 16 MiB cap.
+/// past the count: canon and 10 tags of 8 MiB each stay under a 16 MiB cap.
 #[test]
 fn slb1_inactive_builds_stay_under_the_byte_cap() {
     let h = figures_host();
@@ -514,10 +549,10 @@ fn slb1_inactive_builds_stay_under_the_byte_cap() {
     assert!(size >= 8 * 1024 * 1024, "a build holds the figures: {size}");
     drop(one);
     for v in 0..10 {
-        sh.site.refresh(&sh, &view(v)).unwrap();
+        sh.site.refresh(&sh, &tag(v)).unwrap();
         assert!(
             sh.site.held_inactive_bytes() <= SLB1_CAP,
-            "after view {v}: {} inactive bytes held",
+            "after tag {v}: {} inactive bytes held",
             sh.site.held_inactive_bytes()
         );
     }
@@ -560,7 +595,7 @@ fn slb1_a_dropped_build_is_rebuilt_on_its_next_request() {
     let (files, revs) = (first.live.files.clone(), first.live.revs.clone());
     drop(first);
     for v in 0..3 {
-        sh.site.refresh(&sh, &view(v)).unwrap();
+        sh.site.refresh(&sh, &tag(v)).unwrap();
     }
     let builds = sh.site.builds();
     let again = sh.site.refresh(&sh, &C).unwrap();
@@ -624,7 +659,7 @@ fn slb1_open_targets_builds_count_in_the_byte_cap() {
     let cap = size * 5 / 2;
     sh.site.set_inactive_build_cap(Some(cap));
     let mut subs = Vec::new();
-    for t in [C, view(0), view(1), view(2)] {
+    for t in [C, tag(0), tag(1), tag(2)] {
         let b = sh.site.refresh(&sh, &t).unwrap();
         subs.push(sub(&sh, &t, "index.html", &b));
         assert!(
@@ -642,7 +677,7 @@ fn slb1_open_targets_builds_count_in_the_byte_cap() {
     assert_eq!(sh.site.held_builds(), 1);
     assert!(sh.site.held_bytes() > size / 2);
     let builds = sh.site.builds();
-    sh.site.refresh(&sh, &view(2)).unwrap();
+    sh.site.refresh(&sh, &tag(2)).unwrap();
     assert_eq!(sh.site.builds(), builds, "the most recent build is kept");
     assert_eq!(sh.site.streams(), 4);
 }
@@ -661,8 +696,8 @@ fn slb1_an_evicted_open_target_rebuilds_and_its_page_still_hears() {
     drop(b);
     let mut others = Vec::new();
     for v in 0..2 {
-        let b = sh.site.refresh(&sh, &view(v)).unwrap();
-        others.push(sub(&sh, &view(v), "index.html", &b));
+        let b = sh.site.refresh(&sh, &tag(v)).unwrap();
+        others.push(sub(&sh, &tag(v), "index.html", &b));
     }
     assert_eq!(sh.site.held_builds(), 1, "canon's build was dropped");
     assert_eq!(sh.site.streams(), 3, "canon's page is still open");
@@ -672,7 +707,7 @@ fn slb1_an_evicted_open_target_rebuilds_and_its_page_still_hears() {
     assert_eq!(sh.site.builds(), builds + 1, "canon builds again");
     assert!(empty(&mut figures), "an unchanged page gets nothing");
     // canon's build goes again, then a landing changes its page
-    sh.site.refresh(&sh, &view(0)).unwrap();
+    sh.site.refresh(&sh, &tag(0)).unwrap();
     assert_eq!(sh.site.held_builds(), 1);
     on_writer(&sh, |r| edit_figures_prose(r, "Figures changed."));
     // the worker may build canon first; after this refresh a build of the landing has fanned out
@@ -687,7 +722,7 @@ fn slb1_closing_a_page_that_drops_a_build_gives_memory_back() {
     let h = figures_host();
     let sh = shared(&h);
     let mut subs = Vec::new();
-    for t in std::iter::once(C).chain((0..9).map(view)) {
+    for t in std::iter::once(C).chain((0..9).map(tag)) {
         let b = sh.site.refresh(&sh, &t).unwrap();
         subs.push(sub(&sh, &t, "index.html", &b));
     }
@@ -759,7 +794,7 @@ fn slb1_closing_the_last_streams_enforces_the_byte_cap() {
     let sh = shared(&h);
     sh.site.set_inactive_build_cap(Some(SLB1_CAP));
     let mut subs = Vec::new();
-    for t in [C, view(0), view(1), view(2)] {
+    for t in [C, tag(0), tag(1), tag(2)] {
         let b = sh.site.refresh(&sh, &t).unwrap();
         subs.push(sub(&sh, &t, "index.html", &b));
     }
@@ -771,7 +806,7 @@ fn slb1_closing_the_last_streams_enforces_the_byte_cap() {
     assert_eq!(sh.site.streams(), 4);
     drop(subs);
     let builds = sh.site.builds();
-    sh.site.refresh(&sh, &view(2)).unwrap();
+    sh.site.refresh(&sh, &tag(2)).unwrap();
     assert_eq!(sh.site.builds(), builds, "a cache hit");
     assert!(
         sh.site.held_inactive_bytes() <= SLB1_CAP || sh.site.held_builds() == 1,

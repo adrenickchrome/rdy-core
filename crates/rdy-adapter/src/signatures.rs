@@ -7,6 +7,7 @@
 //! a signature may use. `check_signature_carried` is the carried check of a replayed landing
 //! (D-6Z9BR); [`Snapshot::carried_sources`] reads the replay sources it takes from a snapshot.
 use crate::store::Snapshot;
+use crate::sync::CheckedQuarantine;
 use rdy_engine::RdyError;
 use rdy_engine::signature_check::read_check_context;
 use rdy_model::{Hash, LandingRecord};
@@ -38,5 +39,29 @@ impl Snapshot {
     ) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {
         self.read_state().ensure_current_epoch()?;
         carried_sources(self.read_state(), context)
+    }
+
+    /// [`Snapshot::check_context`] over this snapshot and the push `checked`, before the hub's
+    /// move: a signature whose subject is a landing the push's records hold is read in the
+    /// push's scratch holder, as [`Snapshot::check_pushed_landing`] reads it, and every other
+    /// signature as [`Snapshot::check_context`] reads it here. The context equals what
+    /// [`Snapshot::check_context`] gives once the push has moved in, so `check_signature` of it
+    /// gives the same report. `checked` must have been checked on this snapshot (`E_BAD_INPUT`
+    /// otherwise). A removal since the snapshot is `E_REDACTED_STATE`.
+    pub fn pushed_check_context(
+        &self,
+        checked: &CheckedQuarantine,
+        signature: &Signature,
+    ) -> Result<CheckContext, RdyError> {
+        checked.ensure_bound(self)?;
+        let read = self.read_state();
+        read.ensure_current_epoch()?;
+        if !checked.pushes(&signature.subject) {
+            return self.check_context(signature);
+        }
+        let scratch = checked.scratch(self)?;
+        let out = scratch.snapshot().check_context(signature)?;
+        read.ensure_current_epoch()?;
+        Ok(out)
     }
 }

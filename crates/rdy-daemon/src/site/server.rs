@@ -13,7 +13,7 @@ use crate::site::guard::{Guard, ListenerMode, Refusal, Route, ScopeRef, SiteTarg
 use crate::site::http::{
     MAX_HEAD_BYTES, Method, ParseError, Request, Response, content_type, parse_head, to_bytes,
 };
-use crate::site::live::{NoStream, label, resolve};
+use crate::site::live::{NoStream, is_review, label, normalize, resolve};
 use crate::site::profiles::{self, Availability, TestEvent};
 use crate::site::{LanOverride, SiteInfo, addr, mcp, sse, ui, ui_request};
 use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
@@ -841,19 +841,30 @@ async fn held(ctx: &Ctx, sh: &Arc<Shared>, route: Option<&Route>) -> Option<Refu
     }
 }
 
-/// A page or file of `target`: the config check on an HTML page, then the target's build as of
-/// the latest publish, then the bytes the server sends for `path`. A path the build does not
-/// have is the target's not-found page; a target the site does not hold now is canon's.
+/// A page or file of `target`: the config check on an HTML page, then the bytes the server sends
+/// for `path` as of the latest publish: from an eager target's build, or a review target's file
+/// rendered alone on request (D-F44G6), which never builds the target whole. A path the target
+/// does not have is its not-found page; a target the site does not hold now is canon's.
 async fn page(sh: Arc<Shared>, target: SiteTarget, path: String) -> Response {
     let built = tokio::task::spawn_blocking(move || {
         // a page load reloads a changed config, as a new connection does (`session_started`)
         if path.ends_with(".html") && sh.watch.changed() {
             let _ = sh.writer.reload();
         }
-        let build = match sh.site.refresh(&sh, &target) {
-            Ok(b) => b,
+        let found = if is_review(&normalize(&target)) {
+            sh.site
+                .review_page(&sh, &target, &path)
+                .map(|p| p.map(|p| p.bytes))
+        } else {
+            sh.site
+                .refresh(&sh, &target)
+                .map(|build| rdy_render::live::page(&build.live, &path, &target))
+        };
+        match found {
+            Ok(Some(body)) => Ok((content_type(&path), body)),
+            Ok(None) => Err(not_found_now(&sh, Miss::Page(target))),
             // a removal since the entry check: the build of the old state was discarded
-            Err(e) if e.code == E_REDACTED_STATE => return Err(refusal(Refusal::Busy)),
+            Err(e) if e.code == E_REDACTED_STATE => Err(refusal(Refusal::Busy)),
             // a scope that does not resolve names no view or proposal, and a profile its scope
             // does not hold has no pages: canon's page for a scope that is not on the site now,
             // which never names it. A profile-only listener whose profile is gone has no layout:
@@ -864,21 +875,14 @@ async fn page(sh: Arc<Shared>, target: SiteTarget, path: String) -> Response {
                     SiteTarget::ProfileOnly { .. } => Miss::Plain,
                     _ => Miss::Scope,
                 };
-                return Err(not_found_now(&sh, miss));
+                Err(not_found_now(&sh, miss))
             }
             Err(e) => {
                 log(&format!(
                     "site: the {} pages did not build ({e})",
                     label(&target)
                 ));
-                return Err(refusal(Refusal::Broken));
-            }
-        };
-        match rdy_render::live::page(&build.live, &path, &target) {
-            Some(body) => Ok((content_type(&path), body)),
-            None => {
-                drop(build);
-                Err(not_found_now(&sh, Miss::Page(target)))
+                Err(refusal(Refusal::Broken))
             }
         }
     })
@@ -941,13 +945,22 @@ fn not_found_now(sh: &Shared, miss: Miss) -> Response {
     if sh.state.load().ensure_current_epoch().is_err() {
         return refusal(Refusal::Busy);
     }
-    let built = catch_unwind(AssertUnwindSafe(|| sh.site.refresh(sh, &target)));
+    // a review target's page comes from its preparation, rendered on request; an eager target's
+    // from its build
+    let built = catch_unwind(AssertUnwindSafe(|| {
+        if is_review(&normalize(&target)) {
+            sh.site.review_not_found(sh, &target)
+        } else {
+            sh.site.refresh(sh, &target).map(|build| {
+                let live = &build.live;
+                live.not_found
+                    .get(kind)
+                    .map(|html| (live.epoch, html.to_vec()))
+            })
+        }
+    }));
     let page = match built {
-        Ok(Ok(build)) => build
-            .live
-            .not_found
-            .get(kind)
-            .map(|html| (build.live.epoch, html.to_vec())),
+        Ok(Ok(page)) => page,
         Ok(Err(e)) if e.code == E_REDACTED_STATE => return refusal(Refusal::Busy),
         Ok(Err(_)) | Err(_) => None,
     };
@@ -1134,11 +1147,11 @@ mod tests {
         assert_eq!(prepared, 0, "the Scope variant prepares nothing");
         assert_eq!(scope.status, 404);
         assert!(String::from_utf8_lossy(&scope.body).contains("is not on the site now"));
-        // a page view builds the target once; its misses then prepare nothing
+        // a page view prepares the target once; its misses then prepare nothing
         let tag_less = SiteTarget::Source(ScopeRef::View("admin".into()));
         let before = preparations();
-        sh.site.refresh(&sh, &tag_less).unwrap();
-        assert_eq!(preparations() - before, 1, "the page's build");
+        sh.site.review_page(&sh, &tag_less, "index.html").unwrap();
+        assert_eq!(preparations() - before, 1, "the page's preparation");
         let (r, prepared) = miss(Miss::Page(tag_less));
         assert_eq!((r.status, prepared), (404, 0));
         sh.shutdown().unwrap();

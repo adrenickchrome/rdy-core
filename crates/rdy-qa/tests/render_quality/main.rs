@@ -6,6 +6,7 @@ mod render_quality_css;
 mod render_quality_fixture;
 mod render_quality_leaks;
 mod render_quality_live;
+mod render_quality_on_demand;
 mod render_quality_pages;
 mod render_quality_readme;
 mod render_quality_visual;

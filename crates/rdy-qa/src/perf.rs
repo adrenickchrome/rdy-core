@@ -5845,14 +5845,15 @@ fn site_ops(
 
     let view = SiteTarget::Source(ScopeRef::View("sev".into()));
     edit_claim_on_writer(&sh, &claim, "sev", "Seed.".into(), false);
-    let b = sh.site.refresh(&sh, &view).expect("the view builds");
-    assert!(
-        b.live.revs.contains_key(&page),
-        "no page {page} in the view"
-    );
+    // a view is a review target: its page renders on request, with no whole build
+    let p = sh
+        .site
+        .review_page(&sh, &view, &page)
+        .expect("the view renders")
+        .unwrap_or_else(|| panic!("no page {page} in the view"));
     let mut sub = sh
         .site
-        .subscribe(&sh, &view, &page, &b.live.revs[&page], &b.live.label_rev)
+        .subscribe(&sh, &view, &page, p.rev.as_deref().unwrap(), &p.label_rev)
         .unwrap_or_else(|_| panic!("the site is busy"));
     out.push(measure_timed(
         &format!("site_event_after_view_write{sfx}"),
@@ -5863,7 +5864,9 @@ fn site_ops(
             edit_claim_on_writer(&sh, &claim, "sev", format!("Committed {i}."), false);
             await_reload(&rt, &mut sub);
             let took = s.elapsed();
-            sh.site.refresh(&sh, &view).expect("the view builds");
+            sh.site
+                .review_page(&sh, &view, &page)
+                .expect("the view renders");
             took
         },
     ));

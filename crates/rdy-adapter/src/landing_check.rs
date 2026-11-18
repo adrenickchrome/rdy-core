@@ -72,13 +72,7 @@ impl Snapshot {
         inputs: &CheckInputs,
     ) -> Result<LandingCheck, RdyError> {
         inputs.check()?;
-        if !checked.bound_to(self) {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "the checked quarantine is bound to another snapshot",
-                "check the landing on the snapshot that checked the push",
-            ));
-        }
+        checked.ensure_bound(self)?;
         let read = self.read_state();
         read.ensure_current_epoch()?;
         if !checked.pushes(&landing) {

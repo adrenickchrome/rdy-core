@@ -2276,3 +2276,197 @@ fn scc6_plain_push_after_a_take_names_no_retained_tag() {
     hub.close().unwrap();
     drop(dir);
 }
+
+// ---------------------------------------------------------------------------------------------
+// landing facts and signature contexts of a checked push, before the move
+
+/// A signature of `subject` by an agent; its bytes are not checked here.
+fn loose_signature(subject: Hash, statement: &[u8]) -> rdy_adapter::history::Signature {
+    rdy_adapter::history::Signature {
+        subject,
+        namespace: "rdy-approval-v1".into(),
+        statement: statement.to_vec(),
+        sig: b"not checked here".to_vec(),
+        signed_by: Provenance {
+            actor: "agent:s".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: 7,
+        },
+    }
+}
+
+/// The context and check of every signature of `facts`, read by `context`.
+fn reports(
+    facts: &rdy_adapter::history::LandingFacts,
+    mut context: impl FnMut(
+        &rdy_adapter::history::Signature,
+    ) -> Result<rdy_adapter::signatures::CheckContext, RdyError>,
+) -> Vec<(
+    rdy_adapter::signatures::CheckContext,
+    rdy_adapter::signatures::SignatureCheck,
+)> {
+    facts
+        .signatures
+        .iter()
+        .map(|s| {
+            let ctx = context(&s.record).unwrap();
+            let check = rdy_adapter::signatures::check_signature(&s.record, &ctx, None);
+            (ctx, check)
+        })
+        .collect()
+}
+
+/// A hub reads the facts and signature contexts of the landings of a push while they are only in
+/// its checked quarantine: they equal what the stored reads give once the push has moved in. The
+/// order follows the input, an unknown hash fails as the stored read fails, and a quarantine
+/// checked on another snapshot or holder is refused as the landing check refuses it.
+#[test]
+fn pql_pushed_reads_equal_the_stored_reads_after_the_move() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let c = checked();
+    // l2 is signed twice, l1 not at all
+    let mut r = Rdy::open(c.dir.path()).unwrap();
+    for statement in [&b"x"[..], b"y"] {
+        r.store_mut()
+            .put_signature(&loose_signature(c.l2, statement))
+            .unwrap();
+    }
+    r.seal_open().unwrap();
+    let repo = repo_of(&r);
+    r.close().unwrap();
+    let first = c.dir.path().join("first.rdysync");
+    export_canon(c.dir.path(), c.l2, None, &first);
+    let unknown = Hash::of(b"no such landing");
+
+    let hub = tempfile::tempdir().unwrap();
+    let h = StoreHandle::create_holder(hub.path(), repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let q = check(&s0, &[&first]).unwrap();
+    // the stored read does not see the quarantine
+    assert_eq!(s0.landings(&[c.l2]).unwrap_err().code, "E_NOT_FOUND");
+    let got = s0.pushed_landings(&q, &[c.l2, c.l1, c.l2]).unwrap();
+    assert_eq!(
+        got.iter().map(|f| f.hash).collect::<Vec<_>>(),
+        vec![c.l2, c.l1]
+    );
+    assert_eq!(got[0].signatures.len(), 2);
+    assert!(got[1].signatures.is_empty());
+    assert_eq!(
+        s0.pushed_landings(&q, &[c.l1, c.l2]).unwrap(),
+        vec![got[1].clone(), got[0].clone()]
+    );
+    assert_eq!(s0.pushed_landings(&q, &[]).unwrap(), vec![]);
+    let pushed_unknown = s0.pushed_landings(&q, &[c.l1, unknown]).unwrap_err();
+    let pushed_reports: Vec<_> = got
+        .iter()
+        .map(|f| reports(f, |g| s0.pushed_check_context(&q, g)))
+        .collect();
+    assert_eq!(pushed_reports[0].len(), 2);
+    assert!(pushed_reports[1].is_empty());
+    // the stored read of a signature of a landing only in the push does not find its subject
+    let s0_ctx = s0.check_context(&got[0].signatures[0].record).unwrap();
+    assert_ne!(s0_ctx, pushed_reports[0][0].0);
+
+    // the move, then the stored reads
+    assert_eq!(
+        h.move_canon(&q, CanonMove::Seed, None).unwrap(),
+        moved(c.l2)
+    );
+    let s1 = h.snapshot().unwrap();
+    assert_eq!(s1.landings(&[c.l2, c.l1, c.l2]).unwrap(), got);
+    let stored_unknown = s1.landings(&[c.l1, unknown]).unwrap_err();
+    assert_eq!(
+        (
+            pushed_unknown.code,
+            &pushed_unknown.message,
+            &pushed_unknown.fix
+        ),
+        (
+            stored_unknown.code,
+            &stored_unknown.message,
+            &stored_unknown.fix
+        )
+    );
+    let stored_reports: Vec<_> = got
+        .iter()
+        .map(|f| reports(f, |g| s1.check_context(g)))
+        .collect();
+    assert_eq!(pushed_reports, stored_reports);
+
+    // a quarantine checked on another snapshot is refused, as the landing check refuses it
+    let want = s1.check_pushed_landing(&q, c.l2, &c.advisory).unwrap_err();
+    assert_eq!(want.code, "E_BAD_INPUT");
+    let e = s1.pushed_landings(&q, &[c.l2]).unwrap_err();
+    assert_eq!(
+        (e.code, &e.message, &e.fix),
+        (want.code, &want.message, &want.fix)
+    );
+    let e = s1
+        .pushed_check_context(&q, &got[0].signatures[0].record)
+        .unwrap_err();
+    assert_eq!(
+        (e.code, &e.message, &e.fix),
+        (want.code, &want.message, &want.fix)
+    );
+    // and so is one checked on another holder of another repo
+    let other = tempfile::tempdir().unwrap();
+    let h2 = StoreHandle::create_holder(other.path(), RepoId::new()).unwrap();
+    let s2 = h2.snapshot().unwrap();
+    let want = s2.check_pushed_landing(&q, c.l2, &c.advisory).unwrap_err();
+    let e = s2.pushed_landings(&q, &[c.l2]).unwrap_err();
+    assert_eq!(
+        (e.code, &e.message, &e.fix),
+        (want.code, &want.message, &want.fix)
+    );
+    let e = s2
+        .pushed_check_context(&q, &got[0].signatures[0].record)
+        .unwrap_err();
+    assert_eq!(
+        (e.code, &e.message, &e.fix),
+        (want.code, &want.message, &want.fix)
+    );
+    drop((s1, s2));
+    h2.close().unwrap();
+    h.close().unwrap();
+}
+
+/// A push that extends a seeded holder: a landing the holder stores reads as the stored read
+/// gives it, beside a landing only in the push, in input order.
+#[test]
+fn pql_pushed_landings_mix_stored_and_pushed() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let c = checked();
+    let r = Rdy::open(c.dir.path()).unwrap();
+    let repo = repo_of(&r);
+    r.close().unwrap();
+    let at_l1 = c.dir.path().join("l1.rdysync");
+    export_canon(c.dir.path(), c.l1, None, &at_l1);
+    let next = c.dir.path().join("next.rdysync");
+    export_canon(c.dir.path(), c.l2, Some(c.l1), &next);
+    let hub = tempfile::tempdir().unwrap();
+    let h = StoreHandle::create_holder(hub.path(), repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let q1 = check(&s0, &[&at_l1]).unwrap();
+    assert_eq!(
+        h.move_canon(&q1, CanonMove::Seed, None).unwrap(),
+        moved(c.l1)
+    );
+    let s1 = h.snapshot().unwrap();
+    let q2 = check(&s1, &[&next]).unwrap();
+    let got = s1.pushed_landings(&q2, &[c.l2, c.l1]).unwrap();
+    assert_eq!(got[1], s1.landings(&[c.l1]).unwrap()[0]);
+    // a push-free input reads as the stored read
+    assert_eq!(
+        s1.pushed_landings(&q2, &[c.l1]).unwrap(),
+        s1.landings(&[c.l1]).unwrap()
+    );
+    assert_eq!(
+        h.move_canon(&q2, CanonMove::Extend, Some(c.l1)).unwrap(),
+        moved(c.l2)
+    );
+    let s2 = h.snapshot().unwrap();
+    assert_eq!(s2.landings(&[c.l2, c.l1]).unwrap(), got);
+    drop((s0, s1, s2));
+    h.close().unwrap();
+}

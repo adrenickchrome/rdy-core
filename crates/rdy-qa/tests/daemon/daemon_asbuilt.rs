@@ -134,6 +134,17 @@ fn build(sh: &Arc<Shared>, t: &SiteTarget) -> Arc<SiteBuild> {
         .unwrap_or_else(|e| panic!("{t:?}: {e}"))
 }
 
+/// The guide page of review target `t` (a view or proposal route), rendered on request: a
+/// review target has no whole build.
+fn review_page(sh: &Arc<Shared>, t: &SiteTarget) -> String {
+    let p = sh
+        .site
+        .review_page(sh, t, "guide.html")
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"))
+        .unwrap_or_else(|| panic!("{t:?} has no guide.html"));
+    String::from_utf8_lossy(&p.bytes).into_owned()
+}
+
 fn sub(sh: &Arc<Shared>, target: &SiteTarget, b: &SiteBuild) -> Subscription {
     sh.site
         .subscribe(
@@ -178,9 +189,9 @@ fn ab5_live_scopes_refresh_after_built_only_landings() {
         build(&sh, &tag_hide),
     );
     assert!(hides(&c) && hides(&t) && marks(&m));
-    let (v, p) = (build(&sh, &view_hide), build(&sh, &prop_hide));
+    let (v, p) = (review_page(&sh, &view_hide), review_page(&sh, &prop_hide));
     for b in [&v, &p] {
-        assert!(page(b).contains(PLAN) && !page(b).contains(">Planned</span>"));
+        assert!(b.contains(PLAN) && !b.contains(">Planned</span>"));
     }
     let only = build(&sh, &only_hide);
     assert!(hides(&only));
@@ -262,8 +273,7 @@ fn ab5_live_scopes_refresh_after_built_only_landings() {
     // the review route compares each side in its own revision: the old side (canon, which now
     // ships the block) shows it, the new side (the view, which plans it again) hides it, so the
     // page lists it as removed and holds its words nowhere else
-    let v2 = build(&sh, &view_hide);
-    let body = page(&v2);
+    let body = review_page(&sh, &view_hide);
     assert!(
         body.contains("chg-removed"),
         "the block reads as removed in review"
@@ -282,7 +292,7 @@ fn ab5_live_scopes_refresh_after_built_only_landings() {
         "canon is unaffected"
     );
     // the proposal keeps its own version, which ships the block
-    assert!(page(&build(&sh, &prop_hide)).contains(PLAN));
+    assert!(review_page(&sh, &prop_hide).contains(PLAN));
 
     // a removed profile refuses; a recreated one serves its new settings
     let hide_id = w.ids["$hide"].clone();
@@ -324,8 +334,7 @@ fn ab5_review_counts_a_status_only_change_under_a_marking_profile() {
     let w = world();
     let sh = shared(&w.h);
     let view_mark = profile(ScopeRef::View("later".into()), "mark");
-    let b = build(&sh, &view_mark);
-    let body = page(&b);
+    let body = review_page(&sh, &view_mark);
     assert!(body.contains(PLAN), "the block is shown on both sides");
     assert!(
         !body.contains(">Planned</span>"),
@@ -337,6 +346,6 @@ fn ab5_review_counts_a_status_only_change_under_a_marking_profile() {
     );
     // the same compare through the proposal route
     let prop_mark = profile(ScopeRef::Proposal(w.ids["prop"].clone()), "mark");
-    let prop_page = page(&build(&sh, &prop_mark));
+    let prop_page = review_page(&sh, &prop_mark);
     assert!(prop_page.contains("chg-label chg-edited") && prop_page.contains("1 change"));
 }

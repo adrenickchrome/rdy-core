@@ -36,7 +36,7 @@ use std::sync::Arc;
 const HISTORY_WARNING: &str = "Profile history exceeds 100000 landings. The landings chip and since link are omitted. Open a tagged profile scope to read that version.";
 
 /// Task 3's refusal of a target no profile build serves.
-fn invalid_target() -> RdyError {
+pub(crate) fn invalid_target() -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
         "invalid live site target",
@@ -65,7 +65,7 @@ pub(crate) fn build_within(
     history: &mut ProfileHistoryMemo,
     budget: &Budget,
 ) -> Result<ProfileBuild, RdyError> {
-    let (prepared, profile, changes) = prepare_within(st, target, history, budget)?;
+    let (prepared, profile, changes) = prepare_within(st, target, history, Figures::Eager(budget))?;
     let root = target.root();
     // the target's not-found page, from the same selected state, kept with its pages
     let built = build_site_from(
@@ -85,6 +85,30 @@ pub(crate) fn build_within(
     })
 }
 
+/// How a profile preparation reads the figures of its selection.
+#[derive(Clone, Copy)]
+pub(crate) enum Figures<'b> {
+    /// A whole build: the old and new figures held to the budget together, each within the
+    /// per-file limit and all within the artifact's, then the current side's bytes read.
+    Eager(&'b Budget),
+    /// A review target (D-WYZ97, D-SMP5A): each old and new figure held to the per-file limit
+    /// alone, then the current side's figures measured by their manifests. The selection's
+    /// attachment bounds are checked as a whole build checks them; no figure byte is read.
+    Measured(&'b Budget),
+}
+
+/// What a review target of a profile route reads, as [`build_within`] would build from it, with
+/// its figures measured and never read ([`Figures::Measured`]): the selected preparation, the
+/// profile the target resolved to, and the change summary's page the target has, if any.
+pub(crate) fn prepare_review(
+    st: &ReadState,
+    target: &SiteTarget,
+    history: &mut ProfileHistoryMemo,
+    per_file: &Budget,
+) -> Result<(prepare::Prepared, ResolvedProfile, Option<&'static str>), RdyError> {
+    prepare_within(st, target, history, Figures::Measured(per_file))
+}
+
 /// What a build of a profile target reads, as [`build_within`] builds from it: the selected
 /// preparation, the profile the target resolved to, and the change summary's page the build
 /// will write, if any.
@@ -92,7 +116,7 @@ fn prepare_within(
     st: &ReadState,
     target: &SiteTarget,
     history: &mut ProfileHistoryMemo,
-    budget: &Budget,
+    figures: Figures,
 ) -> Result<(prepare::Prepared, ResolvedProfile, Option<&'static str>), RdyError> {
     target.validate()?;
     crate::probe::prepared();
@@ -133,9 +157,22 @@ fn prepare_within(
         .unwrap_or_default();
 
     // the old and new figures together, bounded before any of their bytes is read; then the
-    // current side's bytes, with no output gate (D-CWC91)
-    holds_figures(budget, &source, &resolved, old.as_ref())?;
-    let bytes = selection::load_inspection_assets(&source, &resolved)?;
+    // current side's bytes, with no output gate (D-CWC91). A review target bounds each figure
+    // alone and keeps no byte: its requested figure files read their own
+    let measured = match figures {
+        Figures::Eager(budget) => {
+            holds_figures(budget, &source, &resolved, old.as_ref())?;
+            None
+        }
+        Figures::Measured(budget) => {
+            holds_each_figure(budget, &source, &resolved, old.as_ref())?;
+            Some(measure_figures(&source, &resolved)?)
+        }
+    };
+    let bytes = match measured {
+        Some(_) => BTreeMap::new(),
+        None => selection::load_inspection_assets(&source, &resolved)?,
+    };
     let mut removed = publication::removed_blobs(&source, &resolved)?;
     let old_removed = match &old {
         Some(o) => publication::removed_blobs(&source, o)?,
@@ -155,7 +192,10 @@ fn prepare_within(
     for (blob, request) in old_removed {
         removed.entry(blob).or_insert(request);
     }
-    let blobs = FigureBlobs::selected(bytes, removed);
+    let blobs = match measured {
+        Some(lens) => FigureBlobs::measured(lens, removed),
+        None => FigureBlobs::selected(bytes, removed),
+    };
     let tag = match &scope_ref {
         ScopeRef::Tag(name) => {
             let (stored, redacted) = publication::chosen_tag(st, name)?;
@@ -466,6 +506,43 @@ fn holds_figures(
         }
     }
     budget.holds_blobs(lens)
+}
+
+/// [`holds_figures`] for a review target: each available figure blob of the current selection and
+/// of the review's old one within the per-file limit, by its manifest's length; no aggregate is
+/// checked (D-SMP5A).
+fn holds_each_figure(
+    budget: &Budget,
+    source: &ReadPublicationSource<'_>,
+    current: &Resolved,
+    old: Option<&Resolved>,
+) -> Result<(), RdyError> {
+    use rdy_engine::publication::PublicationSource;
+    let blobs: BTreeSet<Hash> = current
+        .attachments
+        .iter()
+        .chain(old.into_iter().flat_map(|o| o.attachments.iter()))
+        .filter(|a| a.available)
+        .map(|a| a.blob)
+        .collect();
+    for blob in &blobs {
+        if let Some(manifest) = source.manifest(blob)? {
+            budget.holds_file(manifest.len)?;
+        }
+    }
+    Ok(())
+}
+
+/// The length of each figure blob the selection's pages read: the blobs
+/// [`selection::load_inspection_assets`] reads, chosen and bounded by the same rules (its
+/// selection and attachment limits, with their own errors). The bytes it reads are measured and
+/// dropped here: a review target keeps none.
+fn measure_figures(
+    source: &ReadPublicationSource<'_>,
+    resolved: &Resolved,
+) -> Result<BTreeMap<Hash, u64>, RdyError> {
+    let read = selection::load_inspection_assets(source, resolved)?;
+    Ok(prepare::lens_of(&read))
 }
 
 /// The identity of a pack, for the memo: the hash of its JSON form (its maps are ordered).

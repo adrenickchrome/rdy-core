@@ -8,7 +8,9 @@
 use crate::daemon_site_not_found::{Variant, assert_themed};
 use rdy_daemon::Shared;
 use rdy_daemon::site::guard::{Refusal, ScopeRef, SiteTarget, refusal};
-use rdy_daemon::site::live::{LiveEvent, LiveSite, SiteBuild, Subscription, normalize};
+use rdy_daemon::site::live::{
+    LiveEvent, LiveSite, ReviewPage, SiteBuild, Subscription, is_review, normalize,
+};
 use rdy_engine::engine::{ExportRequest, RenderRequest, write_typed};
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::site_scope::proposal_ref;
@@ -285,6 +287,22 @@ fn holds(b: &SiteBuild, needle: &str) -> bool {
 fn sub(sh: &Arc<Shared>, target: &SiteTarget, page: &str, b: &SiteBuild) -> Subscription {
     sh.site
         .subscribe(sh, target, page, &b.live.revs[page], &b.live.label_rev)
+        .unwrap_or_else(|_| panic!("the site is busy"))
+}
+
+/// The file `path` of review target `t` as a request gets it: rendered on request.
+#[track_caller]
+fn review(sh: &Arc<Shared>, t: &SiteTarget, path: &str) -> ReviewPage {
+    sh.site
+        .review_page(sh, t, path)
+        .unwrap_or_else(|e| panic!("{t:?} {path}: {e}"))
+        .unwrap_or_else(|| panic!("{t:?} has no {path}"))
+}
+
+/// A stream of `path` of review target `t` that has the page as `p` served it.
+fn review_sub(sh: &Arc<Shared>, t: &SiteTarget, path: &str, p: &ReviewPage) -> Subscription {
+    sh.site
+        .subscribe(sh, t, path, p.rev.as_deref().unwrap(), &p.label_rev)
         .unwrap_or_else(|_| panic!("the site is busy"))
 }
 
@@ -620,35 +638,64 @@ fn spv6_profile_cache_separates_scope_and_menu() {
         menu(view("work"), None),
         menu(view("work"), Some("guide")),
     ];
-    let builds: Vec<Arc<SiteBuild>> = targets
+    // an eager target builds whole; a review target (a profile route under the view) renders
+    // the page a request names, and gives its warnings through a complete check
+    struct Seen {
+        index: String,
+        warnings: Vec<String>,
+        profile: Option<String>,
+        build: Option<Arc<SiteBuild>>,
+    }
+    let seen: Vec<Seen> = targets
         .iter()
         .map(|t| {
-            sh.site
+            if is_review(t) {
+                let p = review(&sh, t, "index.html");
+                let f = sh
+                    .site
+                    .review_facts(&sh, t)
+                    .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+                return Seen {
+                    index: String::from_utf8_lossy(&p.bytes).into_owned(),
+                    warnings: f.warnings,
+                    profile: f.profile.map(|p| p.title),
+                    build: None,
+                };
+            }
+            let b = sh
+                .site
                 .refresh(&sh, t)
-                .unwrap_or_else(|e| panic!("{t:?}: {e}"))
+                .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+            Seen {
+                index: file(&b, "index.html"),
+                warnings: b.live.warnings.clone(),
+                profile: b.profile.as_ref().map(|p| p.title.clone()),
+                build: Some(b),
+            }
         })
         .collect();
-    for (i, a) in builds.iter().enumerate() {
-        for (j, b) in builds.iter().enumerate().skip(i + 1) {
-            assert!(!Arc::ptr_eq(a, b), "{:?} {:?}", targets[i], targets[j]);
+    for (i, a) in seen.iter().enumerate() {
+        for (j, b) in seen.iter().enumerate().skip(i + 1) {
+            if let (Some(x), Some(y)) = (&a.build, &b.build) {
+                assert!(!Arc::ptr_eq(x, y), "{:?} {:?}", targets[i], targets[j]);
+            }
             assert_ne!(
-                file(a, "index.html"),
-                file(b, "index.html"),
+                a.index, b.index,
                 "{:?} and {:?} share bytes",
-                targets[i],
-                targets[j]
+                targets[i], targets[j]
             );
         }
     }
-    // each build's own warnings: only the blocked public profile has one
+    let builds: Vec<Option<Arc<SiteBuild>>> = seen.iter().map(|s| s.build.clone()).collect();
+    // each target's own warnings: only the blocked public profile has one
     let warning = format!("Public profile has 1 references outside its selection. {PUBLIC_FIX}");
-    for (t, b) in targets.iter().zip(&builds) {
+    for (t, b) in targets.iter().zip(&seen) {
         let want: Vec<String> = match t {
             SiteTarget::Profile { key, .. } if key == "other" => vec![warning.clone()],
             _ => vec![],
         };
-        assert_eq!(b.live.warnings, want, "{t:?}");
-        let profile = b.profile.as_ref().map(|p| p.title.as_str());
+        assert_eq!(b.warnings, want, "{t:?}");
+        let profile = b.profile.as_deref();
         match t {
             SiteTarget::Profile { key, .. } if key == "guide" => {
                 assert_eq!(profile, Some("Guide book"))
@@ -663,22 +710,22 @@ fn spv6_profile_cache_separates_scope_and_menu() {
         .refresh(&sh, &SiteTarget::Source(ScopeRef::Versions))
         .unwrap();
     assert!(
-        Arc::ptr_eq(&again, &builds[5]),
+        Arc::ptr_eq(&again, builds[5].as_ref().unwrap()),
         "one build for canon's menu"
     );
     // a profile page links its menu in its scope and profile
     assert!(
-        file(&builds[3], "manual/intro.html")
+        String::from_utf8_lossy(&review(&sh, &targets[3], "manual/intro.html").bytes)
             .contains("href=\"/~versions/?scope=view%3Awork&amp;profile=guide\""),
         "the pill opens the context's menu"
     );
 
     // an excluded edit sends a profile's open pages nothing; a selected edit reloads its page
     let guide = profile(ScopeRef::Canon, "guide");
-    let b = &builds[1];
+    let b = builds[1].as_ref().unwrap();
     let mut intro = sub(&sh, &guide, "manual/intro.html", b);
     let mut home = sub(&sh, &guide, "index.html", b);
-    let mut other = sub(&sh, &targets[2], "secret.html", &builds[2]);
+    let mut other = sub(&sh, &targets[2], "secret.html", builds[2].as_ref().unwrap());
     for s in [&mut intro, &mut home, &mut other] {
         assert!(empty(s), "current pages get nothing on subscribe");
     }
@@ -838,7 +885,7 @@ fn spv6_profile_history_reuses_memo_and_warns_once() {
         "no since page",
     );
     assert_eq!(
-        sh.site.refresh(&sh, &work).unwrap().live.warnings,
+        sh.site.review_facts(&sh, &work).unwrap().warnings,
         vec![HISTORY_WARNING.to_string()]
     );
     assert_eq!(logged(), 1, "logged once across requests");
@@ -856,9 +903,8 @@ fn spv6_profile_history_reuses_memo_and_warns_once() {
     });
     assert!(
         sh.site
-            .refresh(&sh, &work)
+            .review_facts(&sh, &work)
             .unwrap()
-            .live
             .warnings
             .is_empty()
     );
@@ -871,9 +917,8 @@ fn spv6_profile_history_reuses_memo_and_warns_once() {
     );
     assert!(
         sh.site
-            .refresh(&sh, &work)
+            .review_facts(&sh, &work)
             .unwrap()
-            .live
             .warnings
             .is_empty()
     );
@@ -910,6 +955,11 @@ fn spv6_open_targets_leave_inactive_slots_for_profile_memo() {
     ];
     let mut subs = Vec::new();
     for t in &active {
+        if is_review(t) {
+            let p = review(&sh, t, "index.html");
+            subs.push(review_sub(&sh, t, "index.html", &p));
+            continue;
+        }
         let b = sh.site.refresh(&sh, t).unwrap();
         let page = b.live.revs.keys().next().expect("a page").clone();
         subs.push(sub(&sh, t, &page, &b));
@@ -938,7 +988,7 @@ fn spv6_open_targets_leave_inactive_slots_for_profile_memo() {
         sh.site.history_evaluations(&guide).is_some(),
         "the ninth target keeps its slot and memo"
     );
-    let builds = sh.site.builds();
+    let (builds, renders) = (sh.site.builds(), sh.site.page_renders());
     for _ in 0..3 {
         let again = sh.site.refresh(&sh, &guide).unwrap();
         assert!(Arc::ptr_eq(&first, &again), "the build is reused");
@@ -950,10 +1000,19 @@ fn spv6_open_targets_leave_inactive_slots_for_profile_memo() {
     assert_eq!(logged(), 1, "logged once while the condition persists");
     // the open targets keep theirs too
     for t in &active {
+        if is_review(t) {
+            assert!(!review(&sh, t, "index.html").bytes.is_empty());
+            continue;
+        }
         let b = sh.site.refresh(&sh, t).unwrap();
         assert!(!b.live.files.is_empty());
     }
     assert_eq!(sh.site.builds(), builds, "no open target rebuilt");
+    assert_eq!(
+        sh.site.page_renders(),
+        renders,
+        "no open review page rendered again"
+    );
     sh.site.set_log_hook(None);
     drop(subs);
 }

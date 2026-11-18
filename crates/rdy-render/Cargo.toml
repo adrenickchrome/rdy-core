@@ -29,6 +29,8 @@ probe = []
 [dev-dependencies]
 tempfile.workspace = true
 rdy-store.workspace = true
+# The publication's injected limits (`override_limits_for_tests`), for the review bound tests.
+rdy-engine = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
