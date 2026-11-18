@@ -36,25 +36,33 @@ use std::process::{Child, Command, Stdio};
 // the binary and the machines
 // ---------------------------------------------------------------------------------------------
 
-/// The `rdy` binary under test. A missing one fails the test.
-fn rdy_bin() -> PathBuf {
-    if let Ok(p) = std::env::var("RDY_BIN") {
-        return PathBuf::from(p);
-    }
-    let exe = std::env::current_exe().expect("this test's executable");
-    let dir = exe.parent().expect("its directory");
-    let target = if dir.file_name().is_some_and(|n| n == "deps") {
-        dir.parent().expect("the profile directory")
-    } else {
-        dir
+/// The `rdy` binary the tests name: `$RDY_BIN`, else the release `rdy` of this test's target
+/// directory (a test runs from `target/<profile>/deps`). None when no such file exists.
+fn find_bin() -> Option<PathBuf> {
+    let bin = match std::env::var("RDY_BIN") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => {
+            let exe = std::env::current_exe().ok()?;
+            let dir = exe.parent()?;
+            let profile = if dir.file_name().is_some_and(|n| n == "deps") {
+                dir.parent()?
+            } else {
+                dir
+            };
+            profile
+                .parent()?
+                .join("release")
+                .join(format!("rdy{}", std::env::consts::EXE_SUFFIX))
+        }
     };
-    let bin = target.join(format!("rdy{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        bin.exists(),
-        "{} not found: run `cargo build --release -p rdy-cli` first, or set RDY_BIN",
-        bin.display()
-    );
-    bin
+    bin.exists().then_some(bin)
+}
+
+/// The `rdy` binary under test. A missing one fails the test: these tests never skip.
+fn rdy_bin() -> PathBuf {
+    find_bin().unwrap_or_else(|| {
+        panic!("the release rdy binary is missing: run `cargo build --release -p rdy-cli` first, or set RDY_BIN")
+    })
 }
 
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
@@ -271,6 +279,10 @@ impl Machine {
 
     /// Stops the project's daemon, if one runs.
     fn stop(&self) {
+        // no binary, no daemon: a test that failed for that reason must not panic again here
+        if find_bin().is_none() {
+            return;
+        }
         let _ = self
             .command(
                 self.path(),
