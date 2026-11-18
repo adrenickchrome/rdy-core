@@ -2615,10 +2615,13 @@ impl Version {
     /// for no decisions): the related list a briefing of them gives, read in the proposal's
     /// candidate at the canon it was proposed on (this version's own build while canon is still
     /// there, else the proposal's scope), cut to one cap of 20 rows. The value is
-    /// `{l} listed by link, {t} found by text, {o} omitted: {row}; {row}`, each link row
-    /// `{for} {relation} {decision} [{status}] via link: {summary}` (text rows are only counted,
-    /// over the rows kept by the caps; omitted rows have no route), or `none`; the whole fact is
-    /// cut as every stored fact is, so the counts lead. A list that cannot be read is `not worked out ({code})`.
+    /// `{l} listed by link, {t} found by text, {o} omitted: {row}; {row}`, each row
+    /// `{for} {relation} {decision} [{status}] via {link|text}: {summary}`, the link rows first,
+    /// then at most [`RELATED_TEXT_NAMED`] text rows (D-Q6A3F); past that the value ends
+    /// `and {n} more found by text`. The counts are over the rows kept by the caps; omitted rows
+    /// have no route. A list with no rows is `none`; the whole fact is cut as every stored fact
+    /// is, so the counts lead. A list that cannot be read is `not worked out ({code})`. A stored
+    /// approve card keeps the bytes it was stored with.
     fn related_facts(&self, st: &ReadState, ids: &[BlockId]) -> Vec<Fact> {
         if ids.is_empty() {
             return vec![];
@@ -2662,14 +2665,16 @@ impl Version {
         if rows.is_empty() && omitted == 0 {
             return Ok("none".to_string());
         }
-        // D-KVQ7F: only link rows are listed. Text rows are counted, one per retained row (a
-        // pair under two anchors is two rows). The omitted count stays as `related_in` and the
-        // aggregate cut gave it: those rows have no route here and are never guessed.
+        // D-KVQ7F, D-Q6A3F: the link rows are listed, then the text rows, at most
+        // RELATED_TEXT_NAMED of them, one per retained row (a pair under two anchors is two
+        // rows). The omitted count stays as `related_in` and the aggregate cut gave it: those
+        // rows have no route here and are never guessed.
         let (linked, text): (Vec<_>, Vec<_>) = rows
             .iter()
             .partition(|r| r.via == crate::related::RelatedVia::Link);
         let listed: Vec<String> = linked
             .iter()
+            .chain(text.iter().take(RELATED_TEXT_NAMED))
             .map(|r| {
                 let summary = BlockId::parse(&r.decision)
                     .ok()
@@ -2687,16 +2692,7 @@ impl Version {
                 )
             })
             .collect();
-        let counts = format!(
-            "{} listed by link, {} found by text, {omitted} omitted",
-            linked.len(),
-            text.len()
-        );
-        if listed.is_empty() {
-            Ok(counts)
-        } else {
-            Ok(format!("{counts}: {}", listed.join("; ")))
-        }
+        Ok(related_text(linked.len(), text.len(), omitted, &listed))
     }
 
     /// The Base fact: the canon the version was proposed on, and whether canon is still there.
@@ -3191,6 +3187,27 @@ use crate::check::options::{ALTERNATIVE_SET_FACT, CONSIDERED_OPTIONS_FACT, KEYS_
 const BASE_FACT: &str = "Base";
 /// nb11: the fact that lists the related decisions of a card's decisions.
 pub const RELATED_FACT: &str = "Related decisions";
+
+/// D-Q6A3F: the most text rows a `Related decisions` fact names; past it the value ends
+/// `and <n> more found by text`.
+pub const RELATED_TEXT_NAMED: usize = 10;
+
+/// The value of a `Related decisions` fact with `linked` link rows and `text` text rows retained,
+/// `omitted` rows cut, and `listed` the rows it names (the link rows, then the first
+/// [`RELATED_TEXT_NAMED`] text rows), each as a card prints it.
+fn related_text(linked: usize, text: usize, omitted: usize, listed: &[String]) -> String {
+    let counts = format!("{linked} listed by link, {text} found by text, {omitted} omitted");
+    let more = text.saturating_sub(RELATED_TEXT_NAMED);
+    let mut parts: Vec<String> = listed.to_vec();
+    if more > 0 {
+        parts.push(format!("and {more} more found by text"));
+    }
+    if parts.is_empty() {
+        counts
+    } else {
+        format!("{counts}: {}", parts.join("; "))
+    }
+}
 /// The name of the exception fact of a superseding decision that lists the findings it depends
 /// on (rf9, TASK-507 (3)); it follows the exception-kind facts.
 pub const FINDINGS_FACT: &str = "Findings";
@@ -3446,6 +3463,36 @@ mod tests {
         assert_eq!(
             open.iter().map(|i| i.r#ref.as_str()).collect::<Vec<_>>(),
             vec![ex.r#ref.as_str()]
+        );
+    }
+
+    /// D-Q6A3F: text rows follow the link rows; past 10 the value ends with the rest's count
+    #[test]
+    fn related_text_names_text_rows_after_link_rows() {
+        let rows = |via: &str, n: usize| -> Vec<String> {
+            (0..n).map(|i| format!("D-A {via} {i}")).collect()
+        };
+        let mut listed = rows("link", 3);
+        listed.extend(rows("text", 10));
+        let v = related_text(3, 12, 0, &listed);
+        assert_eq!(
+            v,
+            format!(
+                "3 listed by link, 12 found by text, 0 omitted: {}; and 2 more found by text",
+                listed.join("; ")
+            )
+        );
+        let ten = rows("text", 10);
+        assert_eq!(
+            related_text(0, 10, 1, &ten),
+            format!(
+                "0 listed by link, 10 found by text, 1 omitted: {}",
+                ten.join("; ")
+            )
+        );
+        assert_eq!(
+            related_text(0, 0, 2, &[]),
+            "0 listed by link, 0 found by text, 2 omitted"
         );
     }
 }
