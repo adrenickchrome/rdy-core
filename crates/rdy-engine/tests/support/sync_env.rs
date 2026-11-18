@@ -665,7 +665,7 @@ impl SyncWire for Hub {
 
     fn write(&self, cx: &UploadContext, request: &SyncWrite) -> Result<WriteReply, WriteFailure> {
         self.enter("write", cx, Some(&request.push), None)
-            .map_err(WriteFailure::NotSent)?;
+            .map_err(WriteFailure::not_sent)?;
         let n = {
             let mut w = self.writes.lock().unwrap();
             w.push(request.clone());
@@ -709,14 +709,14 @@ impl SyncWire for Hub {
                 request: Some(HubRequest { number, version }),
                 min_rdy_raised: false,
             }),
-            WritePlan::Refuse(e) => Err(WriteFailure::Refused(e)),
+            WritePlan::Refuse(e) => Err(WriteFailure::refused(e)),
             WritePlan::Lost { apply } => {
                 if apply {
                     self.take(request, tip.expect("a pushed head"));
                 }
                 Err(WriteFailure::Uncertain)
             }
-            WritePlan::NotSent(e) => Err(WriteFailure::NotSent(e)),
+            WritePlan::NotSent(e) => Err(WriteFailure::not_sent(e)),
         }
     }
 

@@ -268,7 +268,7 @@ fn a_write() -> SyncWrite {
 #[track_caller]
 fn refused<T: std::fmt::Debug>(r: Result<T, WriteFailure>) -> RdyError {
     match r {
-        Err(WriteFailure::Refused(e)) => e,
+        Err(WriteFailure::Refused(e)) => *e,
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
@@ -341,19 +341,28 @@ fn fixture_v2_steps() {
             "write"
         ]
     );
-    // the cases the hub does not serve yet: nine, each with its step
-    let skipped: Vec<&str> = f["not_served"]
-        .as_array()
-        .unwrap()
+    // the cases the hub does not serve yet: nine, each with its step, design and reason; the
+    // client pins none of them here
+    let not_served = f["not_served"].as_array().unwrap();
+    let skipped: Vec<(&str, &str)> = not_served
         .iter()
-        .map(|n| n["step"].as_str().unwrap())
+        .map(|n| (n["step"].as_str().unwrap(), n["case"].as_str().unwrap()))
         .collect();
     assert_eq!(
-        skipped,
+        skipped.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
         [
             "dump", "state", "write", "write", "write", "outcome", "write", "write", "write"
         ]
     );
+    for n in not_served {
+        for m in ["case", "design", "reason"] {
+            assert!(!n[m].as_str().unwrap().is_empty(), "{n}");
+        }
+    }
+    // the settings steps are Task 9b's (pull of the hub's gate settings); every other step is
+    // pinned below
+    let settings: Vec<usize> = (0..st.len()).filter(|i| named[*i] == "settings").collect();
+    assert_eq!(settings, [5, 12, 19]);
 
     let mut s = Server::start();
     let hub = Hub::new(&s, &[], &[]);
@@ -871,7 +880,7 @@ fn scc8_discovery_fence_precedes_every_request() {
         })),
         err(unsent(&servers, || hub.wire.outcome(&stray, PUSH))),
         match unsent(&servers, || hub.wire.write(&stray, &write)) {
-            Err(WriteFailure::NotSent(e)) => e,
+            Err(WriteFailure::NotSent(e)) => *e,
             other => panic!("{other:?}"),
         },
     ] {

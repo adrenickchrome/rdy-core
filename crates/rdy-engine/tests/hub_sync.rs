@@ -553,7 +553,7 @@ fn scc8_hub_refusals_use_publish_mapping() {
             "get" => err(wire.get(&cx, &get, &mut Vec::new(), 1 << 20)),
             "outcome" => err(wire.outcome(&cx, push_id)),
             "write" => match wire.write(&cx, &write) {
-                Err(WriteFailure::Refused(e)) => e,
+                Err(WriteFailure::Refused(e)) => *e,
                 other => panic!("{other:?}"),
             },
             _ => err(wire.put(&cx, push_id, &mut &b"batch"[..], 5)),

@@ -397,14 +397,28 @@ struct WriteReplyDto {
 }
 
 /// Why a write has no reply to apply.
+/// The errors are boxed: an unboxed `RdyError` with the tag passes the workspace's
+/// `large-error-threshold`.
 #[derive(Debug)]
 pub enum WriteFailure {
     /// The hub refused it: the hub's error object, mapped as publish maps it.
-    Refused(RdyError),
+    Refused(Box<RdyError>),
     /// It may have reached the hub, and no decodable reply came.
     Uncertain,
     /// It was not sent: a local refusal, or a failure before the request left.
-    NotSent(RdyError),
+    NotSent(Box<RdyError>),
+}
+
+impl WriteFailure {
+    /// The hub's refusal `e`.
+    pub fn refused(e: RdyError) -> WriteFailure {
+        WriteFailure::Refused(Box::new(e))
+    }
+
+    /// A write that never left: `e` says why.
+    pub fn not_sent(e: RdyError) -> WriteFailure {
+        WriteFailure::NotSent(Box::new(e))
+    }
 }
 
 /// The write reply `body` to `w`: `taken` with a tip of the write's root kind, or `held` (a
@@ -698,8 +712,8 @@ impl SyncWire for HttpSyncWire {
         cx: &UploadContext,
         request: &WriteRequest,
     ) -> Result<WriteReply, WriteFailure> {
-        let json = encode_write(request).map_err(WriteFailure::NotSent)?;
-        let url = route(cx, &["write"], &[]).map_err(WriteFailure::NotSent)?;
+        let json = encode_write(request).map_err(WriteFailure::not_sent)?;
+        let url = route(cx, &["write"], &[]).map_err(WriteFailure::not_sent)?;
         let sent = self.inner.post_split(
             cx,
             Effect::Write,
@@ -711,11 +725,11 @@ impl SyncWire for HttpSyncWire {
         );
         match sent {
             Ok(body) => decode_write(&body, request, &cx.bearer),
-            Err(PostError::Refused(e)) => Err(WriteFailure::Refused(e)),
+            Err(PostError::Refused(e)) => Err(WriteFailure::refused(e)),
             Err(PostError::Other(e)) if e.code == E_UPSTREAM_UNCERTAIN => {
                 Err(WriteFailure::Uncertain)
             }
-            Err(PostError::Other(e)) => Err(WriteFailure::NotSent(e)),
+            Err(PostError::Other(e)) => Err(WriteFailure::not_sent(e)),
         }
     }
 

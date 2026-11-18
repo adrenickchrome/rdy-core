@@ -1115,7 +1115,7 @@ impl<'a> SyncService<'a> {
                 self.reply_only(engine, t, &id)?;
                 return Ok(WriteEnd::Refused {
                     push: Some(id),
-                    error,
+                    error: *error,
                 });
             }
             Err(WriteFailure::Uncertain) => return Err(sync_uncertain(&id)),
@@ -1129,7 +1129,7 @@ impl<'a> SyncService<'a> {
                         SyncStep::Upload(upload),
                     ],
                 );
-                return Err(e);
+                return Err(*e);
             }
         };
         drop(cx);

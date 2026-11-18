@@ -121,7 +121,7 @@ impl SyncWire for LazyWire<'_> {
         request: &WriteRequest,
     ) -> Result<WriteReply, WriteFailure> {
         self.wire(cx)
-            .map_err(WriteFailure::NotSent)?
+            .map_err(WriteFailure::not_sent)?
             .write(cx, request)
     }
 
