@@ -56,6 +56,25 @@ pub fn files() -> Vec<(&'static str, Vec<u8>)> {
     out
 }
 
+/// The site-relative paths of the theme's files ([`files`]), without their bytes.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    THEME
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(std::iter::once("assets/app.js"))
+}
+
+/// The bytes of the theme file at `path`, if the theme has one there ([`files`]).
+pub fn file(path: &str) -> Option<Vec<u8>> {
+    if path == "assets/app.js" {
+        return Some(app_js());
+    }
+    THEME
+        .iter()
+        .find(|(name, _)| *name == path)
+        .map(|(_, bytes)| bytes.to_vec())
+}
+
 /// The extension of a figure file whose media type has no extension of its own.
 pub(crate) const OTHER_EXTENSION: &str = "bin";
 

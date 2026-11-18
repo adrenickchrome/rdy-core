@@ -74,22 +74,31 @@ enum Target<'a> {
 /// The page the full site writes at `path`: a permalink page, which replaces a page at its path,
 /// else the last page of the build with that path. None for a path the build has no page at.
 fn resolve<'a>(sh: &page::Shared<'a>, path: &str) -> Option<Target<'a>> {
-    let site = sh.site;
-    if let Some(name) = path
-        .strip_prefix("go/")
-        .and_then(|p| p.strip_suffix(".html"))
-        && let Ok(id) = BlockId::parse(name)
-        && site.go_page(&id) == path
-        && sh.m.get(&id).is_some_and(|b| !is_profile(b))
-        && let Some(url) = site.url_of(&id)
-    {
+    if let Some((id, url)) = permalink(sh, path) {
         return Some(Target::Permalink(id, url));
     }
+    page_at(sh, path).map(Target::Page)
+}
+
+/// The block whose permalink page the full site writes at `path` (`go/<id>.html`), and where it
+/// leads: a block with a place on the site that is no publication profile.
+pub(crate) fn permalink(sh: &page::Shared<'_>, path: &str) -> Option<(BlockId, Url)> {
+    let site = sh.site;
+    let name = path.strip_prefix("go/")?.strip_suffix(".html")?;
+    let id = BlockId::parse(name).ok()?;
+    if site.go_page(&id) != path || !sh.m.get(&id).is_some_and(|b| !is_profile(b)) {
+        return None;
+    }
+    site.url_of(&id).map(|url| (id, url))
+}
+
+/// The last page of the build's pages ([`page_kinds`]) with the path `path`.
+pub(crate) fn page_at<'a>(sh: &page::Shared<'a>, path: &str) -> Option<Kind<'a>> {
+    let site = sh.site;
     page_kinds(site, sh.m)
         .into_iter()
         .rev()
         .find(|k| kind_page(site, k).as_deref() == Some(path))
-        .map(Target::Page)
 }
 
 /// Renders the page of the publication of `profile` (a profile id or key, or `implicit:org`) in
@@ -118,6 +127,8 @@ pub fn render_publication_page(
     let resolved = rdy_engine::publication::resolve_source(source, m, profile)?;
     let prepared = publication::prepare_resolved(source, resolved, tag_name, tag_redacted, inputs)?;
     let budget = Budget::publication();
+    #[cfg(test)]
+    crate::budget_hooks::dispatched(Some(budget.limits()));
     let (built, mut blobs) = with_shared(prepared, Mode::Static, |sh, env, extras| {
         let ctx = match resolve(sh, path).ok_or_else(not_found)? {
             Target::Page(kind) => build_page(sh, kind),

@@ -70,6 +70,93 @@ pub(crate) struct Prepared {
     pub status: BTreeMap<BlockId, BlockStatus>,
 }
 
+/// The render inputs of one prepared state, apart from what a single build or request owns
+/// (D-F44G6, the F3 ruling): the selected blocks and graph, the pack, each shown figure's
+/// descriptor (its length, or the request that removed it), the version facts, the review and
+/// its summaries, the profile's presentation and the status words. It holds no store reader, no
+/// `ReadState`, no diagram cache and no figure byte, so a review target can keep it between
+/// requests and count it ([`crate::retained`]). A whole build lends it to its pages once
+/// ([`Prepared::split`]); a review target lends it to each requested file.
+pub(crate) struct Detached {
+    pub m: Arc<Materialized>,
+    pub g: Arc<Graph>,
+    pub pack: Pack,
+    /// The figure descriptors: `bytes` is always empty here (the bytes are the build's or the
+    /// request's own).
+    pub blobs: FigureBlobs,
+    pub site_name: String,
+    pub description: Option<String>,
+    pub position: VersionPosition,
+    pub versions: Vec<VersionInfo>,
+    pub landed_ms: BTreeMap<String, i64>,
+    pub disagreements: Vec<disagree::Disagreement>,
+    pub history: History,
+    pub profile: Option<ProfilePresentation>,
+    pub status: BTreeMap<BlockId, BlockStatus>,
+}
+
+/// What [`Prepared::split`] leaves beside the [`Detached`] inputs: what one build or one request
+/// owns, and is never kept with a review target.
+pub(crate) struct Scoped {
+    /// The bytes of the figures a whole build copies (empty for a review preparation).
+    pub bytes: BTreeMap<Hash, Vec<u8>>,
+    /// Where a live page's pill opens the menu.
+    pub menu_url: Option<String>,
+    /// The store's diagram cache, a handle on the store the preparation read.
+    pub diagram_cache: Option<DiagramCache>,
+}
+
+impl Prepared {
+    /// The detached render inputs, and the parts one build or request owns: the figure bytes,
+    /// the menu link and the store's diagram cache. The blob states the preparation read to
+    /// reach its sides are dropped here: no page reads them.
+    pub(crate) fn split(self) -> (Detached, Scoped) {
+        let Prepared {
+            m,
+            g,
+            pack,
+            mut blobs,
+            site_name,
+            description,
+            position,
+            versions,
+            landed_ms,
+            disagreements,
+            scope_text: _,
+            rdy_dir: _,
+            history,
+            profile,
+            menu_url,
+            diagram_cache,
+            status,
+        } = self;
+        let bytes = std::mem::take(&mut blobs.bytes);
+        blobs.states = BTreeMap::new();
+        (
+            Detached {
+                m,
+                g,
+                pack,
+                blobs,
+                site_name,
+                description,
+                position,
+                versions,
+                landed_ms,
+                disagreements,
+                history,
+                profile,
+                status,
+            },
+            Scoped {
+                bytes,
+                menu_url,
+                diagram_cache,
+            },
+        )
+    }
+}
+
 /// The status words a block's page shows: `Planned`, or `since <version>` when the output shows
 /// the since label. At most one is set.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -187,15 +274,24 @@ pub(crate) fn source(
     purpose: Purpose,
 ) -> Result<Prepared, RdyError> {
     crate::probe::prepared();
-    source_reading(rdy, scope, purpose, rdy)
+    source_reading(rdy, scope, purpose, rdy, Keep::Bytes)
 }
 
-/// [`source`], reading the figure blobs through `reads`.
+/// The site preparation of `scope` for a review target that renders its files on request
+/// (D-F44G6): [`source`], with each shown figure's blob measured by its manifest and never read.
+/// A requested figure file reads its bytes from the request's own captured state.
+pub(crate) fn source_review(rdy: &ReadState, scope: &Scope) -> Result<Prepared, RdyError> {
+    crate::probe::prepared();
+    source_reading(rdy, scope, Purpose::Site, rdy, Keep::Lengths)
+}
+
+/// [`source`], reading the figure blobs through `reads` and keeping them as `keep` says.
 fn source_reading(
     rdy: &ReadState,
     scope: &Scope,
     purpose: Purpose,
     reads: &dyn BlobReads,
+    keep: Keep,
 ) -> Result<Prepared, RdyError> {
     let position = rdy.version_position(scope)?;
     let versions = rdy.versions()?;
@@ -211,7 +307,7 @@ fn source_reading(
     // the figure blobs the store holds; a figure whose blob lost content reads as removed from
     // here on, so no page, summary or print reads its file or words
     let mut blobs = FigureBlobs::default();
-    let m = blobs.side(rdy, reads, scope, true)?;
+    let m = blobs.side(rdy, reads, scope, keep)?;
     let site_name = rdy.project_name();
     let description = rdy.project_description();
     let pack = rdy.pack().clone();
@@ -322,7 +418,10 @@ fn history(
     let mut inline_diffs: BTreeMap<BlockId, String> = BTreeMap::new();
     if let (Some(r), Some(rv)) = (&reviewed, listed.as_ref()) {
         let (diff, from) = match &base {
-            Some(b) => (Some(rdy.diff(b, scope)?), blobs.side(rdy, reads, b, false)?),
+            Some(b) => (
+                Some(rdy.diff(b, scope)?),
+                blobs.side(rdy, reads, b, Keep::States)?,
+            ),
             None => (None, Default::default()),
         };
         let sides = changes::Sides {
@@ -356,10 +455,10 @@ fn history(
     {
         let rv = review::between(rdy, &tag, &to)?;
         let diff = rdy.diff(&tag, &to)?;
-        let from = blobs.side(rdy, reads, &tag, false)?;
+        let from = blobs.side(rdy, reads, &tag, Keep::States)?;
         // both sides read against the `to` side's site (O4)
         let to_m = (to != *scope)
-            .then(|| blobs.side(rdy, reads, &to, false))
+            .then(|| blobs.side(rdy, reads, &to, Keep::States))
             .transpose()?;
         let to_site = to_m.as_ref().map(|tm| Site::new(tm, pack, site_name));
         let sides = changes::Sides {
@@ -400,18 +499,47 @@ fn history(
 /// scope a build pages shows it (D-FY4VF).
 #[derive(Default)]
 pub(crate) struct FigureBlobs {
+    /// The bytes of each readable blob the paged scope shows; empty for a review preparation,
+    /// whose requested figure files read their own bytes ([`Keep::Lengths`]).
     pub bytes: BTreeMap<Hash, Vec<u8>>,
+    /// The length of each readable blob the paged scope shows: what a page reads of a blob (that
+    /// it is there, and its size). It has an entry for every blob of `bytes`.
+    pub lens: BTreeMap<Hash, u64>,
     pub removed: BTreeMap<Hash, Hash>,
     /// The state each blob this build reached read as, kept for the build's other sides.
     states: BTreeMap<Hash, BlobState>,
+}
+
+/// What [`FigureBlobs::side`] keeps of the readable blobs of a side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Keep {
+    /// The bytes and the length of each (the scope a whole build pages).
+    Bytes,
+    /// The length of each, from its manifest; no byte is read (a review preparation).
+    Lengths,
+    /// Only which blobs lost content (a change summary's other side).
+    States,
 }
 
 impl FigureBlobs {
     /// The blobs of a named profile's selection: the bytes its bounded asset reader read, and the
     /// blobs a redaction removed content of, by the request that did.
     pub(crate) fn selected(bytes: BTreeMap<Hash, Vec<u8>>, removed: BTreeMap<Hash, Hash>) -> Self {
+        let lens = lens_of(&bytes);
         FigureBlobs {
             bytes,
+            lens,
+            removed,
+            states: BTreeMap::new(),
+        }
+    }
+
+    /// [`FigureBlobs::selected`] with the lengths of the readable blobs alone: a review
+    /// preparation keeps no figure byte.
+    pub(crate) fn measured(lens: BTreeMap<Hash, u64>, removed: BTreeMap<Hash, Hash>) -> Self {
+        FigureBlobs {
+            bytes: BTreeMap::new(),
+            lens,
             removed,
             states: BTreeMap::new(),
         }
@@ -428,7 +556,7 @@ impl FigureBlobs {
         rdy: &ReadState,
         reads: &dyn BlobReads,
         scope: &Scope,
-        keep: bool,
+        keep: Keep,
     ) -> Result<Arc<Materialized>, RdyError> {
         let m = rdy.materialized(scope)?;
         let mut figures: Vec<Vec<Hash>> = vec![];
@@ -438,7 +566,7 @@ impl FigureBlobs {
                 continue;
             }
             for h in &blobs {
-                if self.bytes.contains_key(h) || self.states.contains_key(h) {
+                if self.lens.contains_key(h) || self.states.contains_key(h) {
                     continue;
                 }
                 let state = reads.state(h)?;
@@ -449,30 +577,39 @@ impl FigureBlobs {
             }
             figures.push(blobs);
         }
-        if keep {
+        if keep != Keep::States {
             for blobs in figures {
                 // a figure that lost content shows the notice: none of its bytes is read
                 if blobs.iter().any(|h| self.removed.contains_key(h)) {
                     continue;
                 }
                 for h in blobs {
-                    if self.bytes.contains_key(&h)
+                    if self.lens.contains_key(&h)
                         || self.states.get(&h) != Some(&BlobState::Readable)
                     {
                         continue;
                     }
-                    // a readable blob the paged scope shows: its bytes, once
-                    match reads.bytes(&h) {
-                        Ok(bytes) => {
-                            self.bytes.insert(h, bytes);
-                        }
-                        Err(e) => match removed_by(&e) {
-                            Some(request) => {
-                                self.states.insert(h, BlobState::Removed(request));
-                                self.removed.insert(h, request);
+                    // a readable blob the paged scope shows: its bytes, once, or its length
+                    let removed = match keep {
+                        Keep::Bytes => match reads.bytes(&h) {
+                            Ok(bytes) => {
+                                self.lens.insert(h, bytes.len() as u64);
+                                self.bytes.insert(h, bytes);
+                                None
                             }
-                            None => return Err(e),
+                            Err(e) => Some(removed_by(&e).ok_or(e)?),
                         },
+                        Keep::Lengths | Keep::States => match reads.len(&h)? {
+                            BlobLen::Len(n) => {
+                                self.lens.insert(h, n);
+                                None
+                            }
+                            BlobLen::Removed(request) => Some(request),
+                        },
+                    };
+                    if let Some(request) = removed {
+                        self.states.insert(h, BlobState::Removed(request));
+                        self.removed.insert(h, request);
                     }
                 }
             }
@@ -492,11 +629,21 @@ impl FigureBlobs {
     }
 }
 
+/// The length of a readable blob from its manifest, or the request that removed a chunk of it
+/// (the read of its bytes would be refused by that request).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlobLen {
+    Len(u64),
+    Removed(Hash),
+}
+
 /// What collecting a build's figure blobs reads of the store: a blob's state from its metadata,
-/// and its bytes. A source build reads through the store; a test counts the reads.
+/// its bytes, and its length. A source build reads through the store; a test counts the reads.
 pub(crate) trait BlobReads {
     fn state(&self, h: &Hash) -> Result<BlobState, RdyError>;
     fn bytes(&self, h: &Hash) -> Result<Vec<u8>, RdyError>;
+    /// The blob's length by its manifest, with the removal walk of its chunks: no chunk is read.
+    fn len(&self, h: &Hash) -> Result<BlobLen, RdyError>;
 }
 
 impl BlobReads for ReadState {
@@ -507,6 +654,22 @@ impl BlobReads for ReadState {
     fn bytes(&self, h: &Hash) -> Result<Vec<u8>, RdyError> {
         self.reader().get_blob(h).map_err(RdyError::from)
     }
+
+    fn len(&self, h: &Hash) -> Result<BlobLen, RdyError> {
+        use rdy_engine::publication::{PublicationSource, ReadPublicationSource};
+        // the source reads only the store's blob manifests and removal marks here: its pack and
+        // words are never read
+        let source = ReadPublicationSource::with_settings(self, self.pack(), "", None);
+        if let Some(request) = source.removed_blob(h)? {
+            return Ok(BlobLen::Removed(request));
+        }
+        Ok(BlobLen::Len(source.manifest(h)?.map_or(0, |m| m.len)))
+    }
+}
+
+/// The length of each blob of `bytes`.
+pub(crate) fn lens_of(bytes: &BTreeMap<Hash, Vec<u8>>) -> BTreeMap<Hash, u64> {
+    bytes.iter().map(|(h, b)| (*h, b.len() as u64)).collect()
 }
 
 /// The request an `E_REDACTED` refusal names (`Content removed by redaction {hash}.`); none for
@@ -627,6 +790,10 @@ mod dgm2 {
             *self.bytes.borrow_mut().entry(*h).or_default() += 1;
             self.rdy.bytes(h)
         }
+
+        fn len(&self, h: &Hash) -> Result<BlobLen, RdyError> {
+            self.rdy.len(h)
+        }
     }
 
     #[test]
@@ -671,7 +838,8 @@ mod dgm2 {
         };
         let scope = Scope::View("work".into());
         for build in 1..=2u32 {
-            let p = source_reading(&st, &scope, Purpose::Site, &reads).expect("prepare");
+            let p =
+                source_reading(&st, &scope, Purpose::Site, &reads, Keep::Bytes).expect("prepare");
             assert!(p.history.since.is_some(), "the tag's history is read");
             assert_eq!(p.blobs.bytes.keys().collect::<Vec<_>>(), vec![&shared]);
             // one byte read and one metadata read of the shared blob per build; the history-only

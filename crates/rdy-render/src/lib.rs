@@ -9,6 +9,7 @@ mod home;
 mod html;
 pub mod inline;
 pub mod live;
+pub mod live_review;
 mod llms;
 pub mod menu;
 mod nav;
@@ -24,8 +25,22 @@ pub mod probe;
 mod probe {
     #[inline(always)]
     pub(crate) fn hit() {}
+    #[cfg(not(test))]
     #[inline(always)]
     pub(crate) fn prepared() {}
+    // the crate's own tests count preparations with the feature off too
+    #[cfg(test)]
+    thread_local! {
+        static PREPARATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    #[cfg(test)]
+    pub(crate) fn prepared() {
+        PREPARATIONS.set(PREPARATIONS.get().wrapping_add(1));
+    }
+    #[cfg(test)]
+    pub(crate) fn preparations() -> u64 {
+        PREPARATIONS.get()
+    }
 }
 pub mod process;
 mod profile_live;
@@ -33,6 +48,7 @@ mod publication;
 pub mod publish;
 pub mod refusal;
 pub mod render_input;
+pub mod retained;
 pub mod review;
 mod search;
 mod site;
@@ -166,6 +182,19 @@ thread_local! {
     static PAGE_OUT: std::cell::RefCell<Option<PageOut>> = const { std::cell::RefCell::new(None) };
 }
 
+// The page templates rendered on this thread (see `page_renders`); test builds only.
+#[cfg(test)]
+thread_local! {
+    static PAGE_RENDERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many page templates this thread rendered so far: a page, a permalink prototype, a
+/// not-found page. Tests count the files a request renders with it.
+#[cfg(test)]
+fn page_renders() -> u64 {
+    PAGE_RENDERS.get()
+}
+
 /// The sink [`render_page`] hands minijinja: it appends to this thread's [`PageOut`], each
 /// write admitted first by a publication build's limits when there are some.
 struct PageSink<'b>(Option<&'b Budget>);
@@ -222,6 +251,8 @@ fn render_page_within<S: Serialize>(
     ctx: S,
     budget: Option<&Budget>,
 ) -> Result<Rendered, RdyError> {
+    #[cfg(test)]
+    PAGE_RENDERS.set(PAGE_RENDERS.get().wrapping_add(1));
     let t = env.get_template(name).map_err(tpl)?;
     PAGE_OUT.set(Some(PageOut::default()));
     let rendered = t.render_captured_to(ctx, PageSink(budget)).map(drop);
@@ -1113,7 +1144,28 @@ impl Budget {
 
     /// The limits of a publication manifest.
     fn publication() -> Budget {
+        #[cfg(test)]
+        if let Some((files, file, total)) = budget_hooks::limits() {
+            return Budget::new(files, file, total);
+        }
         Budget::new(MAX_FILES, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES)
+    }
+
+    /// The bounds of one requested file of a live review target (D-WYZ97, D-SMP5A): the
+    /// manifest's file count and per-file limit, and no artifact limit. Each requested file is
+    /// admitted on its own; nothing adds up the target's files.
+    fn per_file() -> Budget {
+        #[cfg(test)]
+        if let Some((files, file, _)) = budget_hooks::limits() {
+            return Budget::new(files, file, u64::MAX);
+        }
+        Budget::new(MAX_FILES, MAX_FILE_BYTES, u64::MAX)
+    }
+
+    /// The limits: files, bytes of one file, bytes of all files.
+    #[cfg(test)]
+    fn limits(&self) -> budget_hooks::Limits {
+        (self.max_files, self.max_file, self.max_total)
     }
 
     /// `E_LIMIT`: the artifact would exceed `limit`, in the manifest's words. The build stops.
@@ -1128,6 +1180,8 @@ impl Budget {
 
     /// Admits `n` more bytes to a file that holds `len` bytes so far.
     fn admit(&self, len: u64, n: u64) -> Result<(), RdyError> {
+        #[cfg(test)]
+        budget_hooks::admitted();
         if len.checked_add(n).is_none_or(|end| end > self.max_file) {
             return Err(self.over(format!("{} file bytes", self.max_file)));
         }
@@ -1153,11 +1207,11 @@ impl Budget {
     /// old and new figures together, D-CWC91): each within the per-file limit, all of them within
     /// the aggregate one. Nothing is admitted: each file is admitted again as it is put.
     fn holds_blobs(&self, lens: impl IntoIterator<Item = u64>) -> Result<(), RdyError> {
+        #[cfg(test)]
+        budget_hooks::aggregate();
         let mut total = 0u64;
         for len in lens {
-            if len > self.max_file {
-                return Err(self.over(format!("{} file bytes", self.max_file)));
-            }
+            self.holds_file(len)?;
             total = match total.checked_add(len).filter(|t| *t <= self.max_total) {
                 Some(t) => t,
                 None => return Err(self.over(format!("{} artifact bytes", self.max_total))),
@@ -1166,8 +1220,21 @@ impl Budget {
         Ok(())
     }
 
+    /// Checks that one file of `len` bytes fits the per-file limit, before any of its bytes is
+    /// read. Nothing is admitted.
+    fn holds_file(&self, len: u64) -> Result<(), RdyError> {
+        #[cfg(test)]
+        budget_hooks::admitted();
+        if len > self.max_file {
+            return Err(self.over(format!("{} file bytes", self.max_file)));
+        }
+        Ok(())
+    }
+
     /// Checks that the artifact may hold `files` files.
     fn count(&self, files: usize) -> Result<(), RdyError> {
+        #[cfg(test)]
+        budget_hooks::admitted();
         if files > self.max_files {
             return Err(self.over(format!("{} files", self.max_files)));
         }
@@ -1275,6 +1342,64 @@ impl Budget {
     #[cfg(test)]
     fn peak(&self) -> usize {
         self.peak.load(Ordering::SeqCst)
+    }
+}
+
+/// Test hooks of the budget matrix (D-SMP5A): small limits injected for this thread, and a
+/// record of which budget each whole build dispatched with and how often a budget was asked.
+/// Test builds only: no production option or limit.
+#[cfg(test)]
+pub(crate) mod budget_hooks {
+    use std::cell::{Cell, RefCell};
+
+    /// A budget's limits: files, bytes of one file, bytes of all files.
+    pub(crate) type Limits = (usize, u64, u64);
+
+    thread_local! {
+        static LIMITS: Cell<Option<Limits>> = const { Cell::new(None) };
+        static DISPATCH: RefCell<Vec<Option<Limits>>> = const { RefCell::new(Vec::new()) };
+        static ADMITS: Cell<u64> = const { Cell::new(0) };
+        static AGGREGATES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// `f`, with every publication and review budget made on this thread at `limits`.
+    pub(crate) fn with_limits<T>(limits: Limits, f: impl FnOnce() -> T) -> T {
+        let old = LIMITS.replace(Some(limits));
+        let out = f();
+        LIMITS.set(old);
+        out
+    }
+
+    pub(crate) fn limits() -> Option<Limits> {
+        LIMITS.get()
+    }
+
+    /// A whole build or a one-page publication dispatched with `budget`'s limits, or with none.
+    pub(crate) fn dispatched(budget: Option<Limits>) {
+        DISPATCH.with_borrow_mut(|d| d.push(budget));
+    }
+
+    /// The dispatches since the last call, in order.
+    pub(crate) fn take_dispatched() -> Vec<Option<Limits>> {
+        DISPATCH.take()
+    }
+
+    pub(crate) fn admitted() {
+        ADMITS.set(ADMITS.get().wrapping_add(1));
+    }
+
+    /// How many times a budget admitted or checked something on this thread.
+    pub(crate) fn admits() -> u64 {
+        ADMITS.get()
+    }
+
+    pub(crate) fn aggregate() {
+        AGGREGATES.set(AGGREGATES.get().wrapping_add(1));
+    }
+
+    /// How many aggregate figure checks ([`super::Budget::holds_blobs`]) ran on this thread.
+    pub(crate) fn aggregates() -> u64 {
+        AGGREGATES.get()
     }
 }
 
@@ -1447,11 +1572,11 @@ fn render_threads() -> usize {
         .clamp(1, 8)
 }
 
-/// What the shared setup keeps of a prepared source's history for the build that follows: the
+/// What the shared setup lends of a prepared source's history to the build that follows: the
 /// change summaries (pages of the site) and the build's warnings.
-struct Extras {
-    changes: Option<changes::Summary>,
-    since: Option<changes::Summary>,
+struct Extras<'p> {
+    changes: Option<&'p changes::Summary>,
+    since: Option<&'p changes::Summary>,
     warnings: Vec<String>,
 }
 
@@ -1479,15 +1604,36 @@ fn build_page(sh: &page::Shared, kind: page::Kind) -> page::PageContext {
 /// The setup every build shares, from what [`prepare::source`] or `publication::prepare_resolved`
 /// read: the site of the selected state, the template environment, the header, the authored
 /// local targets and the [`page::Shared`] the pages are built from. `f` builds with them; the
-/// figure blobs the pages did not borrow for good come back with its result, for the build to
-/// copy once the shared state is dropped. A static build refuses two siblings that would be one
-/// file before `f` runs.
+/// figure blobs' bytes come back with its result, for the build to copy once the shared state is
+/// dropped. A static build refuses two siblings that would be one file before `f` runs.
 fn with_shared<R>(
     prepared: prepare::Prepared,
     mode: Mode,
     f: impl FnOnce(&page::Shared<'_>, &minijinja::Environment<'static>, Extras) -> Result<R, RdyError>,
-) -> Result<(R, prepare::FigureBlobs), RdyError> {
-    let prepare::Prepared {
+) -> Result<(R, BTreeMap<Hash, Vec<u8>>), RdyError> {
+    let (inputs, scoped) = prepared.split();
+    let prepare::Scoped {
+        bytes,
+        menu_url,
+        diagram_cache,
+    } = scoped;
+    let out = with_inputs(&inputs, mode, menu_url.as_deref(), diagram_cache, f)?;
+    Ok((out, bytes))
+}
+
+/// The shared setup of [`with_shared`] over detached inputs `d` (D-F44G6): what a whole build
+/// lends to its pages once, and a review target lends to each requested file. The site, the
+/// template environment, the header, the authored local targets and the [`page::Shared`] are
+/// made here and live only while `f` runs; `d` is only borrowed. `menu_url` and `diagram_cache`
+/// are the build's or the request's own.
+fn with_inputs<R>(
+    d: &prepare::Detached,
+    mode: Mode,
+    menu_url: Option<&str>,
+    diagram_cache: Option<rdy_engine::DiagramCache>,
+    f: impl FnOnce(&page::Shared<'_>, &minijinja::Environment<'static>, Extras) -> Result<R, RdyError>,
+) -> Result<R, RdyError> {
+    let prepare::Detached {
         m,
         g,
         pack,
@@ -1500,12 +1646,9 @@ fn with_shared<R>(
         disagreements,
         history,
         profile,
-        menu_url,
-        diagram_cache,
         status,
-        ..
-    } = prepared;
-    let m: &Materialized = &m;
+    } = d;
+    let m: &Materialized = m;
     // a named profile reads every reference outside its selection in neutral words
     let unavailable = match profile {
         Some(_) => inline::UNAVAILABLE,
@@ -1517,12 +1660,12 @@ fn with_shared<R>(
         .unwrap_or_default();
     let mut site = Site::with_words(
         m,
-        &pack,
-        &site_name,
+        pack,
+        site_name,
         profile.as_ref().map(|_| inline::UNAVAILABLE),
         dropped.clone(),
     );
-    site.set_disagreements(disagreements);
+    site.set_disagreements(disagreements.clone());
     // a static site is written as files: two siblings that would be one file refuse before
     // anything is built, so the last rendered site stays as it was (a live site's pages are not
     // files)
@@ -1543,16 +1686,16 @@ fn with_shared<R>(
     // a named profile's review base: the words only it holds read through its selected state
     let old_site = old
         .as_deref()
-        .map(|o| Site::for_profile(o, &pack, &site_name, &dropped));
+        .map(|o| Site::for_profile(o, pack, site_name, &dropped));
     // the review marks on the pages read only a base a scope names (the task-8 ruling)
-    let review = listed.as_ref().filter(|_| review_marks);
-    let header = match &profile {
+    let review = listed.as_ref().filter(|_| *review_marks);
+    let header = match profile {
         Some(ProfilePresentation {
             presentation: Presentation::LiveRoute { header, .. },
             ..
         }) => header.clone(),
         Some(p) => version::chosen_header(p.tag_name.as_deref(), position.frozen),
-        None => version::header(&position, reviewed.as_ref()),
+        None => version::header(position, reviewed.as_ref()),
     };
     // the pages and anchors a named profile's authored local links may lead to, known before
     // any page body is written
@@ -1562,14 +1705,14 @@ fn with_shared<R>(
     let sh = page::Shared {
         site: &site,
         m,
-        g: &g,
-        position: &position,
-        pack: &pack,
-        site_name: &site_name,
+        g,
+        position,
+        pack,
+        site_name,
         description: description.as_deref(),
-        versions: &versions,
-        landed_ms: &landed_ms,
-        blobs: &blobs.bytes,
+        versions,
+        landed_ms,
+        blob_lens: &blobs.lens,
         removed_blobs: &blobs.removed,
         review,
         listed: listed.as_ref(),
@@ -1587,18 +1730,18 @@ fn with_shared<R>(
         profile: profile.as_ref(),
         local: local.as_ref(),
         unavailable,
-        menu_url: menu_url.as_deref(),
+        menu_url,
         old_site: old_site.as_ref(),
-        status: &status,
+        status,
     };
     let extras = Extras {
-        changes: changes_summary,
-        since: since_summary,
-        warnings,
+        changes: changes_summary.as_ref(),
+        since: since_summary.as_ref(),
+        warnings: warnings.clone(),
     };
     let out = f(&sh, &env, extras)?;
     drop(sh);
-    Ok((out, blobs))
+    Ok(out)
 }
 
 /// The pages of a build, in the order a reader meets them: the home page, the tree, the
@@ -1680,6 +1823,8 @@ fn build_site_from(
     budget: Option<&Budget>,
     not_found: NotFoundOut,
 ) -> Result<BuiltSite, RdyError> {
+    #[cfg(test)]
+    budget_hooks::dispatched(budget.map(Budget::limits));
     let ((staged, missing), mut blobs) = with_shared(prepared, mode, |sh, env, extras| {
         let mut staged = stage_site(sh, env, extras, slots, budget)?;
         let mut missing = NotFoundPages::default();
@@ -1741,7 +1886,7 @@ fn copy_blobs(
     files: &mut BTreeMap<String, Vec<u8>>,
     budget: Option<&Budget>,
     used: &BTreeMap<String, (Hash, String)>,
-    blobs: &mut prepare::FigureBlobs,
+    blobs: &mut BTreeMap<Hash, Vec<u8>>,
 ) -> Result<usize, RdyError> {
     let mut uses: BTreeMap<&Hash, usize> = BTreeMap::new();
     for (h, _) in used.values() {
@@ -1752,13 +1897,13 @@ fn copy_blobs(
         let left = uses.get_mut(h).expect("counted above");
         *left -= 1;
         if let Some(b) = budget {
-            let len = blobs.bytes.get(h).map_or(0, Vec::len);
+            let len = blobs.get(h).map_or(0, Vec::len);
             b.reserve(files, path, len)?;
         }
         let bytes = if *left == 0 {
-            blobs.bytes.remove(h)
+            blobs.remove(h)
         } else {
-            blobs.bytes.get(h).cloned()
+            blobs.get(h).cloned()
         };
         let bytes = bytes.expect("a used blob is held");
         if let (Some(old), Some(b)) = (files.insert(path.clone(), bytes), budget) {
@@ -1828,10 +1973,10 @@ fn stage_site(
     // the change summaries: pages of the site, kept out of the navigation, the search index,
     // the llms files and the permalinks (sr6)
     let mut extra = vec![];
-    if let Some(c) = &changes_summary {
+    if let Some(c) = changes_summary {
         extra.push(build_page(sh, page::Kind::Changes(c)));
     }
-    if let Some(c) = &since_summary {
+    if let Some(c) = since_summary {
         extra.push(build_page(sh, page::Kind::ChangesSince(c)));
     }
     let mut pages = pages;
