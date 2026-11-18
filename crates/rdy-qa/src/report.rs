@@ -470,6 +470,9 @@ pub fn test_areas(tests_dir: &Path) -> Vec<String> {
     v
 }
 
+/// The folder of shared test helpers (no test binary of its own).
+const SUPPORT_DIR: &str = "support";
+
 /// What is wrong with the test layout (one test binary per area, `tests/<area>/main.rs`
 /// with one `mod <stem>;` line per test file), one message per problem, sorted. Empty when
 /// the layout is right. A test file without its `mod` line compiles and never runs.
@@ -488,6 +491,22 @@ pub fn layout_problems(tests_dir: &Path) -> Vec<String> {
             continue;
         }
         if !p.is_dir() || !holds_rs(&p) {
+            continue;
+        }
+        // `tests/support/` holds helpers that areas include with `#[path]`; it is no test binary.
+        // A `#[test]` there would run once per area that includes it, so tests stay in an area.
+        if name == SUPPORT_DIR {
+            for f in dir_paths(&p).into_iter().filter(|f| is_rs_file(f)) {
+                if std::fs::read_to_string(&f)
+                    .unwrap_or_default()
+                    .contains("#[test]")
+                {
+                    out.push(format!(
+                        "tests/{name}/{} holds a test: move it to an area",
+                        name_of(&f)
+                    ));
+                }
+            }
             continue;
         }
         let main = p.join("main.rs");
@@ -1248,6 +1267,20 @@ mod tests {
         let p = layout_problems(d.path());
         assert_eq!(p.len(), 1, "{p:?}");
         assert!(p[0].contains("engine/engine_b.rs"), "{p:?}");
+    }
+
+    #[test]
+    fn tlay1_support_holds_helpers_and_no_tests() {
+        let ok = tree(&[
+            ("cli/main.rs", "mod cli_a;\n"),
+            ("cli/cli_a.rs", ""),
+            ("support/hub.rs", "pub fn hub() {}\n"),
+        ]);
+        assert_eq!(layout_problems(ok.path()), Vec::<String>::new());
+        let bad = tree(&[("support/hub.rs", "#[test]\nfn t() {}\n")]);
+        let p = layout_problems(bad.path());
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("support/hub.rs holds a test"), "{p:?}");
     }
 
     #[test]
