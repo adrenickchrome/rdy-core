@@ -2470,3 +2470,184 @@ fn pql_pushed_landings_mix_stored_and_pushed() {
     drop((s0, s1, s2));
     h.close().unwrap();
 }
+
+/// The (name, landing) of each row of a tag read.
+fn tag_rows(rows: &[(Hash, rdy_adapter::Tag)]) -> Vec<(String, Hash)> {
+    rows.iter()
+        .map(|(_, t)| (t.name.clone(), t.landing))
+        .collect()
+}
+
+/// A push's carried tags are the versions it adds: each with the landing its tag names in the
+/// pushed history, read before the move, and equal to the rows the stored tag read gives for
+/// them once the push has moved in, in the same order. A tag the holder already names, at the
+/// same landing, is not carried.
+#[test]
+fn pqt_pushed_tags_are_the_new_versions_with_their_landings() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = tag_world();
+    // P's whole history at p2: v1.0.0 at p1 and v2.0.0 at p2
+    let whole = w.dir.path().join("whole.rdysync");
+    export(
+        &w.dir.path().join("p"),
+        StreamPurpose::CanonHistory,
+        w.p2,
+        None,
+        &whole,
+    );
+
+    // a seed of the whole history carries both, oldest version first
+    let a = StoreHandle::create_holder(&w.dir.path().join("a"), w.repo).unwrap();
+    let s0 = a.snapshot().unwrap();
+    let q = check(&s0, &[&whole]).unwrap();
+    assert!(s0.tags().unwrap().is_empty());
+    let got = s0.pushed_tags(&q).unwrap();
+    assert_eq!(
+        tag_rows(&got),
+        [("v1.0.0".to_string(), w.p1), ("v2.0.0".to_string(), w.p2)]
+    );
+    // the read is stable
+    assert_eq!(s0.pushed_tags(&q).unwrap(), got);
+    assert_eq!(
+        a.move_canon(&q, CanonMove::Seed, None).unwrap(),
+        moved(w.p2)
+    );
+    let s1 = a.snapshot().unwrap();
+    assert_eq!(s1.tags().unwrap(), got);
+    drop((s0, q, s1));
+    a.close().unwrap();
+
+    // on a holder that names v1.0.0 at p1, the same history carries only v2.0.0
+    let b = StoreHandle::create_holder(&w.dir.path().join("b"), w.repo).unwrap();
+    let s0 = b.snapshot().unwrap();
+    let c1 = check(&s0, &[&w.e1]).unwrap();
+    assert_eq!(
+        tag_rows(&s0.pushed_tags(&c1).unwrap()),
+        [("v1.0.0".to_string(), w.p1)]
+    );
+    assert_eq!(
+        b.move_canon(&c1, CanonMove::Seed, None).unwrap(),
+        moved(w.p1)
+    );
+    let s1 = b.snapshot().unwrap();
+    let q = check(&s1, &[&whole]).unwrap();
+    let got = s1.pushed_tags(&q).unwrap();
+    assert_eq!(tag_rows(&got), [("v2.0.0".to_string(), w.p2)]);
+    assert_eq!(
+        b.move_canon(&q, CanonMove::Extend, Some(w.p1)).unwrap(),
+        moved(w.p2)
+    );
+    let s2 = b.snapshot().unwrap();
+    let new: Vec<_> = s2
+        .tags()
+        .unwrap()
+        .into_iter()
+        .filter(|(h, _)| !s1.tags().unwrap().iter().any(|(g, _)| g == h))
+        .collect();
+    assert_eq!(new, got);
+    // a push that adds no version carries none: here the same history again
+    let again = check(&s2, &[&whole]).unwrap();
+    assert_eq!(s2.pushed_tags(&again).unwrap(), vec![]);
+    drop((s0, c1, s1, q, s2, again));
+    b.close().unwrap();
+}
+
+/// A push with no tag carries none; a held chain's tags are carried by the push that names the
+/// held head, as its extend takes them.
+#[test]
+fn pqt_pushed_tags_empty_and_held_chain() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = world();
+    let h = w.holder("hub");
+    let s0 = h.snapshot().unwrap();
+    let c1 = check(&s0, &[&w.e1]).unwrap();
+    assert_eq!(s0.pushed_tags(&c1).unwrap(), vec![]);
+    assert_eq!(
+        h.move_canon(&c1, CanonMove::Seed, None).unwrap(),
+        moved(w.p1)
+    );
+    let s1 = h.snapshot().unwrap();
+    let c2 = check(&s1, &[&w.e2]).unwrap();
+    assert_eq!(s1.pushed_tags(&c2).unwrap(), vec![]);
+    // a view push carries none
+    let v = check(&s1, &[&w.v1]).unwrap();
+    assert_eq!(s1.pushed_tags(&v).unwrap(), vec![]);
+    drop((s0, c1, s1, c2, v));
+    h.close().unwrap();
+
+    let t = tag_world();
+    let h = StoreHandle::create_holder(&t.dir.path().join("hub"), t.repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let c1 = check(&s0, &[&t.e1]).unwrap();
+    assert_eq!(
+        h.move_canon(&c1, CanonMove::Seed, None).unwrap(),
+        moved(t.p1)
+    );
+    let s1 = h.snapshot().unwrap();
+    let c2 = check(&s1, &[&t.e2]).unwrap();
+    assert_eq!(
+        tag_rows(&s1.pushed_tags(&c2).unwrap()),
+        [("v2.0.0".to_string(), t.p2)]
+    );
+    assert_eq!(
+        h.move_canon(&c2, CanonMove::Hold, Some(t.p1)).unwrap(),
+        moved(t.p2)
+    );
+    let s2 = h.snapshot().unwrap();
+    let stored = s2.check_stored_head(t.p2).unwrap();
+    let got = s2.pushed_tags(&stored).unwrap();
+    assert_eq!(tag_rows(&got), [("v2.0.0".to_string(), t.p2)]);
+    assert_eq!(
+        h.move_canon(&stored, CanonMove::Extend, Some(t.p1))
+            .unwrap(),
+        moved(t.p2)
+    );
+    assert_eq!(h.snapshot().unwrap().tags().unwrap()[1..], got[..]);
+    drop((s0, c1, s1, c2, s2, stored));
+    h.close().unwrap();
+}
+
+/// A version names one landing for good: a push whose tag names a version the holder names at
+/// another landing moves no tag, and the read refuses it with the move's own `E_TAG_EXISTS`.
+/// A quarantine checked on another snapshot or holder is refused as `pushed_landings` refuses it.
+#[test]
+fn pqt_pushed_tags_refuse_a_moved_version_and_another_snapshot() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = tag_world();
+    let h = StoreHandle::create_holder(&w.dir.path().join("hub"), w.repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let c1 = check(&s0, &[&w.e1]).unwrap();
+    h.move_canon(&c1, CanonMove::Seed, None).unwrap();
+    let s1 = h.snapshot().unwrap();
+    let c2 = check(&s1, &[&w.e2]).unwrap();
+    h.move_canon(&c2, CanonMove::Extend, Some(w.p1)).unwrap();
+    let s2 = h.snapshot().unwrap();
+    // Q's push names v2.0.0 at q2; the hub names it at p2
+    let cq = check(&s2, &[&w.eq]).unwrap();
+    let e = s2.pushed_tags(&cq).unwrap_err();
+    assert_eq!(e.code, "E_TAG_EXISTS", "{e:#?}");
+    let m = h.move_canon(&cq, CanonMove::Force, Some(w.p2)).unwrap_err();
+    assert_eq!((e.code, &e.message), (m.code, &m.message));
+
+    // another snapshot of the same holder
+    let want = s2.pushed_landings(&c2, &[w.p2]).unwrap_err();
+    assert_eq!(want.code, "E_BAD_INPUT");
+    let e = s2.pushed_tags(&c2).unwrap_err();
+    assert_eq!(
+        (e.code, &e.message, &e.fix),
+        (want.code, &want.message, &want.fix)
+    );
+    // another holder of another repo
+    let other = tempfile::tempdir().unwrap();
+    let h2 = StoreHandle::create_holder(other.path(), RepoId::new()).unwrap();
+    let s3 = h2.snapshot().unwrap();
+    let want = s3.pushed_landings(&cq, &[w.q2]).unwrap_err();
+    let e = s3.pushed_tags(&cq).unwrap_err();
+    assert_eq!(
+        (e.code, &e.message, &e.fix),
+        (want.code, &want.message, &want.fix)
+    );
+    drop((s0, c1, s1, c2, s2, cq, s3));
+    h2.close().unwrap();
+    h.close().unwrap();
+}
