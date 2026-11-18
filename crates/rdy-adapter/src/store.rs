@@ -306,6 +306,13 @@ impl Snapshot {
         &self.views
     }
 
+    /// The store's features when the snapshot was taken, as its manifest listed them. It reads
+    /// only the snapshot, keeps no state and does no network. A feature activated later is not
+    /// in it. The class of each feature is core's; a host maps it to its own words.
+    pub fn features(&self) -> &StoreFeatures {
+        &self.features
+    }
+
     /// The store's features when the snapshot was taken.
     pub(crate) fn captured_features(&self) -> &StoreFeatures {
         &self.features

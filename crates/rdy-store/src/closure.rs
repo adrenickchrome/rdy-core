@@ -687,7 +687,7 @@ impl StoreSource<'_> {
     }
 
     /// Whether the log holds `kind` and `hash` before `end`.
-    fn holds(&self, kind: u8, hash: &Hash) -> Result<bool, StreamError> {
+    pub fn holds(&self, kind: u8, hash: &Hash) -> Result<bool, StreamError> {
         Ok(self.at(kind, hash)?.is_some())
     }
 }
