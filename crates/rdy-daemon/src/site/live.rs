@@ -416,6 +416,10 @@ impl Review {
     }
 }
 
+/// A review file request's answer: the preparation it read, the file (None for a path the
+/// target has no file at), and whether kept data was dropped.
+type FileAt = (Arc<PreparedReview>, Option<Arc<ReviewFile>>, bool);
+
 /// The bytes of an `Arc`'s counts, beside its value.
 const ARC_HEADER: u64 = 16;
 
@@ -1489,7 +1493,7 @@ impl LiveSite {
         scope: &SiteTarget,
         fresh: &Fresh,
         path: &str,
-    ) -> Result<(Arc<PreparedReview>, Option<Arc<ReviewFile>>, bool), RdyError> {
+    ) -> Result<FileAt, RdyError> {
         {
             let mut inner = lock(&self.inner);
             inner.clock += 1;
