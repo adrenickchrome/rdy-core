@@ -1674,6 +1674,155 @@ fn scc8_force_push_moves_hub_canon_and_previews_leaving() {
     assert_eq!(hub.writes()[0].kind, WriteKind::Landings);
 }
 
+/// D-KE83X, D-H0BZN (final review F1): a push that moves canon or a view still names the root it
+/// moves to when the hub already holds every object. Known names nothing missing, so one batch
+/// of no record names the head as its prerequisite before the write, under the write's push id;
+/// the upload is recorded before that put, so a lost put reply leaves it to resume and a put
+/// that certainly failed clears it. An ordinary push, a forced push and a view push alike.
+#[test]
+fn scc8_moving_push_with_every_object_held_names_its_root() {
+    // ordinary: the hub tip is the first landing and the hub holds the second's whole closure
+    let e = env(2);
+    let (first, head) = (e.landings[0], e.landings[1]);
+    let hub = Hub::new().with_state(|s| s.canon = Some(first));
+    *hub.held.lock().unwrap() = closure(&e, head, None);
+    let out = push(&e, &hub, None).unwrap();
+    assert_eq!(hub.steps(), ["discovery", "state", "known", "put", "write"]);
+    let (id, base, pushed, tip, resumed, sent) = taken(&out);
+    assert_eq!(
+        (base, pushed, tip, resumed),
+        (Some(first), head, head, false)
+    );
+    assert_eq!(
+        sent,
+        HistorySentView {
+            batches: 1,
+            records: 0
+        }
+    );
+    assert_eq!(*hub.puts.lock().unwrap(), [(id.clone(), vec![])]);
+    assert_eq!(*hub.roots.lock().unwrap(), [(head, vec![landing(head)])]);
+    let w = &hub.writes()[0];
+    assert_eq!(
+        (w.kind, w.push.as_str(), w.expected),
+        (WriteKind::Landings, id.as_str(), Some(landing(first)))
+    );
+    assert_eq!(upload_of(&e, "shared"), None);
+    assert_eq!(pending_of(&e, "shared"), None);
+
+    // the upload is recorded before the root batch: a lost put reply leaves it to resume
+    let e = env(2);
+    let (first, head) = (e.landings[0], e.landings[1]);
+    let hub = Hub::new().with_state(|s| s.canon = Some(first));
+    *hub.held.lock().unwrap() = closure(&e, head, None);
+    hub.fail_at(
+        "put",
+        1,
+        RdyError::new(
+            E_UPSTREAM_UNCERTAIN,
+            UPSTREAM_UNCERTAIN_MESSAGE,
+            UPSTREAM_UNCERTAIN_FIX,
+        ),
+    );
+    assert_eq!(err(push(&e, &hub, None)).code, E_UPSTREAM_UNCERTAIN);
+    let up = upload_of(&e, "shared").expect("the upload stays to resume");
+    assert_eq!(hub.calls().last().unwrap().push.as_deref(), Some(&*up.push));
+    assert!(hub.writes().is_empty());
+    // the resumed push sends the root batch under the same push id, then writes
+    hub.clear();
+    let out = push(&e, &hub, None).unwrap();
+    let (id, _, _, _, resumed, _) = taken(&out);
+    assert_eq!((id.as_str(), resumed), (up.push.as_str(), true));
+    assert_eq!(*hub.puts.lock().unwrap(), [(id.clone(), vec![])]);
+    assert_eq!(upload_of(&e, "shared"), None);
+    // a root batch that certainly failed: its own upload is cleared, and no write is sent
+    let e = env(2);
+    let (first, head) = (e.landings[0], e.landings[1]);
+    let hub = Hub::new().with_state(|s| s.canon = Some(first));
+    *hub.held.lock().unwrap() = closure(&e, head, None);
+    hub.fail_at("put", 1, transport_failure());
+    assert_eq!(err(push(&e, &hub, None)).code, E_UPSTREAM_TRANSPORT);
+    assert_eq!(upload_of(&e, "shared"), None);
+    assert!(hub.writes().is_empty());
+
+    // forced: the hub tip is a landing local canon lacks; the hub holds local canon's closure
+    let e = env(2);
+    let head = e.landings[1];
+    let (_dir, hub_store) = copy_project(&e);
+    let theirs = land_in(&hub_store, "theirs");
+    let hub = Hub::new().with_state(|s| s.canon = Some(theirs));
+    *hub.held.lock().unwrap() = closure(&e, head, None);
+    let out = Sync::new(&e, &hub)
+        .push(PushRequest {
+            force: true,
+            ..PushRequest::default()
+        })
+        .unwrap();
+    assert_eq!(hub.steps(), ["discovery", "state", "known", "put", "write"]);
+    let (id, _, pushed, tip, _, _) = taken(&out);
+    assert_eq!((pushed, tip), (head, head));
+    assert_eq!(*hub.puts.lock().unwrap(), [(id.clone(), vec![])]);
+    assert_eq!(*hub.roots.lock().unwrap(), [(head, vec![landing(head)])]);
+    let w = &hub.writes()[0];
+    assert_eq!(
+        (w.kind, w.push.as_str(), w.expected),
+        (WriteKind::Force, id.as_str(), Some(landing(theirs)))
+    );
+    assert_eq!(hub.state.lock().unwrap().canon, Some(head));
+
+    // a view: the hub holds every op of the local head, and its head is an earlier op
+    let e = env(1);
+    write_in(&e.engine, "v1", "a");
+    let v1_first = view_head(&e, "v1");
+    write_in(&e.engine, "v1", "b");
+    let v1 = view_head(&e, "v1");
+    let read = e.engine.read();
+    let ops = rdy_store::closure::history_closure_before(
+        read.reader(),
+        StreamPurpose::ViewHistory,
+        v1,
+        &BTreeSet::new(),
+        None,
+        read.seq(),
+    )
+    .unwrap()
+    .records;
+    let canon = e.landings[0];
+    let hub = Hub::new().with_state(|s| s.canon = Some(canon));
+    {
+        let mut held = hub.held.lock().unwrap();
+        *held = closure(&e, canon, None);
+        held.extend(ops);
+    }
+    hub.views
+        .lock()
+        .unwrap()
+        .insert("v1".into(), (view_root(&read, v1), v1_first));
+    drop(read);
+    let out = Sync::new(&e, &hub)
+        .push(PushRequest {
+            views: names(&["v1"]),
+            ..PushRequest::default()
+        })
+        .unwrap();
+    assert_eq!(up_to_date(&out), Some(canon));
+    let op = |hash| ObjectKey {
+        kind: kinds::VIEW_OP,
+        hash,
+    };
+    let w = &hub.writes()[0];
+    assert_eq!(
+        (w.kind, w.view.as_deref(), w.expected),
+        (WriteKind::View, Some("v1"), Some(op(v1_first)))
+    );
+    assert_eq!(*hub.puts.lock().unwrap(), [(w.push.clone(), vec![])]);
+    assert_eq!(*hub.roots.lock().unwrap(), [(v1, vec![op(v1)])]);
+    match &out.views[..] {
+        [(name, WriteEnd::Taken { tip, .. })] => assert_eq!((name.as_str(), *tip), ("v1", v1)),
+        other => panic!("{other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Restore through the exchange (Task 8b: D-J3YA0, D-D5J18, D-QMZ92, D-0WWYR, D-H0BZN, D-47HVF)
 // ---------------------------------------------------------------------------------------------

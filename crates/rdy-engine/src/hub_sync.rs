@@ -47,10 +47,11 @@ use crate::error::{
 use crate::formats::formats;
 use crate::hub_config::{BAD_REMOTE_NAME_FIX, BAD_REMOTE_NAME_MESSAGE, HubConfig, RemoteMode};
 use crate::hub_credentials::HubCredentials;
+use crate::hub_http::UPLOAD_BUFFER_BYTES;
 use crate::hub_publish::{PublishRenderer, not_share_remote, repo_mismatch};
 use crate::hub_publish_stream::{
     BatchLimits, HistorySent, ObjectWire, PreparedHistory, PushId, missing_with, scratch_error,
-    send_objects,
+    send_objects, send_root,
 };
 use crate::hub_publish_wire::{MAX_KNOWN_KEYS, ObjectPut, PublishState, UploadContext};
 use crate::hub_sync_wire::{
@@ -81,7 +82,7 @@ use rdy_store::sync_stream::{HISTORY_FORMAT, StreamPurpose};
 use rdy_store::take_batch::FetchTarget;
 use rdy_store::{StoreError, StoreReader};
 use std::collections::BTreeSet;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1260,7 +1261,7 @@ impl<'a> SyncService<'a> {
             }
             Ok(())
         };
-        let result = send_objects(
+        let mut result = send_objects(
             &job.history,
             &missing,
             &push,
@@ -1270,6 +1271,19 @@ impl<'a> SyncService<'a> {
             &mut before_put,
             &mut sent,
         );
+        if result.is_ok() && !job.at_tip && sent.batches == 0 {
+            // the hub holds every record, yet the write moves canon or the view: a batch of no
+            // record names the head the write moves to, after the upload is recorded
+            result = send_root(
+                &job.history,
+                &push,
+                limits,
+                &wire,
+                &mut context,
+                &mut before_put,
+                &mut sent,
+            );
+        }
         if let Err(e) = result {
             // a failed push clears only its own upload, and only when no put of it may have
             // reached the quarantine
@@ -1596,8 +1610,12 @@ impl<'a> SyncService<'a> {
         let per = usize::try_from(state.batch_records)
             .unwrap_or(MAX_KNOWN_KEYS)
             .clamp(1, MAX_KNOWN_KEYS);
+        // the groups to get, last first: each within batch_records; a group whose reply passes
+        // batch_bytes is split in two, its halves got in turn (a record's bytes are unknown
+        // before it is fetched), down to one key, which is refused
+        let mut groups: Vec<&[ObjectKey]> = want.chunks(per).rev().collect();
         let mut files = Vec::new();
-        for keys in want.chunks(per) {
+        while let Some(keys) = groups.pop() {
             let mut file = tempfile::tempfile().map_err(|_| scratch_error())?;
             let cx = self.context(t, &read, Some(base_url))?;
             let request = GetRequest {
@@ -1605,7 +1623,28 @@ impl<'a> SyncService<'a> {
                 purpose,
                 root: root_key,
             };
-            self.wire.get(&cx, &request, &mut file, state.batch_bytes)?;
+            let mut sink = Capped {
+                out: &mut file,
+                cap: state.batch_bytes,
+                bytes: 0,
+                over: false,
+            };
+            // one transport piece of room past the cap: a reply past it always shows its first
+            // byte past the cap to the sink before the transport stops it
+            let limit = state.batch_bytes.saturating_add(UPLOAD_BUFFER_BYTES as u64);
+            let got = self.wire.get(&cx, &request, &mut sink, limit);
+            let over = sink.over;
+            drop(cx);
+            if over {
+                if keys.len() == 1 {
+                    return Err(upstream_protocol());
+                }
+                let (front, back) = keys.split_at(keys.len() / 2);
+                groups.push(back);
+                groups.push(front);
+                continue;
+            }
+            got?;
             file.seek(SeekFrom::Start(0)).map_err(|_| scratch_error())?;
             let report =
                 crate::stream_check::check_batch(BufReader::new(&mut file), Some(repo_id))?;
@@ -1627,5 +1666,33 @@ impl<'a> SyncService<'a> {
             crate::sync_fetch::fetch(rdy, &files, &target)
         })
         .map(Some)
+    }
+}
+
+/// A fetch batch's scratch file within the hub's `batch_bytes` (`cap`): a write that would pass
+/// the cap marks the batch `over` and is dropped, as is every write after it.
+struct Capped<'a> {
+    out: &'a mut std::fs::File,
+    cap: u64,
+    bytes: u64,
+    over: bool,
+}
+
+impl Write for Capped<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if !self.over {
+            let next = self.bytes.saturating_add(buf.len() as u64);
+            if next > self.cap {
+                self.over = true;
+            } else {
+                self.out.write_all(buf)?;
+                self.bytes = next;
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.flush()
     }
 }

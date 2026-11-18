@@ -637,30 +637,30 @@ impl SyncWire for Hub {
         let bytes = match self.get_bytes.lock().unwrap().take() {
             Some(b) => b,
             None => {
+                // the hub's export of exactly the keys asked for (the core read a hub serves)
                 let read = self.store.lock().unwrap().clone().expect("a hub store");
-                let want: BTreeSet<ObjectKey> = request.keys.iter().copied().collect();
-                let all: BTreeSet<ObjectKey> = self
-                    .history(request.purpose, request.root.hash, None)
-                    .into_iter()
-                    .collect();
-                let known: BTreeSet<ObjectKey> = all.difference(&want).copied().collect();
                 let mut out = Vec::new();
-                stream_export::write_history(
+                stream_export::write_history_keys(
                     &read,
                     request.purpose,
                     request.root.hash,
-                    None,
-                    &known,
+                    &request.keys,
                     &mut out,
                 )?;
                 out
             }
         };
-        if bytes.len() as u64 > limit {
-            return Err(rdy_engine::upstream_protocol());
+        // as the transport streams a reply: piece by piece, each written while the bytes so far
+        // are within `limit`; the first piece past it fails the get
+        let mut n = 0u64;
+        for piece in bytes.chunks(rdy_engine::hub_http::UPLOAD_BUFFER_BYTES) {
+            n += piece.len() as u64;
+            if n > limit {
+                return Err(rdy_engine::upstream_protocol());
+            }
+            sink.write_all(piece).unwrap();
         }
-        sink.write_all(&bytes).unwrap();
-        Ok(bytes.len() as u64)
+        Ok(n)
     }
 
     fn write(&self, cx: &UploadContext, request: &SyncWrite) -> Result<WriteReply, WriteFailure> {

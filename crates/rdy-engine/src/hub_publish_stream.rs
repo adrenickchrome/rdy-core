@@ -37,8 +37,8 @@
 //! prerequisites that never travel. When the hub tip is the head, the closure holds only the
 //! attachments made since (later tags, signatures and answers), and every batch names the head
 //! as a prerequisite. Each format-4 batch passes Plan A's batch check before it is sent. When
-//! nothing is missing, no batch is sent; a restore whose write still moves canon or a view then
-//! sends one batch of no record that names the root ([`send_root`]).
+//! nothing is missing, no batch is sent; a push or restore whose write still moves canon or a
+//! view then sends one batch of no record that names the root ([`send_root`]).
 use crate::error::{E_BAD_INPUT, E_INTERNAL, E_IO, E_LIMIT, RdyError, upstream_protocol};
 use crate::hub_publish_wire::{
     CORE_BATCH_BYTES, CORE_BATCH_RECORDS, MAX_KNOWN_KEYS, ObjectPut, PUSH_ID_CHARS, PublishWire,
@@ -928,18 +928,20 @@ pub fn send_objects(
 }
 
 /// Sends one batch of no record of `history` under push `push`, right after a fresh `context`:
-/// its root is its only prerequisite. A restore sends it when the hub holds every record yet the
-/// write moves canon or a view, so the push still names the root the write moves to.
+/// its root is its only prerequisite; `before_put` runs once, before the put. A push or restore
+/// sends it when the hub holds every record yet the write moves canon or a view, so the push
+/// still names the root the write moves to.
 pub fn send_root(
     history: &PreparedHistory,
     push: &PushId,
     limits: BatchLimits,
     wire: &dyn ObjectWire,
     context: &mut dyn FnMut() -> Result<UploadContext, RdyError>,
+    before_put: &mut dyn FnMut() -> Result<(), RdyError>,
     sent: &mut HistorySent,
 ) -> Result<(), RdyError> {
     let batches = plan(history, &[], limits)?;
-    put_batches(history, &batches, push, wire, context, &mut || Ok(()), sent)
+    put_batches(history, &batches, push, wire, context, before_put, sent)
 }
 
 /// Writes and puts each batch of `batches` in order (see [`send_objects`]).

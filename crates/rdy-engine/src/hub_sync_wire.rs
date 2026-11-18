@@ -687,7 +687,9 @@ pub trait SyncWire: Send + Sync {
     /// `POST <base>/known`, pull form: one page.
     fn known_pull(&self, cx: &UploadContext, request: &KnownPull) -> Result<KnownPage, RdyError>;
     /// `POST <base>/objects/get`: the batch streamed to `sink`, at most `limit` bytes. Returns
-    /// its bytes.
+    /// its bytes. The reply streams in pieces of at most
+    /// [`UPLOAD_BUFFER_BYTES`](crate::hub_http::UPLOAD_BUFFER_BYTES), each written while the
+    /// bytes so far are within `limit`; the first piece past it fails the get unwritten.
     fn get(
         &self,
         cx: &UploadContext,

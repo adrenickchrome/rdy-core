@@ -465,7 +465,15 @@ impl<'a, 's> Exchange<'a, 's> {
         if job.expected != Some(job.head) && sent.batches == 0 {
             // the hub holds every record, yet the write moves canon or the view: a batch of no
             // record names the head the write moves to
-            send_root(&job.history, &push, limits, &wire, &mut context, &mut sent)?;
+            send_root(
+                &job.history,
+                &push,
+                limits,
+                &wire,
+                &mut context,
+                &mut || Ok(()),
+                &mut sent,
+            )?;
         }
         if job.expected == Some(job.head) && sent.batches == 0 {
             // the hub tip or head is the dump's, and the hub holds every attachment

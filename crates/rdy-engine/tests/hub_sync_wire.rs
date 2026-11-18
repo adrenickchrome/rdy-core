@@ -1462,6 +1462,21 @@ fn scc8_wire_bounds_and_redirects_fail_closed() {
         hub.wire.get(&cx, &get, &mut Vec::new(), 10)
     });
     assert_eq!(r.unwrap(), 10);
+    // the reply streams piece by piece, each piece written while the bytes so far are within
+    // the limit: with one piece of room past a cap, a reply past the cap always shows its first
+    // byte past the cap to the sink (the fetch splits a batch on it, final review F2)
+    let piece = rdy_engine::hub_http::UPLOAD_BUFFER_BYTES;
+    let cap = 100usize;
+    let mut sink = Vec::new();
+    let (r, _) = served(&mut s, octets(cap + 3 * piece), || {
+        hub.wire.get(&cx, &get, &mut sink, (cap + piece) as u64)
+    });
+    assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL);
+    assert!(
+        sink.len() > cap && sink.len() <= cap + piece,
+        "{}",
+        sink.len()
+    );
     // a get of no key or of more than 100,000 keys never leaves
     let none = GetRequest {
         keys: vec![],
@@ -1895,6 +1910,116 @@ fn scc8_get_checks_purpose_root_and_sd1_delta_closure() {
             .unwrap()
     );
     assert_eq!(sync_env::canon_of(&e, "shared"), None);
+}
+
+/// D-H0BZN "Get" (final review F2): a fetch batch keeps within both of the hub's limits. The
+/// client cannot know a record's bytes before it fetches it, so a get whose reply passes
+/// `batch_bytes` is split in two and each half fetched in turn, down to one key; a history that
+/// needs several byte-limited batches is fetched whole, canon and view alike (a URL clone fetches
+/// through the same step). Each half is checked as every batch is; one key past the limit is
+/// still refused (`scc8_get_checks_purpose_root_and_sd1_delta_closure`).
+#[test]
+fn scc8_fetch_splits_batches_past_batch_bytes() {
+    let e = fake_env(2);
+    let (_dir, hub_store) = sync_env::copy_project(&e);
+    let mut later = e.landings[1];
+    for i in 0..20 {
+        later = sync_env::land_in(&hub_store, &format!("later-{i}"));
+    }
+    for i in 0..5 {
+        sync_env::write_in(&hub_store, "drafts", &format!("draft-{i}"));
+    }
+    let hub_read = hub_store.read();
+    let drafts = hub_read.view_head("drafts").unwrap().head;
+    let drafts_root = hub_read
+        .reader()
+        .view_chain_root("drafts", &drafts)
+        .unwrap();
+    let fake = sync_env::Hub::new();
+    fake.serve(hub_store.read());
+    {
+        let mut st = fake.state.lock().unwrap();
+        st.canon = Some(later);
+        st.batch_bytes = 8_192;
+        st.batch_records = 100_000;
+    }
+    fake.views
+        .lock()
+        .unwrap()
+        .insert("drafts".into(), (drafts_root, drafts));
+    let read = e.engine.read();
+    let want = |purpose, root| -> Vec<ObjectKey> {
+        fake.history(purpose, root, None)
+            .into_iter()
+            .filter(|k| !read.reader().has_kind(k.kind, &k.hash).unwrap())
+            .collect()
+    };
+    let canon_want = want(StreamPurpose::CanonHistory, later);
+    // the view fetch comes after canon's, which brought every record they share
+    let view_want: Vec<ObjectKey> = want(StreamPurpose::ViewHistory, drafts)
+        .into_iter()
+        .filter(|k| !canon_want.contains(k))
+        .collect();
+    drop(read);
+    // the whole history does not fit one batch of 8,192 bytes
+    let mut whole = Vec::new();
+    rdy_engine::stream_export::write_history(
+        &hub_read,
+        StreamPurpose::CanonHistory,
+        later,
+        None,
+        &BTreeSet::new(),
+        &mut whole,
+    )
+    .unwrap();
+    assert!(whole.len() > 8_192, "{}", whole.len());
+
+    sync_env::Sync::new(&e, &fake)
+        .pull(PullRequest {
+            views: vec!["drafts".into()],
+            ..PullRequest::default()
+        })
+        .unwrap();
+    let gets = fake.gets.lock().unwrap().clone();
+    for (purpose, wanted) in [
+        (StreamPurpose::CanonHistory, &canon_want),
+        (StreamPurpose::ViewHistory, &view_want),
+    ] {
+        let mine: Vec<&GetRequest> = gets.iter().filter(|g| g.purpose == purpose).collect();
+        // the first get asks for every key within batch_records; the halves follow
+        assert_eq!(mine[0].keys, *wanted, "{purpose:?}");
+        let asked: BTreeSet<ObjectKey> = mine.iter().flat_map(|g| g.keys.clone()).collect();
+        let wanted_set: BTreeSet<ObjectKey> = wanted.iter().copied().collect();
+        assert_eq!(asked, wanted_set, "{purpose:?}");
+        // bounded: each split halves a group, so at most 2n - 1 gets
+        assert!(mine.len() < 2 * wanted.len(), "{purpose:?}: {}", mine.len());
+        assert!(mine.iter().all(|g| !g.keys.is_empty()));
+    }
+    assert!(
+        gets.iter()
+            .filter(|g| g.purpose == StreamPurpose::CanonHistory)
+            .count()
+            > 2,
+        "{gets:?}"
+    );
+    let read = e.engine.read();
+    assert!(read.reader().has_kind(kinds::LANDING, &later).unwrap());
+    for k in canon_want.iter().chain(&view_want) {
+        assert!(read.reader().has_kind(k.kind, &k.hash).unwrap(), "{k:?}");
+    }
+    drop(read);
+    assert_eq!(
+        sync_env::canon_of(&e, "shared").unwrap().fetched,
+        Some(later)
+    );
+    let v = e
+        .engine
+        .read()
+        .reader()
+        .sync_view("shared", "drafts")
+        .unwrap()
+        .unwrap();
+    assert_eq!(v.fetched, Some(drafts));
 }
 
 /// D-H0BZN "State": hub canon's tip reads from a landing's object key (Share on) and from a hex
