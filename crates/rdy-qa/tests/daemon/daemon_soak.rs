@@ -84,13 +84,15 @@ fn land_view(s: &Served, name: &str) {
 }
 
 /// One soak cycle, two landings: view `late-<n>` is written first, view `early-<n>` lands, then
-/// `late-<n>` lands on a base one landing behind canon. A view on an older base is the scope the
-/// old engine copied whole, and its closed build was then kept.
+/// `late-<n>` is read and lands on a base one landing behind canon. A view on an older base is
+/// the scope the old engine copied whole, and its closed build was then kept.
 fn cycle(s: &Served, n: u64) {
     let (late, early) = (format!("late-{n}"), format!("early-{n}"));
     write_doc(s, &late);
     write_doc(s, &early);
     land_view(s, &early);
+    // a read of the view behind canon builds its scope, as an agent's read does
+    ok(s, &["--json", "ls", "--scope", &late]);
     land_view(s, &late);
 }
 
