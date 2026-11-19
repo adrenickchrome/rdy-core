@@ -1,14 +1,16 @@
 //! `cargo qa`: the full regression and hardening gate, with a report in `target/qa/`.
 use clap::Parser;
 use rdy_qa::gate_steps::{
-    ChildOutput, GateStep, StageKind, Stages, build_steps, cargo, default_deadline,
-    discover_command, discovered, fail_tail, fmt_step, list_guarded, run_bounded, run_stage,
+    ChildOutput, DIRECT_AREAS_VAR, GateStep, SERIAL_AREAS, StageKind, Stages, area_jobs,
+    build_steps, capture_area_env, cargo, default_deadline, discover_command, discovered,
+    fail_tail, fmt_step, launch_area, list_guarded, run_areas, run_bounded, run_stage,
 };
 use rdy_qa::perf::{self, Baseline, Measure};
-use rdy_qa::report::{self, Area, Gate, Report};
+use rdy_qa::report::{self, Area, Gate, Report, StageRecord, Timing};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -53,12 +55,26 @@ fn root() -> PathBuf {
         .expect("workspace root")
 }
 
+/// The gate's start, and every timed child so far, for the report's `## Timing` table.
+static GATE_START: OnceLock<Instant> = OnceLock::new();
+static RECORDS: Mutex<Vec<StageRecord>> = Mutex::new(Vec::new());
+
 /// Runs a command with bounded output under `deadline`, keeping the exit status and the two
 /// streams apart. Past the deadline the child is ended and its output names the stage.
 fn step_out(name: &str, mut cmd: Command, deadline: Duration) -> ChildOutput {
     eprintln!("==> {name}");
     cmd.current_dir(root());
-    run_stage(name, cmd, deadline)
+    let t = Instant::now();
+    let out = run_stage(name, cmd, deadline);
+    if let (Some(start), Ok(mut r)) = (GATE_START.get(), RECORDS.lock()) {
+        r.push(StageRecord {
+            label: name.into(),
+            secs: t.elapsed().as_secs_f64(),
+            ok: out.ok,
+            ended_at: start.elapsed().as_secs_f64(),
+        });
+    }
+    out
 }
 
 /// Runs a command, returning (success, stdout + stderr combined).
@@ -224,7 +240,7 @@ fn main() {
         }
         std::process::exit(rdy_qa::focus::main(f, &root(), &env, run_bounded));
     }
-    let start = Instant::now();
+    let start = *GATE_START.get_or_init(Instant::now);
     // A crashed run must not leave a stale verdict behind.
     for f in ["report.md", "report.json"] {
         let _ = std::fs::remove_file(root().join("target/qa").join(f));
@@ -316,6 +332,10 @@ fn main() {
         match stages.blocked(&workspace) {
             Some(root) => gates.push(stages.skip(&workspace, root)),
             None => {
+                // compile first, so the run row is the tests alone; the timings HTML stays
+                let mut compile: Vec<&str> = report::WORKSPACE_TEST_ARGS.to_vec();
+                compile.extend(["--no-run", "--timings"]);
+                let _ = step("workspace compile", cargo(&compile), workspace.deadline);
                 let (ok, out) = step(
                     "workspace tests",
                     with_require_all(cargo(&report::WORKSPACE_TEST_ARGS), &args),
@@ -388,44 +408,135 @@ fn main() {
         }
     }
 
-    // The hardening suite, one test binary at a time; each area reports as one row (an area
-    // of two binaries, `engine` and `engine_read`, sums them, and each binary keeps its own
-    // evidence row). After a failed discovery each binary is a skipped row instead, unless
-    // --all-stages.
+    // The binaries launched directly, with the working directory and environment Cargo gives
+    // them (asked of Cargo once, through the env probe). Without that answer every binary runs
+    // through `cargo test`.
+    let mut direct = rdy_qa::gate_steps::direct_areas(
+        std::env::var(DIRECT_AREAS_VAR).ok().as_deref(),
+        &plan.files,
+    );
+    let area_env = if direct.is_empty() || !discovery_ran || !discovery_ok {
+        None
+    } else {
+        match capture_area_env(|c| step_out("area environment", c, deadline(StageKind::Listing))) {
+            Ok(env) => Some(env),
+            Err(e) => {
+                eprintln!("{e}");
+                notes.push(format!(
+                    "direct launch off, every area ran through cargo: {e}"
+                ));
+                None
+            }
+        }
+    };
+    if area_env.is_none() {
+        direct.clear();
+    }
+
+    // The hardening suite; each area reports as one row (an area of two binaries, `engine` and
+    // `engine_read`, sums them, and each binary keeps its own evidence row). After a failed
+    // discovery each binary is a skipped row instead, unless --all-stages. The rows and areas
+    // keep the plan's order however the binaries ran.
+    enum Pending {
+        Skipped(Gate),
+        Missing(Option<Gate>),
+        Run(Option<Gate>),
+    }
+    let mut pending = Vec::with_capacity(plan.files.len());
+    let mut to_run: Vec<String> = vec![];
     for binary in &plan.files {
         let step_def = area_step(binary);
         if let Some(root) = stages.blocked(&step_def) {
-            gates.push(stages.skip(&step_def, root));
+            pending.push(Pending::Skipped(stages.skip(&step_def, root)));
             continue;
         }
         if discovery_ok && !exes.iter().any(|e| &e.name == binary) {
             // not reachable after the check above; kept so a binary is never silently skipped
-            report::add_missing(&mut areas, binary);
+            pending.push(Pending::Missing(None));
             continue;
         }
+        let mut pre = None;
         if binary == "release" {
             match rdy_qa::release_preflight::run(&root(), git(&["rev-parse", "--short", "HEAD"])) {
-                Ok(rev) => gates.push(Gate::ran(
-                    "release preflight",
-                    true,
-                    format!("revision {rev}"),
-                )),
+                Ok(rev) => {
+                    pre = Some(Gate::ran(
+                        "release preflight",
+                        true,
+                        format!("revision {rev}"),
+                    ))
+                }
                 Err(e) => {
                     eprintln!("release preflight refused: {e}");
-                    gates.push(Gate::ran("release preflight", false, e));
-                    report::add_missing(&mut areas, binary);
+                    pending.push(Pending::Missing(Some(Gate::ran(
+                        "release preflight",
+                        false,
+                        e,
+                    ))));
                     continue;
                 }
             }
         }
-        let mut c = with_require_all(
-            cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]),
-            &args,
-        );
-        if args.deep {
-            c.env("RDY_QA_DEEP", "1");
+        to_run.push(binary.clone());
+        pending.push(Pending::Run(pre));
+    }
+
+    // Directly launched binaries outside SERIAL_AREAS share the workers; every other binary
+    // runs alone after them.
+    let jobs = area_jobs(std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let alone = |b: &String| !direct.contains(b) || SERIAL_AREAS.contains(&b.as_str());
+    let outputs = run_areas(&to_run, alone, jobs, |binary| {
+        let step_def = area_step(binary);
+        let exe = exes.iter().find(|e| &e.name == binary);
+        match (&area_env, exe) {
+            (Some(env), Some(exe)) if direct.contains(binary) => {
+                eprintln!("==> {} (direct)", step_def.id);
+                let mut env = env.clone();
+                if args.require_all {
+                    env.vars
+                        .insert(rdy_qa::skip::REQUIRE_ALL.to_string(), "1".to_string());
+                }
+                if args.deep {
+                    env.vars.insert("RDY_QA_DEEP".to_string(), "1".to_string());
+                }
+                let run = launch_area(&exe.path, &env, &[], &step_def.id, step_def.deadline);
+                eprintln!(
+                    "==> {}: {:.1} s (direct)",
+                    step_def.id,
+                    run.elapsed.as_secs_f64()
+                );
+                run.out
+            }
+            _ => {
+                let mut c = with_require_all(
+                    cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]),
+                    &args,
+                );
+                if args.deep {
+                    c.env("RDY_QA_DEEP", "1");
+                }
+                step_out(&step_def.id, c, step_def.deadline)
+            }
         }
-        let out = step_out(&step_def.id, c, step_def.deadline);
+    });
+    let mut outputs = to_run.iter().zip(outputs);
+    for (binary, item) in plan.files.iter().zip(pending) {
+        let out = match item {
+            Pending::Skipped(g) => {
+                gates.push(g);
+                continue;
+            }
+            Pending::Missing(pre) => {
+                gates.extend(pre);
+                report::add_missing(&mut areas, binary);
+                continue;
+            }
+            Pending::Run(pre) => {
+                gates.extend(pre);
+                let (ran, out) = outputs.next().expect("one output per run");
+                debug_assert_eq!(ran, binary);
+                out
+            }
+        };
         let text = out.combined();
         let run = report::parse_cargo_test(&text);
         seeds.extend(report::failing_seeds(&text));
@@ -533,6 +644,12 @@ fn main() {
         notes,
         guarded,
         os_excluded: report::os_excluded(),
+        timing: Timing::from_records(
+            &RECORDS.lock().map(|r| r.clone()).unwrap_or_default(),
+            std::env::var("RDY_QA_QUEUE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+        ),
     };
 
     let dir = root().join("target/qa");
