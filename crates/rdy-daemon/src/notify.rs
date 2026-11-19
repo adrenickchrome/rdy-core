@@ -70,6 +70,8 @@ pub(crate) enum NotifyMsg {
     },
     /// The pack was reloaded, and the state with the new pack is published.
     PackReloaded,
+    /// The daemon is shutting down: the notifier ends after the messages queued before this.
+    Stop,
 }
 
 /// Starts the notifier thread (`rdy-notify`). It handles one message at a time and ends when
@@ -79,7 +81,17 @@ pub(crate) fn spawn_notifier(shared: Weak<Shared>, rx: Receiver<NotifyMsg>) -> J
         .name("rdy-notify".into())
         .spawn(move || {
             while let Ok(msg) = rx.recv() {
+                if matches!(msg, NotifyMsg::Stop) {
+                    break;
+                }
                 let Some(sh) = shared.upgrade() else { break };
+                #[cfg(test)]
+                {
+                    let hook = sh.in_notifier.lock().unwrap().clone();
+                    if let Some(f) = hook {
+                        f();
+                    }
+                }
                 if let Err(p) = catch_unwind(AssertUnwindSafe(|| deliver(&sh, &msg))) {
                     log(&format!("notify skipped a batch: {}", panic_text(&*p)));
                 }
@@ -92,6 +104,7 @@ pub(crate) fn spawn_notifier(shared: Weak<Shared>, rx: Receiver<NotifyMsg>) -> J
 fn deliver(sh: &Shared, msg: &NotifyMsg) {
     let targets = sh.hub.targets();
     match msg {
+        NotifyMsg::Stop => {}
         NotifyMsg::PackReloaded => {
             for t in &targets {
                 for uri in [PACK, PROJECT] {

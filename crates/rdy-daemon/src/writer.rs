@@ -705,6 +705,41 @@ mod tests {
     /// The text every test hook's full-publish panic gives.
     const HOOK: &str = "test hook: a full publish panics";
 
+    /// The notifier holds a strong `Shared` while it handles a message. The shutdown waits for
+    /// it, so the store reopens as soon as the caller drops its own `Shared`.
+    #[test]
+    fn wrt1_the_shutdown_waits_for_the_notifier_so_the_store_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        // the notifier is slow with the batch of the write below
+        *sh.in_notifier.lock().unwrap() = Some(std::sync::Arc::new(|| {
+            std::thread::sleep(std::time::Duration::from_millis(400))
+        }));
+        sh.writer
+            .run(Box::new(|r: &mut Rdy| {
+                let w =
+                    rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer).unwrap();
+                r.write(
+                    &w,
+                    rdy_engine::WriteRequest {
+                        view: "v".into(),
+                        ops: rdy_engine::parse_ops(vec![serde_json::json!({
+                            "op": "create", "type": "doc",
+                            "fields": {"name": "a", "title": "D", "doc_type": "page"}
+                        })])
+                        .unwrap(),
+                        justification: None,
+                        message: String::new(),
+                    },
+                )?;
+                Ok(serde_json::Value::Null)
+            }))
+            .unwrap();
+        sh.shutdown().unwrap();
+        drop(sh);
+        Rdy::open(dir.path()).unwrap();
+    }
+
     #[test]
     fn reload1_an_invalid_reload_never_records_bytes_newer_than_it_evaluated() {
         let log = fault_log(&["pack invalid: "]);
