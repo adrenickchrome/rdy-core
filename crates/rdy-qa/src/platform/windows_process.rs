@@ -94,6 +94,12 @@ pub fn process_exited(pid: u32) -> bool {
     }
 }
 
+/// The anonymous resident memory of process `pid`: a Linux reading, `None` here.
+pub fn rss_anon_bytes(pid: u32) -> Option<u64> {
+    let _ = pid;
+    None
+}
+
 /// Whether process `pid` is alive. A process this account cannot open counts, as it may be
 /// running; the harness only asks about its own children.
 pub fn process_running(pid: u32) -> bool {

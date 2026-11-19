@@ -1135,6 +1135,23 @@ pub fn malloc_mapped_bytes() -> Option<usize> {
     }
 }
 
+/// The bytes glibc's malloc has handed out and not had back (`mallinfo2()`: `uordblks` in the
+/// arenas plus `hblkhd` in blocks with their own mapping), on Linux with glibc; `None`
+/// elsewhere. The deep-gate memory soak reads it as the daemon's live memory.
+#[allow(unsafe_code)]
+pub fn malloc_live_bytes() -> Option<usize> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: mallinfo2 only reads the allocator's counters
+        let m = unsafe { libc::mallinfo2() };
+        Some(m.uordblks.saturating_add(m.hblkhd))
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::sys::{

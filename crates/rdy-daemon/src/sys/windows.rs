@@ -69,3 +69,8 @@ pub fn release_free_memory() {}
 pub fn malloc_mapped_bytes() -> Option<usize> {
     None
 }
+
+/// The bytes the allocator has handed out and not had back: not read here.
+pub fn malloc_live_bytes() -> Option<usize> {
+    None
+}

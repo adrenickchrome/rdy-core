@@ -17,6 +17,17 @@ pub fn short_tmp_root() -> &'static Path {
     Path::new("/tmp")
 }
 
+/// The anonymous resident memory of process `pid` in bytes: the `RssAnon:` line of
+/// `/proc/<pid>/status`. Linux only: `None` on other Unix systems, and when the file or the line
+/// cannot be read.
+pub fn rss_anon_bytes(pid: u32) -> Option<u64> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    crate::soak::parse_rss_anon(&text)
+}
+
 /// Whether process `pid` has exited: `ps` lists no such process, or lists a zombie (killed, not
 /// yet reaped by its parent).
 pub fn process_exited(pid: u32) -> bool {
