@@ -1380,6 +1380,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn wx8a_endpoint_liveness_proves_only_an_end() {
         use crate::sys::{Liveness, endpoint_liveness};
         let d = tempfile::tempdir().unwrap();
@@ -1389,6 +1390,16 @@ mod tests {
             assert_eq!(endpoint_liveness(&path).await, Liveness::Gone);
             let listener = bind(&path).unwrap();
             assert_eq!(endpoint_liveness(&path).await, Liveness::Live);
+            // shut down, then closed: a process that another test's thread is starting holds a
+            // copy of every descriptor of this one until its exec, and a copy keeps a listener
+            // open; a shut-down listener refuses every connection, whoever holds it (Linux)
+            // SAFETY: `shutdown` takes the listener's own open descriptor and two integers.
+            unsafe {
+                libc::shutdown(
+                    std::os::fd::AsRawFd::as_raw_fd(&listener.0),
+                    libc::SHUT_RDWR,
+                )
+            };
             drop(listener);
             assert!(path.exists(), "the listener's drop leaves the name");
             assert_eq!(endpoint_liveness(&path).await, Liveness::Gone);
