@@ -17,7 +17,7 @@
 use crate::Scope;
 use crate::lexicon::Lexicon;
 use rdy_model::{Block, BlockId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The binary64 bits of ln 2 rounded to nearest (0.6931471805599453): the divisor that turns
@@ -227,13 +227,14 @@ struct Source {
     targets: Option<LinkTargets>,
 }
 
-/// The lazy values of a weight state, and their charge.
+/// The lazy values of a weight state, and their charge. The maps are only read by key and
+/// counted, never walked, so no order of theirs is ever seen.
 #[derive(Default)]
 struct Cache {
-    idf: BTreeMap<String, f64>,
-    targets: BTreeMap<BlockId, f64>,
-    lexical: BTreeMap<BlockId, f64>,
-    link: BTreeMap<BlockId, f64>,
+    idf: HashMap<String, f64>,
+    targets: HashMap<BlockId, f64>,
+    lexical: HashMap<BlockId, f64>,
+    link: HashMap<BlockId, f64>,
     source_lexical: Option<f64>,
     source_link: Option<f64>,
     charged: usize,
@@ -444,102 +445,137 @@ impl VectorWeights {
     /// `doc`'s lexical vector: each word's `tf × idf` divided by the norm, by word. Empty for a
     /// document with no word or whose raw weights are all 0.
     pub fn lexical(&self, doc: Doc<'_>) -> Result<Vec<(&str, f64)>, WeightLimit> {
-        let Some(norm) = self.lexical_norm(doc)?.filter(|n| *n > 0.0) else {
-            return Ok(vec![]);
-        };
         let Some(counts) = self.counts(doc) else {
             return Ok(vec![]);
         };
-        let c = self.lock();
-        Ok(counts
-            .iter()
-            .map(|(w, n)| (w, tf(n) * c.idf[w] / norm))
-            .collect())
+        let (norm, raw) = self.lexical_raw(&mut self.lock(), doc, counts)?;
+        Ok(unit(raw, norm))
     }
 
     /// `doc`'s link vector: each target's weight divided by the norm, by target. Empty for a
     /// document with no target or whose weights are all 0.
     pub fn link(&self, doc: Doc<'_>) -> Result<Vec<(&BlockId, f64)>, WeightLimit> {
-        let Some(norm) = self.link_norm(doc)?.filter(|n| *n > 0.0) else {
-            return Ok(vec![]);
-        };
         let Some(targets) = self.targets(doc) else {
             return Ok(vec![]);
         };
-        let c = self.lock();
-        Ok(targets.iter().map(|t| (t, c.targets[t] / norm)).collect())
+        let (norm, raw) = self.link_raw(&mut self.lock(), doc, targets)?;
+        Ok(unit(raw, norm))
     }
 
-    /// The norm of `doc`'s vector of `kind`, computed once. The charge of the norm and of every
-    /// feature weight it needs that is not cached is taken first, before anything is computed
-    /// or stored, so a refused read leaves the cache as it was.
+    /// The norm of `doc`'s vector of `kind`, computed once (see [`VectorWeights::lexical_raw`]).
     fn norm(&self, doc: Doc<'_>, kind: Kind) -> Result<Option<f64>, WeightLimit> {
-        let key_len = match doc {
+        match kind {
+            Kind::Lexical => match self.counts(doc) {
+                None => Ok(None),
+                Some(counts) => Ok(Some(self.lexical_raw(&mut self.lock(), doc, counts)?.0)),
+            },
+            Kind::Link => match self.targets(doc) {
+                None => Ok(None),
+                Some(targets) => Ok(Some(self.link_raw(&mut self.lock(), doc, targets)?.0)),
+            },
+        }
+    }
+
+    /// What a norm of `doc` is charged beside the feature weights it needs.
+    fn norm_charge(doc: Doc<'_>) -> usize {
+        match doc {
             Doc::Block(id) => id.as_str().len() + BLOCK_ENTRY_BYTES,
             Doc::Source => size_of::<f64>(),
-        };
-        match kind {
-            Kind::Lexical => {
-                let Some(counts) = self.counts(doc) else {
-                    return Ok(None);
-                };
-                let (n, mut c) = (self.corpus_words(), self.lock());
-                if let Some(v) = cached(&c, doc, kind) {
-                    return Ok(Some(v));
+        }
+    }
+
+    /// `doc`'s lexical norm and raw weights (`tf × idf`, in `counts` order), under the held
+    /// lock `c`; `counts` are `doc`'s words. A norm is computed once. The charge of the norm and
+    /// of every idf it needs that is not cached is taken first, before anything is computed or
+    /// stored, so a refused read leaves the cache as it was.
+    fn lexical_raw<'s>(
+        &'s self,
+        c: &mut Cache,
+        doc: Doc<'_>,
+        counts: &'s WordCounts,
+    ) -> Result<Raw<&'s str>, WeightLimit> {
+        if let Some(norm) = cached(c, doc, Kind::Lexical) {
+            let raw = counts.iter().map(|(w, n)| (w, tf(n) * c.idf[w])).collect();
+            return Ok((norm, raw));
+        }
+        // each word's cached idf, read once; a word without one is filled in below, after the
+        // charge
+        let mut raw = Vec::with_capacity(counts.len());
+        let mut missing = 0;
+        for (w, count) in counts.iter() {
+            match c.idf.get(w) {
+                Some(v) => raw.push((w, tf(count) * v)),
+                None => {
+                    missing += WORD_ENTRY_BYTES + w.len();
+                    raw.push((w, 0.0));
                 }
-                let missing: usize = counts
-                    .iter()
-                    .filter(|(w, _)| !c.idf.contains_key(*w))
-                    .map(|(w, _)| WORD_ENTRY_BYTES + w.len())
-                    .sum();
-                c.charge(key_len + missing, self.limit)?;
-                let mut raw = Vec::with_capacity(counts.len());
-                for (w, count) in counts.iter() {
-                    let v = match c.idf.get(w) {
-                        Some(v) => *v,
-                        None => {
-                            let v = idf(n, self.df(w));
-                            c.idf.insert(w.to_string(), v);
-                            v
-                        }
-                    };
-                    raw.push(tf(count) * v);
-                }
-                let norm = length(raw.into_iter());
-                store(&mut c, doc, kind, norm);
-                Ok(Some(norm))
-            }
-            Kind::Link => {
-                let Some(targets) = self.targets(doc) else {
-                    return Ok(None);
-                };
-                let (l, mut c) = (self.corpus_links(), self.lock());
-                if let Some(v) = cached(&c, doc, kind) {
-                    return Ok(Some(v));
-                }
-                let missing: usize = targets
-                    .iter()
-                    .filter(|t| !c.targets.contains_key(*t))
-                    .map(|t| BLOCK_ENTRY_BYTES + t.as_str().len())
-                    .sum();
-                c.charge(key_len + missing, self.limit)?;
-                let mut weights = Vec::with_capacity(targets.len());
-                for t in targets.iter() {
-                    let v = match c.targets.get(t) {
-                        Some(v) => *v,
-                        None => {
-                            let v = idf(l, self.indeg(t));
-                            c.targets.insert(t.clone(), v);
-                            v
-                        }
-                    };
-                    weights.push(v);
-                }
-                let norm = length(weights.into_iter());
-                store(&mut c, doc, kind, norm);
-                Ok(Some(norm))
             }
         }
+        c.charge(Self::norm_charge(doc) + missing, self.limit)?;
+        if missing > 0 {
+            let n = self.corpus_words();
+            for ((w, count), slot) in counts.iter().zip(&mut raw) {
+                if !c.idf.contains_key(w) {
+                    let v = idf(n, self.df(w));
+                    c.idf.insert(w.to_string(), v);
+                    slot.1 = tf(count) * v;
+                }
+            }
+        }
+        let norm = length(raw.iter().map(|(_, x)| *x));
+        store(c, doc, Kind::Lexical, norm);
+        Ok((norm, raw))
+    }
+
+    /// `doc`'s link norm and target weights (in `targets` order), under the held lock `c`;
+    /// `targets` are `doc`'s targets. Computed and charged as [`VectorWeights::lexical_raw`].
+    fn link_raw<'s>(
+        &'s self,
+        c: &mut Cache,
+        doc: Doc<'_>,
+        targets: &'s LinkTargets,
+    ) -> Result<Raw<&'s BlockId>, WeightLimit> {
+        if let Some(norm) = cached(c, doc, Kind::Link) {
+            let raw = targets.iter().map(|t| (t, c.targets[t])).collect();
+            return Ok((norm, raw));
+        }
+        let missing: usize = targets
+            .iter()
+            .filter(|t| !c.targets.contains_key(*t))
+            .map(|t| BLOCK_ENTRY_BYTES + t.as_str().len())
+            .sum();
+        c.charge(Self::norm_charge(doc) + missing, self.limit)?;
+        let l = self.corpus_links();
+        let mut raw = Vec::with_capacity(targets.len());
+        for t in targets.iter() {
+            let v = match c.targets.get(t) {
+                Some(v) => *v,
+                None => {
+                    let v = idf(l, self.indeg(t));
+                    c.targets.insert(t.clone(), v);
+                    v
+                }
+            };
+            raw.push((t, v));
+        }
+        let norm = length(raw.iter().map(|(_, x)| *x));
+        store(c, doc, Kind::Link, norm);
+        Ok((norm, raw))
+    }
+}
+
+/// A document's norm and its raw weights by feature, before they are divided by the norm.
+type Raw<K> = (f64, Vec<(K, f64)>);
+
+/// `raw` divided by `norm`, weight by weight: a unit vector. Empty when `norm` is not above 0.
+fn unit<K>(mut raw: Vec<(K, f64)>, norm: f64) -> Vec<(K, f64)> {
+    if norm > 0.0 {
+        for (_, x) in &mut raw {
+            *x /= norm;
+        }
+        raw
+    } else {
+        vec![]
     }
 }
 
@@ -1070,13 +1106,18 @@ fn shared<K: Ord + Copy>(a: &[(K, f64)], b: &[(K, f64)]) -> Vec<K> {
 /// products are not charged.
 pub fn reasons(w: &VectorWeights, a: Doc<'_>, b: Doc<'_>) -> Result<Reasons, Guard> {
     let (a, b) = (Operand::of(w, a)?, Operand::of(w, b)?);
-    Ok(Reasons {
+    Ok(reasons_of_operands(&a, &b))
+}
+
+/// The reasons of two documents' vectors ([`reasons`]).
+pub fn reasons_of_operands(a: &Operand<'_>, b: &Operand<'_>) -> Reasons {
+    Reasons {
         words: shared(&a.lexical, &b.lexical)
             .into_iter()
             .map(str::to_string)
             .collect(),
         links: shared(&a.link, &b.link).into_iter().cloned().collect(),
-    })
+    }
 }
 
 #[cfg(test)]

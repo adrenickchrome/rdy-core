@@ -69,10 +69,11 @@ fn defines_entity(pack: &Pack, b: &Block) -> bool {
 pub(crate) struct Relation<'a> {
     m: &'a Materialized,
     g: &'a Graph,
-    pack: &'a Pack,
     source: &'a Block,
     /// The entities the source is tied to, by a reference, `describes` or `affects`.
     entities: BTreeSet<&'a BlockId>,
+    /// Whether the source can have a neighbor: it has a containing doc and takes part.
+    open: bool,
 }
 
 impl<'a> Relation<'a> {
@@ -91,29 +92,26 @@ impl<'a> Relation<'a> {
             .filter(|e| m.get(&e.to).is_some_and(|t| defines_entity(pack, t)))
             .map(|e| &e.to)
             .collect();
+        let open = m.doc_of(&source.id).is_some() && takes_part(pack, source);
         Relation {
             m,
             g,
-            pack,
             source,
             entities,
+            open,
         }
     }
 
     /// Whether `n` is a section or entity neighbor of the source. A block is never its own
     /// neighbor. A section neighbor is another participating child of the source's parent. An
     /// entity neighbor is a participating, live block with a containing doc that is tied to an
-    /// entity the source is tied to.
+    /// entity the source is tied to. `n` takes part ([`takes_part`]): the caller checked it.
     pub(crate) fn relates(&self, n: &Block) -> bool {
         let (m, source) = (self.m, self.source);
         let Some(parent) = source.parent.as_ref() else {
             return false;
         };
-        if n.id == source.id
-            || m.doc_of(&source.id).is_none()
-            || !takes_part(self.pack, source)
-            || !takes_part(self.pack, n)
-        {
+        if n.id == source.id || !self.open {
             return false;
         }
         if n.parent.as_ref() == Some(parent) {

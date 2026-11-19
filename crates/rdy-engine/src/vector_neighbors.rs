@@ -9,15 +9,21 @@
 //! [`Advice::skipped`] (D-0ZPAP); so does an eligible source past the cut's source limit. A
 //! source with no seed (D-RY7B5) is complete: no rows, no count. Rows past a source's row cap
 //! count nowhere.
+use crate::brief::{effective_lifecycle, own_lifecycle};
 use crate::neighbors::{Relation, takes_part};
-use crate::tensions::index::is_deprecated;
+use crate::tensions::index::{DEPRECATED, ended, is_deprecated};
 use crate::vectors::{
-    Doc, VectorBudget, VectorWeights, rank_rows, reasons as reasons_of, score_source,
+    Doc, Guard, Operand, Reasons, VectorBudget, VectorWeights, rank_rows, reasons_of_operands,
+    score_source,
 };
 use crate::{Materialized, lexicon};
 use rdy_graph::Graph;
 use rdy_model::{Block, BlockId};
 use rdy_schema::Pack;
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 /// The cut of one advice call: the lowest score that counts, the most rows each source keeps and
 /// the most eligible sources it scores. These are fixed judgements (D-Y1WEY); a cut is a
@@ -98,42 +104,177 @@ pub fn eligible_target(m: &Materialized, g: &Graph, pack: &Pack, b: &Block) -> b
         && !is_deprecated(m, g, &b.id)
 }
 
-/// A row's tie-break key once scores are equal (module doc of [`Advice::rows`]).
+/// A row's tie-break key once scores are equal (module doc of [`Advice::rows`]). It borrows
+/// from the snapshot and shares each doc's path, so a large group of equal scores builds no
+/// strings; it orders as the owned key would.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Tie {
+struct Tie<'m> {
     elsewhere: bool,
-    doc_path: String,
-    position: Vec<(String, BlockId)>,
-    block: BlockId,
+    doc_path: Rc<str>,
+    position: Vec<(&'m str, &'m BlockId)>,
+    block: Cow<'m, BlockId>,
     source_index: usize,
 }
 
-/// The chain of (order key, id) from the child of `doc` down to `id`. Chains compare in reading
-/// order: a block follows its parent and its earlier siblings.
-fn position(m: &Materialized, doc: &BlockId, id: &BlockId) -> Vec<(String, BlockId)> {
-    let mut chain = Vec::new();
-    let mut cur = m.get(id);
-    for _ in 0..=m.len() {
-        let Some(b) = cur else { break };
-        if b.id == *doc {
-            break;
-        }
-        chain.push((b.order.clone(), b.id.clone()));
-        cur = b.parent.as_ref().and_then(|p| m.get(p));
-    }
-    chain.reverse();
-    chain
+/// What one advice call reads about the blocks around its candidates, each read once for the
+/// call: an ancestor's block, its containing doc and that doc's path, and whether its lifecycle
+/// (its own or inherited) is deprecated; and whether a block type takes part. Candidates share
+/// sections and docs, so a call reads these once each, not once per candidate. Every answer
+/// equals the uncached read.
+struct Reader<'m> {
+    m: &'m Materialized,
+    ups: RefCell<HashMap<&'m BlockId, Up<'m>>>,
+    paths: RefCell<HashMap<&'m BlockId, Rc<str>>>,
+    parts: RefCell<Vec<(&'m str, bool)>>,
 }
 
-fn tie(m: &Materialized, source_doc: Option<&BlockId>, source_index: usize, id: &BlockId) -> Tie {
-    let doc = m.doc_of(id).map(|d| &d.id);
-    Tie {
-        elsewhere: doc.is_none() || doc != source_doc,
-        doc_path: doc.and_then(|d| m.path_of(d)).unwrap_or_default(),
-        position: doc.map(|d| position(m, d, id)).unwrap_or_default(),
-        block: id.clone(),
-        source_index,
+/// One ancestor's reads: `m.get`, `m.doc_of` and the doc's path, and whether
+/// `effective_lifecycle` is deprecated.
+#[derive(Clone)]
+struct Up<'m> {
+    block: Option<&'m Block>,
+    doc: Option<(&'m Block, Rc<str>)>,
+    deprecated: bool,
+}
+
+impl<'m> Reader<'m> {
+    fn new(m: &'m Materialized) -> Reader<'m> {
+        Reader {
+            m,
+            ups: RefCell::new(HashMap::new()),
+            paths: RefCell::new(HashMap::new()),
+            parts: RefCell::new(Vec::new()),
+        }
     }
+
+    fn up(&self, id: &'m BlockId) -> Up<'m> {
+        if let Some(u) = self.ups.borrow().get(id) {
+            return u.clone();
+        }
+        let m = self.m;
+        let u = Up {
+            block: m.get(id),
+            doc: m.doc_of(id).map(|d| (d, self.path(&d.id))),
+            deprecated: effective_lifecycle(m, Some(id)).as_deref() == Some(DEPRECATED),
+        };
+        self.ups.borrow_mut().insert(id, u.clone());
+        u
+    }
+
+    /// The reads of `b`'s parent; `None` for a block with no parent.
+    fn parent(&self, b: &'m Block) -> Option<Up<'m>> {
+        b.parent.as_ref().map(|p| self.up(p))
+    }
+
+    /// `m.doc_of(&b.id)` and its path, for a block `b` of `m` whose parent's reads are `up`:
+    /// `b` when it is a doc, else its parent's doc.
+    fn doc_of(&self, b: &'m Block, up: Option<&Up<'m>>) -> Option<(&'m Block, Rc<str>)> {
+        if b.block_type == "doc" {
+            return Some((b, self.path(&b.id)));
+        }
+        up.and_then(|u| u.doc.clone())
+    }
+
+    /// [`takes_part`], read once per block type.
+    fn takes_part(&self, pack: &Pack, b: &'m Block) -> bool {
+        let mut parts = self.parts.borrow_mut();
+        if let Some((_, part)) = parts.iter().find(|(t, _)| *t == b.block_type) {
+            return *part;
+        }
+        let part = takes_part(pack, b);
+        parts.push((&b.block_type, part));
+        part
+    }
+
+    /// [`eligible_target`] for a block `b` of `m`: the lifecycle `b` lacks is its parent's.
+    fn eligible_target(&self, g: &Graph, pack: &Pack, b: &'m Block) -> bool {
+        if !self.takes_part(pack, b) {
+            return false;
+        }
+        let up = self.parent(b);
+        let has_doc = b.block_type == "doc" || up.as_ref().is_some_and(|u| u.doc.is_some());
+        let deprecated = match own_lifecycle(b) {
+            Some(l) => l.as_str() == Some(DEPRECATED),
+            None => up.as_ref().is_some_and(|u| u.deprecated),
+        };
+        has_doc && !(deprecated || ended(g, &b.id))
+    }
+
+    /// The path of doc `d`, or empty when it has none.
+    fn path(&self, d: &'m BlockId) -> Rc<str> {
+        let mut paths = self.paths.borrow_mut();
+        Rc::clone(
+            paths
+                .entry(d)
+                .or_insert_with(|| Rc::from(self.m.path_of(d).unwrap_or_default())),
+        )
+    }
+
+    /// The chain of (order key, id) from the child of `doc` down to `b`, whose parent's block
+    /// is `parent`. Chains compare in reading order: a block follows its parent and its earlier
+    /// siblings.
+    fn position(
+        &self,
+        doc: &BlockId,
+        b: &'m Block,
+        parent: Option<&'m Block>,
+    ) -> Vec<(&'m str, &'m BlockId)> {
+        let mut chain = Vec::new();
+        let mut cur = Some(b);
+        for step in 0..=self.m.len() {
+            let Some(b) = cur else { break };
+            if b.id == *doc {
+                break;
+            }
+            chain.push((b.order.as_str(), &b.id));
+            cur = if step == 0 {
+                parent
+            } else {
+                b.parent.as_ref().and_then(|p| self.up(p).block)
+            };
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// The tie-break key of neighbor `id` (whose block in `m` is `b`) of the source at
+    /// `source_index`, whose doc is `source_doc`.
+    fn tie(
+        &self,
+        source_doc: Option<&BlockId>,
+        source_index: usize,
+        id: Cow<'m, BlockId>,
+        b: Option<&'m Block>,
+    ) -> Tie<'m> {
+        let up = b.and_then(|b| self.parent(b));
+        let doc = b.and_then(|b| self.doc_of(b, up.as_ref()));
+        let doc_id = doc.as_ref().map(|(d, _)| &d.id);
+        Tie {
+            elsewhere: doc_id.is_none() || doc_id != source_doc,
+            position: doc_id
+                .zip(b)
+                .map(|(d, b)| self.position(d, b, up.as_ref().and_then(|u| u.block)))
+                .unwrap_or_default(),
+            doc_path: doc.map_or_else(|| Rc::from(""), |(_, p)| p),
+            block: id,
+            source_index,
+        }
+    }
+}
+
+/// [`crate::vectors::reasons`] of `source` and `block`, with the source's vectors read once
+/// into `source_vectors` for all its rows.
+fn row_reasons<'w>(
+    w: &'w VectorWeights,
+    source_vectors: &mut Option<Operand<'w>>,
+    source: &BlockId,
+    block: &BlockId,
+) -> Result<Reasons, Guard> {
+    let a = match source_vectors {
+        Some(a) => a,
+        None => source_vectors.insert(Operand::of(w, Doc::Block(source))?),
+    };
+    Ok(reasons_of_operands(a, &Operand::of(w, Doc::Block(block))?))
 }
 
 /// The vector neighbors of `sources`, the covered blocks in reading order.
@@ -161,29 +302,39 @@ pub fn vector_neighbors_in(
         .filter(|(_, b)| eligible_source(m, pack, b))
         .collect();
     let mut skipped = eligible.len().saturating_sub(cut.max_sources);
+    let reader = Reader::new(m);
     let mut rows: Vec<AdviceRow> = Vec::new();
     for &(index, src) in eligible.iter().take(cut.max_sources) {
         let relation = Relation::new(m, g, pack, src);
+        // the blocks `keep` accepts, in the order `score_source` scores them
+        let mut kept: Vec<&Block> = Vec::new();
         let keep = |id: &BlockId| {
             *id != src.id
-                && m.get(id)
-                    .is_some_and(|b| eligible_target(m, g, pack, b) && !relation.relates(b))
+                && m.get(id).is_some_and(|b| {
+                    let ok = reader.eligible_target(g, pack, b) && !relation.relates(b);
+                    if ok {
+                        kept.push(b);
+                    }
+                    ok
+                })
         };
         let Ok(scored) = score_source(w, Doc::Block(&src.id), keep, budget) else {
             skipped += 1;
             continue;
         };
+        debug_assert_eq!(scored.len(), kept.len());
         let source_doc = m.doc_of(&src.id).map(|d| &d.id);
         let top = rank_rows(
-            scored,
-            |s| s.score,
+            scored.into_iter().zip(kept).collect(),
+            |(s, _)| s.score,
             cut.floor,
             cut.per_source,
-            |s| tie(m, source_doc, index, s.block),
+            |(_, b)| reader.tie(source_doc, index, Cow::Borrowed(&b.id), Some(b)),
         );
         let mut mine = Vec::with_capacity(top.len());
-        for s in top {
-            let Ok(why) = reasons_of(w, Doc::Block(&src.id), Doc::Block(s.block)) else {
+        let mut source_vectors = None;
+        for (s, _) in top {
+            let Ok(why) = row_reasons(w, &mut source_vectors, &src.id, s.block) else {
                 mine.clear();
                 skipped += 1;
                 break;
@@ -210,7 +361,12 @@ pub fn vector_neighbors_in(
         usize::MAX,
         |r| {
             let doc = m.doc_of(&r.source).map(|d| &d.id);
-            tie(m, doc, r.source_index, &r.block)
+            reader.tie(
+                doc,
+                r.source_index,
+                Cow::Owned(r.block.clone()),
+                m.get(&r.block),
+            )
         },
     );
     Advice { rows, skipped }
@@ -221,9 +377,9 @@ mod tests {
     use super::*;
     use crate::lexicon::Lexicon;
     use crate::vectors::{
-        BudgetUse, Guard, MAX_REASON_ITEMS, MAX_SEED_TARGETS, MAX_SEED_WORDS, Operand, Reasons,
-        SOURCE_CANDIDATES, SOURCE_POSTINGS, SOURCE_PRODUCTS, Seeds, SourceLimits, WeightScope,
-        candidates, round3, score_operands, score_pair, select_seeds,
+        BudgetUse, MAX_REASON_ITEMS, MAX_SEED_TARGETS, MAX_SEED_WORDS, SOURCE_CANDIDATES,
+        SOURCE_POSTINGS, SOURCE_PRODUCTS, Seeds, SourceLimits, WeightScope, candidates,
+        reasons as reasons_of, round3, score_operands, score_pair, select_seeds,
     };
     use crate::{Rdy, Scope};
     use rdy_model::{CROCKFORD, FieldValue, Link, StateSnapshot};

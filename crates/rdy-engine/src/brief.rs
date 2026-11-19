@@ -2523,7 +2523,7 @@ struct Subject<'a> {
 }
 
 /// A block's own `lifecycle`, if it has one (a null value counts as none).
-fn own_lifecycle(b: &Block) -> Option<&FieldValue> {
+pub(crate) fn own_lifecycle(b: &Block) -> Option<&FieldValue> {
     b.fields
         .get("lifecycle")
         .filter(|v| **v != FieldValue::Null)
