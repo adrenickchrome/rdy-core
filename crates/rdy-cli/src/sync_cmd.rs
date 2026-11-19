@@ -403,6 +403,14 @@ fn pull_text(v: &Value) -> String {
             ));
         }
     }
+    for w in v["warnings"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "{}: {}\nfix: {}",
+            text(&w["code"]),
+            text(&w["message"]),
+            text(&w["fix"])
+        ));
+    }
     lines.join("\n")
 }
 

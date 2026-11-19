@@ -617,5 +617,6 @@ fn pull_json(out: &PullOutcome) -> Result<Value, RdyError> {
         "canon": serde_json::to_value(&out.canon).map_err(|_| internal())?,
         "views_fetched": views_fetched,
         "views": serde_json::to_value(&out.views).map_err(|_| internal())?,
+        "warnings": serde_json::to_value(&out.warnings).map_err(|_| internal())?,
     }))
 }

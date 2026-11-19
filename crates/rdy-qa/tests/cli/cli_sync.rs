@@ -939,3 +939,30 @@ fn scc9_clone_settings_refusal_fetches_nothing_and_leaves_dir() {
     }
     assert_eq!(fetches(&k), 0);
 }
+
+/// D-H67EN: a pull whose lookup of the held push the hub refuses keeps `held`, goes on and warns
+/// `W_UPSTREAM_HELD_LOOKUP` with the hub's code and fix.
+fn not_found_body(push: &str) -> String {
+    json!({"code": "E_HUB_NOT_FOUND", "message": "No push of that id.",
+        "fix": format!("check the push id, and sign in with the account that opened push {push}"),
+        "issues": [], "request_id": "req_00000000000000000000000009"})
+    .to_string()
+}
+
+#[test]
+fn scc8_cli_held_lookup_refusal_warns_and_the_pull_goes_on() {
+    let k = kit(&["a", "b"]);
+    k.hub.fault(Fault::HoldWrite(4));
+    let v = cli_ok(&k, &["push"]);
+    assert_eq!(v["canon"]["status"], "held", "{v}");
+    let push = v["canon"]["push"].as_str().unwrap().to_string();
+    k.hub
+        .fault(Fault::RefuseOutcome(404, not_found_body(&push)));
+    let o = run(&k, &["pull"]);
+    assert!(o.status.success(), "{o:?}");
+    let out = String::from_utf8_lossy(&o.stdout);
+    let want = format!(
+        "W_UPSTREAM_HELD_LOOKUP: the outcome of held push {push} could not be read: E_HUB_NOT_FOUND\nfix: check the push id, and sign in with the account that opened push {push}"
+    );
+    assert!(out.contains(&want), "{out}");
+}

@@ -1009,3 +1009,41 @@ fn scc9_clone_settings_refusal_never_quotes_unknown_keys_or_values() {
         assert_eq!(e["fix"], fix, "{label}");
     }
 }
+
+/// D-H67EN: a pull whose lookup of the held push the hub refuses keeps `held`, goes on and warns
+/// `W_UPSTREAM_HELD_LOOKUP` with the hub's code and fix.
+fn not_found_body(push: &str) -> String {
+    json!({"code": "E_HUB_NOT_FOUND", "message": "No push of that id.",
+        "fix": format!("check the push id, and sign in with the account that opened push {push}"),
+        "issues": [], "request_id": "req_00000000000000000000000009"})
+    .to_string()
+}
+
+#[test]
+fn scc8_held_lookup_refusal_warns_and_the_pull_goes_on() {
+    let k = kit(&["a", "b"]);
+    let mut c = writer(&k);
+    k.hub.fault(Fault::HoldWrite(4));
+    let v = mcp_ok(&mut c, "rdy_push", json!({}));
+    assert_eq!(v["canon"]["status"], "held", "{v}");
+    let push = v["canon"]["push"].as_str().unwrap().to_string();
+    k.hub
+        .fault(Fault::RefuseOutcome(404, not_found_body(&push)));
+    let v = mcp_ok(&mut c, "rdy_pull", json!({}));
+    assert_eq!(
+        v["warnings"],
+        json!([{
+            "code": "W_UPSTREAM_HELD_LOOKUP",
+            "message": format!("the outcome of held push {push} could not be read: E_HUB_NOT_FOUND"),
+            "fix": format!("check the push id, and sign in with the account that opened push {push}"),
+        }]),
+        "{v}"
+    );
+    // held stays: the next push sends no write and reports the open request
+    k.hub.fault(Fault::None);
+    let before = writes(&k).len();
+    let v = mcp_ok(&mut c, "rdy_push", json!({}));
+    assert_eq!(v["canon"]["status"], "held_open", "{v}");
+    assert_eq!(v["canon"]["request"], 4, "{v}");
+    assert_eq!(writes(&k).len(), before);
+}

@@ -19925,6 +19925,7 @@
       "W_STOP_BEFORE_REDACTION": "\"W_STOP_BEFORE_REDACTION\"",
       "W_UNAPPLIED_DECISION": "\"W_UNAPPLIED_DECISION\"",
       "W_UPSTREAM_HANDLE_CHANGED": "\"W_UPSTREAM_HANDLE_CHANGED\"",
+      "W_UPSTREAM_HELD_LOOKUP": "\"W_UPSTREAM_HELD_LOOKUP\"",
       "W_UPSTREAM_PACK_MISMATCH": "\"W_UPSTREAM_PACK_MISMATCH\"",
       "W_UPSTREAM_SIGNOUT_LOCAL": "\"W_UPSTREAM_SIGNOUT_LOCAL\"",
       "W_WC_KEPT": "\"W_WC_KEPT\"",
@@ -20409,6 +20410,11 @@
         "end the credential on the hub if it is still active"
       ],
       [
+        "W_UPSTREAM_HELD_LOOKUP",
+        "the outcome of held push <push> could not be read: <code>",
+        "the hub's fix, or for a code with no fix, pull again later"
+      ],
+      [
         "E_BAD_RECORD",
         "a sync batch has an invalid object, frame or header, an unlisted dependency, an unneeded prerequisite, a root tag that is not in the batch or its prerequisites, a dependency cycle or a repeated object",
         "request this stream again; run rdy fsck at its source"
@@ -20820,6 +20826,8 @@
       "UPSTREAM_CA_MESSAGE": "\"the configured CA file cannot be used\"",
       "UPSTREAM_CONFIRM_HOST_FIX": "\"show the sign-in card, then relay the answer with its card_hash\"",
       "UPSTREAM_CONFIRM_HOST_MESSAGE": "\"the install host has not been confirmed\"",
+      "UPSTREAM_HELD_LOOKUP_FIX": "\"pull again later\"",
+      "UPSTREAM_HELD_LOOKUP_MESSAGE": "\"the outcome of held push <push> could not be read: <code>\"",
       "UPSTREAM_KEY_PROOF_FIX": "\"check the configured public key and SSH agent, then bind again\"",
       "UPSTREAM_KEY_PROOF_MESSAGE": "\"the agent's key proof is invalid\"",
       "UPSTREAM_ORIGIN_FIX": "\"use the install origin\"",
@@ -21306,6 +21314,7 @@
       "E_UPSTREAM_ACTOR_CLAIM",
       "W_UPSTREAM_HANDLE_CHANGED",
       "W_UPSTREAM_SIGNOUT_LOCAL",
+      "W_UPSTREAM_HELD_LOOKUP",
       "E_BAD_RECORD",
       "E_UNRESOLVED_REF",
       "E_STREAM_TRUNCATED",
@@ -25217,6 +25226,10 @@
               "when": "string"
             },
             "W_UPSTREAM_HANDLE_CHANGED": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_UPSTREAM_HELD_LOOKUP": {
               "fix": "string",
               "when": "string"
             },

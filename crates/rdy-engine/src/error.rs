@@ -1069,6 +1069,9 @@ pub const W_UPSTREAM_SIGNOUT_LOCAL: &str = "W_UPSTREAM_SIGNOUT_LOCAL";
 /// A URL clone whose hub repo holds gate settings for another pack: the clone uses rdy's
 /// default pack (D-FYSG5).
 pub const W_UPSTREAM_PACK_MISMATCH: &str = "W_UPSTREAM_PACK_MISMATCH";
+/// A pull whose lookup of the held push the hub refused: `held` stays and the pull goes on
+/// (D-H67EN).
+pub const W_UPSTREAM_HELD_LOOKUP: &str = "W_UPSTREAM_HELD_LOOKUP";
 
 /// The message of `E_ACTOR_UNBOUND`.
 pub const ACTOR_UNBOUND_MESSAGE: &str = "the session actor is not a hub actor";
@@ -1146,6 +1149,11 @@ pub const UPSTREAM_PACK_MISMATCH_MESSAGE: &str =
 /// The fix of `W_UPSTREAM_PACK_MISMATCH`.
 pub const UPSTREAM_PACK_MISMATCH_FIX: &str =
     "push the project to the hub repo again from a machine that has its pack, then clone again";
+/// The message of `W_UPSTREAM_HELD_LOOKUP`.
+pub const UPSTREAM_HELD_LOOKUP_MESSAGE: &str =
+    "the outcome of held push <push> could not be read: <code>";
+/// The fix of `W_UPSTREAM_HELD_LOOKUP` for a hub code with no fix; else the hub's fix.
+pub const UPSTREAM_HELD_LOOKUP_FIX: &str = "pull again later";
 
 /// `E_ACTOR_UNBOUND`.
 pub fn actor_unbound() -> RdyError {

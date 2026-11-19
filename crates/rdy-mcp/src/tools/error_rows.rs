@@ -432,6 +432,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         UPSTREAM_SIGNOUT_LOCAL_FIX,
     ),
     (
+        W_UPSTREAM_HELD_LOOKUP,
+        UPSTREAM_HELD_LOOKUP_MESSAGE,
+        "the hub's fix, or for a code with no fix, pull again later",
+    ),
+    (
         E_BAD_RECORD,
         "a sync batch has an invalid object, frame or header, an unlisted dependency, an unneeded prerequisite, a root tag that is not in the batch or its prerequisites, a dependency cycle or a repeated object",
         "request this stream again; run rdy fsck at its source",

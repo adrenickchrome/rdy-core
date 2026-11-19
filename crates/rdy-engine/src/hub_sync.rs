@@ -35,7 +35,8 @@
 //!    batches within the hub's limits, each streamed to a scratch file and checked, then Plan
 //!    A's fetch and replay. Before the fetch, a pull with a held request asks the outcome
 //!    lookup for the held push and clears `held` when the request closed with no landing
-//!    (D-PGQZM).
+//!    (D-PGQZM). An `unknown` answer clears `held` after hub canon applies; a refused lookup
+//!    keeps it and warns `W_UPSTREAM_HELD_LOOKUP` (D-H67EN). The pull goes on in each case.
 //! 10. **Restore.** A dump goes to the hub through a temporary store (`crate::sync_restore`).
 //!
 //! A hub refusal keeps the hub's message, fix and request id. `E_HUB_TAG_TAKEN` takes core's
@@ -44,7 +45,8 @@ use crate::engine::{Engine, with_writer_result};
 use crate::error::{
     E_BAD_INPUT, E_DIVERGED, E_STORE_FORMAT, E_TAG_EXISTS, E_UPSTREAM_ACTOR_CLAIM,
     E_UPSTREAM_UNCERTAIN, RdyError, SYNC_DIVERGED_FIX, SYNC_DIVERGED_MESSAGE, SYNC_MIN_RDY_FIX,
-    SYNC_MIN_RDY_MESSAGE, sync_uncertain, upstream_auth, upstream_protocol,
+    SYNC_MIN_RDY_MESSAGE, UPSTREAM_HELD_LOOKUP_FIX, UPSTREAM_HELD_LOOKUP_MESSAGE,
+    W_UPSTREAM_HELD_LOOKUP, sync_uncertain, upstream_auth, upstream_protocol,
 };
 use crate::formats::formats;
 use crate::hub_config::{BAD_REMOTE_NAME_FIX, BAD_REMOTE_NAME_MESSAGE, HubConfig, RemoteMode};
@@ -83,6 +85,7 @@ use rdy_store::sync_state::{
 use rdy_store::sync_stream::{HISTORY_FORMAT, StreamPurpose};
 use rdy_store::take_batch::FetchTarget;
 use rdy_store::{StoreError, StoreReader};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -178,6 +181,27 @@ pub struct PullOutcome {
     pub canon: Option<sync_replay::PullOutcome>,
     pub views_fetched: Vec<(String, FetchOutcome)>,
     pub views: Vec<ViewPulled>,
+    /// The pull's warnings: `W_UPSTREAM_HELD_LOOKUP` when the hub refused the lookup of the
+    /// held push (D-H67EN).
+    pub warnings: Vec<SyncWarning>,
+}
+
+/// A warning of a push or pull: its code, message and fix.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SyncWarning {
+    pub code: String,
+    pub message: String,
+    pub fix: String,
+}
+
+/// What a pull's lookup of the held push found (D-PGQZM, D-H67EN).
+enum HeldLookup {
+    /// No held request of this hub repo, or one the lookup keeps or cleared.
+    Settled,
+    /// The hub knows no outcome of held push `push`: `held` clears after hub canon applies.
+    Unknown(String),
+    /// The hub refused the lookup: `held` stays and the pull warns.
+    Refused(SyncWarning),
 }
 
 /// Which canon move a preview names.
@@ -1418,7 +1442,7 @@ impl<'a> SyncService<'a> {
             }
         }
         let lookup = self.lookup(engine, t, &base_url, &state)?;
-        self.held_lookup(engine, t, &base_url)?;
+        let held = self.held_lookup(engine, t, &base_url)?;
         let hub = HubState {
             repo_id: state.repo_id,
             canon: state.canon,
@@ -1430,7 +1454,11 @@ impl<'a> SyncService<'a> {
             canon: None,
             views_fetched: Vec::new(),
             views: Vec::new(),
+            warnings: Vec::new(),
         };
+        if let HeldLookup::Refused(w) = &held {
+            out.warnings.push(w.clone());
+        }
         if let Some(tip) = state.canon {
             out.fetched = self.fetch_history(
                 engine,
@@ -1453,6 +1481,10 @@ impl<'a> SyncService<'a> {
                 sync_replay::pull(rdy, &s, &req)
             })?);
             self.clear_held(engine, t)?;
+        }
+        if let HeldLookup::Unknown(push) = &held {
+            // the request closed with no landing and its outcome aged out (D-H67EN)
+            self.drop_held(engine, t, push)?;
         }
         if !request.views.is_empty() {
             let mut named = Vec::new();
@@ -1485,32 +1517,71 @@ impl<'a> SyncService<'a> {
         Ok(out)
     }
 
-    /// A pull's lookup of the held push (D-PGQZM "Clear"): with `held` set for this hub repo,
-    /// the outcome lookup of `held.push`. A held outcome whose `request_state` is `closed` (the
-    /// request closed with no landing) clears `held`; `open`, `landed`, any other outcome and
-    /// `unknown` keep it, and the pull goes on. A refusal of the lookup stops the pull and keeps
-    /// `held`, as a refused lookup of `pending` does.
-    fn held_lookup(&self, engine: &dyn Engine, t: &Target, base_url: &str) -> Result<(), RdyError> {
+    /// A pull's lookup of the held push (D-PGQZM "Clear", D-H67EN): with `held` set for this
+    /// hub repo, the outcome lookup of `held.push`. A held outcome whose `request_state` is
+    /// `closed` (the request closed with no landing) clears `held`; `open`, `landed` and any
+    /// other outcome keep it. `unknown` keeps it through the fetch (the caller clears it after
+    /// hub canon applies). A refusal of the lookup keeps it and gives `W_UPSTREAM_HELD_LOOKUP`;
+    /// the pull goes on in every case.
+    fn held_lookup(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+    ) -> Result<HeldLookup, RdyError> {
+        let read = engine.read();
+        let Some(c) = read.reader().sync_canon(&t.name).map_err(store)? else {
+            return Ok(HeldLookup::Settled);
+        };
+        let Some(h) = &c.held else {
+            return Ok(HeldLookup::Settled);
+        };
+        if c.url != t.url || c.repo_id != read.repo_id()? {
+            // another hub repo's request: never looked up or cleared here
+            return Ok(HeldLookup::Settled);
+        }
+        let push = h.push.clone();
+        let cx = self.context(t, &read, Some(base_url))?;
+        let reply = self.wire.outcome(&cx, &push);
+        drop(cx);
+        drop(read);
+        let reply = match reply {
+            Ok(r) => r,
+            Err(e) => {
+                let fix = if e.fix.is_empty() {
+                    UPSTREAM_HELD_LOOKUP_FIX.to_string()
+                } else {
+                    e.fix
+                };
+                return Ok(HeldLookup::Refused(SyncWarning {
+                    code: W_UPSTREAM_HELD_LOOKUP.to_string(),
+                    message: UPSTREAM_HELD_LOOKUP_MESSAGE
+                        .replace("<push>", &push)
+                        .replace("<code>", e.code),
+                    fix,
+                }));
+            }
+        };
+        match reply.outcome {
+            LookupOutcome::Held { .. } if reply.request_state.as_deref() == Some("closed") => {
+                self.drop_held(engine, t, &push)?;
+                Ok(HeldLookup::Settled)
+            }
+            LookupOutcome::Unknown => Ok(HeldLookup::Unknown(push)),
+            _ => Ok(HeldLookup::Settled),
+        }
+    }
+
+    /// Clears `held` of `t` when it is still the request of push `push`.
+    fn drop_held(&self, engine: &dyn Engine, t: &Target, push: &str) -> Result<(), RdyError> {
         let read = engine.read();
         let Some(c) = read.reader().sync_canon(&t.name).map_err(store)? else {
             return Ok(());
         };
-        let Some(h) = &c.held else {
-            return Ok(());
-        };
-        if c.url != t.url || c.repo_id != read.repo_id()? {
-            // another hub repo's request: never looked up or cleared here
+        if c.held.as_ref().is_none_or(|h| h.push != push) {
             return Ok(());
         }
-        let cx = self.context(t, &read, Some(base_url))?;
-        let reply = self.wire.outcome(&cx, &h.push)?;
-        drop(cx);
         drop(read);
-        let closed = matches!(reply.outcome, LookupOutcome::Held { .. })
-            && reply.request_state.as_deref() == Some("closed");
-        if !closed {
-            return Ok(());
-        }
         let step = SyncStep::Canon(SyncCanon { held: None, ..c });
         write_steps(engine, &t.name, vec![step])
     }

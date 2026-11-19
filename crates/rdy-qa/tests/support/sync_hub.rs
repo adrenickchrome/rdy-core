@@ -51,6 +51,11 @@ pub enum Fault {
     RefuseWrite(u16, String),
     /// The write request's connection closes with no reply: a lost response.
     LoseWrite,
+    /// The gate rules hold the write as the landing request of this number, version 1: hub
+    /// canon stays (rdyhub-design i-B40VF).
+    HoldWrite(u64),
+    /// The outcome lookup is refused with this status and hub error body.
+    RefuseOutcome(u16, String),
 }
 
 /// One request the hub read.
@@ -529,7 +534,19 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
                 Some(reply_bytes(status, "application/json", body.as_bytes()))
             }
             Fault::LoseWrite => None,
-            Fault::None => {
+            Fault::HoldWrite(number) => {
+                let r = req.json();
+                let push = r["push"].as_str().unwrap_or_default();
+                let q = repo.quarantine.remove(push).unwrap_or_default();
+                repo.held.extend(q);
+                let tip = repo.canon.as_deref().map(|t| key_json(LANDING, t));
+                Some(reply(
+                    200,
+                    &json!({"outcome": "held", "tip": tip,
+                        "request": {"number": number, "version": 1}, "min_rdy_raised": false}),
+                ))
+            }
+            _ => {
                 let r = req.json();
                 let push = r["push"].as_str().unwrap_or_default().to_string();
                 let view = r["view"].as_str().map(str::to_string);
@@ -587,6 +604,9 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
             Some(reply(200, &body))
         }
         ("POST", _, "/outcome") => {
+            if let Fault::RefuseOutcome(status, body) = fault {
+                return Some(reply_bytes(status, "application/json", body.as_bytes()));
+            }
             let r = req.json();
             let push = r["push"].as_str().unwrap_or_default();
             Some(reply(

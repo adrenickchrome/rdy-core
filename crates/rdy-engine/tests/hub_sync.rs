@@ -16,8 +16,8 @@ use hub_tls::{Reply, Server};
 use rdy_engine::hub_http::HttpHubTransport;
 use rdy_engine::hub_publish_wire::{SYNC_MEDIA_TYPE, UploadContext};
 use rdy_engine::hub_sync::{
-    CanonPreview, PreviewKind, PullRequest, PushOutcome, PushRequest, SyncService, WriteEnd,
-    canon_preview,
+    CanonPreview, PreviewKind, PullRequest, PushOutcome, PushRequest, SyncService, SyncWarning,
+    WriteEnd, canon_preview,
 };
 use rdy_engine::hub_sync_wire::{
     GateSettings, GetRequest, HttpSyncWire, HubRequest, KnownPull, LookupOutcome, ProposeGate,
@@ -1330,7 +1330,8 @@ fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
     else {
         panic!("{out:?}")
     };
-    // a pull while hub canon is below the held head keeps held
+    // a pull while hub canon is below the held head and the request is open keeps held
+    hub.answer_held(held_push, 5, "open");
     let (_dir, hub_store) = copy_project(&e);
     hub.serve(hub_store.read());
     let s = Sync::new(&e, &hub);
@@ -1353,14 +1354,15 @@ fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
     assert_eq!((c.applied, c.held), (Some(head2), None));
     let _ = head;
 
-    // D-PGQZM "Clear": a pull with `held` set asks the outcome lookup for `held.push` before
-    // any known or get. `open`, `landed` (hub canon still below the held head) and unknown keep
-    // `held`; `closed` (the request closed with no landing) clears it, and `applied` stays. The
-    // hub's held outcome is rdyhub-design i-6YB7Y; its fixture pin waits for fixture v3a.
+    // D-PGQZM "Clear", D-H67EN: a pull with `held` set asks the outcome lookup for
+    // `held.push` before any known or get. `open` and `landed` (hub canon still below the held
+    // head) keep `held`; `closed` (the request closed with no landing) clears it; `unknown`
+    // clears it after hub canon applies, when canon does not reach the held head. `applied`
+    // stays at the hub tip.
     for (request_state, kept) in [
         (Some("open"), true),
         (Some("landed"), true),
-        (None, true),
+        (None, false),
         (Some("closed"), false),
     ] {
         let e = env(2);
@@ -1387,7 +1389,8 @@ fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
         let (_dir, hub_store) = copy_project(&e);
         hub.serve(hub_store.read());
         hub.clear();
-        Sync::new(&e, &hub).pull(PullRequest::default()).unwrap();
+        let pulled = Sync::new(&e, &hub).pull(PullRequest::default()).unwrap();
+        assert!(pulled.warnings.is_empty());
         let steps = hub.steps();
         assert_eq!(
             steps[..3],
@@ -1424,6 +1427,76 @@ fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
             assert_ne!(&p, held_push);
             assert_eq!((base, pushed), (Some(tip), head));
         }
+    }
+
+    // D-H67EN: a refused lookup keeps `held`, the pull goes on (fetch and replay) and warns
+    // W_UPSTREAM_HELD_LOOKUP with the hub's code and fix, or `pull again later` for a code with
+    // no fix; the next pull asks again
+    for (refusal, fix) in [
+        (
+            RdyError::new(
+                "E_HUB_NOT_FOUND",
+                "push not found",
+                "check the push id, and sign in with the account that opened push p",
+            ),
+            "check the push id, and sign in with the account that opened push p",
+        ),
+        (
+            RdyError::new("E_HUB_BUSY", "the hub is busy", ""),
+            "pull again later",
+        ),
+    ] {
+        let e = env(2);
+        let tip = e.landings[0];
+        let head = e.landings[1];
+        let hub = Hub::new().with_state(|s| s.canon = Some(tip));
+        hub.plan_write(
+            1,
+            WritePlan::Held {
+                number: 3,
+                version: 1,
+            },
+        );
+        let out = push(&e, &hub, None).unwrap();
+        let WriteEnd::Held {
+            push: held_push, ..
+        } = &out.canon
+        else {
+            panic!("{out:?}")
+        };
+        let code = refusal.code;
+        hub.fail_at("outcome", 1, refusal);
+        let (_dir, hub_store) = copy_project(&e);
+        hub.serve(hub_store.read());
+        hub.clear();
+        let s = Sync::new(&e, &hub);
+        let pulled = s.pull(PullRequest::default()).unwrap();
+        assert_eq!(
+            pulled.warnings,
+            [SyncWarning {
+                code: "W_UPSTREAM_HELD_LOOKUP".into(),
+                message: format!("the outcome of held push {held_push} could not be read: {code}"),
+                fix: fix.into(),
+            }]
+        );
+        assert!(pulled.canon.is_some(), "the pull went on: {pulled:?}");
+        let steps = hub.steps();
+        assert_eq!(steps[..3], ["discovery", "state", "outcome"]);
+        assert!(steps.contains(&"known_pull"), "{steps:?}");
+        let held = Some(SyncHeld {
+            head,
+            request: 3,
+            push: held_push.clone(),
+        });
+        let c = canon_of(&e, "shared").unwrap();
+        assert_eq!((c.applied, c.held.clone()), (Some(tip), held.clone()));
+        // the next pull asks again
+        hub.answer_held(held_push, 3, "open");
+        hub.clear();
+        let pulled = s.pull(PullRequest::default()).unwrap();
+        assert!(pulled.warnings.is_empty());
+        assert_eq!(hub.steps().iter().filter(|s| **s == "outcome").count(), 1);
+        assert_eq!(canon_of(&e, "shared").unwrap().held, held);
     }
 
     // a pull with no held request asks no outcome lookup

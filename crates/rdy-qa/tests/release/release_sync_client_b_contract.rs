@@ -192,6 +192,27 @@ const SCC9_CHANGES: &[(&str, &str)] = &[
         "added /mcp/tools/rdy_clone/input_schema/properties/url",
         "rdy_clone takes an https hub repo URL, exclusive with file",
     ),
+    // the pull's refused lookup of a held push (D-H67EN)
+    (
+        "added /errors_warnings/codes/W_UPSTREAM_HELD_LOOKUP",
+        "a pull whose lookup of the held push the hub refused keeps held and goes on (D-H67EN)",
+    ),
+    (
+        "added /errors_warnings/error_rows/row=W_UPSTREAM_HELD_LOOKUP",
+        "the errors reference lists the held-lookup warning (D-H67EN)",
+    ),
+    (
+        "added /errors_warnings/templates/UPSTREAM_HELD_LOOKUP_FIX",
+        "the fix of W_UPSTREAM_HELD_LOOKUP for a hub code with no fix",
+    ),
+    (
+        "added /errors_warnings/templates/UPSTREAM_HELD_LOOKUP_MESSAGE",
+        "the text of W_UPSTREAM_HELD_LOOKUP",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/W_UPSTREAM_HELD_LOOKUP",
+        "rdy_schema lists the held-lookup warning row",
+    ),
 ];
 
 fn contracts() -> PathBuf {
@@ -400,7 +421,7 @@ fn scc8_contract_adds_only_sync_wire_and_errors() {
 
 /// scc9: the successor adds only the sync surfaces of Task 9 ([`SCC9_CHANGES`]) beside Task 8's:
 /// the two tools, the two command trees and one error row; then the clone's `url` selector, its
-/// warning code and its texts. No whole top-level section moves: each leaf is a member below a
+/// warning code and its texts; then the pull's held-lookup warning (D-H67EN). No whole top-level section moves: each leaf is a member below a
 /// section, and no member of an earlier task changes.
 #[test]
 fn scc9_contract_adds_only_sync_surfaces() {
@@ -487,6 +508,11 @@ fn scc9_contract_adds_only_sync_surfaces() {
             "UPSTREAM_PACK_MISMATCH_FIX",
             "push the project to the hub repo again from a machine that has its pack, then clone again",
         ),
+        (
+            "UPSTREAM_HELD_LOOKUP_MESSAGE",
+            "the outcome of held push <push> could not be read: <code>",
+        ),
+        ("UPSTREAM_HELD_LOOKUP_FIX", "pull again later"),
     ] {
         assert_eq!(templates[name], format!("\"{text}\""), "{name}");
     }
