@@ -823,7 +823,9 @@ impl Served {
     /// The pid in `.rdy/run/daemon.pid`, if it parses and that process is alive.
     pub fn daemon_pid(&self) -> Option<u32> {
         let pid = self.pid_file()?;
-        platform::process_running(pid).then_some(pid)
+        // a killed daemon that its parent has not reaped yet is no daemon, though `kill -0`
+        // still finds it: `wait_killed` already counts it as exited
+        (platform::process_running(pid) && !exited(pid)).then_some(pid)
     }
 
     fn pid_file(&self) -> Option<u32> {
