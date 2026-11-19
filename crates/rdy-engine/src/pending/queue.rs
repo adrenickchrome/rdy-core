@@ -16,6 +16,14 @@
 //! answer only: while the deferral card has no acceptance, it says the landing waits for each
 //! card beside it (p-T69HT); an acceptance gives the reason of the holds that remain.
 //!
+//! D-3N83P (refining D-D8FAB, D-91DEW): while a cause holds, the approve card recommends no
+//! option and shows a live `Recommendation` fact right after Policy, before the check verdict
+//! lines ([`Version::recommendation`]). A cause is a decision of the version whose confirm card
+//! recommends Reject (`not_recommended`) and has no confirm answer, or an open semantic tension
+//! (a reviewer's `tension` verdict opens one) that touches a block of the version. Approve keeps
+//! its place; a list of recommended answers refuses the card. With no cause the computed reason
+//! comes back. Readiness does not read it.
+//!
 //! # Exceptions (p-FN596, F3; closed)
 //!
 //! A proposed decision in the version is a decision block that the version's changes create or
@@ -401,8 +409,9 @@ impl ReadState {
                     continue;
                 }
             }
-            // TASK-982 C1: then the computed Imported fact; D-JQD5X, O13: then the live verdict
-            // lines
+            // D-3N83P: then the live Recommendation; TASK-982 C1: then the computed Imported
+            // fact; D-JQD5X, O13: then the live verdict lines
+            card.facts.extend(v.recommendation(self));
             card.facts.extend(imported_fact(self, &v.p, &v.next)?);
             show_verdicts(self, &v.pref, &v.p, &mut card)?;
             if let Some(rt) = routing.as_mut() {
@@ -778,6 +787,16 @@ pub(crate) fn imported_fact(
         .map(|value| bounded_fact(IMPORTED_FACT, value)))
 }
 
+/// D-3N83P: the live `Recommendation` fact of the approve card of version `pref` (record `p`):
+/// none when no cause holds.
+pub(crate) fn recommendation_fact(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+) -> Result<Option<Fact>, RdyError> {
+    Ok(Version::read(st, *pref, p.clone())?.recommendation(st))
+}
+
 /// O13 (D-JQD5X): the approve card `item` of version `pref` (record `p`) as the person is shown
 /// it: after every stored fact, one line for each check verdict whose case matches the version
 /// now ([`crate::check::verdicts::matching_verdicts`]), each row's complete metadata in
@@ -861,6 +880,7 @@ pub(crate) fn shown_approve_item(
         return Ok(None);
     };
     card.facts = facts;
+    card.facts.extend(v.recommendation(st));
     card.facts.extend(imported_fact(st, &v.p, &v.next)?);
     let open = crate::check::verdicts::open_hold(st, pref, &verdicts)?;
     with_verdicts(&mut card, pref, verdicts, open)?;
@@ -1151,6 +1171,7 @@ pub(crate) fn removal_item(
     if let Some(facts) = stored_facts(st, &v)? {
         item.facts = facts;
     }
+    item.facts.extend(v.recommendation(st));
     item.facts.extend(imported_fact(st, &v.p, &v.next)?);
     show_verdicts(st, &v.pref, &v.p, &mut item)?;
     let issues = v.readiness(st)?;
@@ -2427,14 +2448,16 @@ impl Version {
             .iter()
             .map(|d| format!("{}  {}", d.block.id, d.title()))
             .collect();
+        // D-3N83P: while a cause holds, no option is recommended
+        let approve_why = self
+            .recommendation(st)
+            .is_none()
+            .then(|| approve_reason(self.exception_count(), self.deferral_open(st, now)));
         let mut approve = option(
             "approve",
             &approve,
             "Lands the proposal in canon.",
-            Some(approve_reason(
-                self.exception_count(),
-                self.deferral_open(st, now),
-            )),
+            approve_why,
         );
         if self.removal.is_some() {
             approve.consequences.push(REMOVAL_IRREVERSIBLE.to_string());
@@ -2453,6 +2476,62 @@ impl Version {
         ];
         self.raised(&mut it, now);
         it
+    }
+
+    /// D-3N83P: the causes that keep every option of the approve card from being recommended, in
+    /// this order: each decision of the version whose confirm card recommends Reject
+    /// (`not_recommended`) and has no confirm answer, by id, then each open semantic tension that
+    /// touches a block the version writes, by tension id. Empty when none holds. An answer that
+    /// cannot be read counts as none, so the cause stays.
+    fn recommendation_causes(&self, st: &ReadState) -> Vec<String> {
+        let mut causes = vec![];
+        for d in &self.decisions {
+            if d.kinds
+                .iter()
+                .any(|(k, _)| *k == ExceptionKind::NotRecommended)
+                && !answered(st, &d.r#ref, AnswerAct::Confirm).unwrap_or(false)
+            {
+                causes.push(RECOMMENDATION_PROPOSER.replace("{id}", d.block.id.as_str()));
+            }
+        }
+        for t in self
+            .tensions
+            .iter()
+            .filter(|t| t.kind == TensionKind::Semantic)
+        {
+            // the local sides in block order, as the review case lists them
+            let sides = t.blocks();
+            if !sides.iter().any(|b| self.touched.contains(b)) {
+                continue;
+            }
+            let (a, b) = match sides.as_slice() {
+                [a, b, ..] => (a.as_str(), b.as_str()),
+                [a] => (a.as_str(), a.as_str()),
+                [] => continue,
+            };
+            causes.push(
+                RECOMMENDATION_TENSION
+                    .replace("{tn}", &tension_label(&t.id))
+                    .replace("{a}", a)
+                    .replace("{b}", b),
+            );
+        }
+        causes
+    }
+
+    /// D-3N83P: the live `Recommendation` fact of the approve card while a cause holds
+    /// ([`Version::recommendation_causes`]); none when no cause holds.
+    fn recommendation(&self, st: &ReadState) -> Option<Fact> {
+        let causes = self.recommendation_causes(st);
+        (!causes.is_empty()).then(|| {
+            bounded_fact(
+                RECOMMENDATION_FACT,
+                format!(
+                    "{RECOMMENDATION_NONE}{}",
+                    causes.join(RECOMMENDATION_SEPARATOR)
+                ),
+            )
+        })
     }
 
     /// The docs the version touches: for each block it writes, its doc in the canon it would give
@@ -3167,6 +3246,18 @@ pub const APPROVE_REASON_BESIDE: &str =
 /// batch, with or without exceptions (D-AAQ9Z): the landing waits for an answer to each card.
 pub const APPROVE_REASON_CARDS: &str =
     "its checks pass, and it lands after you answer each card beside it";
+
+/// D-3N83P: the live fact of an approve card that recommends no option while a cause holds.
+pub const RECOMMENDATION_FACT: &str = "Recommendation";
+/// What the `Recommendation` value starts with; the causes follow.
+pub const RECOMMENDATION_NONE: &str = "none: ";
+/// What joins the causes of the `Recommendation` value.
+pub const RECOMMENDATION_SEPARATOR: &str = "; ";
+/// A decision whose confirm card recommends Reject; `{id}` is the decision.
+pub const RECOMMENDATION_PROPOSER: &str = "{id} the proposer recommends reject";
+/// An open tension a reviewer's verdict raised; `{tn}` is the tension, `{a}` and `{b}` its two
+/// case sides.
+pub const RECOMMENDATION_TENSION: &str = "{tn} a reviewer found a tension between {a} and {b}";
 
 /// The name of the batch fact that gives the claim of the version's justifications (rf9,
 /// TASK-507 (3)); it follows Changes.
