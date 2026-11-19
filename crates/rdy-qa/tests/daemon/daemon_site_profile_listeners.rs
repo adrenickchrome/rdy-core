@@ -27,7 +27,7 @@ use rdy_qa::http::{self, Sse};
 use rdy_qa::platform;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Barrier, Mutex};
@@ -694,17 +694,22 @@ fn spv7_same_key_concurrent_starts_return_one_port() {
     assert!(urls.iter().all(|u| *u == urls[0]), "{urls:?}");
     assert_eq!(sh.profile_sites.keys(), vec!["guide".to_string()]);
     let guide = port_of(&urls[0]);
-    assert!(
-        profile_candidates(&root_of(w.h.dir.path()), "guide").contains(&guide),
-        "{guide}"
+    let candidates = profile_candidates(&root_of(w.h.dir.path()), "guide");
+    let won = candidates
+        .iter()
+        .position(|p| *p == guide)
+        .unwrap_or_else(|| panic!("{guide} is not a candidate: {candidates:?}"));
+    // one walk of the candidates, in order, up to the port it took, then [::1] on that port: one
+    // listener set. The profile hash does not keep the source's port out of the candidates, so
+    // the walk tries it when the ports before it are busy, but never takes it
+    let mut walk: Vec<SocketAddr> = candidates[..=won].iter().map(|p| sock(*p)).collect();
+    walk.push(SocketAddr::from((Ipv6Addr::LOCALHOST, guide)));
+    assert_eq!(
+        rec.binds(),
+        walk,
+        "one listener set (source port {source}, candidates {candidates:?})"
     );
-    let v4: Vec<SocketAddr> = rec
-        .binds()
-        .into_iter()
-        .filter(|a| *a == sock(guide))
-        .collect();
-    assert_eq!(v4, vec![sock(guide)], "one listener set: {:?}", rec.binds());
-    assert!(rec.binds().iter().all(|a| a.port() != source));
+    assert_ne!(guide, source);
     assert_eq!(
         rec.logs()
             .iter()
