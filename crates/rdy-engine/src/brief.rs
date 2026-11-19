@@ -2231,10 +2231,17 @@ impl ReadState {
     }
 }
 
+/// A block's reading-order key: whether its ancestors fail to reach the top level, the chain of
+/// (order key, id) from the top level down, and its id.
+type ReadingKey<'m> = (bool, Vec<(&'m str, &'m BlockId)>, &'m BlockId);
+
 /// `ids` in the depth-first reading order of `m`: a block before its children, siblings by order
 /// key, then id. A block whose ancestors do not reach the top level follows, in id order.
-fn in_reading_order<'a>(m: &Materialized, ids: impl Iterator<Item = &'a BlockId>) -> Vec<BlockId> {
-    let mut keyed: Vec<(bool, Vec<(&str, &BlockId)>, &BlockId)> = ids
+fn in_reading_order<'a>(
+    m: &'a Materialized,
+    ids: impl Iterator<Item = &'a BlockId>,
+) -> Vec<BlockId> {
+    let mut keyed: Vec<ReadingKey<'a>> = ids
         .map(|id| {
             let mut chain = vec![];
             let mut cur = m.get(id);
