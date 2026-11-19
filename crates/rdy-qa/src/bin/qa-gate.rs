@@ -261,7 +261,22 @@ fn main() {
     let machine = perf::machine_class();
     // a failed step skips the steps that need it, unless --all-stages
     let mut stages = Stages::new(args.all_stages);
-    let mut gates = build_steps(&mut stages, step);
+    // The Python CI tests need no build, so they run first, in the default fast gate and
+    // `--only <area>` (the plan's checks), never in `--focus` or `--only perf`.
+    let python = if plan.checks {
+        match rdy_qa::gate_steps::python_ci_step(std::env::consts::OS, step) {
+            Ok(g) => Some(g),
+            Err(line) => {
+                eprintln!("{line}");
+                notes.push(line);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut gates: Vec<Gate> = python.into_iter().collect();
+    gates.extend(build_steps(&mut stages, step));
     let mut areas: Vec<Area> = vec![];
     let mut seeds = vec![];
 

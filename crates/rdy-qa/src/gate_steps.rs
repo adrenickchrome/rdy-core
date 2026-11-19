@@ -130,6 +130,8 @@ pub enum StageKind {
     Perf,
     /// One test binary's `--list`.
     Listing,
+    /// The Python CI tests (`tests/ci`).
+    Python,
 }
 
 /// The median wall time of a whole fast gate run on each platform, in seconds: Linux from 159
@@ -155,6 +157,7 @@ pub const STAGE_SHARE_PCT: &[(StageKind, u64)] = &[
     (StageKind::Lib, 50),
     (StageKind::Perf, 50),
     (StageKind::Listing, 50),
+    (StageKind::Python, 50),
 ];
 
 /// The default deadline of a child of `kind` on `os` (`std::env::consts::OS`): twice its median
@@ -760,6 +763,65 @@ pub fn build_steps(
     gates
 }
 
+/// The gate row of the Python CI tests (`tests/ci`).
+pub const PYTHON_CI_GATE: &str = "python ci tests";
+
+/// The `FAIL:` and `ERROR:` lines of `unittest` output, one per failing test, in order.
+pub fn python_failures(out: &str) -> Vec<String> {
+    out.lines()
+        .map(str::trim_end)
+        .filter(|l| l.starts_with("FAIL: ") || l.starts_with("ERROR: "))
+        .map(String::from)
+        .collect()
+}
+
+/// Runs the Python CI tests (`python3 -m unittest discover -s tests/ci`, from the repo root)
+/// through `run` (label, command and deadline in, success and output back). A missing `python3`
+/// or PyYAML is a failed row that says what is missing, never a pass. A failed run lists the
+/// failing tests. On Windows the stage does not run (the Linux `policy-tests` job runs these
+/// tests) and the error is the report line that says so.
+pub fn python_ci_step(
+    os: &str,
+    mut run: impl FnMut(&str, Command, Duration) -> (bool, String),
+) -> Result<Gate, String> {
+    if os == "windows" {
+        return Err(format!(
+            "{PYTHON_CI_GATE}: not run on Windows; the Linux policy-tests job runs the Python CI tests"
+        ));
+    }
+    let fail = |detail: String| Ok(Gate::ran(PYTHON_CI_GATE, false, detail));
+    let deadline = default_deadline(StageKind::Python, os);
+    let mut probe = Command::new("python3");
+    probe.args(["-c", "import yaml"]);
+    let (ok, out) = run("python3 and PyYAML", probe, deadline);
+    if !ok {
+        let missing = if out.contains("No module named") {
+            "PyYAML is missing (python3 -m pip install -r tests/ci/requirements-release-producers.txt)"
+        } else {
+            "python3 is missing or does not start"
+        };
+        eprintln!("{out}");
+        return fail(format!(
+            "{missing}; the Python CI tests did not run:\n{}",
+            report::tail(&out, 5)
+        ));
+    }
+    let mut tests = Command::new("python3");
+    tests.args(["-m", "unittest", "discover", "-s", "tests/ci"]);
+    let (ok, out) = run("python ci tests", tests, deadline);
+    if ok {
+        return Ok(Gate::ran(PYTHON_CI_GATE, true, String::new()));
+    }
+    eprintln!("{out}");
+    let failures = python_failures(&out);
+    let detail = if failures.is_empty() {
+        format!("unittest failed:\n{}", report::tail(&out, 20))
+    } else {
+        failures.join("\n")
+    };
+    fail(detail)
+}
+
 /// The gate row of the format check. The row keeps the name of the one command it replaced.
 pub const FMT_GATE: &str = "cargo fmt --all --check";
 
@@ -913,6 +975,69 @@ mod tests {
     }
 
     #[test]
+    fn pci1_python_stage_runs_unittest_from_the_root() {
+        let mut seen: Vec<Vec<String>> = vec![];
+        let gate = python_ci_step("linux", |_, cmd, _| {
+            seen.push(args_of(&cmd));
+            (true, String::new())
+        })
+        .unwrap();
+        assert!(gate.pass, "{gate:?}");
+        assert_eq!(gate.name, PYTHON_CI_GATE);
+        assert_eq!(
+            seen.last().unwrap(),
+            &["-m", "unittest", "discover", "-s", "tests/ci"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn pci2_failing_python_run_fails_and_names_the_tests() {
+        let out = "...F\n======\nFAIL: test_a (test_x.T.test_a)\n---\nERROR: test_b (test_y.U.test_b)\nRan 4 tests\nFAILED (failures=1, errors=1)\n";
+        let gate = python_ci_step("linux", |label, _, _| {
+            if label == "python ci tests" {
+                (false, out.into())
+            } else {
+                (true, String::new())
+            }
+        })
+        .unwrap();
+        assert!(!gate.pass);
+        assert_eq!(
+            gate.detail,
+            "FAIL: test_a (test_x.T.test_a)\nERROR: test_b (test_y.U.test_b)"
+        );
+        assert!(!report::overall(&[gate], &[], true));
+    }
+
+    #[test]
+    fn pci3_missing_interpreter_or_pyyaml_fails_not_passes() {
+        let mut ran_tests = false;
+        let gate = python_ci_step("linux", |label, _, _| {
+            ran_tests |= label == "python ci tests";
+            (false, "No such file or directory (os error 2)".into())
+        })
+        .unwrap();
+        assert!(!gate.pass && !ran_tests);
+        assert!(
+            gate.detail.contains("python3 is missing"),
+            "{}",
+            gate.detail
+        );
+        let gate = python_ci_step("macos", |_, _, _| {
+            (false, "ModuleNotFoundError: No module named 'yaml'".into())
+        })
+        .unwrap();
+        assert!(!gate.pass);
+        assert!(gate.detail.contains("PyYAML is missing"), "{}", gate.detail);
+    }
+
+    #[test]
+    fn pci4_windows_skips_with_a_reason() {
+        let skip = python_ci_step("windows", |_, _, _| panic!("must not run")).unwrap_err();
+        assert!(skip.contains("not run on Windows"), "{skip}");
+    }
+
+    #[test]
     fn tgs2_default_deadlines_are_twice_the_median_with_a_floor() {
         // until stages are timed, every child's deadline is its platform's whole-run median
         let whole = [("linux", 3290), ("macos", 4152), ("windows", 8767)];
@@ -927,6 +1052,7 @@ mod tests {
             StageKind::Lib,
             StageKind::Perf,
             StageKind::Listing,
+            StageKind::Python,
         ] {
             for (os, secs) in whole {
                 assert_eq!(
