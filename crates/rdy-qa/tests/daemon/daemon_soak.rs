@@ -4,7 +4,7 @@
 //! version. Those views sit on bases behind canon: the scopes the old engine copied whole. The
 //! daemon is read once before any landing (landing 0) and after each cycle: its `RssAnon` and the
 //! memory report of `rdy status --json` (the allocator's live bytes and the bytes the capped caches
-//! hold). `rdy_qa::soak::check` then applies the 800 MiB limit and the growth rule. Deep gate only;
+//! hold). `rdy_qa::soak::check` then applies the 800 MiB limit and the level and growth rules. Deep gate only;
 //! the readings are Linux ones, so other platforms skip with a line that says so.
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::deep;

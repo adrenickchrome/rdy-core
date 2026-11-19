@@ -1,37 +1,31 @@
 //! The deep gate's memory soak check. The soak lands one change at a time on one daemon serving a
-//! project of realistic size and takes a [`Sample`] after each landing. The check fails when:
+//! project of realistic size, with views kept open across landings, and takes a [`Sample`] before
+//! the first landing (landing 0) and after each cycle. "Net" is the daemon's live memory less the
+//! bytes its capped caches say they hold. The check fails when:
 //!
 //! - (a) the daemon's anonymous resident memory (`RssAnon`) goes over [`RSS_ANON_LIMIT`] at any
 //!   sample;
-//! - (b) the daemon's live memory, less the bytes its capped caches say they hold ("net"), grows
-//!   after landing [`SETTLE_LANDINGS`] by more than a fraction of what it was then. A capped cache
-//!   may fill up to its cap: that is not growth.
+//! - (b) from landing [`LEVEL_FROM`] on, net goes over [`LEVEL_TENTHS`]/10 times the net at
+//!   landing 0 (canon built and read, nothing landed). The views kept open and the count-capped
+//!   caches of old landings and proposal versions are full by then; each one that held its own
+//!   copy of the project, as the engine before scope sharing did, adds about canon's size;
+//! - (c) the median net of the last [`TAIL_SAMPLES`] samples is more than half the net at landing 0
+//!   over the net at landing [`LEVEL_FROM`]: a leak that grows with each landing.
 //!
-//! "Grows" in (b): the median net of the last [`TAIL_SAMPLES`] samples is more than
-//! [`GROWTH_DIVISOR`]th of the net at landing [`SETTLE_LANDINGS`] over it ([`growth_allowed`]).
-//! The net at that landing is mostly canon's build, so the bound scales with the project: a
-//! leak that keeps one copy of the project per landing passes it within a few landings, while
-//! what a soak's landings add (a small doc each, and their history) stays well under it.
-//!
-//! A growth check is only as sharp as the project is large, so the check also fails when the net
-//! at landing [`SETTLE_LANDINGS`] is under [`MIN_SETTLED_NET`]: the soak's project is too small.
+//! The check also fails when the net at landing 0 is under [`MIN_ZERO_NET`]: the project is then
+//! too small for (b) and (c) to tell a copy of it from noise.
 
 /// The most anonymous resident memory the daemon may hold at any sample (800 MiB).
 pub const RSS_ANON_LIMIT: u64 = 800 * 1024 * 1024;
-/// The landings before the growth check starts: start-up caches fill in these.
-pub const SETTLE_LANDINGS: u64 = 5;
-/// The net may rise by this fraction (1/4) of its settled value before it counts as growth.
-pub const GROWTH_DIVISOR: u64 = 4;
-/// The least net at landing [`SETTLE_LANDINGS`] for which the growth check can tell a leak from
-/// noise (16 MiB): a smaller project's copies are lost in the allocator's own variation.
-pub const MIN_SETTLED_NET: u64 = 16 * 1024 * 1024;
-/// The samples at the end whose median is compared with the settled value.
+/// The landing from which rules (b) and (c) apply: the kept views and capped caches are full.
+pub const LEVEL_FROM: u64 = 10;
+/// Rule (b)'s bound on net, in tenths of the net at landing 0 (4.5 times).
+pub const LEVEL_TENTHS: u64 = 45;
+/// The least net at landing 0 for which the rules can tell a copy of the project from noise
+/// (16 MiB).
+pub const MIN_ZERO_NET: u64 = 16 * 1024 * 1024;
+/// The samples at the end whose median rule (c) compares.
 pub const TAIL_SAMPLES: usize = 5;
-
-/// How far the net may rise over `settled`, its value at landing [`SETTLE_LANDINGS`].
-pub fn growth_allowed(settled: u64) -> u64 {
-    settled / GROWTH_DIVISOR
-}
 
 /// One reading of the daemon, taken after landing `landing`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,8 +50,8 @@ fn mib(b: u64) -> String {
     format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0))
 }
 
-/// Checks a soak's samples (in landing order) against rules (a) and (b). The error names each
-/// rule that failed, with the numbers.
+/// Checks a soak's samples (in landing order, the first at landing 0) against rules (a) to (c).
+/// The error names each rule that failed, with the numbers.
 pub fn check(samples: &[Sample]) -> Result<(), String> {
     let mut failed = vec![];
     if let Some(s) = samples.iter().find(|s| s.rss_anon > RSS_ANON_LIMIT) {
@@ -68,45 +62,55 @@ pub fn check(samples: &[Sample]) -> Result<(), String> {
             mib(RSS_ANON_LIMIT)
         ));
     }
-    let after: Vec<&Sample> = samples
-        .iter()
-        .filter(|s| s.landing >= SETTLE_LANDINGS)
-        .collect();
-    match after.first() {
-        None => failed.push(format!(
-            "no sample at or after landing {SETTLE_LANDINGS}: the soak is too short"
-        )),
-        Some(base) if after.len() <= TAIL_SAMPLES => failed.push(format!(
-            "only {} samples from landing {}: the growth check needs more than {TAIL_SAMPLES}",
-            after.len(),
-            base.landing
-        )),
-        Some(base) if base.net() < MIN_SETTLED_NET => failed.push(format!(
-            "net {} at landing {} is under {}: the project is too small for the growth check",
-            mib(base.net()),
-            base.landing,
-            mib(MIN_SETTLED_NET)
-        )),
-        Some(base) => {
-            let mut tail: Vec<u64> = after[after.len() - TAIL_SAMPLES..]
-                .iter()
-                .map(|s| s.net())
-                .collect();
-            tail.sort_unstable();
-            let end = tail[TAIL_SAMPLES / 2];
-            let allowed = growth_allowed(base.net());
-            if end > base.net().saturating_add(allowed) {
-                let last = after[after.len() - 1];
-                failed.push(format!(
-                    "live memory less capped caches grew from {} at landing {} to {} at landing {} \
-                     (median of the last {TAIL_SAMPLES}), more than the {} (1/{GROWTH_DIVISOR}) allowed",
-                    mib(base.net()),
-                    base.landing,
-                    mib(end),
-                    last.landing,
-                    mib(allowed)
-                ));
-            }
+    let zero = match samples.first() {
+        Some(z) if z.landing == 0 => z.net(),
+        _ => {
+            failed.push("no sample at landing 0".to_string());
+            return Err(failed.join("; "));
+        }
+    };
+    let after: Vec<&Sample> = samples.iter().filter(|s| s.landing >= LEVEL_FROM).collect();
+    if zero < MIN_ZERO_NET {
+        failed.push(format!(
+            "net {} at landing 0 is under {}: the project is too small for the growth rules",
+            mib(zero),
+            mib(MIN_ZERO_NET)
+        ));
+    } else if after.len() <= TAIL_SAMPLES {
+        failed.push(format!(
+            "only {} samples from landing {LEVEL_FROM}: the rules need more than {TAIL_SAMPLES}",
+            after.len()
+        ));
+    } else {
+        let level = zero / 10 * LEVEL_TENTHS;
+        if let Some(s) = after.iter().find(|s| s.net() > level) {
+            failed.push(format!(
+                "net {} at landing {} is over {} ({}.{} times the {} at landing 0)",
+                mib(s.net()),
+                s.landing,
+                mib(level),
+                LEVEL_TENTHS / 10,
+                LEVEL_TENTHS % 10,
+                mib(zero)
+            ));
+        }
+        let base = after[0];
+        let mut tail: Vec<u64> = after[after.len() - TAIL_SAMPLES..]
+            .iter()
+            .map(|s| s.net())
+            .collect();
+        tail.sort_unstable();
+        let end = tail[TAIL_SAMPLES / 2];
+        if end > base.net().saturating_add(zero / 2) {
+            failed.push(format!(
+                "net grew from {} at landing {} to {} at landing {} (median of the last \
+                 {TAIL_SAMPLES}), more than half the {} at landing 0",
+                mib(base.net()),
+                base.landing,
+                mib(end),
+                after[after.len() - 1].landing,
+                mib(zero)
+            ));
         }
     }
     if failed.is_empty() {
@@ -135,47 +139,81 @@ mod tests {
     /// The capped store map cache's budget (MAP_CACHE_BYTES).
     const CAP: u64 = 64 * MB;
 
-    fn series(n: u64, f: impl Fn(u64) -> (u64, u64, u64)) -> Vec<Sample> {
-        (1..=n)
-            .map(|landing| {
-                let (rss_anon, live, cache) = f(landing);
-                Sample {
-                    landing,
-                    rss_anon,
-                    live,
-                    cache,
-                }
-            })
-            .collect()
+    /// Landing 0 with net `zero`, then landings 1..=n from `f`.
+    fn series(zero: u64, n: u64, f: impl Fn(u64) -> (u64, u64, u64)) -> Vec<Sample> {
+        let mut v = vec![Sample {
+            landing: 0,
+            rss_anon: zero + 20 * MB,
+            live: zero,
+            cache: 0,
+        }];
+        v.extend((1..=n).map(|landing| {
+            let (rss_anon, live, cache) = f(landing);
+            Sample {
+                landing,
+                rss_anon,
+                live,
+                cache,
+            }
+        }));
+        v
+    }
+
+    /// The fixed engine on the bench (net in MiB): 132 at landing 0, 477 at 10, then about
+    /// 1.2 a landing; the capped cache fills about 1.6 a landing.
+    fn fixed(l: u64) -> (u64, u64, u64) {
+        let cache = (l * 16 * MB / 10).min(CAP);
+        let net = if l < 10 {
+            132 * MB + l * 34 * MB
+        } else {
+            477 * MB + (l - 10) * 12 * MB / 10
+        };
+        (net + cache + 100 * MB, net + cache, cache)
     }
 
     #[test]
-    fn soak1_rss_anon_over_800_mb_fails() {
-        // flat live memory, but one sample is over the limit
-        let s = series(40, |l| {
-            let rss = if l == 23 { 801 * MB } else { 500 * MB };
-            (rss, 300 * MB, 0)
+    fn soak1_the_fixed_engine_passes() {
+        assert_eq!(check(&series(132 * MB, 40, fixed)), Ok(()));
+    }
+
+    #[test]
+    fn soak1_the_old_engine_fails_on_its_level() {
+        // the bench before scope sharing: 155 at landing 0, 871 at 10, 915 at 40
+        let s = series(155 * MB, 40, |l| {
+            let net = if l < 10 {
+                155 * MB + l * 72 * MB
+            } else {
+                871 * MB + (l - 10) * 15 * MB / 10
+            };
+            (700 * MB, net, 0)
         });
         let e = check(&s).unwrap_err();
-        assert!(e.contains("RssAnon") && e.contains("landing 23"), "{e}");
+        assert!(e.contains("4.5 times"), "{e}");
         assert!(!e.contains("grew"), "{e}");
     }
 
     #[test]
-    fn soak1_growth_after_landing_5_with_no_cache_growth_fails() {
-        // 3 MiB a landing of live memory, the cache flat: over 40 landings that is 105 MiB on a
-        // settled 307 MiB, more than a quarter
-        let s = series(40, |l| (500 * MB, 300 * MB + 3 * l * MB, 8 * MB));
+    fn soak1_rss_anon_over_800_mb_fails() {
+        let s = series(132 * MB, 40, |l| {
+            let (rss, live, cache) = fixed(l);
+            (if l == 23 { 801 * MB } else { rss }, live, cache)
+        });
         let e = check(&s).unwrap_err();
-        assert!(e.contains("grew") && e.contains("landing 5"), "{e}");
-        assert!(!e.contains("RssAnon"), "{e}");
+        assert!(e.contains("RssAnon") && e.contains("landing 23"), "{e}");
+    }
+
+    #[test]
+    fn soak1_growth_after_landing_10_with_no_cache_growth_fails() {
+        // under the level bound, but 3 MiB more each landing: 90 MiB from landing 10 to 40
+        let s = series(132 * MB, 40, |l| (300 * MB, 300 * MB + 3 * l * MB, 8 * MB));
+        let e = check(&s).unwrap_err();
+        assert!(e.contains("grew") && e.contains("landing 10"), "{e}");
+        assert!(!e.contains("times"), "{e}");
     }
 
     #[test]
     fn soak1_only_the_capped_cache_growing_to_its_cap_passes() {
-        // the cache fills ~0.7 MiB a landing to its cap near landing 90, then stays; live memory
-        // grows by exactly what the cache holds, with some noise
-        let s = series(120, |l| {
+        let s = series(300 * MB, 120, |l| {
             let cache = (l * 7 * MB / 10).min(CAP);
             let noise = (l % 3) * 4 * MB;
             (450 * MB + 3 * cache, 320 * MB + cache + noise, cache)
@@ -185,29 +223,17 @@ mod tests {
     }
 
     #[test]
-    fn soak1_a_leaked_project_copy_per_landing_fails_and_fair_growth_passes() {
-        // a 40 MiB canon; the old engine kept one copy of it per landing
-        let leak = series(40, |l| (300 * MB, 60 * MB + l * 40 * MB, 0));
-        let e = check(&leak).unwrap_err();
-        assert!(e.contains("grew"), "{e}");
-        // the fixed engine: each landing adds a small doc and its history (64 KiB)
-        let fair = series(40, |l| (300 * MB, 60 * MB + l * 64 * 1024, 0));
-        assert_eq!(check(&fair), Ok(()));
+    fn soak1_a_project_too_small_to_show_a_copy_fails() {
+        // the first bench run: about 1.3 MiB of net
+        let s = series(MB, 40, |l| (5 * MB, MB + l * 45 * 1024, 0));
+        assert!(check(&s).unwrap_err().contains("too small"));
     }
 
     #[test]
-    fn soak1_a_project_too_small_to_show_a_leak_fails() {
-        // the first bench run: about 1.3 MiB of net at landing 5
-        let s = series(40, |l| (5 * MB, MB + l * 45 * 1024, 0));
-        let e = check(&s).unwrap_err();
-        assert!(e.contains("too small"), "{e}");
-    }
-
-    #[test]
-    fn soak1_a_soak_too_short_for_the_growth_check_fails() {
-        let s = series(8, |_| (400 * MB, 300 * MB, 0));
-        assert!(check(&s).unwrap_err().contains("needs more than"));
-        assert!(check(&s[..3]).unwrap_err().contains("too short"));
+    fn soak1_a_soak_too_short_or_with_no_landing_0_fails() {
+        let s = series(132 * MB, 12, fixed);
+        assert!(check(&s).unwrap_err().contains("need more than"));
+        assert!(check(&s[1..]).unwrap_err().contains("landing 0"));
     }
 
     #[test]
