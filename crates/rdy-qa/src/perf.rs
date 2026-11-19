@@ -11389,6 +11389,7 @@ mod tests {
             notes: vec![],
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
+            timing: Default::default(),
         };
         let md = crate::report::markdown(&report);
         assert!(

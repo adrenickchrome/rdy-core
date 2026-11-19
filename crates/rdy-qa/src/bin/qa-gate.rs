@@ -5,10 +5,11 @@ use rdy_qa::gate_steps::{
     discover_command, discovered, fail_tail, fmt_step, list_guarded, run_bounded, run_stage,
 };
 use rdy_qa::perf::{self, Baseline, Measure};
-use rdy_qa::report::{self, Area, Gate, Report};
+use rdy_qa::report::{self, Area, Gate, Report, StageRecord, Timing};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -53,12 +54,26 @@ fn root() -> PathBuf {
         .expect("workspace root")
 }
 
+/// The gate's start, and every timed child so far, for the report's `## Timing` table.
+static GATE_START: OnceLock<Instant> = OnceLock::new();
+static RECORDS: Mutex<Vec<StageRecord>> = Mutex::new(Vec::new());
+
 /// Runs a command with bounded output under `deadline`, keeping the exit status and the two
 /// streams apart. Past the deadline the child is ended and its output names the stage.
 fn step_out(name: &str, mut cmd: Command, deadline: Duration) -> ChildOutput {
     eprintln!("==> {name}");
     cmd.current_dir(root());
-    run_stage(name, cmd, deadline)
+    let t = Instant::now();
+    let out = run_stage(name, cmd, deadline);
+    if let (Some(start), Ok(mut r)) = (GATE_START.get(), RECORDS.lock()) {
+        r.push(StageRecord {
+            label: name.into(),
+            secs: t.elapsed().as_secs_f64(),
+            ok: out.ok,
+            ended_at: start.elapsed().as_secs_f64(),
+        });
+    }
+    out
 }
 
 /// Runs a command, returning (success, stdout + stderr combined).
@@ -224,7 +239,7 @@ fn main() {
         }
         std::process::exit(rdy_qa::focus::main(f, &root(), &env, run_bounded));
     }
-    let start = Instant::now();
+    let start = *GATE_START.get_or_init(Instant::now);
     // A crashed run must not leave a stale verdict behind.
     for f in ["report.md", "report.json"] {
         let _ = std::fs::remove_file(root().join("target/qa").join(f));
@@ -316,6 +331,10 @@ fn main() {
         match stages.blocked(&workspace) {
             Some(root) => gates.push(stages.skip(&workspace, root)),
             None => {
+                // compile first, so the run row is the tests alone; the timings HTML stays
+                let mut compile: Vec<&str> = report::WORKSPACE_TEST_ARGS.to_vec();
+                compile.extend(["--no-run", "--timings"]);
+                let _ = step("workspace compile", cargo(&compile), workspace.deadline);
                 let (ok, out) = step(
                     "workspace tests",
                     with_require_all(cargo(&report::WORKSPACE_TEST_ARGS), &args),
@@ -533,6 +552,12 @@ fn main() {
         notes,
         guarded,
         os_excluded: report::os_excluded(),
+        timing: Timing::from_records(
+            &RECORDS.lock().map(|r| r.clone()).unwrap_or_default(),
+            std::env::var("RDY_QA_QUEUE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+        ),
     };
 
     let dir = root().join("target/qa");
