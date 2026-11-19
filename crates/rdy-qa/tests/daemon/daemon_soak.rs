@@ -1,6 +1,7 @@
 //! The deep gate's memory soak: one served daemon, on a project of about 20,000 blocks, takes a
-//! run of landings. Each landing comes from a view of its own, so a closed view or an old landing
-//! that kept its own copy of the project would show as growth. After each landing the harness
+//! run of landings, two per cycle. Each comes from a view of its own, and every second one from a
+//! view on a base one landing behind canon (the scope the old engine copied whole, and kept once
+//! the view closed), so a scope that keeps its own copy of the project shows as growth. After each landing the harness
 //! reads the daemon's `RssAnon` and the memory report of `rdy status --json` (the allocator's
 //! live bytes and the bytes the capped caches hold). `rdy_qa::soak::check` then applies the
 //! 800 MiB limit and the relative growth rule after landing 5. Deep gate only; the readings are
@@ -48,24 +49,27 @@ fn ok(s: &Served, args: &[&str]) -> serde_json::Value {
     v
 }
 
-/// Lands one new doc through the human's CLI, from a view of its own: write, propose, approve.
-fn land(s: &Served, n: u64) {
-    let (name, title) = (format!("soak-{n}"), format!("Soak {n}"));
+/// Writes one new doc `name` in view `name`, as the human.
+fn write_doc(s: &Served, name: &str) {
     ok(
         s,
         &[
-            "--json", "new", "doc", &name, "--title", &title, "--view", &name,
+            "--json", "new", "doc", name, "--title", name, "--view", name,
         ],
     );
+}
+
+/// Proposes view `name` and approves it, as the human.
+fn land_view(s: &Served, name: &str) {
     let p = ok(
         s,
         &[
             "--json",
             "propose",
             "--title",
-            &title,
+            name,
             "--view",
-            &name,
+            name,
             "--summary",
             "Adds one doc.",
         ],
@@ -77,6 +81,17 @@ fn land(s: &Served, n: u64) {
         "approve {pref}: {}",
         String::from_utf8_lossy(&o.stderr)
     );
+}
+
+/// One soak cycle, two landings: view `late-<n>` is written first, view `early-<n>` lands, then
+/// `late-<n>` lands on a base one landing behind canon. A view on an older base is the scope the
+/// old engine copied whole, and its closed build was then kept.
+fn cycle(s: &Served, n: u64) {
+    let (late, early) = (format!("late-{n}"), format!("early-{n}"));
+    write_doc(s, &late);
+    write_doc(s, &early);
+    land_view(s, &early);
+    land_view(s, &late);
 }
 
 #[test]
@@ -108,8 +123,8 @@ fn soak1_daemon_memory_stays_bounded_over_landings() {
         return;
     }
     let mut samples = vec![];
-    for n in 1..=landings() {
-        land(&s, n);
+    for n in 1..=landings() / 2 {
+        cycle(&s, n);
         let v = ok(&s, &["--json", "status"]);
         let mem = &v["memory"];
         let Some(live) = mem["live_bytes"].as_u64() else {
@@ -123,13 +138,14 @@ fn soak1_daemon_memory_stays_bounded_over_landings() {
         assert_eq!(s.daemon_pid(), Some(pid), "the same daemon served the soak");
         let rss_anon = platform::rss_anon_bytes(pid).expect("RssAnon of the daemon");
         let sample = Sample {
-            landing: n,
+            landing: 2 * n,
             rss_anon,
             live,
             cache,
         };
         eprintln!(
-            "soak landing {n}: RssAnon {rss_anon} live {live} cache {cache} net {}",
+            "soak landing {}: RssAnon {rss_anon} live {live} cache {cache} net {}",
+            sample.landing,
             sample.net()
         );
         samples.push(sample);
