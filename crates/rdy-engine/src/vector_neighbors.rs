@@ -604,7 +604,7 @@ mod tests {
         let r = score_source(w, Doc::Block(&z), |_| true, &mut none).unwrap();
         assert!(r.is_empty());
         assert_eq!(none.used(), BudgetUse::default());
-        let (adv, used) = world.advice(&[z.clone()], AdviceCut::BRIEFING);
+        let (adv, used) = world.advice(std::slice::from_ref(&z), AdviceCut::BRIEFING);
         assert_eq!(
             (adv.rows.len(), adv.skipped, used),
             (0, 0, BudgetUse::default())
@@ -999,7 +999,7 @@ mod tests {
         let in_zeta = p.alone(&dz, same);
         let in_alpha = p.alone(&da, same);
         let world = World::new(&p.blocks);
-        let (adv, _) = world.advice(&[src.clone()], AdviceCut::BRIEFING);
+        let (adv, _) = world.advice(std::slice::from_ref(&src), AdviceCut::BRIEFING);
         assert_eq!(
             adv.rows.iter().map(|r| r.block.clone()).collect::<Vec<_>>(),
             vec![in_early, in_late, in_alpha, in_zeta],
@@ -1043,7 +1043,7 @@ mod tests {
             score(&s1, &low) < score(&s1, &wide),
             "the same-doc block has the lower exact score"
         );
-        let (one, _) = world.advice(&[s1.clone()], AdviceCut::BRIEFING);
+        let (one, _) = world.advice(std::slice::from_ref(&s1), AdviceCut::BRIEFING);
         assert_eq!(
             one.rows.iter().map(|r| r.block.clone()).collect::<Vec<_>>(),
             vec![
@@ -1115,7 +1115,7 @@ mod tests {
         probe = World::new(&p.blocks);
         assert_eq!(probe.w.corpus_words(), 15);
         assert_eq!(probe.w.idf("a1").unwrap(), Some(3.0));
-        let (adv, _) = probe.advice(&[s.clone()], AdviceCut::BRIEFING);
+        let (adv, _) = probe.advice(std::slice::from_ref(&s), AdviceCut::BRIEFING);
         let got: Vec<(BlockId, u64)> = adv
             .rows
             .iter()
@@ -1133,13 +1133,19 @@ mod tests {
             floor: next_up(0.25),
             ..AdviceCut::BRIEFING
         };
-        assert_eq!(probe.advice(&[s.clone()], above).0.rows.len(), 1);
+        assert_eq!(
+            probe.advice(std::slice::from_ref(&s), above).0.rows.len(),
+            1
+        );
         assert_eq!(adv.rows[1].score, 0.25);
         let below = AdviceCut {
             floor: f64::from_bits(0.25_f64.to_bits() - 1),
             ..AdviceCut::BRIEFING
         };
-        assert_eq!(probe.advice(&[s.clone()], below).0.rows.len(), 2);
+        assert_eq!(
+            probe.advice(std::slice::from_ref(&s), below).0.rows.len(),
+            2
+        );
 
         // eleven eligible neighbors: ten rows in a briefing, three in a write, none counted as
         // skipped; same-doc rows first
@@ -1396,7 +1402,7 @@ mod tests {
                 &world.g,
                 &world.pack,
                 &world.w,
-                &[s1.clone()],
+                std::slice::from_ref(&s1),
                 AdviceCut::BRIEFING,
                 &mut b,
             );
