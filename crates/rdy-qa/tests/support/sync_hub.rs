@@ -1000,6 +1000,20 @@ pub fn builtin_pack() -> Value {
     serde_json::to_value(pack).unwrap()
 }
 
+/// This rdy's built-in pack in full, named `name`, as another engine would capture it: the
+/// prose type lacks the `planned` field this engine gives every content type. Its digest is not
+/// the built-in pack's, and its source form resolves here to another pack, so a clone of it
+/// refuses whatever wire fixture is pinned.
+pub fn other_engine_pack(name: &str) -> Value {
+    let mut pack = builtin_pack();
+    pack["name"] = json!(name);
+    let fields = pack["block_types"]["prose"]["fields"]
+        .as_object_mut()
+        .unwrap();
+    assert!(fields.remove("planned").is_some(), "prose has planned");
+    pack
+}
+
 /// A settings reply holding `pack` in full, captured by rdy `rdy` (none when None).
 pub fn pack_settings(pack: Value, rdy: Option<&str>) -> Value {
     let mut b = settings_step(19);

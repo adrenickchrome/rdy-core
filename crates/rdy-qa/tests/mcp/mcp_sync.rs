@@ -732,11 +732,12 @@ fn scc9_clone_settings_bundle_bounds_defaults_and_pack_digest() {
     assert_eq!(cfg["pack"], "rdy-standard");
     assert_eq!(cfg["name"], "Publish");
     assert_eq!(cfg["coverage"], json!({"gate": "off"}));
-    // step 19: a pack in full named as the built-in pack. The fixture's pack is not this rdy's
-    // effective built-in pack, so its digest differs: the clone refuses in D-7PYYS's words for
-    // its capturing rdy and writes no pack file under the built-in name
-    let step19 = settings_step(19);
+    // step 19: a pack in full named as the built-in pack. The test makes the pack differ from
+    // this rdy's effective built-in pack, so its digest differs: the clone refuses in D-7PYYS's
+    // words for its capturing rdy and writes no pack file under the built-in name
+    let mut step19 = settings_step(19);
     assert_eq!(step19["pack"]["name"], "rdy-standard");
+    step19["pack"] = other_engine_pack("rdy-standard");
     assert_ne!(step19["pack"], builtin_pack());
     k.hub.settings(step19.clone());
     let (p19, d19) = target();
@@ -746,7 +747,6 @@ fn scc9_clone_settings_bundle_bounds_defaults_and_pack_digest() {
     assert_eq!(entries(p19.path()), 0);
     // step 19 with this rdy's built-in pack in full: the pack from the hub, no pack file, and
     // the effective pack is it
-    let mut step19 = step19;
     step19["pack"] = builtin_pack();
     let (v, _p19, d19) = clone_with(&mut c, step19.clone());
     assert_eq!(
@@ -938,15 +938,14 @@ fn scc9_clone_unreadable_bundle_without_rdy_refuses() {
 /// newer-version words when the bundle's rdy is newer, else with D-D5J18's refusal in the
 /// words of the capturing version (older or this one) or of none. Two packs: one named as the
 /// built-in pack but not it, and a pack of its own whose source form resolves to another pack
-/// here (fixture v2's pack, made by another engine, renamed).
+/// here (a pack as another engine would capture it, made by the test).
 #[test]
 fn scc9_clone_pack_digest_mismatch_from_newer_rdy_refuses() {
     let (k, _copy, _store, mut c) = served_kit(&["a"]);
     let url = hub_url(&k);
     let mut other = builtin_pack();
     other["version"] = json!("0.0.1-other");
-    let mut foreign = settings_step(19)["pack"].clone();
-    foreign["name"] = json!("team-pack");
+    let foreign = other_engine_pack("team-pack");
     for pack in [other, foreign] {
         for captured in [Some(newer_rdy()), Some(older_rdy()), Some(this_rdy()), None] {
             k.hub
