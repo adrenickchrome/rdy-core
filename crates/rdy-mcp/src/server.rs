@@ -28,6 +28,7 @@ mod session;
 mod signing;
 mod site;
 mod store;
+mod sync;
 mod tension;
 mod views;
 mod write;
@@ -270,7 +271,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 31] {
+    fn family_routers() -> [ToolRouter<Self>; 32] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -303,6 +304,7 @@ impl RdyServer {
             Self::rule_router(),
             Self::links_router(),
             Self::hook_router(),
+            Self::sync_router(),
         ]
     }
 

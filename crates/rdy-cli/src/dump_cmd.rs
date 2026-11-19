@@ -43,7 +43,7 @@ pub(crate) struct LoadArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct CloneArgs {
-    /// A project directory or a dump file.
+    /// A project directory, a dump file, or an https hub repo URL.
     source: PathBuf,
     /// The directory to clone into (default: --project, else the current directory, as rdy load). It must have no rdy store.
     dir: Option<PathBuf>,
@@ -134,9 +134,11 @@ pub(crate) fn load(
     Ok((v, t))
 }
 
-/// `rdy clone`: the source decides (O7). A dump file clones in this process, as `rdy load`
-/// runs. A project directory clones through its own daemon's op `clone`, or in process with
-/// `--no-daemon`. The target is `dir`, else `--project`, else the current directory (O38).
+/// `rdy clone`: the source decides (O7, D-47HVF). A dump file clones in this process, as `rdy
+/// load` runs. A project directory clones through its own daemon's op `clone`, or in process
+/// with `--no-daemon`. An `https://` hub URL clones in this process with the user config's trust
+/// and sign-in (D-D5J18); it never forks. The target is `dir`, else `--project`, else the
+/// current directory (O38).
 pub(crate) fn clone(
     env: &Env,
     a: CloneArgs,
@@ -145,6 +147,7 @@ pub(crate) fn clone(
     let CloneArgs { source, dir, fork } = a;
     let dir = dir.or(project).unwrap_or_else(|| env.cwd.clone());
     let v = match source_kind(&source)? {
+        SourceKind::Url => return clone_url(&source, &dir, fork),
         SourceKind::File => {
             let s = rdy_engine::clone::clone(CloneSource::File(&source), &dir, fork)?;
             serde_json::to_value(&s).expect("a reply serializes")
@@ -172,6 +175,59 @@ pub(crate) fn clone(
         text(&v["next"])
     );
     Ok((v, t))
+}
+
+/// `rdy clone <url>`: the hub repo at `url`, cloned in this process as the configured person,
+/// with `RDY_ACTOR` and `RDY_RUN` (D-D5J18, D-47HVF).
+fn clone_url(
+    source: &std::path::Path,
+    dir: &std::path::Path,
+    fork: bool,
+) -> Result<(Value, String), ErrorReply> {
+    if fork {
+        return Err(rdy_engine::clone::url_fork().into());
+    }
+    let user_file = rdy_engine::hub_credentials::require_user_file(
+        rdy_engine::config_levels::user_file_from_env(),
+    )?;
+    let person = rdy_mcp::tools::auth_person(None, &user_file)?;
+    let (actor, run) = crate::conn::session_env()?;
+    let session = rdy_engine::classify(
+        &person,
+        actor.as_deref(),
+        run.as_deref(),
+        rdy_model::Role::Reader,
+    )?;
+    let url = source.to_string_lossy();
+    let s = rdy_engine::clone::clone_url(&session, &url, dir, &user_file)?;
+    let mut t = format!(
+        "cloned hub repo {} into {}: {} landings, {} versions, canon at {}; fsck ok\nremote {}: share, {}\nrepo id: {}\nsettings from the hub: {}\nsettings at their defaults: {}",
+        s.url,
+        s.project,
+        s.landings,
+        s.tags,
+        s.canon,
+        s.remote,
+        s.url,
+        s.repo_id,
+        list(&s.settings.hub),
+        list(&s.settings.defaults),
+    );
+    for w in &s.warnings {
+        t.push_str(&format!("\n{}: {}\nfix: {}", w.code, w.message, w.fix));
+    }
+    t.push_str(&format!("\nnext: {}", s.next));
+    let v = serde_json::to_value(&s).expect("a reply serializes");
+    Ok((v, t))
+}
+
+/// `names` joined with commas, or `none`.
+fn list(names: &[String]) -> String {
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    }
 }
 
 #[cfg(test)]

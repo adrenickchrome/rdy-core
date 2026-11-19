@@ -58,12 +58,14 @@ pub fn sync_locked_message(remote: &str) -> String {
 }
 
 /// The held landing request of a canon state: the head of the last canon write that the hub held
-/// as a landing request, and that request's number.
+/// as a landing request, that request's number, and the push id of that write, taken from the
+/// `pending` ref that the held reply clears. A pull looks the request's state up by that push id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncHeld {
     pub head: Hash,
     pub request: u64,
+    pub push: String,
 }
 
 /// `meta/sync/<remote>/canon`: the hub canon tip of the last fetch, the last hub tip that this
@@ -355,7 +357,12 @@ pub fn check_ref(name: &str, value: &[u8]) -> Result<Option<SyncValue>, String> 
             push_rule(&p.push).map_err(rule)?;
             kind_rule(p.kind, &p.view).map_err(rule)?;
         }
-        SyncValue::Canon(_) | SyncValue::View(_) => {}
+        SyncValue::Canon(c) => {
+            if let Some(h) = &c.held {
+                push_rule(&h.push).map_err(rule)?;
+            }
+        }
+        SyncValue::View(_) => {}
     }
     Ok(Some(v))
 }

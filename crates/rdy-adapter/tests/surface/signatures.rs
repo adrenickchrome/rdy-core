@@ -12,6 +12,7 @@ use rdy_adapter::signatures::{
     ActorRun, AllowedSigners, CheckContext, KEY_TYPES, RepoId, Signature, SignatureCheck,
     SignatureSubject, SigningWarning, StatementKind, check_signature,
 };
+use rdy_adapter::signatures::{carried_sources, check_signature_carried};
 use rdy_adapter::{Hash, StoreHandle};
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::redaction::RedactInput;
@@ -559,4 +560,161 @@ fn ha16_check_context_keeps_the_snapshot_log_end() {
     );
     drop((before, after));
     handle.close().unwrap();
+}
+
+// ---- the carried signature check (D-6Z9BR) through the adapter ----
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let p = e.unwrap().path();
+        let dest = to.join(p.file_name().unwrap());
+        if p.is_dir() {
+            copy_tree(&p, &dest);
+        } else {
+            std::fs::copy(&p, &dest).unwrap();
+        }
+    }
+}
+
+/// A closed project whose canon head is a clean replay: local landing `l` on base `b`, pulled
+/// onto the hub's next landing as `l2` with `rebased_from = [l]`. Returns `l` and `l2`.
+fn replayed_project(dir: &Path) -> (Hash, Hash) {
+    use rdy_engine::sync_fetch::{self, HubState};
+    use rdy_engine::sync_replay::{self, PULLED, PullRequest};
+    use rdy_store::sync_state::{SyncCanon, SyncStep};
+    use rdy_store::sync_stream::StreamPurpose;
+    use rdy_store::take_batch::FetchTarget;
+    let url = "https://127.0.0.1:9/r/demo";
+    let hub_dir = dir.join("hub");
+    let local_dir = dir.join("local");
+    std::fs::create_dir_all(&hub_dir).unwrap();
+    let mut hub = Rdy::init(&hub_dir, "rdy-standard").unwrap();
+    write(
+        &mut hub,
+        json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}]),
+    );
+    let base = land(&mut hub);
+    hub.close().unwrap();
+    copy_tree(&hub_dir, &local_dir);
+    let mut hub = Rdy::open(&hub_dir).unwrap();
+    write(
+        &mut hub,
+        json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "page"}}]),
+    );
+    let tip = land(&mut hub);
+    let repo = hub.store().repo_id().unwrap().unwrap();
+    let mut batch = Vec::new();
+    rdy_engine::stream_export::write_history(
+        &hub.read(),
+        StreamPurpose::CanonHistory,
+        tip,
+        Some(base),
+        &BTreeSet::new(),
+        &mut batch,
+    )
+    .unwrap();
+    hub.close().unwrap();
+    let batch_path = dir.join("fetch.rdysync");
+    std::fs::write(&batch_path, batch).unwrap();
+
+    let mut local = Rdy::open(&local_dir).unwrap();
+    local
+        .store_mut()
+        .write_sync(
+            "origin",
+            vec![SyncStep::Canon(SyncCanon {
+                repo_id: repo,
+                url: url.into(),
+                fetched: Some(base),
+                applied: Some(base),
+                held: None,
+            })],
+        )
+        .unwrap();
+    write(
+        &mut local,
+        json!([{"op": "create", "type": "doc", "fields": {"name": "c", "title": "C", "doc_type": "page"}}]),
+    );
+    let l = land(&mut local);
+    let target = FetchTarget {
+        remote: "origin".into(),
+        url: url.into(),
+        purpose: StreamPurpose::CanonHistory,
+        root: tip,
+        view: None,
+    };
+    sync_fetch::fetch(
+        &mut local,
+        &[std::fs::File::open(&batch_path).unwrap()],
+        &target,
+    )
+    .unwrap();
+    let out = sync_replay::pull(
+        &mut local,
+        &session(Role::Writer),
+        &PullRequest {
+            remote: "origin".into(),
+            hub: HubState {
+                repo_id: Some(repo),
+                canon: Some(tip),
+            },
+            take: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(out.status, PULLED, "{out:?}");
+    let l2 = local.store().reader().canon_head().unwrap().unwrap();
+    assert_eq!(
+        local.store().reader().landing(&l2).unwrap().rebased_from,
+        [l]
+    );
+    local.close().unwrap();
+    (l, l2)
+}
+
+/// TASK-2812 point 1: the adapter re-exports SIG's carried check and its source read. On one
+/// carried landing, the adapter's sources (through a snapshot and through the re-export) and
+/// its carried report are core's.
+#[test]
+fn scc8_adapter_reexports_carried_signature_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let (l, l2) = replayed_project(dir.path());
+    let root = dir.path().join("local");
+    let (signature, _) = vector(false);
+    let trust = trust(PLAIN_KEY_LINE);
+
+    let r = Rdy::open(&root).unwrap();
+    let state = r.read();
+    let record = state.reader().landing(&l2).unwrap();
+    let context = CheckContext {
+        subject: SignatureSubject::Landing {
+            hash: l2,
+            record: record.clone(),
+        },
+        current_repo: state.reader().repo_id().unwrap().unwrap(),
+        source_repos: vec![],
+        holder: false,
+    };
+    let core_sources = core::carried_sources(&state, &context).unwrap();
+    let core_report =
+        core::check_signature_carried(&signature, &context, Some(&trust), &core_sources);
+    // the re-export is the engine's function
+    let reexported = carried_sources(&state, &context).unwrap();
+    let report = check_signature_carried(&signature, &context, Some(&trust), &reexported);
+    drop(state);
+    r.close().unwrap();
+    assert_eq!(core_sources.len(), 1, "{core_sources:?}");
+    assert_eq!(core_sources[0].0, l);
+    assert_eq!(reexported, core_sources);
+    assert_eq!(json_bytes(&report), json_bytes(&core_report));
+
+    // the adapter's read handle gives the same sources from a snapshot
+    let handle = StoreHandle::open(&root).unwrap();
+    let snap = handle.snapshot().unwrap();
+    let from_snapshot = snap.carried_sources(&context).unwrap();
+    drop(snap);
+    handle.close().unwrap();
+    assert_eq!(from_snapshot, core_sources);
 }

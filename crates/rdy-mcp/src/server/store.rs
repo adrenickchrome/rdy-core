@@ -24,7 +24,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Clone this project, or the dump file named by file, into dir, a directory with no rdy store. The clone keeps every hash, landing, tag and view, keeps the repo id and records its origin; fork gives it a new repo id. To clone another project, call rdy_dump on its own server, then pass the file here."
+        description = "Clone this project, the dump file named by file, or the hub repo at an https url, into dir, a directory with no rdy store. The clone keeps every hash, landing, tag and view, keeps the repo id and records its origin; fork gives it a new repo id. A url clone takes hub canon and its tags, the hub's settings and one share remote named hub; it never forks. To clone another local project, call rdy_dump on its own server, then pass the file here."
     )]
     async fn rdy_clone(&self, Parameters(p): Parameters<CloneParams>) -> CallToolResult {
         self.run("rdy_clone", p, tools::rdy_clone).await

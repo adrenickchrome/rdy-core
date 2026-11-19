@@ -1,0 +1,281 @@
+{
+  "about": [
+    "The hub's frozen sync wire fixture, version 1 (D-H0BZN in rdy-design, p-1FPMG in rdyhub-design).",
+    "Each step holds one request to the real hub and the hub's reply, as the test swf1_ in rdyhub-server/tests/pg_sync_wire_fixture.rs checks them.",
+    "Normalized: the bearer token is <token>, and each request id is <request-id>. Object members are in key order.",
+    "The hub repo is acme/docs with the site docs-site, owned by ana, on a test install with its default sync settings.",
+    "A put body is binary: the file gives its length and sha256. It is the first batch of tag v1.0.0 of rdyhub-core's TwoTags upload fixture, at 10,000 records per batch.",
+    "The list not_served names the steps of D-H0BZN that this hub does not serve yet, with the design that sets each one."
+  ],
+  "fixture": "sync-client-wire",
+  "media_type": "application/vnd.rdy.sync+json",
+  "not_served": [
+    {
+      "design": "D-3TBYC",
+      "step": "state, with views"
+    },
+    {
+      "design": "D-3TBYC",
+      "step": "known, pull form"
+    },
+    {
+      "design": "D-3TBYC",
+      "step": "get"
+    },
+    {
+      "design": "D-3TBYC, i-B40VF, D-Q0V1P, tb-KAZ3J",
+      "step": "write"
+    },
+    {
+      "design": "D-3HA62",
+      "step": "outcome"
+    },
+    {
+      "design": "D-BYZR0",
+      "step": "settings"
+    },
+    {
+      "design": "i-G5WSQ",
+      "step": "dump"
+    }
+  ],
+  "steps": [
+    {
+      "case": "a hub repo that the caller can read",
+      "reply": {
+        "body": {
+          "protocols": [
+            1
+          ],
+          "sync_base": "/sync/acme/docs"
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": null,
+        "headers": {
+          "accept": "application/vnd.rdy.sync+json",
+          "authorization": "Bearer <token>"
+        },
+        "method": "GET",
+        "path": "/acme/docs"
+      },
+      "step": "discovery"
+    },
+    {
+      "case": "a hub repo that does not exist",
+      "reply": {
+        "body": {
+          "code": "E_HUB_NOT_FOUND",
+          "fix": "check the name; you may lack access",
+          "issues": [],
+          "message": "no hub repo acme/ghost",
+          "request_id": "<request-id>"
+        },
+        "content_type": "application/json",
+        "status": 404
+      },
+      "request": {
+        "body": null,
+        "headers": {
+          "accept": "application/vnd.rdy.sync+json",
+          "authorization": "Bearer <token>"
+        },
+        "method": "GET",
+        "path": "/acme/ghost"
+      },
+      "step": "discovery"
+    },
+    {
+      "case": "an empty hub repo, without a site",
+      "reply": {
+        "body": {
+          "artifact_bytes": 201326592,
+          "artifact_files": 32000,
+          "audience": null,
+          "batch_bytes": 1073741824,
+          "batch_records": 1000000,
+          "canon": null,
+          "features": [],
+          "min_rdy": null,
+          "profile": null,
+          "quarantine_seconds": 3600,
+          "rdy": "0.54.0",
+          "repo_id": null,
+          "stream_read": [
+            2
+          ],
+          "stream_write": [
+            2
+          ]
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "actor": "agent:ana/claude",
+          "rdy": "0.54.0",
+          "run": "run-ana",
+          "site": null,
+          "stream_read": [
+            2
+          ],
+          "stream_write": [
+            2
+          ]
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/state"
+      },
+      "step": "state"
+    },
+    {
+      "case": "an rdy older than the install takes",
+      "reply": {
+        "body": {
+          "code": "E_HUB_RDY_TOO_OLD",
+          "fix": "install rdy 0.54.0 from rdy's official download",
+          "issues": [],
+          "message": "rdy 0.1.0 is older than this install takes",
+          "request_id": "<request-id>"
+        },
+        "content_type": "application/json",
+        "status": 422
+      },
+      "request": {
+        "body": {
+          "actor": "agent:ana/claude",
+          "rdy": "0.1.0",
+          "run": "run-ana",
+          "site": null,
+          "stream_read": [
+            2
+          ],
+          "stream_write": [
+            2
+          ]
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/state"
+      },
+      "step": "state"
+    },
+    {
+      "case": "push form: a push with no batch yet; keys out of order and one twice",
+      "reply": {
+        "body": {
+          "missing": [
+            {
+              "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "kind": 1
+            },
+            {
+              "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "kind": 1
+            }
+          ]
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "keys": [
+            {
+              "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "kind": 1
+            },
+            {
+              "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "kind": 1
+            },
+            {
+              "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "kind": 1
+            }
+          ],
+          "push": "0123456789abcdefghjkmnpqrs"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/known"
+      },
+      "step": "known"
+    },
+    {
+      "case": "push form: a push id of the wrong form",
+      "reply": {
+        "body": {
+          "code": "E_HUB_BAD_INPUT",
+          "fix": "use 26 lower-case Crockford base32 characters",
+          "issues": [],
+          "message": "the push id is not valid",
+          "request_id": "<request-id>"
+        },
+        "content_type": "application/json",
+        "status": 400
+      },
+      "request": {
+        "body": {
+          "keys": [],
+          "push": "x"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/known"
+      },
+      "step": "known"
+    },
+    {
+      "case": "one batch of a push",
+      "reply": {
+        "body": {
+          "bytes": 3485,
+          "records": 10
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "bytes": 3485,
+          "sha256": "1a44fce5d9476751f3e6eebab418f89f42d8486ccf8b217e0fe7f2b5475caa38"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/octet-stream",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/objects/put?push=0123456789abcdefghjkmnpqrs"
+      },
+      "step": "put"
+    }
+  ],
+  "version": 1
+}

@@ -36,8 +36,8 @@ use crate::error::{
 };
 use crate::formats::formats;
 use crate::hub_http::{
-    HttpHubTransport, JsonLimits, Prefixes, UploadHttpRequest, UploadMethod, api_error_entry,
-    decode_bounded_json, reply_echoes,
+    HttpHubTransport, JsonLimits, Prefixes, ReplySink, UploadHttpRequest, UploadMethod,
+    api_error_entry, decode_bounded_json, reply_echoes,
 };
 use crate::hub_types::{
     HubFailure, LimitUnit, MAX_ID_BYTES, MAX_URL_BYTES, Origin, OriginFence, RemoteUrl,
@@ -103,7 +103,7 @@ pub const MAX_JSON_SCALAR_BYTES: usize = 1_048_576;
 pub const MAX_JSON_VALUES: usize = 1_000_000;
 
 /// The most stream formats or protocol versions one list holds.
-const MAX_FORMATS: usize = 16;
+pub(crate) const MAX_FORMATS: usize = 16;
 const MAX_PROTOCOLS: usize = 64;
 /// The hub codes that always carry `retry_after`.
 const RETRY_CODES: [&str; 4] = [
@@ -378,7 +378,7 @@ impl HttpPublishWire {
 // ---------------------------------------------------------------------------------------------
 
 /// A hash as 64 lowercase hex digits.
-mod hex {
+pub(crate) mod hex {
     use rdy_model::Hash;
     use serde::{Deserialize, Deserializer, Serializer, de};
 
@@ -393,7 +393,9 @@ mod hex {
 }
 
 /// A member every reply holds whose value may be null.
-fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+pub(crate) fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
 }
 
@@ -404,7 +406,9 @@ fn nullable_hash<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Hash>, D::Err
 }
 
 /// A repo id as exactly 32 lowercase hex digits.
-fn nullable_repo_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RepoId>, D::Error> {
+pub(crate) fn nullable_repo_id<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<RepoId>, D::Error> {
     Option::<String>::deserialize(d)?
         .map(|t| match t.parse::<RepoId>() {
             Ok(id) if id.to_string() == t => Ok(id),
@@ -429,7 +433,7 @@ fn present_object<'de, D: Deserializer<'de>>(
 /// A list of at most `N` elements. The elements are built one at a time; once `N` are built, a
 /// further element is skipped unbuilt and the list refused, so nothing past the bound is ever
 /// allocated. The JSON guard has already bounded the whole body.
-fn at_most<'de, D, T, const N: usize>(d: D) -> Result<Vec<T>, D::Error>
+pub(crate) fn at_most<'de, D, T, const N: usize>(d: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -559,10 +563,10 @@ struct MissingKeys {
 /// `ObjectKey` closed, so the reply reads this open type and an unknown member is ignored
 /// (D-N8PR2).
 #[derive(Deserialize)]
-struct KeyWire {
-    kind: u8,
+pub(crate) struct KeyWire {
+    pub(crate) kind: u8,
     #[serde(deserialize_with = "hex::deserialize")]
-    hash: Hash,
+    pub(crate) hash: Hash,
 }
 
 impl From<KeyWire> for ObjectKey {
@@ -577,7 +581,7 @@ impl From<KeyWire> for ObjectKey {
 /// The values the guard admits in a known reply: four times `per_element` for each of `n`
 /// elements, plus 64, for members the hub may add (D-N8PR2); never over [`MAX_JSON_VALUES`],
 /// which a full reply without added members stays well under.
-fn known_values(n: usize, per_element: usize) -> usize {
+pub(crate) fn known_values(n: usize, per_element: usize) -> usize {
     n.saturating_mul(per_element.saturating_mul(4))
         .saturating_add(64)
         .min(MAX_JSON_VALUES)
@@ -642,7 +646,7 @@ fn bad_input(message: &str, fix: &str) -> RdyError {
 }
 
 /// A push id: 26 lower-case Crockford base32 characters.
-fn check_push(push: &str) -> Result<(), RdyError> {
+pub(crate) fn check_push(push: &str) -> Result<(), RdyError> {
     let crockford = |b: u8| {
         rdy_model::CROCKFORD
             .iter()
@@ -679,7 +683,7 @@ fn check_site(site: &str) -> Result<(), RdyError> {
 }
 
 /// 1 to 16 distinct positive stream formats.
-fn formats_ok(list: &[u32]) -> bool {
+pub(crate) fn formats_ok(list: &[u32]) -> bool {
     !list.is_empty()
         && list.len() <= MAX_FORMATS
         && list.iter().all(|&f| f > 0)
@@ -782,7 +786,7 @@ impl Write for Capped {
 }
 
 /// The compact JSON of `value`, refused with `E_LIMIT` at more than `cap` bytes.
-fn encode<T: Serialize>(value: &T, cap: usize) -> Result<Vec<u8>, RdyError> {
+pub(crate) fn encode<T: Serialize>(value: &T, cap: usize) -> Result<Vec<u8>, RdyError> {
     let mut w = Capped {
         out: Vec::new(),
         cap,
@@ -936,7 +940,7 @@ fn resolve_base(fence: &OriginFence, install: &Origin, text: &str) -> Result<Str
 }
 
 /// The URL of the fixed route `segments` under the context's sync base, with `query` pairs.
-fn route(
+pub(crate) fn route(
     cx: &UploadContext,
     segments: &[&str],
     query: &[(&str, &str)],
@@ -971,13 +975,13 @@ fn route(
 
 /// Whether a step only reads hub state or may write it.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Effect {
+pub(crate) enum Effect {
     Read,
     Write,
 }
 
 /// A reply outside the contract after the request was sent.
-fn invalid_reply(effect: Effect) -> RdyError {
+pub(crate) fn invalid_reply(effect: Effect) -> RdyError {
     match effect {
         Effect::Read => upstream_protocol(),
         Effect::Write => upstream_uncertain(),
@@ -996,7 +1000,7 @@ struct Exchange<'a> {
     success: &'a [u16],
 }
 
-fn limits(bytes: usize, values: usize) -> JsonLimits {
+pub(crate) fn limits(bytes: usize, values: usize) -> JsonLimits {
     JsonLimits {
         bytes,
         depth: MAX_JSON_DEPTH,
@@ -1007,7 +1011,7 @@ fn limits(bytes: usize, values: usize) -> JsonLimits {
 
 /// `body` read as `T` within `limits`, then scanned whole for `bearer` and the token prefixes
 /// (D-N8PR2); anything else is an invalid reply.
-fn reply<T: DeserializeOwned>(
+pub(crate) fn reply<T: DeserializeOwned>(
     body: &[u8],
     limits: JsonLimits,
     effect: Effect,
@@ -1021,7 +1025,7 @@ fn reply<T: DeserializeOwned>(
 }
 
 /// 1 to 64 upper-case ASCII letters, digits and underscores.
-fn code_ok(code: &str) -> bool {
+pub(crate) fn code_ok(code: &str) -> bool {
     !code.is_empty()
         && code.len() <= MAX_ERROR_CODE_BYTES
         && code
@@ -1135,9 +1139,30 @@ fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyE
     Some(e)
 }
 
+/// A step's error, split by whether it is the hub's own refusal (a hub error object at a refusal
+/// status) or anything else: a local refusal, a transport failure or an invalid reply.
+pub(crate) enum PostError {
+    Refused(RdyError),
+    Other(RdyError),
+}
+
+impl PostError {
+    /// The error, whichever kind it is.
+    pub(crate) fn into_error(self) -> RdyError {
+        match self {
+            PostError::Refused(e) | PostError::Other(e) => e,
+        }
+    }
+}
+
 impl HttpPublishWire {
     /// Sends one request: the success body, or the step's error. Nothing is retried.
     fn exchange(&self, cx: &UploadContext, x: Exchange<'_>) -> Result<Vec<u8>, RdyError> {
+        self.exchange_split(cx, x).map_err(PostError::into_error)
+    }
+
+    /// [`exchange`](Self::exchange), with the hub's refusal told apart from every other error.
+    fn exchange_split(&self, cx: &UploadContext, x: Exchange<'_>) -> Result<Vec<u8>, PostError> {
         let effect = x.effect;
         let sent = self.transport.upload(
             &cx.install,
@@ -1153,28 +1178,52 @@ impl HttpPublishWire {
                 reply_limit: x.reply_limit,
             },
         );
-        let (status, body) = match sent {
-            Ok(r) => r,
-            Err(HubFailure::Local(e)) => return Err(e),
-            Err(HubFailure::Transport { may_have_sent }) => {
-                return Err(if effect == Effect::Write && may_have_sent {
-                    upstream_uncertain()
-                } else {
-                    upstream_transport()
-                });
-            }
-            // A redirect or a reply over its bounds: the request was sent.
-            Err(HubFailure::Protocol) => return Err(invalid_reply(effect)),
-            Err(f) => return Err(f.into_error(&cx.install)),
-        };
+        let (status, body) = sent.map_err(|f| PostError::Other(failed(cx, effect, f)))?;
         if x.success.contains(&status) {
             return Ok(body);
         }
-        if (200..300).contains(&status) {
-            return Err(invalid_reply(effect));
+        Err(refused(cx, effect, status, &body, x.reply_limit))
+    }
+
+    /// `POST <url>` of a read step with the JSON body `json` as `content_type`, whose reply at
+    /// status 200 streams to `sink`, at most `limit` bytes; a refusal is read within
+    /// [`REPLY_BYTES`]. Returns the bytes streamed.
+    pub(crate) fn post_streamed(
+        &self,
+        cx: &UploadContext,
+        url: &str,
+        content_type: &str,
+        json: Vec<u8>,
+        sink: &mut dyn Write,
+        limit: u64,
+    ) -> Result<u64, RdyError> {
+        let effect = Effect::Read;
+        let len = u64::try_from(json.len()).map_err(|_| hub_limit(usize::MAX, LimitUnit::Bytes))?;
+        let mut body = Cursor::new(json);
+        let sent = self.transport.upload_streamed(
+            &cx.install,
+            cx.ca_file.as_deref(),
+            &cx.claim,
+            &cx.bearer,
+            UploadHttpRequest {
+                method: UploadMethod::Post,
+                destination: url,
+                content_type,
+                body: Some(&mut body),
+                body_len: len,
+                reply_limit: REPLY_BYTES,
+            },
+            ReplySink {
+                status: 200,
+                out: sink,
+                limit,
+            },
+        );
+        let (status, body, n) = sent.map_err(|f| failed(cx, effect, f))?;
+        if status == 200 {
+            return Ok(n);
         }
-        Err(refusal(status, &body, x.reply_limit, &cx.bearer)
-            .unwrap_or_else(|| invalid_reply(effect)))
+        Err(refused(cx, effect, status, &body, REPLY_BYTES).into_error())
     }
 
     /// A JSON POST of a step.
@@ -1187,6 +1236,59 @@ impl HttpPublishWire {
         reply_limit: usize,
         success: &[u16],
     ) -> Result<Vec<u8>, RdyError> {
+        self.post_as(
+            cx,
+            effect,
+            url,
+            "application/json",
+            json,
+            reply_limit,
+            success,
+        )
+    }
+
+    /// [`post_as`](Self::post_as), with the hub's refusal told apart from every other error.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn post_split(
+        &self,
+        cx: &UploadContext,
+        effect: Effect,
+        url: &str,
+        content_type: &str,
+        json: Vec<u8>,
+        reply_limit: usize,
+        success: &[u16],
+    ) -> Result<Vec<u8>, PostError> {
+        let len = u64::try_from(json.len())
+            .map_err(|_| PostError::Other(hub_limit(usize::MAX, LimitUnit::Bytes)))?;
+        let mut body = Cursor::new(json);
+        self.exchange_split(
+            cx,
+            Exchange {
+                effect,
+                method: UploadMethod::Post,
+                url,
+                content_type,
+                body: Some(&mut body),
+                body_len: len,
+                reply_limit,
+                success,
+            },
+        )
+    }
+
+    /// A POST of a step whose JSON body is sent as `content_type`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn post_as(
+        &self,
+        cx: &UploadContext,
+        effect: Effect,
+        url: &str,
+        content_type: &str,
+        json: Vec<u8>,
+        reply_limit: usize,
+        success: &[u16],
+    ) -> Result<Vec<u8>, RdyError> {
         let len = u64::try_from(json.len()).map_err(|_| hub_limit(usize::MAX, LimitUnit::Bytes))?;
         let mut body = Cursor::new(json);
         self.exchange(
@@ -1195,7 +1297,7 @@ impl HttpPublishWire {
                 effect,
                 method: UploadMethod::Post,
                 url,
-                content_type: "application/json",
+                content_type,
                 body: Some(&mut body),
                 body_len: len,
                 reply_limit,
@@ -1205,13 +1307,63 @@ impl HttpPublishWire {
     }
 }
 
-/// The state reply's checks; it clamps the limits to core's caps.
+/// A failed exchange of a step of `effect` as the step's error.
+fn failed(cx: &UploadContext, effect: Effect, f: HubFailure) -> RdyError {
+    match f {
+        HubFailure::Local(e) => e,
+        HubFailure::Transport { may_have_sent } => {
+            if effect == Effect::Write && may_have_sent {
+                upstream_uncertain()
+            } else {
+                upstream_transport()
+            }
+        }
+        // A redirect or a reply over its bounds: the request was sent.
+        HubFailure::Protocol => invalid_reply(effect),
+        f => f.into_error(&cx.install),
+    }
+}
+
+/// A reply of `status` that is not the step's success, as the step's error: the hub's refusal
+/// when it is a valid hub error object at a refusal status, else an invalid reply.
+fn refused(
+    cx: &UploadContext,
+    effect: Effect,
+    status: u16,
+    body: &[u8],
+    reply_limit: usize,
+) -> PostError {
+    if (200..300).contains(&status) {
+        return PostError::Other(invalid_reply(effect));
+    }
+    match refusal(status, body, reply_limit, &cx.bearer) {
+        Some(e) => PostError::Refused(e),
+        None => PostError::Other(invalid_reply(effect)),
+    }
+}
+
+/// The state reply's checks for a publish upload; it clamps the limits to core's caps.
 fn check_state(st: &mut PublishState) -> bool {
+    check_state_with(
+        st,
+        &|name| KNOWN_INCOMPATIBLE.contains(&name),
+        Some(formats().stream),
+    )
+}
+
+/// The state reply's checks; it clamps the limits to core's caps. An incompatible feature is
+/// refused unless `incompatible_known` knows its name; with `stream`, the hub must read that
+/// stream format.
+fn check_state_with(
+    st: &mut PublishState,
+    incompatible_known: &dyn Fn(&str) -> bool,
+    stream: Option<u32>,
+) -> bool {
     let semver_ok = |v: &str| semver::Version::parse(v).is_ok();
     let versions_ok = semver_ok(&st.rdy) && st.min_rdy.as_deref().is_none_or(semver_ok);
     let streams_ok = formats_ok(&st.stream_read)
         && formats_ok(&st.stream_write)
-        && st.stream_read.contains(&formats().stream);
+        && stream.is_none_or(|f| st.stream_read.contains(&f));
     let names_ok = st.features.len() <= MAX_FEATURES
         && st.features.iter().all(|f| {
             !f.name.is_empty()
@@ -1222,9 +1374,10 @@ fn check_state(st: &mut PublishState) -> bool {
         })
         && st.features.windows(2).all(|w| w[0].name < w[1].name);
     // Only an incompatible feature this client does not know is refused.
-    let features_ok = st.features.iter().all(|f| {
-        f.class != FeatureClass::Incompatible || KNOWN_INCOMPATIBLE.contains(&f.name.as_str())
-    });
+    let features_ok = st
+        .features
+        .iter()
+        .all(|f| f.class != FeatureClass::Incompatible || incompatible_known(&f.name));
     let caps = [
         (&mut st.batch_bytes, CORE_BATCH_BYTES),
         (&mut st.batch_records, CORE_BATCH_RECORDS),
@@ -1238,6 +1391,84 @@ fn check_state(st: &mut PublishState) -> bool {
         *value = (*value).min(cap);
     }
     versions_ok && streams_ok && names_ok && features_ok && limits_ok
+}
+
+impl HttpPublishWire {
+    /// `POST <base>/state` with the encoded request `json` as `content_type`: the decoded reply,
+    /// unchecked.
+    pub(crate) fn state_as(
+        &self,
+        cx: &UploadContext,
+        json: Vec<u8>,
+        content_type: &str,
+    ) -> Result<PublishState, RdyError> {
+        let url = route(cx, &["state"], &[])?;
+        let body = self.post_as(
+            cx,
+            Effect::Read,
+            &url,
+            content_type,
+            json,
+            REPLY_BYTES,
+            &[200],
+        )?;
+        reply(
+            &body,
+            limits(REPLY_BYTES, MAX_JSON_VALUES),
+            Effect::Read,
+            &cx.bearer,
+        )
+    }
+
+    /// `POST <base>/known` (push form) with the body sent as `content_type`: the keys of `keys`
+    /// the hub lacks, a sorted, unique subset of them.
+    pub(crate) fn known_as(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        keys: &[ObjectKey],
+        content_type: &str,
+    ) -> Result<Vec<ObjectKey>, RdyError> {
+        check_push(push)?;
+        check_entries(keys.len(), MAX_KNOWN_KEYS, "object key")?;
+        if keys.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(unordered("object keys"));
+        }
+        let url = route(cx, &["known"], &[])?;
+        let json = encode(&KnownBody { push, keys }, KNOWN_REQUEST_BYTES)?;
+        let body = self.post_as(
+            cx,
+            Effect::Read,
+            &url,
+            content_type,
+            json,
+            KNOWN_REPLY_BYTES,
+            &[200],
+        )?;
+        // Per key, one element and two members: 3 values, with headroom for added members.
+        let values = known_values(keys.len(), 3);
+        let dto: MissingKeys = reply(
+            &body,
+            limits(KNOWN_REPLY_BYTES, values),
+            Effect::Read,
+            &cx.bearer,
+        )?;
+        let missing: Vec<ObjectKey> = dto.missing.into_iter().map(ObjectKey::from).collect();
+        let subset = missing.windows(2).all(|w| w[0] < w[1])
+            && missing.iter().all(|k| keys.binary_search(k).is_ok());
+        if !subset {
+            return Err(upstream_protocol());
+        }
+        Ok(missing)
+    }
+}
+
+/// The sync exchange's state reply checks (D-4XHPH, D-N8PR2): those of a publish upload, with
+/// every feature of the real registry known and no stream format required; the exchange checks
+/// the stream format it sends. It clamps the limits to core's caps.
+pub(crate) fn check_sync_state(st: &mut PublishState) -> bool {
+    let registry = rdy_store::format::registered_features();
+    check_state_with(st, &|name| registry.iter().any(|f| f.name == name), None)
 }
 
 impl PublishWire for HttpPublishWire {
@@ -1280,15 +1511,8 @@ impl PublishWire for HttpPublishWire {
 
     fn state(&self, cx: &UploadContext, request: &StateRequest) -> Result<PublishState, RdyError> {
         check_state_request(cx, request)?;
-        let url = route(cx, &["state"], &[])?;
         let json = encode(request, STATE_REQUEST_BYTES)?;
-        let body = self.post_json(cx, Effect::Read, &url, json, REPLY_BYTES, &[200])?;
-        let mut st: PublishState = reply(
-            &body,
-            limits(REPLY_BYTES, MAX_JSON_VALUES),
-            Effect::Read,
-            &cx.bearer,
-        )?;
+        let mut st = self.state_as(cx, json, "application/json")?;
         if !check_state(&mut st) {
             return Err(upstream_protocol());
         }
@@ -1301,29 +1525,7 @@ impl PublishWire for HttpPublishWire {
         push: &str,
         keys: &[ObjectKey],
     ) -> Result<Vec<ObjectKey>, RdyError> {
-        check_push(push)?;
-        check_entries(keys.len(), MAX_KNOWN_KEYS, "object key")?;
-        if keys.windows(2).any(|w| w[0] >= w[1]) {
-            return Err(unordered("object keys"));
-        }
-        let url = route(cx, &["known"], &[])?;
-        let json = encode(&KnownBody { push, keys }, KNOWN_REQUEST_BYTES)?;
-        let body = self.post_json(cx, Effect::Read, &url, json, KNOWN_REPLY_BYTES, &[200])?;
-        // Per key, one element and two members: 3 values, with headroom for added members.
-        let values = known_values(keys.len(), 3);
-        let dto: MissingKeys = reply(
-            &body,
-            limits(KNOWN_REPLY_BYTES, values),
-            Effect::Read,
-            &cx.bearer,
-        )?;
-        let missing: Vec<ObjectKey> = dto.missing.into_iter().map(ObjectKey::from).collect();
-        let subset = missing.windows(2).all(|w| w[0] < w[1])
-            && missing.iter().all(|k| keys.binary_search(k).is_ok());
-        if !subset {
-            return Err(upstream_protocol());
-        }
-        Ok(missing)
+        self.known_as(cx, push, keys, "application/json")
     }
 
     fn put_objects(

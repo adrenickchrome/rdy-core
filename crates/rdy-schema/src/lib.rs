@@ -13,7 +13,7 @@ mod validate;
 
 pub use glob::{Glob, GlobError, MAX_GLOB_LEN, MAX_PATH_SEGMENTS};
 pub use pack::*;
-pub use resolve::{PROPOSAL_PREFIX, PackSet, PackWarning, STANDARD_YAML, SchemaError};
+pub use resolve::{PROPOSAL_PREFIX, PackSet, PackWarning, STANDARD_YAML, SchemaError, source_form};
 pub use rules::{
     CompiledRule, MAX_RULE_NAME_CHARS, MAX_RULES, MAX_TEXT_BYTES, MAX_TEXT_CHARS, Rule,
     RuleSeverity, compile_rules,

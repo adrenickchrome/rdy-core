@@ -15,6 +15,16 @@ pub type WriteFn = Box<dyn FnOnce(&mut Rdy) -> Result<serde_json::Value, RdyErro
 /// writer, and returns its result as JSON.
 pub type ReadFn = Box<dyn FnOnce(&Rdy) -> Result<serde_json::Value, RdyError> + Send>;
 
+/// One sync call over the engine seam: the op (`push` or `pull`), its checked arguments (the
+/// daemon's strict op arguments) and the person the card's relay is checked against. Over the
+/// seam the session is the relay, as for every tool.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncCall {
+    pub op: &'static str,
+    pub args: serde_json::Value,
+    pub person: String,
+}
+
 pub trait Engine: Send + Sync {
     /// The current published state. After `write` returns, it includes that write.
     fn read(&self) -> Arc<ReadState>;
@@ -113,6 +123,20 @@ pub trait Engine: Send + Sync {
             crate::E_BAD_INPUT,
             "rdy_publish runs in the daemon, and this session runs without one",
             "drop --no-daemon, or run rdy publish <tag> --to <remote> --site <site>",
+        ))
+    }
+    /// Runs a sync call (`rdy_push`, `rdy_pull`, an output seam like [`Engine::publish`]): the
+    /// daemon runs the sync coordinator off its writer, after the person's card when the call
+    /// needs one. An engine with no daemon refuses.
+    fn sync(
+        &self,
+        _call: SyncCall,
+        _session: &crate::Session,
+    ) -> Result<serde_json::Value, RdyError> {
+        Err(RdyError::new(
+            crate::E_BAD_INPUT,
+            "rdy_push and rdy_pull run in the daemon, and this session runs without one",
+            "drop --no-daemon, or run rdy push or rdy pull",
         ))
     }
     /// The host's reader of the person layer for `rdy_instructions` (D-YQPB6, an input seam like

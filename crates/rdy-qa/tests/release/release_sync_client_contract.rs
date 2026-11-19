@@ -501,9 +501,11 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     for file in SELECTORS {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        // ruling R-F2: Sync client B's successor `sync-client-b-v1.json` is the selected file
+        let selects = |name: &str| text.contains(&format!("fixtures/contracts/{name}\""));
         assert!(
-            text.contains(&format!("fixtures/contracts/{CURRENT}\"")),
-            "{file} selects {CURRENT}"
+            selects(CURRENT) || selects("sync-client-b-v1.json"),
+            "{file} selects {CURRENT} or its successor"
         );
         assert!(
             !text.contains(&format!("contracts/{PREDECESSOR}\"")),
@@ -1043,7 +1045,12 @@ fn scc7_predecessor_fixtures_keep_their_bytes() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    let mut want: Vec<&str> = FROZEN.iter().map(|(n, _)| *n).chain([CURRENT]).collect();
+    // ruling R-F2: the folder also holds Sync client B's successor
+    let mut want: Vec<&str> = FROZEN
+        .iter()
+        .map(|(n, _)| *n)
+        .chain([CURRENT, "sync-client-b-v1.json"])
+        .collect();
     want.sort();
     assert_eq!(
         names, want,

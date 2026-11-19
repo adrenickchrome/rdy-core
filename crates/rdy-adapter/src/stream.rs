@@ -10,6 +10,7 @@
 //! quarantine (D-WDKWQ); a checked batch is not a complete upload.
 
 use crate::store::Snapshot;
+pub use rdy_engine::stream_export::KeyPage;
 use rdy_engine::{RdyError, stream_check, stream_export};
 use rdy_model::{Hash, RepoId};
 use std::collections::BTreeSet;
@@ -65,5 +66,44 @@ impl Snapshot {
         out: W,
     ) -> Result<BatchReport, RdyError> {
         stream_export::write_history(self.read_state(), purpose, root, base, known, out)
+    }
+
+    /// Gives a page of at most `limit` keys (1 to 100000) of the canon or view history of
+    /// `root`, less the link closure of `base`, in the order [`Snapshot::write_history`] writes
+    /// them, after the key `after` (from the start when None). `next` is the page's last key
+    /// when more keys follow, else None. A `base` the snapshot does not hold counts as none. It
+    /// reads only the snapshot's captured refs and log end, keeps no state and does no network.
+    /// A root the snapshot does not hold, or an `after` outside the history, is
+    /// `E_UNRESOLVED_REF`; another purpose is `E_STREAM_PURPOSE`; a `limit` out of range is
+    /// `E_LIMIT`.
+    pub fn history_page(
+        &self,
+        purpose: StreamPurpose,
+        root: Hash,
+        base: Option<Hash>,
+        after: Option<ObjectKey>,
+        limit: usize,
+    ) -> Result<KeyPage, RdyError> {
+        stream_export::history_page(self.read_state(), purpose, root, base, after, limit)
+    }
+
+    /// Writes the records that `keys` name of the canon or view history of `root` as one
+    /// complete format-4 batch with that purpose and root, in the order
+    /// [`Snapshot::write_history`] would write that set. The header names the root as a
+    /// prerequisite when the batch does not hold it. A landing carries its one snapshot delta,
+    /// which the batch holds though `keys` omit it; a named delta travels only with its landing.
+    /// A repeated key counts once. It reads only
+    /// the snapshot's captured refs and log end, owns no output path, keeps no state and does
+    /// no network. A key outside the root's history, or a root the snapshot does not hold, is
+    /// `E_UNRESOLVED_REF` and nothing is written; more than 100000 keys is `E_LIMIT`; another
+    /// purpose is `E_STREAM_PURPOSE`.
+    pub fn write_history_keys<W: Write>(
+        &self,
+        purpose: StreamPurpose,
+        root: Hash,
+        keys: &[ObjectKey],
+        out: W,
+    ) -> Result<BatchReport, RdyError> {
+        stream_export::write_history_keys(self.read_state(), purpose, root, keys, out)
     }
 }

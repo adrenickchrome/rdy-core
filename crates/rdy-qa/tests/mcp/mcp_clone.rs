@@ -236,19 +236,27 @@ fn ec12_rdy_clone_with_file_refuses_a_directory() {
         assert!(!to.exists(), "{file}: the target is untouched");
     }
 
-    // any other path follows O7: a URL, and a path that is nothing
+    // any other path follows O7: a URL that is not HTTPS gets rdy remote add's refusal; a hub
+    // URL is no dump file (it goes in url); and a path that is nothing
     let (code, message, fix) = refused(c.call(
         "rdy_clone",
         json!({"dir": to_arg, "file": "rdy://hub/team/project"}),
     ));
     assert_eq!(code, "E_BAD_INPUT");
-    assert_eq!(
-        message,
-        "rdy://hub/team/project is a URL: cloning from a hub comes with the sync client"
-    );
+    assert_eq!(message, "the hub address is not an HTTPS URL");
     assert_eq!(
         fix,
-        "run rdy dump --out <file> in that project, then clone the file"
+        "use an HTTPS address without credentials, a query or a fragment"
+    );
+    let (code, message, fix) = refused(c.call(
+        "rdy_clone",
+        json!({"dir": to_arg, "file": "https://127.0.0.1/acme/docs"}),
+    ));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert_eq!(message, "https://127.0.0.1/acme/docs is not a dump file");
+    assert_eq!(
+        fix,
+        "to clone another project, call rdy_dump on its own server, then pass the file here"
     );
     let missing = scratch.path().join("missing.rdydump");
     let (code, message, fix) = refused(c.call(
@@ -284,18 +292,20 @@ fn ec12_rdy_clone_params_are_strict() {
         json!({"file": "p.rdydump"}),
         json!({"dir": "x", "fork": "yes"}),
         json!({"dir": "x", "source": "p.rdydump"}),
-        json!({"dir": "x", "url": "rdy://hub/p"}),
+        json!({"dir": "x", "url": 5}),
+        json!({"dir": "x", "urls": "https://127.0.0.1/acme/docs"}),
     ] {
         assert_eq!(bad(args.clone()).code, "E_BAD_INPUT", "{args}");
     }
-    let ok = parse_params::<CloneParams>(
-        "rdy_clone",
-        json!({"dir": "x", "file": "p.rdydump", "fork": true})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    assert!(ok.is_ok(), "{ok:?}");
+    // the old inputs and the new url selector each parse
+    for args in [
+        json!({"dir": "x"}),
+        json!({"dir": "x", "file": "p.rdydump", "fork": true}),
+        json!({"dir": "x", "url": "https://127.0.0.1/acme/docs"}),
+    ] {
+        let ok = parse_params::<CloneParams>("rdy_clone", args.as_object().unwrap().clone());
+        assert!(ok.is_ok(), "{args}: {ok:?}");
+    }
 
     // over the wire: a session is required, and an unknown key writes nothing
     let s = Served::new();
@@ -311,6 +321,33 @@ fn ec12_rdy_clone_params_are_strict() {
     let (code, ..) = refused(c.call("rdy_clone", json!({"dir": "copy", "forks": true})));
     assert_eq!(code, "E_BAD_INPUT");
     assert!(!s.dir.path().join("copy").exists());
+    // url is exclusive with file (D-47HVF), in the field rule's words; with fork it is
+    // D-47HVF's refusal; neither sends a request or writes
+    let (code, message, fix) = refused(c.call(
+        "rdy_clone",
+        json!({"dir": "copy", "url": "https://127.0.0.1:9/acme/docs", "file": "p.rdydump"}),
+    ));
+    assert_eq!(
+        (code.as_str(), message.as_str(), fix.as_str()),
+        (
+            "E_BAD_INPUT",
+            "file is not used by clone with url",
+            "remove file or url"
+        )
+    );
+    let (code, message, fix) = refused(c.call(
+        "rdy_clone",
+        json!({"dir": "copy", "url": "https://127.0.0.1:9/acme/docs", "fork": true}),
+    ));
+    assert_eq!(
+        (code.as_str(), message.as_str(), fix.as_str()),
+        (
+            "E_BAD_INPUT",
+            "a fork starts from a project or a dump, not from a hub URL",
+            "clone the hub repo, then run rdy clone --fork <that project> <dir>"
+        )
+    );
+    assert!(!s.dir.path().join("copy").exists());
 
     // the tool says what it does, exactly
     let tools = c.tools();
@@ -320,7 +357,7 @@ fn ec12_rdy_clone_params_are_strict() {
         .expect("rdy_clone is listed");
     assert_eq!(
         t["description"],
-        "Clone this project, or the dump file named by file, into dir, a directory with no rdy store. The clone keeps every hash, landing, tag and view, keeps the repo id and records its origin; fork gives it a new repo id. To clone another project, call rdy_dump on its own server, then pass the file here."
+        "Clone this project, the dump file named by file, or the hub repo at an https url, into dir, a directory with no rdy store. The clone keeps every hash, landing, tag and view, keeps the repo id and records its origin; fork gives it a new repo id. A url clone takes hub canon and its tags, the hub's settings and one share remote named hub; it never forks. To clone another local project, call rdy_dump on its own server, then pass the file here."
     );
 }
 

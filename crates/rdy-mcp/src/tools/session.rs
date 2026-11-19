@@ -221,6 +221,13 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let carried = st_.carried_warnings()?;
     let carried_json = (!carried.is_empty()).then(|| json!(carried));
     let carried_tokens = carried_json.as_ref().map_or(0, tokens_of);
+    // the sync state of each remote and the uncovered-removal warnings (D-3RSCW, D-47HVF): local
+    // facts of the current store, whole and outside the fit, as the carried warnings are
+    let sync_json = super::sync_status(&st_)?;
+    let uncovered = st_.uncovered_warnings()?;
+    let uncovered_json = (!uncovered.is_empty()).then(|| json!(uncovered));
+    let sync_tokens =
+        sync_json.as_ref().map_or(0, tokens_of) + uncovered_json.as_ref().map_or(0, tokens_of);
     // a build warning this reply will carry is whole and outside the fit, as the carried ones
     let warning_tokens = st
         .build_warning_due
@@ -250,6 +257,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     }
     // the tree gets what the fixed parts (coverage included) leave
     let reserve = 300
+        + sync_tokens
         + carried_tokens
         + warning_tokens
         + reminder_tokens
@@ -314,10 +322,16 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     // the rest of the reply fits what the warnings leave; the warnings are added whole
     let mut out = budget(
         out,
-        Some(max.saturating_sub(carried_tokens + warning_tokens + reminder_tokens)),
+        Some(max.saturating_sub(carried_tokens + sync_tokens + warning_tokens + reminder_tokens)),
     );
     if let Some(w) = carried_json {
         out["redaction_warnings"] = w;
+    }
+    if let Some(sync) = sync_json {
+        out["sync"] = sync;
+    }
+    if let Some(w) = uncovered_json {
+        out["uncovered_warnings"] = w;
     }
     // D-CRXNA: each upgrade backup beside the store with its size, as `rdy status` lists them;
     // a local fact added whole, like the warnings. None, no member

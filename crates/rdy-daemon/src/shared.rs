@@ -11,7 +11,8 @@ use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
 use rdy_engine::engine::{
-    Engine, ExportRequest, McpHttpFacts, ReadFn, RenderRequest, SiteFacts, SiteLink, WriteFn,
+    Engine, ExportRequest, McpHttpFacts, ReadFn, RenderRequest, SiteFacts, SiteLink, SyncCall,
+    WriteFn,
 };
 use rdy_engine::hub_publish::PublishRequest;
 use rdy_engine::semantic::lease::LeaseRegistry;
@@ -414,6 +415,12 @@ impl Engine for DaemonEngine {
         req: rdy_engine::maintenance::UpgradeRequest,
     ) -> Result<rdy_engine::maintenance::UpgradeReport, RdyError> {
         rdy_engine::maintenance::connected(&self.read(), req.dry_run)
+    }
+
+    /// `rdy_push` and `rdy_pull`: the sync coordinator, off the writer, after the person's card
+    /// when the move needs one. The session is the relay of the card's answer.
+    fn sync(&self, call: SyncCall, session: &Session) -> Result<Value, RdyError> {
+        crate::ops::sync::call(self, &self.0.root, session, call)
     }
 
     /// `rdy_publish`: the publish helper's candidate upload, from one read state, off the

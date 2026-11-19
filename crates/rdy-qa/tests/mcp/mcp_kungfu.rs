@@ -693,6 +693,8 @@ fn script(x: &mut Script, spec: &Spec, scratch: &Path) {
         "rdy_publish",
         json!({"tag": "none", "to": "none", "site": "none"}),
     );
+    x.step("rdy_push", json!({}));
+    x.step("rdy_pull", json!({}));
     x.step("rdy_render", json!({"out": s("render"), "scope": "canon"}));
     x.step(
         "rdy_export",
@@ -786,6 +788,9 @@ const REFUSED: &[(&str, &str)] = &[
     ("rdy_land", "E_EXCEPTION_OPEN"),
     ("rdy_publication_baseline", "E_BAD_INPUT"),
     ("rdy_publish", "E_BAD_TAG_NAME"),
+    // the world has no remote: the sync tools reach the coordinator, which wants one
+    ("rdy_push", "E_REMOTE_REQUIRED"),
+    ("rdy_pull", "E_REMOTE_REQUIRED"),
     ("rdy_auth", "E_BAD_INPUT"),
     ("rdy_key_bind", "E_NOT_FOUND"),
     ("rdy_key_retire", "E_BAD_INPUT"),
@@ -863,7 +868,7 @@ fn kfu4_each_tool_keeps_its_action_for_all_values() {
 
     // the matrix accounts for every router name
     let names: BTreeSet<String> = kungfu::TOOLS.iter().map(|p| p.tool.to_string()).collect();
-    assert_eq!(names.len(), 63);
+    assert_eq!(names.len(), 65);
     assert_eq!(correct.called, names);
 
     same_steps(&correct, &absent, "absent");

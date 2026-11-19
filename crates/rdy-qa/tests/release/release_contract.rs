@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/sync-client-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/sync-client-b-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -99,12 +99,12 @@ fn workspace_root() -> PathBuf {
 
 /// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
 /// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json`,
-/// `disclosure-review-v1.json` and `sd1-v1.json`, all frozen) with the additions since. A capture
-/// writes this file, never a baseline. It starts as a byte copy of its predecessor `sd1-v1.json`,
-/// whose bytes `release_sync_client_contract.rs` and `release_disclosure_contract.rs` pin; a
-/// later contract change is a successor fixture.
+/// `disclosure-review-v1.json`, `sd1-v1.json` and `sync-client-v1.json`, all frozen) with the
+/// additions since. A capture writes this file, never a baseline. It starts as a byte copy of its
+/// predecessor `sync-client-v1.json`, whose bytes `release_sync_client_b_contract.rs` and
+/// `release_disclosure_contract.rs` pin; a later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/sync-client-v1.json")
+    qa_root().join("fixtures/contracts/sync-client-b-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -2132,6 +2132,8 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "makes a baseline of a tagged publication; cli_sync_baseline pins its replies",
     ),
     ("publish", "uploads a site to a host"),
+    ("pull", "pulls from a hub; cli_sync pins its replies"),
+    ("push", "pushes to a hub; cli_sync pins its replies"),
     (
         "reaffirm",
         "needs a suspect decision; the write op of the same name is an MCP write",
@@ -3283,6 +3285,8 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
         "makes a baseline of a tagged publication; cli_sync_baseline and mcp_sync_baseline pin its replies",
     ),
     ("rdy_publish", "uploads a site to a host"),
+    ("rdy_pull", "pulls from a hub; mcp_sync pins its replies"),
+    ("rdy_push", "pushes to a hub; mcp_sync pins its replies"),
     ("rdy_redact", "destroys content; no dry run is probed"),
     ("rdy_remote", "edits the remotes of the project"),
     (

@@ -557,7 +557,7 @@ pub(crate) fn in_place_wanted(a: &SignInArgs, as_json: bool, console: &dyn Conso
 }
 
 /// `y` or `yes`, in any case.
-fn is_yes(line: &str) -> bool {
+pub(crate) fn is_yes(line: &str) -> bool {
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
@@ -571,7 +571,7 @@ fn may_open(link: &str, install: &Origin) -> bool {
 
 /// The answer to a prompt: the line, or `None` at the end of input, where the prompt's line is
 /// ended so the next print starts on its own line.
-fn ask(console: &mut dyn Console, prompt: &str) -> Option<String> {
+pub(crate) fn ask(console: &mut dyn Console, prompt: &str) -> Option<String> {
     console.write(prompt);
     let line = console.read_line();
     if line.is_none() {
