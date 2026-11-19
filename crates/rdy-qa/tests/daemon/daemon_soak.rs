@@ -1,11 +1,11 @@
 //! The deep gate's memory soak: one served daemon, on a project of about 20,000 blocks, takes a
-//! run of landings, two per cycle. Each comes from a view of its own, and every second one from a
-//! view on a base one landing behind canon (the scope the old engine copied whole, and kept once
-//! the view closed), so a scope that keeps its own copy of the project shows as growth. After each landing the harness
-//! reads the daemon's `RssAnon` and the memory report of `rdy status --json` (the allocator's
-//! live bytes and the bytes the capped caches hold). `rdy_qa::soak::check` then applies the
-//! 800 MiB limit and the relative growth rule after landing 5. Deep gate only; the readings are
-//! Linux ones, so other platforms skip with a line that says so.
+//! run of landings in the shape of agent traffic. Four views stay open at once: each cycle
+//! proposes a new one, lands the oldest, and reads every other open view and its proposal
+//! version. Those views sit on bases behind canon: the scopes the old engine copied whole. The
+//! daemon is read once before any landing (landing 0) and after each cycle: its `RssAnon` and the
+//! memory report of `rdy status --json` (the allocator's live bytes and the bytes the capped caches
+//! hold). `rdy_qa::soak::check` then applies the 800 MiB limit and the growth rule. Deep gate only;
+//! the readings are Linux ones, so other platforms skip with a line that says so.
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::deep;
 use rdy_qa::platform;
@@ -49,18 +49,18 @@ fn ok(s: &Served, args: &[&str]) -> serde_json::Value {
     v
 }
 
-/// Writes one new doc `name` in view `name`, as the human.
-fn write_doc(s: &Served, name: &str) {
+/// The views kept open at once: each cycle proposes one more and lands the oldest, so every
+/// open view sits on a base behind canon.
+const OPEN_VIEWS: usize = 4;
+
+/// Writes one new doc in view `name` and proposes the view, as the human; returns the version.
+fn propose_view(s: &Served, name: &str) -> String {
     ok(
         s,
         &[
             "--json", "new", "doc", name, "--title", name, "--view", name,
         ],
     );
-}
-
-/// Proposes view `name` and approves it, as the human.
-fn land_view(s: &Served, name: &str) {
     let p = ok(
         s,
         &[
@@ -74,8 +74,12 @@ fn land_view(s: &Served, name: &str) {
             "Adds one doc.",
         ],
     );
-    let pref = p["ref"].as_str().expect("a proposal ref").to_string();
-    let o = s.rdy(&["approve", &pref]);
+    p["ref"].as_str().expect("a proposal ref").to_string()
+}
+
+/// Approves proposal version `pref`, as the human.
+fn approve(s: &Served, pref: &str) {
+    let o = s.rdy(&["approve", pref]);
     assert!(
         o.status.success(),
         "approve {pref}: {}",
@@ -83,17 +87,53 @@ fn land_view(s: &Served, name: &str) {
     );
 }
 
-/// One soak cycle, two landings: view `late-<n>` is written first, view `early-<n>` lands, then
-/// `late-<n>` is read and lands on a base one landing behind canon. A view on an older base is
-/// the scope the old engine copied whole, and its closed build was then kept.
-fn cycle(s: &Served, n: u64) {
-    let (late, early) = (format!("late-{n}"), format!("early-{n}"));
-    write_doc(s, &late);
-    write_doc(s, &early);
-    land_view(s, &early);
-    // a read of the view behind canon builds its scope, as an agent's read does
-    ok(s, &["--json", "ls", "--scope", &late]);
-    land_view(s, &late);
+/// An agent's reads of an open view and its proposal version: the scopes the old engine copied
+/// whole once the view's base fell behind canon.
+fn read_open(s: &Served, view: &str, pref: &str) {
+    ok(s, &["--json", "suspects", "--scope", view]);
+    ok(s, &["--json", "plan", "--view", view]);
+    ok(s, &["--json", "diff", "canon", &format!("proposal:{pref}")]);
+}
+
+/// One soak cycle: propose a new view; past [`OPEN_VIEWS`] open, land the oldest (one landing);
+/// then read every other open view and its proposal. Returns whether the cycle landed.
+fn cycle(s: &Served, open: &mut Vec<(String, String)>, n: u64) -> bool {
+    let view = format!("soak-{n}");
+    let pref = propose_view(s, &view);
+    open.push((view, pref));
+    let landed = open.len() > OPEN_VIEWS;
+    if landed {
+        let (_, oldest) = open.remove(0);
+        approve(s, &oldest);
+    }
+    for (view, pref) in &open[..open.len() - 1] {
+        read_open(s, view, pref);
+    }
+    landed
+}
+
+/// One reading of the daemon after `landing` landings: `RssAnon` and the status memory report.
+/// `None` when the daemon reports no live bytes (glibc's counters only).
+fn sample(s: &Served, pid: u32, landing: u64) -> Option<Sample> {
+    let v = ok(s, &["--json", "status"]);
+    let mem = &v["memory"];
+    let live = mem["live_bytes"].as_u64()?;
+    let cache = mem["capped_cache_bytes"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("status has no capped_cache_bytes: {v}"));
+    assert_eq!(s.daemon_pid(), Some(pid), "the same daemon served the soak");
+    let rss_anon = platform::rss_anon_bytes(pid).expect("RssAnon of the daemon");
+    let sample = Sample {
+        landing,
+        rss_anon,
+        live,
+        cache,
+    };
+    eprintln!(
+        "soak landing {landing}: RssAnon {rss_anon} live {live} cache {cache} net {}",
+        sample.net()
+    );
+    Some(sample)
 }
 
 #[test]
@@ -124,33 +164,21 @@ fn soak1_daemon_memory_stays_bounded_over_landings() {
         s.stop();
         return;
     }
-    let mut samples = vec![];
-    for n in 1..=landings() / 2 {
-        cycle(&s, n);
-        let v = ok(&s, &["--json", "status"]);
-        let mem = &v["memory"];
-        let Some(live) = mem["live_bytes"].as_u64() else {
-            not_here("the daemon reports no live bytes (glibc's allocator counters only)");
-            s.stop();
-            return;
-        };
-        let cache = mem["capped_cache_bytes"]
-            .as_u64()
-            .unwrap_or_else(|| panic!("status has no capped_cache_bytes: {v}"));
-        assert_eq!(s.daemon_pid(), Some(pid), "the same daemon served the soak");
-        let rss_anon = platform::rss_anon_bytes(pid).expect("RssAnon of the daemon");
-        let sample = Sample {
-            landing: 2 * n,
-            rss_anon,
-            live,
-            cache,
-        };
-        eprintln!(
-            "soak landing {}: RssAnon {rss_anon} live {live} cache {cache} net {}",
-            sample.landing,
-            sample.net()
-        );
-        samples.push(sample);
+    // landing 0: canon built and read, no landing yet
+    ok(&s, &["--json", "suspects"]);
+    let Some(zero) = sample(&s, pid, 0) else {
+        not_here("the daemon reports no live bytes (glibc's allocator counters only)");
+        s.stop();
+        return;
+    };
+    let mut samples = vec![zero];
+    let (mut open, mut landed, mut n) = (vec![], 0, 0);
+    while landed < landings() {
+        n += 1;
+        if cycle(&s, &mut open, n) {
+            landed += 1;
+        }
+        samples.extend(sample(&s, pid, landed));
     }
     s.stop();
     if let Err(e) = check(&samples) {
