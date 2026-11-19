@@ -1412,7 +1412,7 @@ mod tests {
         let ports = addr::candidates(None, &root);
         let (first, last) = (ports[0], ports[15]);
         let mine = format!("site: ports {first}..{last} refused");
-        let log = crate::daemon::capture_log_for_tests(&[mine.as_str()]);
+        let log = crate::daemon::capture_thread_log_for_tests(&[mine.as_str()]);
         let rt = current_thread();
         let (server, info) = rt.block_on(SiteServer::bind(&root, Some(LanOverride::NoneFound)));
         assert!(server.is_some(), "{:?}", info.url);
@@ -1439,6 +1439,35 @@ mod tests {
     }
 
     #[test]
+    fn s4_capture_takes_only_its_own_threads_bind() {
+        let (_dir, root, _held) = occupied(None);
+        let ports = addr::candidates(None, &root);
+        let mine = format!("site: ports {}..{} refused", ports[0], ports[15]);
+        let log = crate::daemon::capture_thread_log_for_tests(&[mine.as_str()]);
+        // another thread binds a project whose candidates are the same range, all refused
+        let other = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let rt = current_thread();
+                let _enter = rt.enter();
+                let cfg = serve_config(&root);
+                let ports = addr::candidates(None, &root);
+                open(&root, &cfg, &ports, true, None).unwrap().port
+            })
+            .join()
+            .unwrap()
+        };
+        assert!(
+            log.lines().is_empty(),
+            "{:?} (other port {other})",
+            log.lines()
+        );
+        let rt = current_thread();
+        let (_server, info) = rt.block_on(SiteServer::bind(&root, Some(LanOverride::NoneFound)));
+        assert_eq!(log.lines().len(), 1, "{:?}", info.url);
+    }
+
+    #[test]
     fn s4_pinned_site_port_has_no_fallback() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".rdy")).unwrap();
@@ -1462,7 +1491,7 @@ mod tests {
         let (_dir, root, _held) = occupied(Some("guide"));
         let ports = addr::profile_candidates(&root, "guide");
         let mine = format!("site: ports {}..{} refused", ports[0], ports[15]);
-        let log = crate::daemon::capture_log_for_tests(&[mine.as_str()]);
+        let log = crate::daemon::capture_thread_log_for_tests(&[mine.as_str()]);
         let rt = current_thread();
         let _rt = rt.enter();
         let cfg = serve_config(&root);
