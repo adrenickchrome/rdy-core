@@ -814,6 +814,13 @@ fn plb4_recorder_clears_on_unwind() {
 /// The marker a wrapped fixture's child prints once every assertion and its cleanup passed.
 const PLX2_DONE: &str = "PLX2 retry fixture completed";
 
+/// The hang guard of a wrapped test's child: a whole test, sized as the other whole-test child
+/// guards of rdy-qa (600 s). A wrapped fixture builds several projects and starts a daemon for
+/// each; that takes about 4 s on an idle machine and over 2 minutes beside a loaded area run,
+/// with each step still making progress, so a guard sized for a short tool call
+/// ([`platform::RELEASE_CHILD_DEADLINE`]) failed a run that was not hung.
+const PLX2_CHILD_DEADLINE: Duration = Duration::from_secs(600);
+
 /// Runs the named test again as a child that runs it alone (`--exact`, one thread), and judges
 /// the child: it must exit with success, report one passed test and print [`PLX2_DONE`]. It
 /// returns true in the parent, which then has nothing left to do, and false in the child (the
@@ -837,7 +844,7 @@ fn run_plx2_child(test_name: &str) -> bool {
         child,
         None,
         platform::RELEASE_CHILD_OUTPUT_MAX,
-        platform::RELEASE_CHILD_DEADLINE,
+        PLX2_CHILD_DEADLINE,
     )
     .unwrap_or_else(|e| panic!("the child of {test_name} did not finish: {e}"));
     let stdout = String::from_utf8_lossy(&out.stdout);
