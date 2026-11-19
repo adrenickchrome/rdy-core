@@ -556,6 +556,49 @@ pub struct Gate {
     pub pass: bool,
     /// Passed/failed/ignored counts for test steps; empty otherwise.
     pub detail: String,
+    /// Whether the step ran, or was skipped after a step it needs failed.
+    #[serde(flatten)]
+    pub state: RowState,
+}
+
+/// Whether a gate row's step ran. A skipped step never passes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RowState {
+    #[default]
+    Ran,
+    /// Not run: `after`, a step it needs, failed (the gate runs without `--all-stages`).
+    Skipped { after: crate::gate_steps::StepId },
+}
+
+impl Gate {
+    /// The row of a step that ran.
+    pub fn ran(name: &str, pass: bool, detail: String) -> Gate {
+        Gate {
+            name: name.into(),
+            pass,
+            detail,
+            state: RowState::Ran,
+        }
+    }
+
+    /// The row of a step skipped after the failed step `after`.
+    pub fn skipped(name: &str, after: crate::gate_steps::StepId) -> Gate {
+        Gate {
+            name: name.into(),
+            pass: false,
+            detail: String::new(),
+            state: RowState::Skipped { after },
+        }
+    }
+}
+
+/// The result cell of a gate row: PASS, FAIL or `SKIPPED (after <step> failed)`.
+pub fn gate_result(g: &Gate) -> String {
+    match &g.state {
+        RowState::Ran => mark(g.pass).to_string(),
+        RowState::Skipped { after } => format!("SKIPPED (after {after} failed)"),
+    }
 }
 
 /// One area of the `rdy-qa` hardening suite.
@@ -851,7 +894,7 @@ pub fn markdown(r: &Report) -> String {
         "## Build gates\n\n| Step | Result | Detail |\n|---|---|---|"
     );
     for g in &r.gates {
-        let _ = writeln!(s, "| {} | {} | {} |", g.name, mark(g.pass), g.detail);
+        let _ = writeln!(s, "| {} | {} | {} |", g.name, gate_result(g), g.detail);
     }
 
     let _ = writeln!(
@@ -1336,11 +1379,7 @@ mod tests {
     }
 
     fn gate(pass: bool) -> Gate {
-        Gate {
-            name: "g".into(),
-            pass,
-            detail: String::new(),
-        }
+        Gate::ran("g", pass, String::new())
     }
 
     #[test]

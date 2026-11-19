@@ -637,7 +637,7 @@ impl AsOfCache {
 }
 
 /// ls8: proposal version `v` as stored; `E_NOT_FOUND` when `v` is not a proposal version.
-fn proposal_version_in(reader: &StoreReader, v: &Hash) -> Result<Proposal, RdyError> {
+pub(crate) fn proposal_version_in(reader: &StoreReader, v: &Hash) -> Result<Proposal, RdyError> {
     if !reader.has_kind(rdy_store::kinds::PROPOSAL, v)? {
         return Err(RdyError::new(
             E_NOT_FOUND,
@@ -894,22 +894,79 @@ impl ReadState {
         Ok(Arc::clone(&self.built(scope)?.m))
     }
 
+    /// The scope's graph, filled on first use. A scope other than canon carries canon's graph
+    /// across the blocks that differ (`carried_from_canon`), so it shares canon's maps.
     pub fn graph(&self, scope: &Scope) -> Result<Arc<Graph>, RdyError> {
         let built = self.built(scope)?;
-        Ok(Arc::clone(built.graph.get_or_init(|| {
+        if built.graph.get().is_none()
+            && let Some(g) = self.carried_from_canon(
+                &built,
+                |c| self.graph_of(c),
+                |g, o, n| g.with_changes(o, n),
+            )
+        {
+            return Ok(Arc::clone(built.graph.get_or_init(|| g)));
+        }
+        Ok(self.graph_of(&built))
+    }
+
+    /// `built`'s graph, built from its blocks on first use.
+    fn graph_of(&self, built: &Built) -> Arc<Graph> {
+        Arc::clone(built.graph.get_or_init(|| {
             Arc::new(Graph::build_with(
                 built.m.iter(),
                 Arc::clone(self.reader.tracking()),
             ))
-        })))
+        }))
     }
 
-    /// The scope's entity lexicon (FW-EN1), built with the scope and filled on first use.
+    /// The scope's entity lexicon (FW-EN1), built with the scope and filled on first use. A scope
+    /// other than canon carries canon's lexicon, as [`ReadState::graph`] does.
     pub fn lexicon(&self, scope: &Scope) -> Result<Arc<Lexicon>, RdyError> {
         let built = self.built(scope)?;
-        Ok(Arc::clone(built.lexicon.get_or_init(|| {
-            Arc::new(Lexicon::build(&self.pack, built.m.iter()))
-        })))
+        if built.lexicon.get().is_none()
+            && let Some(l) = self.carried_from_canon(
+                &built,
+                |c| self.lexicon_of(c),
+                |l, o, n| l.with_changes(o, n),
+            )
+        {
+            return Ok(Arc::clone(built.lexicon.get_or_init(|| l)));
+        }
+        Ok(self.lexicon_of(&built))
+    }
+
+    /// `built`'s lexicon, built from its blocks on first use.
+    fn lexicon_of(&self, built: &Built) -> Arc<Lexicon> {
+        Arc::clone(
+            built
+                .lexicon
+                .get_or_init(|| Arc::new(Lexicon::build(&self.pack, built.m.iter()))),
+        )
+    }
+
+    /// A structure of `built` (its graph or its lexicon) carried from canon's: canon's own
+    /// (`of`) with the blocks that differ between the two swapped (`carry`), which equals a
+    /// build from `built`'s blocks and shares canon's maps. `None` when `built` is canon's build,
+    /// canon is not built, or more blocks differ than `built` holds (a build is then cheaper).
+    fn carried_from_canon<T>(
+        &self,
+        built: &Arc<Built>,
+        of: impl FnOnce(&Built) -> Arc<T>,
+        carry: impl for<'a> FnOnce(&T, Vec<&'a Block>, Vec<&'a Block>) -> T,
+    ) -> Option<Arc<T>> {
+        let c = self.canon.built_ok()?;
+        if Arc::ptr_eq(c, built) {
+            return None;
+        }
+        if Arc::ptr_eq(&c.m, &built.m) {
+            return Some(of(c));
+        }
+        let (old, new) = c.m.delta_to(&built.m);
+        if old.len() + new.len() > built.m.len() {
+            return None;
+        }
+        Some(Arc::new(carry(&of(c), old, new)))
     }
 
     /// Whether `scope`'s lexicon is built in this state. Never builds, and never marks an as-of
@@ -1179,6 +1236,7 @@ impl ReadState {
                     &self.reader,
                     &self.pack,
                     self.canon_for(entry).map(|b| &**b),
+                    self.near_for(entry).map(|b| &**b),
                     entry,
                     None,
                 )
@@ -1192,9 +1250,10 @@ impl ReadState {
     /// [`inflight_builds`].
     fn build_inflight(&self, entry: &Entry) -> Result<Built, RdyError> {
         let canon = self.canon_for(entry).map(|b| &**b);
+        let near = self.near_for(entry).map(|b| &**b);
         if entry.included.is_empty() {
             let _ = self.inflight_cell.last.set(Arc::default());
-            return build_entry(&self.reader, &self.pack, canon, entry, None);
+            return build_entry(&self.reader, &self.pack, canon, near, entry, None);
         }
         INFLIGHT_BUILDS.with(|c| c.set(c.get() + 1));
         let list = entry
@@ -1214,7 +1273,7 @@ impl ReadState {
                 }
             }
         }
-        let built = build_merged(&self.reader, canon, entry, merged, &by_id)?;
+        let built = build_merged(&self.reader, canon, near, entry, merged, &by_id)?;
         let _ = self.inflight_cell.last.set(Arc::new(last));
         Ok(built)
     }
@@ -1226,6 +1285,33 @@ impl ReadState {
             self.canon.built_ok()
         } else {
             None
+        }
+    }
+
+    /// Canon's build when `entry` is another scope and canon is built: what `build_entry`
+    /// shares every unchanged block with, so no scope off canon holds a private copy of the
+    /// whole project.
+    pub(crate) fn near_for(&self, entry: &Entry) -> Option<&Arc<Built>> {
+        if std::ptr::eq(&*self.canon, entry) {
+            None
+        } else {
+            self.canon.built_ok()
+        }
+    }
+}
+
+/// The materialization of store state `snap`: moved from `near`'s (canon's build) when there
+/// is one, which reads only the blocks that differ, else built from every block.
+fn materialize(
+    reader: &StoreReader,
+    near: Option<&Built>,
+    snap: rdy_model::StateSnapshot,
+) -> Result<Materialized, RdyError> {
+    match near {
+        Some(c) => Ok(c.m.moved_to(&snap, |v| reader.get_block(v))?),
+        None => {
+            let blocks = reader.blocks(&snap)?;
+            Ok(Materialized::build(snap, blocks))
         }
     }
 }
@@ -1248,11 +1334,14 @@ fn candidate_head(base: Option<Hash>, view: &str, changes: &[Hash]) -> Hash {
 
 /// Builds `entry` from what it captured (never from the store's current heads). `canon` is
 /// canon's build, given only when `entry` is a view whose base is canon's head and canon is
-/// built (`ReadState::canon_for`); `merged` replaces the merge of the entry's changes.
+/// built (`ReadState::canon_for`); `near` is canon's build whenever `entry` is another scope
+/// and canon is built (`ReadState::near_for`), which a build from a store state shares its
+/// unchanged blocks with; `merged` replaces the merge of the entry's changes.
 pub(crate) fn build_entry(
     reader: &StoreReader,
     _pack: &Pack,
     canon: Option<&Built>,
+    near: Option<&Built>,
     entry: &Entry,
     merged: Option<Merged>,
 ) -> Result<Built, RdyError> {
@@ -1263,9 +1352,8 @@ pub(crate) fn build_entry(
             return Ok(Built::new(Arc::clone(&c.m), Arc::new(vec![])));
         }
         let snap = reader.state_of(entry.base)?;
-        let blocks = reader.blocks(&snap)?;
         return Ok(Built::new(
-            Arc::new(Materialized::build(snap, blocks)),
+            Arc::new(materialize(reader, near, snap)?),
             Arc::new(vec![]),
         ));
     }
@@ -1283,15 +1371,16 @@ pub(crate) fn build_entry(
             (merged, by_id)
         }
     };
-    build_merged(reader, canon, entry, merged, &changes)
+    build_merged(reader, canon, near, entry, merged, &changes)
 }
 
 /// `build_entry` once the merge is known: seeded from canon's build when there is one and the
-/// merge is clean, else built from the merged state. `changes` holds the changes already read
-/// (any other is read by hash).
+/// merge is clean, else built from the merged state (moved from `near` when given). `changes`
+/// holds the changes already read (any other is read by hash).
 fn build_merged(
     reader: &StoreReader,
     canon: Option<&Built>,
+    near: Option<&Built>,
     entry: &Entry,
     merged: Merged,
     changes: &HashMap<Hash, Change>,
@@ -1313,10 +1402,7 @@ fn build_merged(
             }
             m.map(Arc::new).unwrap_or_else(|| Arc::clone(&c.m))
         }
-        _ => {
-            let blocks = reader.blocks(&merged.state)?;
-            Arc::new(Materialized::build(merged.state, blocks))
-        }
+        _ => Arc::new(materialize(reader, near, merged.state)?),
     };
     // the blocks of removed content a pull's replay left out (D-FNRXT)
     let mut conflicts = merged.conflicts;

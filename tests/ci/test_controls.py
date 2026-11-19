@@ -1502,5 +1502,75 @@ class WindowsPlatformMatrix(unittest.TestCase):
                 self.assertRegex(line, r'@[0-9a-f]{40}\b')
 
 
+def workflow_on(name):
+    """The parsed `on:` block of a workflow (PyYAML reads the key `on` as True)."""
+    import yaml
+    doc = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())
+    return doc, doc.get('on', doc.get(True))
+
+
+def coverage_if(event_name, action=None, labels=(), label=None):
+    """Evaluate the coverage job's `if:` for one event, by translating its few operators to Python."""
+    doc, _ = workflow_on('ci.yml')
+    expr = ' '.join(str(doc['jobs']['coverage']['if']).split())
+    expr = expr.replace("contains(github.event.pull_request.labels.*.name, 'coverage')", "('coverage' in labels)")
+    expr = expr.replace('github.event_name', 'event_name').replace('github.event.action', 'action')
+    expr = expr.replace('github.event.label.name', 'label').replace('&&', ' and ').replace('||', ' or ')
+    assert not re.search(r'github\.|contains\(', expr), expr
+    return eval(expr, {}, dict(event_name=event_name, action=action, labels=list(labels), label=label))
+
+
+class CiSplit(unittest.TestCase):
+    def test_coverage_not_on_plain_pr(self):
+        self.assertFalse(coverage_if('pull_request', 'opened'))
+        self.assertFalse(coverage_if('pull_request', 'synchronize', labels=['other']))
+        self.assertFalse(coverage_if('pull_request', 'labeled', labels=['other'], label='other'))
+        self.assertTrue(coverage_if('pull_request', 'synchronize', labels=['coverage']))
+        self.assertTrue(coverage_if('pull_request', 'labeled', labels=['coverage'], label='coverage'))
+        self.assertFalse(coverage_if('pull_request', 'labeled', labels=['coverage', 'other'], label='other'))
+        for event in ('push', 'schedule', 'workflow_dispatch'):
+            self.assertTrue(coverage_if(event))
+
+    def test_coverage_runs_nightly_at_0300_utc(self):
+        doc, on = workflow_on('ci.yml')
+        self.assertEqual(on['schedule'], [{'cron': '0 3 * * *'}])
+        self.assertEqual(on['push']['branches'], ['main'])
+        self.assertIn('labeled', on['pull_request']['types'])
+
+    def test_nightly_failure_opens_an_issue_with_the_job_token_only(self):
+        doc, _ = workflow_on('ci.yml')
+        job = doc['jobs']['coverage']
+        self.assertIs(job['continue-on-error'], True)
+        self.assertEqual(job['permissions'], {'contents': 'read', 'issues': 'write'})
+        step = job['steps'][-1]
+        self.assertEqual(step['if'], "failure() && github.event_name == 'schedule'")
+        self.assertEqual(step['env']['GH_TOKEN'], '${{ github.token }}')
+        self.assertIn('nightly coverage failed $SHA', step['run'])
+        self.assertNotIn('secrets.', (ROOT / '.github/workflows/ci.yml').read_text())
+        for name, other in doc['jobs'].items():
+            if name != 'coverage':
+                self.assertNotIn('issues', other.get('permissions') or {}, name)
+        self.assertEqual(doc['permissions'], {})
+
+    def test_label_and_nightly_events_skip_the_pr_jobs(self):
+        doc, _ = workflow_on('ci.yml')
+        for name in ('fast', 'policy-tests', 'required'):
+            self.assertIn("github.event_name != 'schedule'", doc['jobs'][name]['if'], name)
+            self.assertIn("github.event.action != 'labeled'", doc['jobs'][name]['if'], name)
+
+    def test_platform_pr_paths(self):
+        doc, on = workflow_on('platform.yml')
+        # `pio*` matches the file only; `pio/**` and `**/windows/**` cover the directories that exist.
+        self.assertEqual(on['pull_request']['paths'], [
+            'crates/rdy-store/src/pio*', 'crates/rdy-store/src/pio/**', 'crates/rdy-daemon/src/sys/**',
+            '**/windows*', '**/windows/**', '.github/workflows/platform.yml', 'scripts/release/**'])
+        self.assertNotIn('paths', on['push'])
+        self.assertNotIn('paths-ignore', on['push'])
+        self.assertEqual(on['push']['branches'], ['main'])
+        for path in ('crates/rdy-store/src/pio.rs', 'crates/rdy-store/src/pio', 'crates/rdy-daemon/src/sys',
+                     'scripts/release'):
+            self.assertTrue((ROOT / path).exists(), path)
+
+
 if __name__ == '__main__':
     unittest.main()

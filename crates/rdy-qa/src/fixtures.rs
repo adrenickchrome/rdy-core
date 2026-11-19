@@ -305,11 +305,16 @@ fn rdy_bin_in(exe: &std::path::Path) -> PathBuf {
 
 /// The `rdy` binary: `$RDY_BIN`, else the `rdy` of the profile this binary was built in: a test
 /// runs from `target/<profile>/deps/`, a qa binary (`qa-perf`) from `target/<profile>/`.
-pub fn rdy_bin() -> PathBuf {
+pub fn rdy_bin_path_unchecked() -> PathBuf {
     if let Ok(p) = std::env::var("RDY_BIN") {
         return PathBuf::from(p);
     }
-    let bin = rdy_bin_in(&std::env::current_exe().expect("current exe"));
+    rdy_bin_in(&std::env::current_exe().expect("current exe"))
+}
+
+/// [`rdy_bin_path_unchecked`], which must exist.
+pub fn rdy_bin() -> PathBuf {
+    let bin = rdy_bin_path_unchecked();
     assert!(
         bin.exists(),
         "{} not found: run `cargo build --release -p rdy-cli` first (cargo qa does this) or set RDY_BIN",

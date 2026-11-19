@@ -185,8 +185,53 @@ pub fn build_view_entry_for_tests(
         &st.reader,
         &st.pack,
         st.canon_for(&entry).map(|b| &**b),
+        st.near_for(&entry).map(|b| &**b),
         &entry,
         Some(merged),
     )?;
     Ok((built.m, built.conflicts))
+}
+
+/// Test hook: scope `scope` of `st` built afresh from the store, with no canon build to share
+/// blocks with or to carry a graph or lexicon from, and its graph and lexicon built from its own
+/// blocks. A scope that `st` derives from canon must equal it. Not for the in-flight scope.
+#[doc(hidden)]
+pub fn rebuilt_scope_for_tests(
+    st: &crate::ReadState,
+    scope: &crate::Scope,
+) -> Result<
+    (
+        std::sync::Arc<crate::Materialized>,
+        rdy_graph::Graph,
+        crate::lexicon::Lexicon,
+    ),
+    crate::RdyError,
+> {
+    use crate::Scope;
+    use crate::read_state::Entry;
+    use std::sync::Arc;
+    let floating = |name: &str| st.views.get(name).is_none_or(|e| e.floats());
+    let entry = match scope {
+        Scope::Canon => Entry::new(None, st.canon_head, None, Arc::new(vec![])),
+        Scope::View(v) if floating(v) => Entry::new(None, st.canon_head, None, Arc::new(vec![])),
+        Scope::View(v) => {
+            let e = &st.views[v];
+            Entry::new(
+                e.name.clone(),
+                e.base,
+                e.head.clone(),
+                Arc::clone(&e.included),
+            )
+        }
+        Scope::At(h) => Entry::new(None, Some(*h), None, Arc::new(vec![])),
+        Scope::Proposal(v) => {
+            let p = crate::read_state::proposal_version_in(&st.reader, v)?;
+            Entry::new(None, p.canon_at, None, Arc::new(p.changes))
+        }
+        Scope::Inflight => panic!("the in-flight scope is not rebuilt here"),
+    };
+    let built = crate::read_state::build_entry(&st.reader, &st.pack, None, None, &entry, None)?;
+    let graph = rdy_graph::Graph::build_with(built.m.iter(), Arc::clone(st.reader.tracking()));
+    let lexicon = crate::lexicon::Lexicon::build(&st.pack, built.m.iter());
+    Ok((built.m, graph, lexicon))
 }
