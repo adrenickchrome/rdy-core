@@ -77,6 +77,12 @@ pub struct Shared {
     /// The full listener's MCP layer's transport counts, once it is made.
     mcp_transports: OnceLock<TransportStats>,
     session_end: Mutex<Vec<SessionEndHook>>,
+    /// The notifier and site worker threads. Each holds a strong `Shared` while it handles a
+    /// message, so the shutdown joins them: when it returns, none holds the published state.
+    helpers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Test hook: run by the notifier for each message, while it holds a strong `Shared`.
+    #[cfg(test)]
+    pub(crate) in_notifier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
     pub(crate) after_reload: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -115,8 +121,9 @@ impl Shared {
         let sh = Arc::new_cyclic(|weak| {
             // the notifier ends when its queue's sender, held here, is dropped with the last
             // `Shared`
-            drop(spawn_notifier(weak.clone(), queue));
+            let notifier = spawn_notifier(weak.clone(), queue);
             Shared {
+                helpers: Mutex::new(vec![notifier]),
                 state,
                 open_report,
                 root,
@@ -143,6 +150,8 @@ impl Shared {
                     Box::new(move |id: SessionId| leaving.disconnect(id.0)),
                 ]),
                 #[cfg(test)]
+                in_notifier: Mutex::new(None),
+                #[cfg(test)]
                 after_reload: Mutex::new(None),
                 #[cfg(test)]
                 before_reload_store: Mutex::new(None),
@@ -156,7 +165,8 @@ impl Shared {
         });
         // the site worker ends on `LiveSite::close` (the shutdown) or with the last `Shared`.
         // It starts once `sh` lives: inside `new_cyclic` it could see no `Shared` yet and end.
-        drop(spawn_site_worker(Arc::downgrade(&sh), Arc::clone(&sh.site)));
+        let worker = spawn_site_worker(Arc::downgrade(&sh), Arc::clone(&sh.site));
+        sh.helpers_lock().push(worker);
         sh
     }
 
@@ -237,11 +247,27 @@ impl Shared {
         self.session_end.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn helpers_lock(&self) -> MutexGuard<'_, Vec<std::thread::JoinHandle<()>>> {
+        self.helpers.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Stops the site worker and ends every open page's stream, then stops the writer: the last
-    /// state is published and the store is closed.
+    /// state is published and the store is closed. The notifier and the site worker are then
+    /// joined: each may hold a strong `Shared`, and so the published state, while it handles a
+    /// message, so the store is free to reopen once the last `Shared` of the caller is dropped.
     pub fn shutdown(&self) -> Result<(), RdyError> {
         self.site.close();
-        self.writer.shutdown()
+        let out = self.writer.shutdown();
+        let _ = self.notify.send(NotifyMsg::Stop);
+        let me = std::thread::current().id();
+        let helpers = std::mem::take(&mut *self.helpers_lock());
+        for h in helpers {
+            // a helper that ends the daemon from its own thread cannot join itself
+            if h.thread().id() != me {
+                let _ = h.join();
+            }
+        }
+        out
     }
 }
 
