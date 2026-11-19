@@ -242,6 +242,7 @@ fn ls5_a_proposal_version_holds_still_and_its_latest_follows() {
     let bl = review(&sh, &latest, "index.html");
     let mut s1 = review_sub(&sh, &v1, "index.html", &b1);
     let mut sl = review_sub(&sh, &latest, "index.html", &bl);
+    let renders = sh.site.page_renders();
     let p2 = on_writer(&sh, |r| {
         // the first prose: the home page shows it
         edit_prose(r, "draft", "Beta", 0, "Beta drafted first.", false);
@@ -251,7 +252,10 @@ fn ls5_a_proposal_version_holds_still_and_its_latest_follows() {
         p2["ref"].as_str().unwrap().ends_with("@2"),
         "guard: version 2: {p2}"
     );
-    let renders = sh.site.page_renders();
+    // the worker may render the latest alias's open page before or after the reads below: its
+    // reload is the fan-out of the new state, so the one render is counted from before the
+    // propose, and the reads follow the reload
+    assert_eq!(sl.rx.blocking_recv(), Some(LiveEvent::Reload));
     review(&sh, &v1, "index.html");
     review(&sh, &latest, "index.html");
     assert_eq!(
@@ -260,7 +264,7 @@ fn ls5_a_proposal_version_holds_still_and_its_latest_follows() {
         "only the latest alias's open page rendered"
     );
     assert!(empty(&mut s1), "a proposal version never changes");
-    assert_eq!(sl.rx.try_recv(), Ok(LiveEvent::Reload));
+    assert!(empty(&mut sl), "one reload");
 }
 
 #[test]
