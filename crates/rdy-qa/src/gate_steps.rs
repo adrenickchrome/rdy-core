@@ -497,6 +497,214 @@ pub fn cargo(args: &[&str]) -> Command {
     c
 }
 
+/// The area binaries that run alone: no other area runs while one of them runs. Each one's tests
+/// load the machine in a way that slows a neighbour's timing-sensitive tests or is slowed by it:
+/// - `cli`: most files start the release `rdy` binary or a daemon, with waits on its endpoint;
+/// - `daemon`: nearly every file starts a daemon and times its endpoints, stops and restarts;
+/// - `io`: crash, fsync and reindex runs, and follower and migration child processes;
+/// - `mcp`: most files start a daemon or the HTTP MCP surface, with the largest payloads;
+/// - `release`: runs Cargo itself, packages and installs the release binary;
+/// - `store`: crash, reopen and fsync runs over many stores (disk-heavy);
+/// - `swarm`: many concurrent agents against one store, with kills and restarts.
+pub const SERIAL_AREAS: &[&str] = &["cli", "daemon", "io", "mcp", "release", "store", "swarm"];
+
+/// The area binaries launched directly when [`DIRECT_AREAS_VAR`] is not set: the pilot.
+pub const PILOT_AREAS: &[&str] = &["model", "schema"];
+
+/// Names the area binaries the gate launches directly: `all`, `none`, or a comma list. Unset, it
+/// is [`PILOT_AREAS`]. Every other area runs through `cargo test`, alone, as before.
+pub const DIRECT_AREAS_VAR: &str = "RDY_QA_DIRECT_AREAS";
+
+/// The area binaries of `files` to launch directly, for the value of [`DIRECT_AREAS_VAR`].
+pub fn direct_areas(value: Option<&str>, files: &[String]) -> BTreeSet<String> {
+    let chosen: Vec<&str> = match value.map(str::trim) {
+        None => PILOT_AREAS.to_vec(),
+        Some("all") => files.iter().map(String::as_str).collect(),
+        Some(v) => v.split(',').map(str::trim).collect(),
+    };
+    files
+        .iter()
+        .filter(|f| chosen.contains(&f.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// How many area binaries run at once on a machine with `cpus` threads: a quarter of them, from
+/// 1 to 4. Each binary already runs its tests on every thread.
+pub fn area_jobs(cpus: usize) -> usize {
+    (cpus / 4).clamp(1, 4)
+}
+
+/// Runs `run` on every item. The items for which `alone` is false share up to `jobs` workers;
+/// after them, each item for which `alone` is true runs by itself, so it never overlaps another.
+/// The results come back in the order of `items`.
+pub fn run_areas<T: Sync, R: Send>(
+    items: &[T],
+    alone: impl Fn(&T) -> bool,
+    jobs: usize,
+    run: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let shared: Vec<usize> = (0..items.len()).filter(|&i| !alone(&items[i])).collect();
+    let next = AtomicUsize::new(0);
+    let done: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(items.len()));
+    std::thread::scope(|s| {
+        for _ in 0..jobs.max(1).min(shared.len()) {
+            s.spawn(|| {
+                while let Some(&i) = shared.get(next.fetch_add(1, Ordering::SeqCst)) {
+                    let r = run(&items[i]);
+                    done.lock().unwrap_or_else(|p| p.into_inner()).push((i, r));
+                }
+            });
+        }
+    });
+    let mut results: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    for (i, r) in done.into_inner().unwrap_or_else(|p| p.into_inner()) {
+        results[i] = Some(r);
+    }
+    for (i, item) in items.iter().enumerate() {
+        if alone(item) {
+            results[i] = Some(run(item));
+        }
+    }
+    results
+        .into_iter()
+        .map(|r| r.expect("every item ran"))
+        .collect()
+}
+
+/// The working directory and the whole environment that `cargo test` gives an `rdy-qa` test
+/// binary. Cargo gives every test target of a package the same ones.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AreaEnv {
+    pub cwd: PathBuf,
+    pub vars: BTreeMap<String, String>,
+}
+
+/// One area binary run by [`launch_area`].
+#[derive(Clone, Debug)]
+pub struct AreaRun {
+    pub out: ChildOutput,
+    pub elapsed: Duration,
+}
+
+/// The command that starts the test binary `bin` with `args`, in `env`'s working directory, with
+/// `env`'s variables and no others.
+pub fn area_command(bin: &Path, env: &AreaEnv, args: &[&str]) -> Command {
+    let mut c = Command::new(bin);
+    c.args(args)
+        .current_dir(&env.cwd)
+        .env_clear()
+        .envs(&env.vars);
+    c
+}
+
+/// Starts the test binary `bin` directly, as `cargo test` would ([`area_command`]), for the stage
+/// `stage` under `deadline` ([`run_stage`]).
+pub fn launch_area(
+    bin: &Path,
+    env: &AreaEnv,
+    args: &[&str],
+    stage: &str,
+    deadline: Duration,
+) -> AreaRun {
+    let start = Instant::now();
+    let out = run_stage(stage, area_command(bin, env, args), deadline);
+    AreaRun {
+        out,
+        elapsed: start.elapsed(),
+    }
+}
+
+/// Names the file the env probe test writes its record to.
+pub const ENV_PROBE_VAR: &str = "RDY_QA_ENV_PROBE";
+/// The area binary that holds the env probe test.
+pub const ENV_PROBE_BINARY: &str = "model";
+/// The env probe test's full name in [`ENV_PROBE_BINARY`].
+pub const ENV_PROBE_TEST: &str = "env_probe::env_probe_dump";
+
+/// The env probe's record of this process: its working directory and every variable, as JSON.
+/// A name or value that is not UTF-8 makes it an error record.
+pub fn env_probe_record() -> String {
+    let record = (|| {
+        let cwd = std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?;
+        let cwd = cwd
+            .to_str()
+            .ok_or("the working directory is not UTF-8")?
+            .to_string();
+        let mut vars = serde_json::Map::new();
+        for (k, v) in std::env::vars_os() {
+            let (Some(k), Some(v)) = (k.to_str(), v.to_str()) else {
+                return Err(format!("the variable {k:?} is not UTF-8"));
+            };
+            vars.insert(k.to_string(), v.into());
+        }
+        Ok(serde_json::json!({ "cwd": cwd, "vars": vars }))
+    })();
+    match record {
+        Ok(v) => v.to_string(),
+        Err(e) => serde_json::json!({ "error": e }).to_string(),
+    }
+}
+
+/// The [`AreaEnv`] in an env probe record, without [`ENV_PROBE_VAR`].
+pub fn parse_env_probe(text: &str) -> Result<AreaEnv, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("env probe record: {e}"))?;
+    if let Some(e) = v["error"].as_str() {
+        return Err(format!("env probe: {e}"));
+    }
+    let cwd = v["cwd"].as_str().ok_or("env probe record has no cwd")?;
+    let mut vars = BTreeMap::new();
+    for (k, val) in v["vars"]
+        .as_object()
+        .ok_or("env probe record has no vars")?
+    {
+        let val = val.as_str().ok_or("env probe value is not a string")?;
+        vars.insert(k.clone(), val.to_string());
+    }
+    vars.remove(ENV_PROBE_VAR);
+    Ok(AreaEnv {
+        cwd: PathBuf::from(cwd),
+        vars,
+    })
+}
+
+/// The `cargo test` arguments that run the env probe test alone.
+pub const ENV_PROBE_ARGS: [&str; 9] = [
+    "test",
+    "-p",
+    "rdy-qa",
+    "--release",
+    "--test",
+    ENV_PROBE_BINARY,
+    "--",
+    ENV_PROBE_TEST,
+    "--exact",
+];
+
+/// Asks Cargo for the environment it gives an `rdy-qa` test binary: runs the env probe test
+/// through `run` (the command in, its output back; the caller sets the working directory) and
+/// reads its record.
+pub fn capture_area_env(run: impl FnOnce(Command) -> ChildOutput) -> Result<AreaEnv, String> {
+    let dir = tempfile::tempdir().map_err(|e| format!("env probe: {e}"))?;
+    let file = dir.path().join("env.json");
+    let mut c = cargo(&ENV_PROBE_ARGS);
+    c.env(ENV_PROBE_VAR, &file);
+    let out = run(c);
+    if !out.ok {
+        return Err(format!(
+            "env probe exited with {}: {}",
+            out.status_text(),
+            report::tail(&out.combined(), 5)
+        ));
+    }
+    let text = std::fs::read_to_string(&file)
+        .map_err(|e| format!("env probe wrote no record ({e}): no test matched?"))?;
+    parse_env_probe(&text)
+}
+
 pub fn fail_tail(ok: bool, out: &str) -> String {
     if ok {
         String::new()

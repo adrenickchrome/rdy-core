@@ -962,6 +962,7 @@ fn plx2_a_failed_child_reaches_the_report_once_with_its_cause() {
         notes: vec![],
         guarded: Default::default(),
         os_excluded: Default::default(),
+        timing: Default::default(),
     };
     let md = report::markdown(&r);
     assert_eq!(md.matches(&format!("- `{probe}`")).count(), 1, "{md}");
