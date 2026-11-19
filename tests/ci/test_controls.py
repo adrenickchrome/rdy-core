@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,12 +20,54 @@ import urllib.error
 import urllib.request
 import urllib.response
 
+import yaml  # test-only, hash-pinned in tests/ci/requirements-release-producers.txt
+
 try:
     import tomllib
 except ImportError:  # Python before 3.11; CI runs 3.13
     tomllib = None
 
 ROOT = Path(__file__).resolve().parents[2]
+WORKFLOWS = ROOT / '.github/workflows'
+FIXTURES = Path(__file__).resolve().parent / 'fixtures'
+
+
+def workflow(name):
+    """A workflow parsed with a YAML loader, so tests see policy and not layout."""
+    return yaml.safe_load((WORKFLOWS / name).read_text())
+
+
+def triggers(doc):
+    """The `on:` block (PyYAML reads the key `on` as True)."""
+    return doc.get('on', doc.get(True))
+
+
+def steps_of(doc, job=None):
+    jobs = doc['jobs'].values() if job is None else [doc['jobs'][job]]
+    return [step for entry in jobs for step in entry.get('steps', [])]
+
+
+def step_named(doc, name):
+    found = [step for step in steps_of(doc) if step.get('name') == name]
+    assert len(found) == 1, (name, len(found))
+    return found[0]
+
+
+def uses_steps(doc, action):
+    return [step for step in steps_of(doc) if str(step.get('uses', '')).startswith(action + '@')]
+
+
+def command_lines(step):
+    """The commands of a `run:` step, without blank lines and comments."""
+    return [line.strip() for line in step['run'].splitlines()
+            if line.strip() and not line.strip().startswith('#')]
+
+
+def glob_matches(pattern, path):
+    """GitHub path-filter globs: `*` stays inside one folder, `**` crosses folders."""
+    regex = re.sub(r'\\\*\\\*', '.*', re.escape(pattern))
+    regex = regex.replace('\\*', '[^/]*')
+    return re.fullmatch(regex, path) is not None
 
 
 def load(name):
@@ -865,7 +908,6 @@ class ToolDownload(unittest.TestCase):
 
 
 
-CI_WORKFLOW = (ROOT / '.github/workflows/ci.yml').read_text()
 PROFILE_ROOT = 'target/llvm-cov-target'
 CORRUPT_HEADER = 'error: {p}: invalid instrumentation profile data (file header is corrupt)\n'
 # The stub llvm-profdata reads the part of a profile before the first "|" as its behaviour.
@@ -912,23 +954,25 @@ case "$*" in *--html*) kind=html;; *--json*) kind=json;; *) kind=summary; echo s
 [ "$kind" = "$CARGO_FAIL" ] && exit 7
 exit 0
 """
-# The Reports step as it stands in ci.yml: the first run line, the unchanged chmod explanation and
-# command, the one new call, then the three report commands in their order.
-RUN_START = ('      - name: Reports\n        if: always()\n        run: |\n'
-             '          set -euo pipefail\n')
-CHMOD_BLOCK = (
-    '          # The config_edit test hsa2_new_directories_are_0700_or_not_made_at_all runs its own\n'
-    '          # instrumented binary under umasks 477 and 700 on purpose. The profile runtime makes each\n'
-    '          # .profraw 0666 less the umask, so those profiles are whole but 0200 or 0066, and\n'
-    '          # llvm-profdata crashes (SIGILL) on a file it cannot open. Give the owner read back: the\n'
-    '          # data is kept, and any other merge error still fails this step.\n'
-    "          find target/llvm-cov-target -name '*.profraw' ! -perm -u=r -print -exec chmod u+r {} +\n")
-CHMOD_COMMAND = CHMOD_BLOCK.splitlines()[-1].strip()
-PRECHECK_LINE = '          python3 scripts/ci/set_aside_profiles.py\n'
-REPORT_LINES = ('          cargo llvm-cov report --summary-only | tee coverage-summary.txt\n'
-                '          cargo llvm-cov report --html --output-dir coverage-html\n'
-                '          cargo llvm-cov report --json --summary-only --output-path coverage-summary.json\n')
-REPORT_SCRIPT = ''.join(line.strip() + '\n' for line in REPORT_LINES.splitlines(True))
+
+
+def reports_step():
+    """The coverage job's Reports step, parsed from ci.yml."""
+    return step_named(workflow('ci.yml'), 'Reports')
+
+
+def reports_commands():
+    """(owner-read fix, profile precheck, report commands), each read from the step itself."""
+    lines = command_lines(reports_step())
+    fixes = [line for line in lines if line.startswith('find ') and '*.profraw' in line]
+    prechecks = [line for line in lines if 'scripts/ci/set_aside_profiles.py' in line]
+    reports = [line for line in lines if line.startswith('cargo llvm-cov report')]
+    assert len(fixes) == 1 and len(prechecks) == 1 and len(reports) == 3, lines
+    return fixes[0], prechecks[0], reports
+
+
+def report_script():
+    return ''.join(line + '\n' for line in reports_commands()[2])
 
 
 class plz5_CoverageProfiles(unittest.TestCase):
@@ -973,7 +1017,7 @@ class plz5_CoverageProfiles(unittest.TestCase):
 
     def run_reports(self, fail=''):
         env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'], CARGO_FAIL=fail)
-        return subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', REPORT_SCRIPT], env=env,
+        return subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', report_script()], env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir)
 
     def checked_paths(self):
@@ -1065,11 +1109,9 @@ class plz5_CoverageProfiles(unittest.TestCase):
         self.assertEqual(self.cargo_calls(), self.expected_calls(3))
 
     def test_owner_read_fix_keeps_valid_profiles(self):
-        self.assertIn(CHMOD_BLOCK, CI_WORKFLOW)
-        self.assertIn(RUN_START + CHMOD_BLOCK + PRECHECK_LINE + REPORT_LINES, CI_WORKFLOW)
         write_only = self.profile('w.profraw', b'good|valid', 0o200)
         group_other = self.profile('d/g.profraw', b'good|valid', 0o066)
-        chmod = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', CHMOD_COMMAND],
+        chmod = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', reports_commands()[0]],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir)
         self.assertEqual(chmod.returncode, 0, chmod.stderr)
         result = self.check_then_report()
@@ -1251,49 +1293,168 @@ class plz5_CoverageProfiles(unittest.TestCase):
         self.assertEqual(self.cargo_calls(), self.expected_calls(1))
 
 
+class ReportsStepPolicy(unittest.TestCase):
+    """What the coverage Reports step must do, read from the parsed workflow."""
+
+    def test_reports_run_after_failed_tests_and_stop_at_the_first_error(self):
+        step = reports_step()
+        self.assertEqual(step['if'], 'always()')
+        self.assertEqual(command_lines(step)[0], 'set -euo pipefail')
+
+    def test_owner_read_fix_then_precheck_then_every_report(self):
+        fix, precheck, reports = reports_commands()
+        lines = command_lines(reports_step())
+        self.assertLess(lines.index(fix), lines.index(precheck))
+        for report in reports:
+            self.assertLess(lines.index(precheck), lines.index(report))
+        self.assertIn('target/llvm-cov-target', fix)
+        self.assertIn('chmod u+r', fix)
+        self.assertEqual(precheck, 'python3 scripts/ci/set_aside_profiles.py')
+
+    def test_reports_are_uploaded_even_when_the_job_failed(self):
+        doc = workflow('ci.yml')
+        steps = steps_of(doc, 'coverage')
+        upload = steps[steps.index(reports_step()) + 1]
+        self.assertTrue(upload['uses'].startswith('actions/upload-artifact@'))
+        self.assertEqual(upload['if'], 'always()')
+        self.assertEqual(sorted(upload['with']['path'].split()),
+                         ['coverage-html', 'coverage-summary.json', 'coverage-summary.txt'])
+
+
+@unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0,
+                 'root reads any file; the owner-read fix is for a standard account')
+class ReportsStepStandardAccount(unittest.TestCase):
+    """The real Reports step, from ci.yml, run in a bash under the current standard account.
+
+    Only llvm-profdata, rustc and cargo are stand-ins. Everything else runs for real: bash, find,
+    chmod, python3 and scripts/ci/set_aside_profiles.py, on files with real modes.
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.dir = Path(temp.name).resolve()
+        self.repo = self.dir / 'repo'
+        (self.repo / 'scripts/ci').mkdir(parents=True)
+        shutil.copy(ROOT / 'scripts/ci/set_aside_profiles.py', self.repo / 'scripts/ci')
+        self.root = self.repo / PROFILE_ROOT
+        self.root.mkdir(parents=True)
+        self.work = self.dir / 'runner-temp'
+        self.work.mkdir()
+        self.summary = self.dir / 'summary.md'
+        self.bin = self.dir / 'bin'
+        self.bin.mkdir()
+        sysroot = self.dir / 'sysroot'
+        profdata = sysroot / 'lib/rustlib/stub-host/bin/llvm-profdata'
+        profdata.parent.mkdir(parents=True)
+        profdata.write_text(STUB_SOURCE.format(exe=sys.executable, table=json.dumps(STUB_TABLE)))
+        profdata.chmod(0o755)
+        shutil.copy(FIXTURES / 'coverage_stubs/rustc', self.bin / 'rustc')
+        (self.bin / 'cargo').write_text(CARGO_STUB)
+        (self.bin / 'cargo').chmod(0o755)
+        self.cargo_log = self.dir / 'cargo.log'
+        self.stub_log = self.dir / 'stub.log'
+        self.env = dict(
+            os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'], RUNNER_TEMP=str(self.work),
+            GITHUB_STEP_SUMMARY=str(self.summary), STUB_SYSROOT=str(sysroot), STUB_LOG=str(self.stub_log),
+            CARGO_LOG=str(self.cargo_log), CARGO_FAIL='')
+
+    def profile(self, relative, content, mode):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        path.chmod(mode)
+        return path
+
+    def run_step(self, script=None, **env):
+        script = reports_step()['run'] if script is None else script
+        return subprocess.run(['bash', '-c', script], cwd=self.repo, env=dict(self.env, **env),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def cargo_calls(self):
+        return self.cargo_log.read_text().splitlines() if self.cargo_log.exists() else []
+
+    def test_restricted_valid_profiles_survive_and_a_corrupt_one_is_set_aside(self):
+        write_only = self.profile('w.profraw', b'good|1', 0o200)
+        group_other = self.profile('d/g.profraw', b'good|2', 0o066)
+        plain = self.profile('p.profraw', b'good|3', 0o600)
+        empty = self.profile('e.profraw', b'', 0o600)
+        corrupt = self.profile('c.profraw', b'corrupt|4', 0o600)
+        done = self.run_step()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for path, content in ((write_only, b'good|1'), (group_other, b'good|2'), (plain, b'good|3')):
+            self.assertEqual(path.read_bytes(), content)
+        self.assertTrue(empty.exists())
+        self.assertFalse(corrupt.exists())
+        self.assertEqual(len(list(self.work.glob('rdy-profraw.*/rejected/c.profraw'))), 1)
+        self.assertIn('set aside corrupt-header profile', done.stdout)
+        self.assertEqual(len(self.cargo_calls()), 3)
+        self.assertIn('## Coverage', self.summary.read_text())
+
+    def test_without_the_owner_read_fix_a_restricted_profile_stops_the_step(self):
+        self.profile('w.profraw', b'good|1', 0o200)
+        fix = reports_commands()[0]
+        script = '\n'.join(line for line in reports_step()['run'].splitlines() if line.strip() != fix)
+        self.assertNotEqual(script, reports_step()['run'])
+        done = self.run_step(script)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(self.cargo_calls(), [])
+
+    def test_other_check_errors_and_report_errors_fail_the_step(self):
+        self.profile('bad.profraw', b'body|1', 0o600)
+        done = self.run_step()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(self.cargo_calls(), [])
+        (self.root / 'bad.profraw').unlink()
+        self.profile('ok.profraw', b'good|1', 0o200)
+        for fail, calls in (('summary', 1), ('html', 2), ('json', 3)):
+            with self.subTest(fail=fail):
+                self.cargo_log.unlink(missing_ok=True)
+                done = self.run_step(CARGO_FAIL=fail)
+                self.assertEqual(done.returncode, 7)
+                self.assertEqual(len(self.cargo_calls()), calls)
+
+
 class CodeqlConfig(unittest.TestCase):
+    CONFIG = ROOT / '.github/codeql/codeql-config.yml'
+
+    def config(self):
+        return yaml.safe_load(self.CONFIG.read_text())
+
     def ignored(self):
-        lines = (ROOT / '.github/codeql/codeql-config.yml').read_text().splitlines()
-        paths, active = [], False
-        for line in lines:
-            if line.startswith('#') or not line.strip():
-                continue
-            if not line.startswith((' ', '-')):
-                active = line.strip() == 'paths-ignore:'
-            elif active:
-                match = re.fullmatch(r'\s*-\s*(.+?)\s*', line)
-                self.assertIsNotNone(match, line)
-                paths.append(match.group(1).strip('\'"'))
-        return paths
+        return self.config()['paths-ignore']
 
     def test_codeql_ignores_exactly_the_tests_folders(self):
         self.assertEqual(self.ignored(), ['crates/*/tests/**'])
+        crates = sorted(path.name for path in (ROOT / 'crates').iterdir() if path.is_dir())
+        self.assertTrue(crates)
+        for crate in crates:
+            self.assertTrue(any(glob_matches(g, f'crates/{crate}/tests/a/b.rs') for g in self.ignored()), crate)
 
     def test_codeql_never_ignores_src(self):
-        for path in self.ignored():
-            self.assertNotIn('src', path.split('/'))
-        text = (ROOT / '.github/codeql/codeql-config.yml').read_text()
-        self.assertNotIn('paths:', text.replace('paths-ignore:', ''))
+        crates = sorted(path.name for path in (ROOT / 'crates').iterdir() if path.is_dir())
+        for crate in crates:
+            for path in (f'crates/{crate}/src/lib.rs', f'crates/{crate}/src/tests/mod.rs',
+                         f'crates/{crate}/build.rs'):
+                self.assertFalse(any(glob_matches(g, path) for g in self.ignored()), path)
+        # no `paths:` allow-list narrows the scan to a subset of the product code
+        self.assertNotIn('paths', self.config())
 
     def test_security_workflow_codeql_init_uses_the_config(self):
-        text = (ROOT / '.github/workflows/security.yml').read_text()
-        init = re.search(r'github/codeql-action/init@[^\n]*\n((?:        .*\n)+)', text)
-        self.assertIsNotNone(init)
-        self.assertIn('config-file: ./.github/codeql/codeql-config.yml', init.group(1))
+        inits = uses_steps(workflow('security.yml'), 'github/codeql-action/init')
+        self.assertEqual(len(inits), 1)
+        config_file = ROOT / inits[0]['with']['config-file']
+        self.assertEqual(config_file.resolve(), self.CONFIG.resolve())
 
 
-class WindowsPlatformMatrix(unittest.TestCase):
-    def workflow(self):
-        return (ROOT / '.github/workflows/platform.yml').read_text()
+class WindowsScriptPolicy(unittest.TestCase):
+    """Source checks for the Windows gate scripts.
+
+    These stay as source checks: the scripts need Windows, and pwsh is not available on the
+    machines that run these tests. The workflow side of each rule is in PlatformWorkflowPolicy.
+    """
 
     def test_wx34_windows_runs_the_full_fast_gate(self):
-        text = self.workflow()
-        self.assertNotIn('windows-portable', text)
-        self.assertNotIn('-p rdy-model', text)
-        self.assertIn('runner: windows-2025', text)
-        self.assertIn('runner: macos-26', text)
-        windows = text[text.index("runner.os == 'Windows'"):]
-        self.assertIn('shell: pwsh', windows)
         gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
         inner = (ROOT / 'scripts/ci/windows_gate_inner.ps1').read_text()
         self.assertIn('cargo qa --skip-perf --require-all', inner)
@@ -1316,8 +1477,6 @@ class WindowsPlatformMatrix(unittest.TestCase):
                 self.assertNotIn('GITHUB_ENV', line)
                 self.assertNotIn('Out-File', line)
                 self.assertNotIn('Write-Host', line)
-        self.assertIn('windows_gate.ps1', text)
-        self.assertIn('windows_gate_cleanup.ps1', text)
 
     def test_wx34_windows_gate_quotes_paths_with_spaces(self):
         # Start-Process joins ArgumentList without quoting; C:\Program Files\Git must stay one argument
@@ -1362,13 +1521,7 @@ class WindowsPlatformMatrix(unittest.TestCase):
         self.assertLess(probe, inner.index('Remove-Item'))
         self.assertLess(inner.index('Remove-Item'), inner.index('cargo fetch'))
 
-    def test_wx35_platform_runs_upload_the_qa_report(self):
-        text = (ROOT / '.github/workflows/platform.yml').read_text()
-        self.assertEqual(text.count('actions/upload-artifact@'), 2)
-        self.assertIn('path: target/qa/report.*', text)
-        self.assertIn('${{ env.RDY_CI_ROOT }}\\work\\target\\qa\\report.*', text)
-        self.assertIn('${{ env.RDY_CI_ROOT }}\\logs\\gate.*', text)
-        self.assertIn('cat target/qa/report.md', text)
+    def test_windows_report_names_failing_rows(self):
         self.assertIn('| FAIL', (ROOT / 'scripts/ci/windows_report.ps1').read_text())
 
     def test_windows_ci_root_is_on_the_drive_with_most_free_space(self):
@@ -1387,9 +1540,6 @@ class WindowsPlatformMatrix(unittest.TestCase):
             self.assertNotIn('C:\\rdy-ci', text, path)
             self.assertNotIn('C:/rdy-ci', text, path)
         self.assertEqual(gate.count("'rdy-ci'"), 2)
-        platform = self.workflow()
-        self.assertIn('-Report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.md"', platform)
-        self.assertIn("$work = Join-Path $env:RDY_CI_ROOT 'work'", platform)
 
     def test_windows_ci_root_acl_does_not_depend_on_the_drive(self):
         # The root's ACL is set, not inherited from whichever drive holds it: the account, the
@@ -1451,31 +1601,7 @@ class WindowsPlatformMatrix(unittest.TestCase):
             self.assertIn(word, report)
         self.assertTrue(report.rstrip().endswith('exit 0'))
 
-    def test_platform_time_limits_fit_the_full_gate(self):
-        # Run f17ab534: the Windows gate was still in the rdy-qa areas when the 90-minute limit
-        # cancelled it; macOS needs 70 to 80 minutes. Both jobs stay advisory.
-        text = self.workflow()
-        self.assertIn('    continue-on-error: true\n', text)
-        self.assertIn('    timeout-minutes: ${{ matrix.timeout }}\n', text)
-        limits = dict(re.findall(r'label: (.+)\n\s+timeout: (\d+)', text))
-        self.assertEqual(set(limits), {'macOS ARM64', 'Windows Server 2025'})
-        self.assertGreaterEqual(int(limits['macOS ARM64']), 120)
-        self.assertGreaterEqual(int(limits['Windows Server 2025']), 240)
-        self.assertLessEqual(max(map(int, limits.values())), 360)
-
-    def test_wx34_no_arm64_linux_job_is_restored(self):
-        text = self.workflow()
-        for word in ('ubuntu-26.04-arm', 'Linux ARM64', 'aarch64', 'linux-arm'):
-            self.assertNotIn(word, text)
-        self.assertNotIn('ubuntu-26.04-arm', (ROOT / 'scripts/ci/actionlint.yaml').read_text())
-        self.assertNotIn('ubuntu-26.04-arm', text)
-        ci = (ROOT / '.github/workflows/ci.yml').read_text()
-        self.assertIn('runs-on: ubuntu-26.04\n', ci)
-        self.assertIn('cargo qa --skip-perf --require-all', ci)
-        self.assertIn('runner: macos-26', text)
-
     def test_wx34_windows_failures_propagate_and_publish_counts(self):
-        text = self.workflow()
         scripts = [(ROOT / 'scripts/ci' / n).read_text() for n in (
             'windows_gate.ps1', 'windows_gate_inner.ps1', 'windows_gate_cleanup.ps1', 'windows_report.ps1')]
         for script in scripts[:2]:
@@ -1483,30 +1609,129 @@ class WindowsPlatformMatrix(unittest.TestCase):
             self.assertIn('LASTEXITCODE', script)
         self.assertIn('ExitCode', scripts[0])
         self.assertIn('exit $', scripts[1])
-        windows = text[text.index("runner.os == 'Windows'"):]
-        self.assertNotRegex(windows, r'(?m)^\s+run:.*\b(sed|id -u|bash)\b')
-        self.assertIn('windows_report.ps1', text)
         self.assertIn('GITHUB_STEP_SUMMARY', scripts[3])
         self.assertIn('Failing in', scripts[3])
         for word in ('passed', 'failed', 'skipped', 'ignored'):
             self.assertIn(word, scripts[3])
-        # the report is read even when the gate failed, and a failed tracked-file check fails the job
-        report_step = text[text.index('windows_report.ps1') - 400:text.index('windows_report.ps1')]
-        self.assertIn('if: always()', report_step)
-        self.assertIn('git diff --exit-code', text)
-        self.assertIn('continue-on-error: true', text)
-        self.assertIn('permissions: {}', text)
-        self.assertEqual(text.count('persist-credentials: false'), text.count('actions/checkout@'))
-        for line in text.splitlines():
-            if 'uses:' in line:
-                self.assertRegex(line, r'@[0-9a-f]{40}\b')
+
+
+class PlatformWorkflowPolicy(unittest.TestCase):
+    """What .github/workflows/platform.yml must do, read from the parsed workflow."""
+
+    def setUp(self):
+        self.doc = workflow('platform.yml')
+        self.job = self.doc['jobs']['native']
+        self.steps = self.job['steps']
+
+    def on(self, os_name):
+        """The steps that run only on Windows (os_name 'Windows') or only elsewhere ('other')."""
+        mark = "runner.os == 'Windows'" if os_name == 'Windows' else "runner.os != 'Windows'"
+        return [step for step in self.steps if mark in str(step.get('if', ''))]
+
+    def test_matrix_is_native_macos_and_windows_only_with_sufficient_limits(self):
+        # Run f17ab534: the Windows gate was still in the rdy-qa areas when the 90-minute limit
+        # cancelled it; macOS needs 70 to 80 minutes. Both jobs stay advisory.
+        include = self.job['strategy']['matrix']['include']
+        self.assertEqual({entry['runner'] for entry in include}, {'macos-26', 'windows-2025'})
+        self.assertEqual(self.job['runs-on'], '${{ matrix.runner }}')
+        self.assertIs(self.job['strategy']['fail-fast'], False)
+        self.assertEqual(self.job['timeout-minutes'], '${{ matrix.timeout }}')
+        self.assertIs(self.job['continue-on-error'], True)
+        limits = {entry['label']: entry['timeout'] for entry in include}
+        self.assertEqual(set(limits), {'macOS ARM64', 'Windows Server 2025'})
+        self.assertGreaterEqual(limits['macOS ARM64'], 120)
+        self.assertGreaterEqual(limits['Windows Server 2025'], 240)
+        self.assertLessEqual(max(limits.values()), 360)
+
+    def test_no_arm64_linux_job_is_restored(self):
+        everything = json.dumps(self.doc)
+        for word in ('ubuntu-26.04-arm', 'Linux ARM64', 'aarch64', 'linux-arm'):
+            self.assertNotIn(word, everything)
+        labels = yaml.safe_load((ROOT / 'scripts/ci/actionlint.yaml').read_text())['self-hosted-runner']['labels']
+        self.assertEqual(labels, ['ubuntu-26.04'])
+        ci = workflow('ci.yml')
+        self.assertEqual(ci['jobs']['fast']['runs-on'], 'ubuntu-26.04')
+        gate = step_named(ci, 'Fast gate (fmt, clippy, tests; no perf)')
+        self.assertEqual(gate['run'].strip(), 'cargo qa --skip-perf --require-all')
+
+    def test_posix_runs_the_full_fast_gate_without_root(self):
+        gate = step_named(self.doc, 'Fast gate (fmt, clippy, tests; no perf)')
+        self.assertEqual(gate['run'].strip(), 'cargo qa --skip-perf --require-all')
+        self.assertIn(gate, self.on('other'))
+        self.assertIn(step_named(self.doc, 'Not root'), self.on('other'))
+        self.assertNotIn('windows-portable', json.dumps(self.doc))
+        for step in self.steps:
+            self.assertNotIn('-p rdy-model', step.get('run', ''))
+
+    def test_windows_steps_are_pwsh_and_call_the_gate_scripts(self):
+        windows = self.on('Windows')
+        self.assertTrue(windows)
+        for step in windows:
+            if 'run' in step:
+                self.assertEqual(step.get('shell'), 'pwsh', step)
+                self.assertNotRegex(step['run'], r'\b(sed|id -u|bash)\b')
+        runs = ' '.join(step.get('run', '') for step in windows)
+        for script in ('windows_gate.ps1', 'windows_report.ps1', 'windows_gate_cleanup.ps1'):
+            self.assertIn('./scripts/ci/' + script, runs)
+        cleanup = [step for step in windows if 'windows_gate_cleanup.ps1' in step.get('run', '')]
+        self.assertEqual([step['if'] for step in cleanup], ["always() && runner.os == 'Windows'"])
+        report = [step for step in windows if 'windows_report.ps1' in step.get('run', '')]
+        self.assertEqual([step['if'] for step in report], ["always() && runner.os == 'Windows'"])
+        # the root is read from RDY_CI_ROOT, never fixed to a drive
+        self.assertIn('-Report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.md"', report[0]['run'])
+        diff = [step for step in windows if 'diff --exit-code' in step.get('run', '')]
+        self.assertEqual(len(diff), 1)
+        self.assertIn("Join-Path $env:RDY_CI_ROOT 'work'", diff[0]['run'])
+        self.assertIn('exit $LASTEXITCODE', diff[0]['run'])
+        self.assertIn("$ErrorActionPreference = 'Stop'", diff[0]['run'])
+
+    def test_ci_root_is_never_a_fixed_drive_path(self):
+        for path in ('.github/workflows/platform.yml', '.github/workflows/release-candidate.yml'):
+            text = (ROOT / path).read_text()
+            self.assertNotIn('C:\\rdy-ci', text, path)
+            self.assertNotIn('C:/rdy-ci', text, path)
+
+    def test_both_platforms_upload_the_qa_report_even_after_a_failure(self):
+        uploads = uses_steps(self.doc, 'actions/upload-artifact')
+        self.assertEqual(len(uploads), 2)
+        paths = {os_name: [line for upload in uploads if upload in self.on(os_name)
+                           for line in upload['with']['path'].split('\n') if line]
+                 for os_name in ('Windows', 'other')}
+        self.assertEqual(paths['other'], ['target/qa/report.*'])
+        self.assertEqual(paths['Windows'], ['${{ env.RDY_CI_ROOT }}\\work\\target\\qa\\report.*',
+                                            '${{ env.RDY_CI_ROOT }}\\logs\\gate.*'])
+        for upload in uploads:
+            self.assertTrue(upload['if'].startswith('always()'))
+            self.assertEqual(upload['with']['name'], 'qa-report-${{ runner.os }}')
+        failing = step_named(self.doc, 'Failing tests')
+        self.assertIn('cat target/qa/report.md', failing['run'])
+        self.assertTrue(failing['if'].startswith('failure()'))
+
+    def test_failed_tracked_file_check_fails_the_job_and_nothing_else_is_hidden(self):
+        diffs = [step for step in self.steps if 'diff --exit-code' in step.get('run', '')]
+        self.assertEqual(len(diffs), 2)
+        posix = [step for step in diffs if step in self.on('other')]
+        self.assertEqual([step['run'].strip() for step in posix], ['git diff --exit-code'])
+        for step in diffs:
+            self.assertNotIn('continue-on-error', step)
+            self.assertNotIn('|| true', step['run'])
+
+    def test_permissions_credentials_and_pins(self):
+        self.assertEqual(self.doc['permissions'], {})
+        self.assertEqual(self.job['permissions'], {'contents': 'read'})
+        checkouts = uses_steps(self.doc, 'actions/checkout')
+        self.assertTrue(checkouts)
+        for checkout in checkouts:
+            self.assertIs(checkout['with']['persist-credentials'], False)
+        for step in steps_of(self.doc):
+            if 'uses' in step:
+                self.assertRegex(step['uses'], r'@[0-9a-f]{40}$')
 
 
 def workflow_on(name):
     """The parsed `on:` block of a workflow (PyYAML reads the key `on` as True)."""
-    import yaml
-    doc = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())
-    return doc, doc.get('on', doc.get(True))
+    doc = workflow(name)
+    return doc, triggers(doc)
 
 
 def coverage_if(event_name, action=None, labels=(), label=None):

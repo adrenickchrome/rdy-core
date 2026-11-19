@@ -1,0 +1,7 @@
+#!/bin/sh
+# Stand-in for rustc in the Reports step test: it names a sysroot and a host, nothing else.
+case "$*" in
+"--print sysroot") echo "$STUB_SYSROOT" ;;
+"-vV") printf 'rustc 1.99.0\nhost: stub-host\nrelease: 1.99.0\n' ;;
+*) exit 99 ;;
+esac

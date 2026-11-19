@@ -11,6 +11,7 @@ mod gate_asbuilt_plan;
 mod gate_card_assessment;
 mod gate_check_verdicts;
 mod gate_considered_options;
+mod gate_contradicted_ruling;
 mod gate_coverage_lowered;
 mod gate_exceptions;
 mod gate_foreign;
