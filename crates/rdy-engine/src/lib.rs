@@ -147,6 +147,7 @@ pub mod tool_reads;
 pub mod trace;
 pub mod transitions;
 mod tree_io;
+pub mod vector_neighbors;
 pub mod vectors;
 mod version;
 pub mod view_api;

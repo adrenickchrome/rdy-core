@@ -55,6 +55,81 @@ pub(crate) fn takes_part(pack: &Pack, b: &Block) -> bool {
     is_content(pack, b) && pack.class_of(&b.block_type) != TypeClass::Supporting
 }
 
+/// Whether `b`'s type defines entities (it has `defines`).
+fn defines_entity(pack: &Pack, b: &Block) -> bool {
+    pack.block_types
+        .get(&b.block_type)
+        .is_some_and(|t| t.traits.contains(&Trait::Defines))
+}
+
+/// Whether one block is a deterministic neighbor of a fixed source, by the rules of
+/// [`neighbors_in`] and read from local adjacencies only: the two parents and the two blocks'
+/// outgoing ties. It builds no list, counts no visit and never refuses, so a caller that must only
+/// leave deterministic neighbors out (vector advice) does not run a bounded traversal for it.
+pub(crate) struct Relation<'a> {
+    m: &'a Materialized,
+    g: &'a Graph,
+    pack: &'a Pack,
+    source: &'a Block,
+    /// The entities the source is tied to, by a reference, `describes` or `affects`.
+    entities: BTreeSet<&'a BlockId>,
+}
+
+impl<'a> Relation<'a> {
+    /// The relations of `source`. A source that does not take part, has no parent or has no
+    /// containing doc has no neighbor, as in [`neighbors_in`].
+    pub(crate) fn new(
+        m: &'a Materialized,
+        g: &'a Graph,
+        pack: &'a Pack,
+        source: &'a Block,
+    ) -> Relation<'a> {
+        let entities = g
+            .outgoing(&source.id)
+            .iter()
+            .filter(|e| is_tie(&e.kind))
+            .filter(|e| m.get(&e.to).is_some_and(|t| defines_entity(pack, t)))
+            .map(|e| &e.to)
+            .collect();
+        Relation {
+            m,
+            g,
+            pack,
+            source,
+            entities,
+        }
+    }
+
+    /// Whether `n` is a section or entity neighbor of the source. A block is never its own
+    /// neighbor. A section neighbor is another participating child of the source's parent. An
+    /// entity neighbor is a participating, live block with a containing doc that is tied to an
+    /// entity the source is tied to.
+    pub(crate) fn relates(&self, n: &Block) -> bool {
+        let (m, source) = (self.m, self.source);
+        let Some(parent) = source.parent.as_ref() else {
+            return false;
+        };
+        if n.id == source.id
+            || m.doc_of(&source.id).is_none()
+            || !takes_part(self.pack, source)
+            || !takes_part(self.pack, n)
+        {
+            return false;
+        }
+        if n.parent.as_ref() == Some(parent) {
+            return true;
+        }
+        !self.entities.is_empty()
+            && m.doc_of(&n.id).is_some()
+            && !is_deprecated(m, self.g, &n.id)
+            && self
+                .g
+                .outgoing(&n.id)
+                .iter()
+                .any(|e| is_tie(&e.kind) && self.entities.contains(&e.to))
+    }
+}
+
 /// The neighbors of the blocks in `covered`, merged and sorted (module doc). A covered block
 /// that does not exist, has no parent or containing doc, or does not take part gives no rows. A
 /// covered block can be a neighbor of another covered block; a block is never its own neighbor.
@@ -324,10 +399,7 @@ impl<'a> Walk<'a> {
     }
 
     fn defines(&self, b: &Block) -> bool {
-        self.pack
-            .block_types
-            .get(&b.block_type)
-            .is_some_and(|t| t.traits.contains(&Trait::Defines))
+        defines_entity(self.pack, b)
     }
 
     /// Reads `parent`'s participating children once per call. `source` is one of them, so a

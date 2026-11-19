@@ -9,6 +9,11 @@
 //! A read scope keeps its weights on its build, so a write drops only that state's values and a
 //! held state keeps its own. Review reads canon plus the one in-flight source block
 //! ([`WeightScope::Review`]), which counts as one more corpus block.
+//!
+//! The scorer comes after the weights: [`select_seeds`] and [`candidates`] find a source's
+//! candidates (D-RY7B5), [`score_operands`] scores a pair with every feature (D-ZX5S6),
+//! [`rank_rows`] orders and cuts rows by their exact scores, and [`reasons`] names what a pair
+//! shares. [`VectorBudget`] holds the work guards. Advice, review and search all use these.
 use crate::Scope;
 use crate::lexicon::Lexicon;
 use rdy_model::{Block, BlockId};
@@ -84,6 +89,10 @@ pub fn is_seed(df: u64, n: u64) -> bool {
 
 /// The term weight of a word that occurs `count` times in a block: `1 + log2(count)`.
 pub fn tf(count: u64) -> f64 {
+    if count == 1 {
+        // log2_fixed(1.0) is exactly 0, so this is the same bits without the series
+        return 1.0;
+    }
     1.0 + log2_fixed(count as f64)
 }
 
@@ -556,6 +565,518 @@ fn store(c: &mut Cache, doc: Doc<'_>, kind: Kind, norm: f64) {
         (Doc::Source, Kind::Lexical) => c.source_lexical = Some(norm),
         (Doc::Source, Kind::Link) => c.source_link = Some(norm),
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Scoring (D-ZX5S6, D-RY7B5, D-0ZPAP): the one scorer that advice, review and search share.
+// ---------------------------------------------------------------------------------------------
+
+/// D-RY7B5: the most seed words one source finds candidates with.
+pub const MAX_SEED_WORDS: usize = 64;
+
+/// D-RY7B5: the most seed link targets one source finds candidates with.
+pub const MAX_SEED_TARGETS: usize = 64;
+
+/// The most shared words, and the most shared link targets, a reason lists.
+pub const MAX_REASON_ITEMS: usize = 5;
+
+/// D-ZX5S6: the share of the lexical dot product in a score when both blocks have links.
+pub const LEXICAL_SHARE: f64 = 0.6;
+
+/// D-ZX5S6: the share of the link dot product in a score when both blocks have links.
+pub const LINK_SHARE: f64 = 0.4;
+
+/// The most eligible-seed posting incidences one source may read, duplicates counted before the
+/// union.
+pub const SOURCE_POSTINGS: u64 = 200_000;
+
+/// The most distinct candidate ids one source may have, itself included.
+pub const SOURCE_CANDIDATES: u64 = 50_000;
+
+/// The most sparse feature products one source may compute.
+pub const SOURCE_PRODUCTS: u64 = 2_000_000;
+
+/// The most charged candidate scratch payload one source may hold, in bytes: 64 MiB.
+pub const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What one candidate record is charged beside its id's bytes: its entry in the union and its
+/// scored row.
+pub const CANDIDATE_RECORD_BYTES: u64 =
+    (size_of::<&BlockId>() + size_of::<Scored<'static>>()) as u64;
+
+/// Which work guard stopped a source. Advice drops the source and counts it; review keeps the
+/// complete sources; ranked search returns its vector-work refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Guard {
+    /// The source's seed postings passed [`SourceLimits::postings`].
+    SourcePostings,
+    /// The source's distinct candidates passed [`SourceLimits::candidates`].
+    SourceCandidates,
+    /// The source's products passed [`SourceLimits::products`].
+    SourceProducts,
+    /// The candidate scratch passed [`SourceLimits::scratch`].
+    Scratch,
+    /// The whole budget's postings ran out.
+    SectionPostings,
+    /// The whole budget's products ran out.
+    SectionProducts,
+    /// A lazy weight read did not fit ([`WeightLimit`]).
+    Weights,
+}
+
+impl From<WeightLimit> for Guard {
+    fn from(_: WeightLimit) -> Guard {
+        Guard::Weights
+    }
+}
+
+/// The per-source work limits of a [`VectorBudget`]. Every field is a fixed constant in
+/// production ([`SourceLimits::FIXED`]); tests lower them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceLimits {
+    pub postings: u64,
+    pub candidates: u64,
+    pub products: u64,
+    pub scratch: u64,
+}
+
+impl SourceLimits {
+    /// The fixed limits: [`SOURCE_POSTINGS`], [`SOURCE_CANDIDATES`], [`SOURCE_PRODUCTS`] and
+    /// [`SCRATCH_BYTES`].
+    pub const FIXED: SourceLimits = SourceLimits {
+        postings: SOURCE_POSTINGS,
+        candidates: SOURCE_CANDIDATES,
+        products: SOURCE_PRODUCTS,
+        scratch: SCRATCH_BYTES,
+    };
+}
+
+/// What a [`VectorBudget`] has charged, over the sources scored so far.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BudgetUse {
+    /// Posting incidences of selected seeds, duplicates counted.
+    pub postings: u64,
+    /// Distinct candidate ids, summed over the sources' unions (each source itself included).
+    pub candidates: u64,
+    /// Candidates scored in full (the ones the caller kept).
+    pub pairs: u64,
+    /// Sparse feature products: one per feature two scored blocks share.
+    pub products: u64,
+}
+
+/// What one source has charged, to check against the [`SourceLimits`].
+#[derive(Clone, Copy, Debug, Default)]
+struct SourceUse {
+    postings: u64,
+    candidates: u64,
+    products: u64,
+    scratch: u64,
+}
+
+/// The work budget of one advice section, receipt, review phase or search request: a whole-budget
+/// limit on posting incidences and on products, and the per-source limits. Every charge happens
+/// before the work it pays for, and a charge that does not fit is refused and changes nothing. Work
+/// a stopped source already charged stays charged, so the sources after it keep to what is left.
+#[derive(Clone, Debug)]
+pub struct VectorBudget {
+    postings: u64,
+    products: u64,
+    source: SourceLimits,
+    used: BudgetUse,
+    current: SourceUse,
+}
+
+impl VectorBudget {
+    /// A budget of `postings` posting incidences and `products` products, with the fixed
+    /// per-source limits.
+    pub const fn new(postings: u64, products: u64) -> VectorBudget {
+        VectorBudget {
+            postings,
+            products,
+            source: SourceLimits::FIXED,
+            used: BudgetUse {
+                postings: 0,
+                candidates: 0,
+                pairs: 0,
+                products: 0,
+            },
+            current: SourceUse {
+                postings: 0,
+                candidates: 0,
+                products: 0,
+                scratch: 0,
+            },
+        }
+    }
+
+    /// A briefing section: 2,000,000 posting incidences and 8,000,000 products.
+    pub const fn briefing() -> VectorBudget {
+        VectorBudget::new(2_000_000, 8_000_000)
+    }
+
+    /// A write receipt: 100,000 posting incidences and 1,000,000 products.
+    pub const fn write() -> VectorBudget {
+        VectorBudget::new(100_000, 1_000_000)
+    }
+
+    /// One change's review vector phase: 200,000 posting incidences and 2,000,000 products.
+    pub const fn review() -> VectorBudget {
+        VectorBudget::new(200_000, 2_000_000)
+    }
+
+    /// One ranked search request: 2,000,000 posting incidences and 8,000,000 products.
+    pub const fn search() -> VectorBudget {
+        VectorBudget::new(2_000_000, 8_000_000)
+    }
+
+    /// Test hook: this budget with other per-source limits.
+    #[doc(hidden)]
+    pub const fn with_source_limits(mut self, limits: SourceLimits) -> VectorBudget {
+        self.source = limits;
+        self
+    }
+
+    /// The per-source limits.
+    pub const fn source_limits(&self) -> SourceLimits {
+        self.source
+    }
+
+    /// What the budget has charged so far.
+    pub const fn used(&self) -> BudgetUse {
+        self.used
+    }
+
+    /// Starts a source: its own counters begin at zero. The whole-budget counters carry on.
+    pub fn begin_source(&mut self) {
+        self.current = SourceUse::default();
+    }
+
+    /// Charges `n` posting incidences to the source and the whole budget.
+    pub fn charge_postings(&mut self, n: u64) -> Result<(), Guard> {
+        let source = self.current.postings.checked_add(n);
+        if source.is_none_or(|v| v > self.source.postings) {
+            return Err(Guard::SourcePostings);
+        }
+        let total = self.used.postings.checked_add(n);
+        if total.is_none_or(|v| v > self.postings) {
+            return Err(Guard::SectionPostings);
+        }
+        self.current.postings = source.unwrap_or(0);
+        self.used.postings = total.unwrap_or(0);
+        Ok(())
+    }
+
+    /// Charges `n` distinct candidate ids, with `bytes` of scratch payload, to the source.
+    pub fn charge_candidates(&mut self, n: u64, bytes: u64) -> Result<(), Guard> {
+        let count = self.current.candidates.checked_add(n);
+        if count.is_none_or(|v| v > self.source.candidates) {
+            return Err(Guard::SourceCandidates);
+        }
+        let scratch = self.current.scratch.checked_add(bytes);
+        if scratch.is_none_or(|v| v > self.source.scratch) {
+            return Err(Guard::Scratch);
+        }
+        self.current.candidates = count.unwrap_or(0);
+        self.current.scratch = scratch.unwrap_or(0);
+        self.used.candidates = self.used.candidates.saturating_add(n);
+        Ok(())
+    }
+
+    /// Charges `n` products to the source and the whole budget.
+    pub fn charge_products(&mut self, n: u64) -> Result<(), Guard> {
+        let source = self.current.products.checked_add(n);
+        if source.is_none_or(|v| v > self.source.products) {
+            return Err(Guard::SourceProducts);
+        }
+        let total = self.used.products.checked_add(n);
+        if total.is_none_or(|v| v > self.products) {
+            return Err(Guard::SectionProducts);
+        }
+        self.current.products = source.unwrap_or(0);
+        self.used.products = total.unwrap_or(0);
+        Ok(())
+    }
+
+    /// Counts one candidate scored in full.
+    fn count_pair(&mut self) {
+        self.used.pairs = self.used.pairs.saturating_add(1);
+    }
+}
+
+/// One document's two unit vectors: its words and its link targets, each by key.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Operand<'w> {
+    pub lexical: Vec<(&'w str, f64)>,
+    pub link: Vec<(&'w BlockId, f64)>,
+}
+
+impl<'w> Operand<'w> {
+    /// `doc`'s vectors under `w`, computing what is not cached yet.
+    pub fn of(w: &'w VectorWeights, doc: Doc<'_>) -> Result<Operand<'w>, Guard> {
+        Ok(Operand {
+            lexical: w.lexical(doc)?,
+            link: w.link(doc)?,
+        })
+    }
+}
+
+/// D-RY7B5: the seeds a source finds candidates with.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Seeds<'w> {
+    /// Up to [`MAX_SEED_WORDS`] seed words, heaviest first.
+    pub words: Vec<&'w str>,
+    /// Up to [`MAX_SEED_TARGETS`] seed link targets, heaviest first.
+    pub targets: Vec<&'w BlockId>,
+}
+
+impl Seeds<'_> {
+    /// Whether the source has no seed, so it finds no candidate.
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty() && self.targets.is_empty()
+    }
+}
+
+/// The heaviest `cap` features of `vector` that `is_seed` accepts: by descending weight, then by
+/// ascending key. The weights are the unit-vector weights the score uses.
+fn heaviest<K: Ord + Copy>(
+    vector: &[(K, f64)],
+    cap: usize,
+    mut is_seed: impl FnMut(K) -> bool,
+) -> Vec<K> {
+    let mut seeds: Vec<(K, f64)> = vector
+        .iter()
+        .copied()
+        .filter(|(k, _)| is_seed(*k))
+        .collect();
+    seeds.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    seeds.truncate(cap);
+    seeds.into_iter().map(|(k, _)| k).collect()
+}
+
+/// D-RY7B5: `source`'s seeds. A word or target seeds when it is a corpus feature with
+/// `df <= 100` or `10 × df <= N` (`indeg` and `L` for a target). The source keeps its 64 heaviest
+/// seed words and its 64 heaviest seed targets, ties by word or target id. A feature that does not
+/// seed never takes a slot, and still counts in every score.
+pub fn select_seeds<'w>(w: &'w VectorWeights, source: &Operand<'w>) -> Seeds<'w> {
+    Seeds {
+        words: heaviest(&source.lexical, MAX_SEED_WORDS, |t| w.word_is_seed(t)),
+        targets: heaviest(&source.link, MAX_SEED_TARGETS, |t| w.target_is_seed(t)),
+    }
+}
+
+/// The candidates `seeds` find: the union of their postings, as distinct ids in id order. Each seed's
+/// postings are charged before they are read, counting duplicates, and the distinct ids and their
+/// scratch are charged before the caller scores any. A candidate can be the source itself; the
+/// caller keeps or drops it. A feature below the seed cut finds nothing.
+pub fn candidates<'w>(
+    w: &'w VectorWeights,
+    seeds: &Seeds<'w>,
+    budget: &mut VectorBudget,
+) -> Result<Vec<&'w BlockId>, Guard> {
+    let lexicon = w.lexicon();
+    let mut lists: Vec<&'w imbl::OrdSet<BlockId>> = Vec::new();
+    let mut incidences: u64 = 0;
+    for word in &seeds.words {
+        if let Some(list) = lexicon.word_blocks_of(word) {
+            incidences = incidences.saturating_add(list.len() as u64);
+            lists.push(list);
+        }
+    }
+    for target in &seeds.targets {
+        if let Some(list) = lexicon.pointing_at(target) {
+            incidences = incidences.saturating_add(list.len() as u64);
+            lists.push(list);
+        }
+    }
+    budget.charge_postings(incidences)?;
+    let mut ids: Vec<&'w BlockId> = Vec::with_capacity(incidences as usize);
+    for list in lists {
+        ids.extend(list.iter());
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    let bytes: u64 = ids
+        .iter()
+        .map(|id| CANDIDATE_RECORD_BYTES + id.as_str().len() as u64)
+        .sum();
+    budget.charge_candidates(ids.len() as u64, bytes)?;
+    Ok(ids)
+}
+
+/// One scored candidate: its exact score. Round only when the score is shown ([`round3`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scored<'w> {
+    pub block: &'w BlockId,
+    pub score: f64,
+}
+
+/// The sparse dot product of two vectors sorted by key, summed in ascending key order. One
+/// product is charged before each is computed.
+fn dot<K: Ord>(a: &[(K, f64)], b: &[(K, f64)], budget: &mut VectorBudget) -> Result<f64, Guard> {
+    let (mut i, mut j, mut sum) = (0, 0, 0.0);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                budget.charge_products(1)?;
+                sum += a[i].1 * b[j].1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    Ok(sum)
+}
+
+/// A score never passes 1: two unit vectors that are the same can add to 1 plus a rounding
+/// error of a few ulp, and that is the only value this clamps.
+fn clamp_unit(x: f64) -> f64 {
+    if x > 1.0 { 1.0 } else { x }
+}
+
+/// D-ZX5S6: the score of two documents' vectors, `0.6 × lexical_dot + 0.4 × link_dot` when both
+/// have link targets, else `lexical_dot`. Charges one product for each feature the two share.
+pub fn score_operands(
+    a: &Operand<'_>,
+    b: &Operand<'_>,
+    budget: &mut VectorBudget,
+) -> Result<f64, Guard> {
+    let lexical = dot(&a.lexical, &b.lexical, budget)?;
+    let score = if !a.link.is_empty() && !b.link.is_empty() {
+        let link = dot(&a.link, &b.link, budget)?;
+        LEXICAL_SHARE * lexical + LINK_SHARE * link
+    } else {
+        lexical
+    };
+    Ok(clamp_unit(score))
+}
+
+/// The exact score of documents `a` and `b` (see [`score_operands`]), with every feature, whether
+/// or not it seeds. Charges its products to `budget`.
+pub fn score_pair(
+    w: &VectorWeights,
+    a: Doc<'_>,
+    b: Doc<'_>,
+    budget: &mut VectorBudget,
+) -> Result<f64, Guard> {
+    let (a, b) = (Operand::of(w, a)?, Operand::of(w, b)?);
+    score_operands(&a, &b, budget)
+}
+
+/// Scores `source` against every candidate its seeds find that `keep` accepts. It starts a source
+/// in `budget`, reads the source's vectors, selects its seeds and unions their postings, then
+/// scores each kept candidate once with all its features, in id order. A source with no seed gives
+/// an empty, complete result and charges nothing. A guard gives `Err` and no partial result.
+/// `keep` runs before any product is charged, so a dropped candidate (the source itself
+/// included) costs none.
+pub fn score_source<'w>(
+    w: &'w VectorWeights,
+    source: Doc<'_>,
+    mut keep: impl FnMut(&'w BlockId) -> bool,
+    budget: &mut VectorBudget,
+) -> Result<Vec<Scored<'w>>, Guard> {
+    budget.begin_source();
+    let src = Operand::of(w, source)?;
+    let seeds = select_seeds(w, &src);
+    if seeds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids = candidates(w, &seeds, budget)?;
+    let mut scored = Vec::new();
+    for id in ids {
+        if !keep(id) {
+            continue;
+        }
+        let candidate = Operand::of(w, Doc::Block(id))?;
+        budget.count_pair();
+        let score = score_operands(&src, &candidate, budget)?;
+        scored.push(Scored { block: id, score });
+    }
+    Ok(scored)
+}
+
+/// The score as shown: rounded to three decimals. Never sort or filter on it.
+pub fn round3(score: f64) -> f64 {
+    (score * 1000.0).round() / 1000.0
+}
+
+/// Ranks `rows`: drops those below `floor` (exact score, at least), sorts by descending exact
+/// score, then by `tie` ascending, and keeps the first `cap`. `tie` runs only for rows whose exact
+/// scores are equal, and not past the group that holds the cut. It must give distinct keys to
+/// distinct rows. The ranking reads no formatting: nothing here rounds.
+pub fn rank_rows<R, K: Ord>(
+    mut rows: Vec<R>,
+    score: impl Fn(&R) -> f64,
+    floor: f64,
+    cap: usize,
+    mut tie: impl FnMut(&R) -> K,
+) -> Vec<R> {
+    rows.retain(|r| score(r) >= floor);
+    rows.sort_by(|a, b| score(b).total_cmp(&score(a)));
+    let mut out: Vec<R> = Vec::new();
+    let mut rest = rows.into_iter().peekable();
+    while out.len() < cap {
+        let Some(first) = rest.next() else { break };
+        let at = score(&first);
+        let mut group = vec![first];
+        while let Some(next) = rest.next_if(|n| score(n).total_cmp(&at).is_eq()) {
+            group.push(next);
+        }
+        if group.len() > 1 {
+            let mut keyed: Vec<(K, R)> = group.into_iter().map(|r| (tie(&r), r)).collect();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            group = keyed.into_iter().map(|(_, r)| r).collect();
+        }
+        out.extend(group);
+    }
+    out.truncate(cap);
+    out
+}
+
+/// Why two documents match: their shared words and shared link targets with the largest weight
+/// products.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reasons {
+    /// Up to [`MAX_REASON_ITEMS`] shared words.
+    pub words: Vec<String>,
+    /// Up to [`MAX_REASON_ITEMS`] shared link targets.
+    pub links: Vec<BlockId>,
+}
+
+/// The `MAX_REASON_ITEMS` shared keys of two sorted vectors with the largest weight products:
+/// by descending product, then ascending key.
+fn shared<K: Ord + Copy>(a: &[(K, f64)], b: &[(K, f64)]) -> Vec<K> {
+    let (mut i, mut j) = (0, 0);
+    let mut both: Vec<(K, f64)> = Vec::new();
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                both.push((a[i].0, a[i].1 * b[j].1));
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    both.sort_by(|x, y| y.1.total_cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+    both.truncate(MAX_REASON_ITEMS);
+    both.into_iter().map(|(k, _)| k).collect()
+}
+
+/// The reasons of documents `a` and `b`: at most five shared words and five shared targets, each
+/// list by descending weight product, then by item. Computed for the rows a caller keeps, so the
+/// products are not charged.
+pub fn reasons(w: &VectorWeights, a: Doc<'_>, b: Doc<'_>) -> Result<Reasons, Guard> {
+    let (a, b) = (Operand::of(w, a)?, Operand::of(w, b)?);
+    Ok(Reasons {
+        words: shared(&a.lexical, &b.lexical)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        links: shared(&a.link, &b.link).into_iter().cloned().collect(),
+    })
 }
 
 #[cfg(test)]
