@@ -600,7 +600,7 @@ impl Rdy {
                     }
                 }
                 // the members the landing closed (not rebased): their heads re-read, their
-                // builds kept
+                // builds dropped
                 for name in closed {
                     self.reread_view(prev, &mut views, name)?;
                 }
@@ -752,8 +752,9 @@ impl Rdy {
     }
 
     /// Re-reads view `view`'s entry into `views` (`Delta::View`, and each view `Delta::Coord`
-    /// closed). View ops that left the base and the set as they were (a close, an own) keep the
-    /// build; any other change starts unbuilt.
+    /// closed). View ops that left the base and the set as they were (an own) keep the build;
+    /// a close drops it, so a closed view holds no copy until it is read again; any other change
+    /// starts unbuilt.
     fn reread_view(
         &self,
         prev: &ReadState,
@@ -763,6 +764,7 @@ impl Rdy {
         match self.view_entry(&view)? {
             Some(mut next) => {
                 if let Some(e) = prev.views.get(&view)
+                    && !next.head.as_ref().is_some_and(|h| h.closed)
                     && e.base == next.base
                     && e.included == next.included
                     && let Some(b) = e.built_ok()
