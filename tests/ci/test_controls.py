@@ -638,7 +638,7 @@ def tracked(prefix='crates/'):
 # per file. Each must be in its file and be allowlisted by shape, not by line.
 SYNTHETIC = {
     'crates/rdy-cli/src/brief_text.rs': ['0123456789abcdef0123', 'abcdef0123456789', '0123456789abcdef'],
-    'crates/rdy-engine/tests/hub_http.rs': ['rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf',
+    'crates/rdy-engine/tests/hub/hub_http.rs': ['rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf',
                                             'rdyx_a_TESTVECTORTESTVECTORTESTVECTORTESTVECTOR2kpMVZ'],
     'crates/rdy-qa/tests/cli/cli_hub_auth.rs': ['rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf',
                                                 'rdyh_r_efghijklmnopqrstuvwxyz0123456789ABCDEFGH3qAvLC',
@@ -649,7 +649,7 @@ SYNTHETIC = {
     'crates/rdy-qa/tests/mcp/mcp_hub_keys.rs': ['rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf',
                                                 'rdyh_r_efghijklmnopqrstuvwxyz0123456789ABCDEFGH3qAvLC'],
 }
-FINGERPRINT_FILES = ['crates/rdy-engine/tests/signing_crypto.rs']
+FINGERPRINT_FILES = ['crates/rdy-engine/tests/config/signing_crypto.rs']
 FIXTURE_FILES = [
     'crates/rdy-qa/fixtures/dump/v2-s14.expect.json', 'crates/rdy-qa/fixtures/dump/v2-s15-holder.expect.json',
     'crates/rdy-qa/fixtures/dump/v2-s15.expect.json', 'crates/rdy-qa/fixtures/dump/v3-s16-chain.expect.json',
@@ -739,13 +739,13 @@ class SecretAllowlists(unittest.TestCase):
     def test_realistic_values_outside_the_shapes_and_paths_are_not_allowlisted(self):
         cases = [
             ('crates/rdy-engine/src/hub.rs', REALISTIC_HUB, '"access' + '_token":"' + REALISTIC_HUB + '"'),
-            ('crates/rdy-engine/tests/hub_http.rs', REALISTIC_HUB, '"access' + '_token":"' + REALISTIC_HUB + '"'),
+            ('crates/rdy-engine/tests/hub/hub_http.rs', REALISTIC_HUB, '"access' + '_token":"' + REALISTIC_HUB + '"'),
             ('crates/rdy-cli/src/brief_text.rs', REALISTIC_HEX, '"tok' + 'en": "' + REALISTIC_HEX + '"'),
-            ('crates/rdy-engine/tests/signing_crypto.rs', REALISTIC_B64, 'sec' + 'ret = "' + REALISTIC_B64 + '"'),
+            ('crates/rdy-engine/tests/config/signing_crypto.rs', REALISTIC_B64, 'sec' + 'ret = "' + REALISTIC_B64 + '"'),
             ('crates/rdy-qa/src/fixtures/example.rs', REALISTIC_HEX, 'x'),
             ('crates/rdy-qa/fixtures-old/example.json', REALISTIC_HEX, 'x'),
             ('crates/rdy-qa/tests/golden.rs', REALISTIC_HEX, 'x'),
-            ('crates/rdy-engine/tests/hub_http.rs', 'rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYfX', 'x'),
+            ('crates/rdy-engine/tests/hub/hub_http.rs', 'rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYfX', 'x'),
             ('crates/rdy-cli/src/brief_text.rs', '0123456789abcdef01234', 'x'),
         ]
         for path, secret, line in cases:
@@ -753,8 +753,8 @@ class SecretAllowlists(unittest.TestCase):
                 self.assertFalse(allowlisted(self.config, path, secret, line))
 
     def test_shape_allowlists_apply_to_the_generic_rule_only(self):
-        value = SYNTHETIC['crates/rdy-engine/tests/hub_http.rs'][0]
-        self.assertFalse(allowlisted(self.config, 'crates/rdy-engine/tests/hub_http.rs', value, 'x',
+        value = SYNTHETIC['crates/rdy-engine/tests/hub/hub_http.rs'][0]
+        self.assertFalse(allowlisted(self.config, 'crates/rdy-engine/tests/hub/hub_http.rs', value, 'x',
                                      rule='another-rule'))
 
 
