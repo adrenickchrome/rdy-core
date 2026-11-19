@@ -257,7 +257,7 @@ fn relc3_capabilities_need_no_project_config_daemon_or_home() {
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "relc3_capabilities_need_no_project_config_daemon_or_home",
+            harness_name("relc3_capabilities_need_no_project_config_daemon_or_home").as_str(),
             "--test-threads=1",
         ])
         .env_clear()
@@ -318,4 +318,13 @@ fn relc3_serialized_capabilities_are_sorted_and_stable() {
         v["dump_reads"]["features"][0],
         serde_json::json!({"dump": 4, "manifest_version": 1})
     );
+}
+
+/// `name` as the test harness lists it: a grouped test binary puts this file's module path
+/// first, and a child process started with `--exact` must name the test that way.
+fn harness_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_string(),
+    }
 }

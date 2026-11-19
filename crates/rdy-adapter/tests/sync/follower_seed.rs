@@ -188,7 +188,7 @@ fn mh6_project_and_holder_snapshots_keep_their_scope_rules() {
     src.close().unwrap();
 
     // the adapter's follower exposes no engine handle
-    let source = include_str!("../src/follower.rs");
+    let source = include_str!("../../src/follower.rs");
     for raw in [
         "-> Rdy",
         "-> Store",

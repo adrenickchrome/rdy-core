@@ -150,8 +150,13 @@ fn mht9_adapter_open_and_snapshot_create_no_http_state() {
     // creates or reads a person layer would make the place, or fail
     let nowhere = tempfile::tempdir().unwrap();
     let mut cmd = Command::new(std::env::current_exe().unwrap());
-    cmd.args(["--exact", CHILD, "--nocapture", "--test-threads=1"])
-        .env(CHILD_PROJECT, dir.path());
+    cmd.args([
+        "--exact",
+        harness_name(CHILD).as_str(),
+        "--nocapture",
+        "--test-threads=1",
+    ])
+    .env(CHILD_PROJECT, dir.path());
     let mut places = Vec::new();
     for var in PERSON_VARS {
         let place = nowhere.path().join(var.to_lowercase());
@@ -212,8 +217,8 @@ fn closure(lock: &str, root: &str) -> BTreeSet<String> {
 
 #[test]
 fn mht9_adapter_gains_no_daemon_or_http_dependency() {
-    let manifest = include_str!("../Cargo.toml");
-    let lock = include_str!("../../../Cargo.lock");
+    let manifest = include_str!("../../Cargo.toml");
+    let lock = include_str!("../../../../Cargo.lock");
     let all = closure(lock, "rdy-adapter");
     assert!(
         all.contains("rdy-engine") && all.contains("rdy-store"),
@@ -239,5 +244,14 @@ fn mht9_adapter_gains_no_daemon_or_http_dependency() {
             !all.contains(banned),
             "the adapter's dependency closure holds {banned}"
         );
+    }
+}
+
+/// `name` as the test harness lists it: a grouped test binary puts this file's module path
+/// first, and a child process started with `--exact` must name the test that way.
+fn harness_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_string(),
     }
 }

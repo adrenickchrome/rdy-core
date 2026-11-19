@@ -7,8 +7,8 @@
 //! Each landing's snapshot links to every block, so [`BLOCKS`] blocks and [`LANDINGS`] landings
 //! carry more than 1,000,000 edges. The project is built with core calls in a closed store
 //! first, then read through the adapter. The fixture takes about a minute in a debug build, so
-//! the test runs on demand (`--ignored`); `rdy-engine/tests/export_walk_known.rs` pins the same
-//! charging with small bounds on every run.
+//! the test runs on demand (`--ignored`); `rdy-engine/tests/history/export_walk_known.rs` pins
+//! the same charging with small bounds on every run.
 
 use rdy_adapter::stream::ObjectKey;
 use rdy_adapter::{Hash, StoreHandle};
