@@ -87,6 +87,83 @@ impl Materialized {
         m
     }
 
+    /// This state moved to the store state `target`: the result shares every block whose version
+    /// is the same in both, and reads each other block of `target` with `read`. It equals
+    /// `Materialized::build` of `target`, but holds only the blocks that differ from `self`, so a
+    /// scope near canon (an old landing, a proposal version, a view) does not decode a private
+    /// copy of the whole project. `self` is unchanged.
+    pub fn moved_to<E>(
+        &self,
+        target: &StateSnapshot,
+        mut read: impl FnMut(&Hash) -> Result<Block, E>,
+    ) -> Result<Materialized, E> {
+        let mut next = self.clone();
+        let gone: Vec<BlockId> = self
+            .versions
+            .iter()
+            .filter(|(id, v)| target.blocks.get(*id) != Some(*v))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &gone {
+            next.remove(id);
+        }
+        for (id, v) in &target.blocks {
+            if self.versions.get(id) != Some(v) {
+                next.insert(Arc::new(read(v)?));
+            }
+        }
+        Ok(next)
+    }
+
+    /// The blocks that differ between this state and `other`: this state's blocks that are
+    /// changed or absent there, then `other`'s blocks that are changed or absent here. A
+    /// structure built from single blocks (the graph, the lexicon) carries from this state to
+    /// `other` by removing the first and adding the second.
+    pub fn delta_to<'a>(&'a self, other: &'a Materialized) -> (Vec<&'a Block>, Vec<&'a Block>) {
+        let old = self
+            .blocks
+            .iter()
+            .filter(|(id, _)| other.versions.get(*id) != self.versions.get(*id))
+            .map(|(_, b)| &**b)
+            .collect();
+        let new = other
+            .blocks
+            .iter()
+            .filter(|(id, _)| self.versions.get(*id) != other.versions.get(*id))
+            .map(|(_, b)| &**b)
+            .collect();
+        (old, new)
+    }
+
+    /// Whether `other` holds the same blocks at the same versions, with the same tree and names
+    /// under each parent (an emptied set counts as none). Tests compare a scope moved from canon
+    /// with a full build of it.
+    #[doc(hidden)]
+    pub fn same_as(&self, other: &Materialized) -> bool {
+        fn sets<K: Clone + Ord, V: Clone + Ord>(m: &OrdMap<K, OrdSet<V>>) -> Vec<(K, OrdSet<V>)> {
+            m.iter()
+                .filter(|(_, s)| !s.is_empty())
+                .map(|(k, s)| (k.clone(), s.clone()))
+                .collect()
+        }
+        let nameless = |m: &Materialized| {
+            m.nameless
+                .iter()
+                .filter(|(_, n)| **n > 0)
+                .map(|(p, n)| (p.clone(), *n))
+                .collect::<Vec<_>>()
+        };
+        self.versions == other.versions
+            && self.blocks.len() == other.blocks.len()
+            && self
+                .blocks
+                .iter()
+                .all(|(id, b)| other.blocks.get(id).is_some_and(|o| **o == **b))
+            && sets(&self.children) == sets(&other.children)
+            && sets(&self.names) == sets(&other.names)
+            && nameless(self) == nameless(other)
+    }
+
     /// This state with `ops` applied in order. `self` is unchanged; the result shares every
     /// block the ops do not name. O(ops × log n).
     pub fn with(&self, ops: &[Op]) -> Materialized {
