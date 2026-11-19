@@ -42,7 +42,8 @@ OWNER_TOOLS = {
     'approvals': ('rdy_answer', 'rdy_dispute', 'rdy_land', 'rdy_policy', 'rdy_tag'),
     'read': ('rdy_coverage', 'rdy_diff', 'rdy_impact', 'rdy_inbox', 'rdy_links', 'rdy_log', 'rdy_tags', 'rdy_trace'),
     'publish': ('rdy_auth', 'rdy_export', 'rdy_key_bind', 'rdy_key_retire', 'rdy_key_revoke', 'rdy_key_show',
-                'rdy_publication_baseline', 'rdy_publication_check', 'rdy_publish', 'rdy_remote', 'rdy_render'),
+                'rdy_publication_baseline', 'rdy_publication_check', 'rdy_publish', 'rdy_pull', 'rdy_push',
+                'rdy_remote', 'rdy_render'),
     'review': ('rdy_review', 'rdy_review_next', 'rdy_review_submit'),
     'parallel': ('rdy_alternatives', 'rdy_view'),
     'project-ops': ('rdy_clone', 'rdy_compact', 'rdy_dump', 'rdy_hook', 'rdy_import', 'rdy_load', 'rdy_redact',
@@ -884,7 +885,7 @@ class Kfu1Binary(BinaryCase):
 
     def test_kfu1_checker_reads_the_table_by_the_builds_rules(self):
         good = json.loads(TABLE.read_text())
-        self.assertEqual(len(good), 63)
+        self.assertEqual(len(good), 65)
         table = GUIDE.read_table(TABLE)
         self.assertEqual({name: tuple(tools) for name, tools in table.items()}, OWNER_TOOLS)
         path = self.dir / 'table.json'
