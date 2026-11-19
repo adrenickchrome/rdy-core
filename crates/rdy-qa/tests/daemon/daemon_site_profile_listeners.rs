@@ -1120,14 +1120,13 @@ fn spv7_registry_and_shared_http_limits_are_bounded() {
 
     // connections: one limit across every port
     let (k01, k02) = (ports["k01"], ports["k02"]);
-    let half = MAX_CONNECTIONS / 2;
-    let mut held: Vec<TcpStream> = (0..half)
+    let held: Vec<TcpStream> = (0..MAX_CONNECTIONS)
         .map(|_| TcpStream::connect(sock(source)).unwrap())
         .collect();
-    // the server accepts in order on each listener: an answer means every earlier connection on
-    // it holds its permit
-    assert_eq!(get(source, "index.html").status, 200);
-    held.extend((0..half).map(|_| TcpStream::connect(sock(k01)).unwrap()));
+    // the server accepts in order on each listener, and a Busy answer holds no permit: Busy on
+    // the source port means every held connection holds one. A probe that got a page would
+    // hold a permit of its own until the server's side of it ends, after the reply is read
+    assert_refusal(&get(source, "index.html"), Refusal::Busy, "the source port");
     let busy = get(k01, "manual/intro.html");
     assert_refusal(&busy, Refusal::Busy, "the limit is shared, not per port");
     assert_refusal(
@@ -1135,7 +1134,6 @@ fn spv7_registry_and_shared_http_limits_are_bounded() {
         Refusal::Busy,
         "another port",
     );
-    assert_refusal(&get(source, "index.html"), Refusal::Busy, "the source port");
     drop(held);
     // the held connections close: the permits come back
     let mut tries = 0;

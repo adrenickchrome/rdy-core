@@ -159,6 +159,8 @@ pub struct World {
     /// Every command the world runs, and every daemon those commands start: on Windows one Job
     /// Object, which ends them when the world drops; on Unix each command leads a process group.
     group: ProcessGroup,
+    /// Its processes get the long hook deadline ([`World::with_long_hook_deadline`]).
+    long_hooks: bool,
 }
 
 /// A project directory of a [`World`], which removes it once its daemon stopped.
@@ -195,9 +197,17 @@ impl World {
             projects: Mutex::new(vec![]),
             dirs: Mutex::new(vec![]),
             group: ProcessGroup::new().expect("the world's process group"),
+            long_hooks: false,
         };
         w.config("");
         w
+    }
+
+    /// This world, with the long hook deadline of the end-to-end hook tests
+    /// ([`crate::fixtures::LONG_HOOK_DEADLINE_MS`]) in the environment of every process it runs.
+    pub fn with_long_hook_deadline(mut self) -> World {
+        self.long_hooks = true;
+        self
     }
 
     /// The user config: the human, then `extra` as written.
@@ -235,10 +245,17 @@ impl World {
     /// The environment of every process of this world. [`World::removed_env`] names the rest.
     pub fn env(&self) -> Vec<(String, String)> {
         let pairs = person_pairs(&self.person_vars());
-        pairs
+        let mut env: Vec<(String, String)> = pairs
             .into_iter()
             .filter_map(|(k, v)| Some((k.to_string(), v?.to_string_lossy().into_owned())))
-            .collect()
+            .collect();
+        if self.long_hooks {
+            env.push((
+                rdy_engine::hooks::TEST_DEADLINE_VAR.to_string(),
+                crate::fixtures::LONG_HOOK_DEADLINE_MS.to_string(),
+            ));
+        }
+        env
     }
 
     /// The person variables this world leaves unset: a process must not inherit them.

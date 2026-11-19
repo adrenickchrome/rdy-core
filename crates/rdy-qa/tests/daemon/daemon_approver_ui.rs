@@ -230,7 +230,15 @@ fn esc(s: &str) -> String {
 /// A UI page: status, content type, one CSP with `form-action 'self'`, and no-store.
 #[track_caller]
 fn assert_ui_page(r: &http::Response, status: u16, what: &str) {
-    assert_eq!(r.status, status, "{what}: {}\n{}", r.head, body(r));
+    // a status 0 is no answer at all: the socket's own account names how the server ended it
+    assert_eq!(
+        r.status,
+        status,
+        "{what}: {}\n{}\n[{}]",
+        r.head,
+        body(r),
+        http::last_transport()
+    );
     assert_eq!(r.header("content-type"), Some(HTML), "{what}: {}", r.head);
     assert_eq!(r.header("cache-control"), Some("no-store"), "{what}");
     let csps: Vec<&str> = r
@@ -981,6 +989,32 @@ fn ui9_moved_and_held_cards_cannot_land() {
     });
     let r = s.answer(&form, "approve");
     let page = body(&r);
+    if r.status != 409 {
+        // seen once with no answer at all (status 0): name the state the answer met, and
+        // whether the site still answers a page (a project check that tripped closes them all)
+        let transport = http::last_transport();
+        let q = s.queue(PERSON);
+        let after = s.get(&item_path(&p.r#ref));
+        panic!(
+            "a changed role: status {} [{transport}]; head {:?}; chain {} before the answer, {} \
+             now; proposal {} v{}; {PERSON}'s queue: {} items {:?}, not ready {:?}; a GET of the \
+             item after it: status {} [{}]",
+            r.status,
+            r.head,
+            chain,
+            s.chain().len(),
+            p.id,
+            p.version,
+            q.items.len(),
+            q.items
+                .iter()
+                .map(|i| (&i.r#ref, &i.card_hash))
+                .collect::<Vec<_>>(),
+            q.not_ready,
+            after.status,
+            http::last_transport(),
+        );
+    }
     assert_eq!(
         s.chain().len(),
         chain + 1,

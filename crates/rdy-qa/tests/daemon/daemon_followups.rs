@@ -164,11 +164,9 @@ fn dfu1_a_store_held_while_a_daemon_pid_is_live_is_not_refused() {
         &rdy_daemon::sys::own_pid_record().unwrap(),
     )
     .unwrap();
-    let holder = Rdy::open(s.dir.path()).unwrap();
-    let releaser = std::thread::spawn(move || {
-        std::thread::sleep(HELD_GRACE * 3);
-        drop(holder);
-    });
+    // the bare lock, as a draining daemon holds it: an open store's close seals and syncs, which
+    // under load took past the new daemon's open retries, so the release came too late
+    let releaser = hold_store_lock(s.dir.path(), HELD_GRACE * 3);
     let (ok, v) = s.json(&["--json", "status"]);
     releaser.join().unwrap();
     assert!(

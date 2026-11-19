@@ -254,7 +254,8 @@ fn relc3_capabilities_need_no_project_config_daemon_or_home() {
     }
     // run in a child with an empty environment and an empty working directory
     let cwd = tempfile::tempdir().unwrap();
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child
         .args([
             "--exact",
             "relc3_capabilities_need_no_project_config_daemon_or_home",
@@ -262,9 +263,18 @@ fn relc3_capabilities_need_no_project_config_daemon_or_home() {
         ])
         .env_clear()
         .env(CHILD, "1")
-        .current_dir(cwd.path())
-        .output()
-        .unwrap();
+        .current_dir(cwd.path());
+    // a coverage build writes its profile where these name, else into the working directory
+    for var in [
+        "LLVM_PROFILE_FILE",
+        "CARGO_LLVM_COV",
+        "CARGO_LLVM_COV_TARGET_DIR",
+    ] {
+        if let Some(v) = std::env::var_os(var) {
+            child.env(var, v);
+        }
+    }
+    let out = child.output().unwrap();
     assert!(
         out.status.success(),
         "{}",

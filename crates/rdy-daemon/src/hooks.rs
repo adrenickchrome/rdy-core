@@ -16,12 +16,12 @@
 //! is, with a `W_HOOK_CONFLICT` warning. It removes only exact owned bytes and entries. Every
 //! entry is opened through its directory's handle without following a link, and every
 //! replacement checks the file's identity and content again just before it is published. One
-//! bounded file lock (`.rdy/hooks.lock`, [`HOOK_DEADLINE`]) serializes the installs of a
+//! bounded file lock (`.rdy/hooks.lock`, [`hook_deadline`]) serializes the installs of a
 //! project; a busy lock changes nothing.
 use rdy_engine::hooks::{
-    CLAUDE_CODE, Conflict, FileResult, HOOK_DEADLINE, HookCheck, HookFile, HookHost, HookInstall,
-    HookKind, HookTarget, HookWarning, MAX_HOOK_INPUT, MAX_LAUNCHER_BYTES, RunContext, Unavailable,
-    form_error,
+    CLAUDE_CODE, Conflict, FileResult, HookCheck, HookFile, HookHost, HookInstall, HookKind,
+    HookTarget, HookWarning, MAX_HOOK_INPUT, MAX_LAUNCHER_BYTES, RunContext, Unavailable,
+    form_error, hook_deadline,
 };
 use rdy_engine::wc::state::{Place, WORKTREES_DIR, worktrees};
 use rdy_engine::{E_BAD_INPUT, E_IO, E_LIMIT, RdyError};
@@ -230,10 +230,10 @@ impl LocalHooks {
     }
 
     /// The installer's lock, tried at once and then until the earlier of the run's deadline
-    /// and [`HOOK_DEADLINE`] from now. `Ok(None)`: busy.
+    /// and [`hook_deadline`] from now. `Ok(None)`: busy.
     fn lock(&self, ctx: &RunContext) -> Result<Option<FileLock>, RdyError> {
         let path = self.lock_path();
-        let mut until = Instant::now() + HOOK_DEADLINE;
+        let mut until = Instant::now() + hook_deadline();
         if let Some(d) = ctx.deadline() {
             until = until.min(d);
         }

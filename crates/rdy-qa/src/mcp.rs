@@ -269,6 +269,9 @@ const STUB_BANNER: &[u8] = b"\nrunning 1 test\n";
 /// group is killed: a hang guard.
 const JOIN_GUARD: Duration = DEADLINE;
 
+/// How many bytes of the server's stderr a `CRITICAL` failure shows, from its end.
+const CRITICAL_STDERR_TAIL: usize = 2048;
+
 pub struct McpClient {
     child: Child,
     writer: Sender<String>,
@@ -1450,8 +1453,27 @@ impl McpClient {
     }
 
     fn critical(&mut self, what: &str) -> ! {
+        // before the kill: whether the server had already ended on its own, and what it said
+        let state = match self.child.try_wait() {
+            Ok(Some(status)) => format!("had exited ({status})"),
+            Ok(None) => "was still running".to_string(),
+            Err(e) => format!("state unknown: {e}"),
+        };
         let _ = self.child.kill();
-        panic!("CRITICAL: {what}");
+        let err = self
+            .stderr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let at = err.len().saturating_sub(CRITICAL_STDERR_TAIL);
+        let at = (at..err.len())
+            .find(|i| err.is_char_boundary(*i))
+            .unwrap_or(err.len());
+        panic!(
+            "CRITICAL: {what} (server pid {} {state}; the last of its stderr: {:?})",
+            self.child.id(),
+            &err[at..]
+        );
     }
 
     /// The raw JSON-RPC response with `id`, waiting at most `budget`.
