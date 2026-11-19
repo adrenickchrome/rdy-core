@@ -8,6 +8,7 @@ pub mod disclosure_review;
 pub mod edit_loop;
 pub mod every_kind;
 pub mod fixtures;
+pub mod focus;
 pub mod foreign_fixture;
 pub mod gate_steps;
 pub mod git_repo;
