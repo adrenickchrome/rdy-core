@@ -34,6 +34,12 @@ struct Args {
     /// non-root user) instead of letting it skip. Sets `RDY_QA_REQUIRE_ALL=1` on the test runs.
     #[arg(long)]
     require_all: bool,
+    /// Run one crate's tests or one rdy-qa area, with only the builds they need: no fmt, clippy,
+    /// workspace tests, perf or report file. `<crate|area>[::<filter>]`; for a crate, a first
+    /// filter segment that names a test target (`tests/<name>.rs`) runs that target alone.
+    /// Fails when no test matches, and ends with the replay command.
+    #[arg(long, value_name = "CRATE|AREA[::FILTER]", conflicts_with_all = ["only", "rebaseline", "skip_perf"])]
+    focus: Option<String>,
 }
 
 fn root() -> PathBuf {
@@ -196,6 +202,16 @@ fn main() {
     {
         eprintln!("could not move the running gate aside: {e}");
         std::process::exit(2);
+    }
+    if let Some(f) = &args.focus {
+        let mut env = vec![];
+        if args.require_all {
+            env.push((rdy_qa::skip::REQUIRE_ALL, "1"));
+        }
+        if args.deep {
+            env.push(("RDY_QA_DEEP", "1"));
+        }
+        std::process::exit(rdy_qa::focus::main(f, &root(), &env, run_bounded));
     }
     let start = Instant::now();
     // A crashed run must not leave a stale verdict behind.
