@@ -22,6 +22,7 @@ mod paths;
 mod query;
 mod read_only;
 mod read_state;
+mod scope_share;
 mod scopes;
 mod source_exists;
 mod windows_native_fixtures;
