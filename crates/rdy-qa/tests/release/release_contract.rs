@@ -4817,15 +4817,13 @@ fn vector_project() -> (tempfile::TempDir, String, String, usize) {
     (dir, address, many, cuts[cuts.len() / 2])
 }
 
+/// One briefing on a surface: target, scope, budget and cursor in, the reply's JSON out.
+type BriefCall<'a> = dyn FnMut(&str, Option<&str>, Option<usize>, Option<&str>) -> Value + 'a;
+
 /// The vector probes of one surface: the rows of two sources with words and links, a cut first
 /// page and the rest, a source past the first 500, and a past landing with no rows. `brief` runs
 /// one briefing (target, scope, budget, cursor) and returns its JSON.
-fn vector_probes(
-    address: &str,
-    many: &str,
-    cut: usize,
-    brief: &mut dyn FnMut(&str, Option<&str>, Option<usize>, Option<&str>) -> Value,
-) {
+fn vector_probes(address: &str, many: &str, cut: usize, brief: &mut BriefCall<'_>) {
     let full = brief(address, None, None, None);
     let rows = full["vector_neighbors"]
         .as_array()
