@@ -101,7 +101,7 @@
           "min_rdy": null,
           "profile": null,
           "quarantine_seconds": 3600,
-          "rdy": "0.53.0",
+          "rdy": "0.54.0",
           "repo_id": null,
           "stream_read": [
             2
@@ -116,7 +116,7 @@
       "request": {
         "body": {
           "actor": "agent:ana/claude",
-          "rdy": "0.53.0",
+          "rdy": "0.54.0",
           "run": "run-ana",
           "site": null,
           "stream_read": [
@@ -142,7 +142,7 @@
       "reply": {
         "body": {
           "code": "E_HUB_RDY_TOO_OLD",
-          "fix": "install rdy 0.53.0 from rdy's official download",
+          "fix": "install rdy 0.54.0 from rdy's official download",
           "issues": [],
           "message": "rdy 0.1.0 is older than this install takes",
           "request_id": "<request-id>"

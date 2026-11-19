@@ -364,7 +364,7 @@ fn scc8_contract_adds_only_sync_wire_and_errors() {
     .unwrap();
     assert_eq!(
         sha(&wire),
-        "18ade8e2c1a301d780270f20fe49fc116110a6aa512baf624d768ef5ba39711f"
+        "60771d5b857135696a355fab2ec388b4aa59a6755549cd041b0b57023a372c95"
     );
     let now = read(CURRENT);
     assert_eq!(
@@ -377,7 +377,7 @@ fn scc8_contract_adds_only_sync_wire_and_errors() {
     .unwrap();
     assert_eq!(
         sha(&wire2),
-        "ddc3e17a39425ba7af5a7a4be8531fa89e484b2ff82cc4f4b12d8d37418e33e7"
+        "15a6c243840c2fa58428a2b6d821d87c57466a14de70a423eb7af1477e30c3d8"
     );
     assert_eq!(
         now["sync"]["fixture_digests"]["sync-client-wire-v2.json"],
@@ -611,9 +611,9 @@ fn scc10_contract_delta_is_exactly_the_owned_leaves() {
 
 /// The sha256 of each wire fixture, in one place: rdyhub recaptures a wire fixture when its core
 /// pin moves, and then only these digests and the `rdy` strings change.
-const WIRE_V1_SHA: &str = "18ade8e2c1a301d780270f20fe49fc116110a6aa512baf624d768ef5ba39711f";
-const WIRE_V2_SHA: &str = "ddc3e17a39425ba7af5a7a4be8531fa89e484b2ff82cc4f4b12d8d37418e33e7";
-const WIRE_V3A_SHA: &str = "101179344b2a81b71878dbaf05864ceeaaed652b1978707fcf2bfd96f0b3b188";
+const WIRE_V1_SHA: &str = "60771d5b857135696a355fab2ec388b4aa59a6755549cd041b0b57023a372c95";
+const WIRE_V2_SHA: &str = "15a6c243840c2fa58428a2b6d821d87c57466a14de70a423eb7af1477e30c3d8";
+const WIRE_V3A_SHA: &str = "4fce80edaadbab7df7dc82c2346d82ab413af223c2df74100f89d5bbb9ebe565";
 
 /// The contract fixtures before this plan, each with the sha256 of the bytes its release shipped.
 const EARLIER: &[(&str, &str)] = &[

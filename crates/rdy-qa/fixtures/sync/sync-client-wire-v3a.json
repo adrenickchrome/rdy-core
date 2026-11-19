@@ -105,9 +105,24 @@
                       "required": false,
                       "values": []
                     },
+                    "everyday": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "name": {
                       "kind": "str",
                       "required": true,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
                       "values": []
                     }
                   },
@@ -141,6 +156,14 @@
                       "kind": "map",
                       "required": false,
                       "values": []
+                    },
+                    "rules_from_chat": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "land",
+                        "card"
+                      ]
                     }
                   },
                   "prefix": "ap",
@@ -153,7 +176,18 @@
                   "body": "required",
                   "children": [],
                   "class": null,
-                  "fields": {},
+                  "fields": {
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
                   "prefix": "c",
                   "tracking": [],
                   "traits": [
@@ -167,6 +201,16 @@
                   "class": null,
                   "fields": {
                     "lang": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
                       "kind": "str",
                       "required": false,
                       "values": []
@@ -188,9 +232,24 @@
                       "required": false,
                       "values": []
                     },
+                    "everyday": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "name": {
                       "kind": "str",
                       "required": true,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
                       "values": []
                     }
                   },
@@ -204,7 +263,18 @@
                   "body": "required",
                   "children": [],
                   "class": null,
-                  "fields": {},
+                  "fields": {
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
                   "prefix": "k",
                   "tracking": [],
                   "traits": [
@@ -233,8 +303,19 @@
                         "delegated",
                         "precedent",
                         "elimination",
-                        "none"
+                        "none",
+                        "reconstructed"
                       ]
+                    },
+                    "built": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "confirmation": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
                     },
                     "decided_at": {
                       "kind": "str",
@@ -323,7 +404,9 @@
                     }
                   },
                   "prefix": "D",
-                  "tracking": [],
+                  "tracking": [
+                    "built"
+                  ],
                   "traits": [
                     "normative"
                   ]
@@ -345,6 +428,16 @@
                         "mermaid",
                         "d2"
                       ]
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
                     }
                   },
                   "prefix": "dg",
@@ -380,6 +473,8 @@
                     "question",
                     "finding",
                     "source",
+                    "instruction",
+                    "repo_link",
                     "publication_profile",
                     "authority_policy"
                   ],
@@ -404,6 +499,16 @@
                       "required": true,
                       "values": []
                     },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "required": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "title": {
                       "kind": "str",
                       "required": true,
@@ -426,6 +531,11 @@
                       "required": false,
                       "values": []
                     },
+                    "everyday": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "kind": {
                       "kind": "str",
                       "required": false,
@@ -434,6 +544,16 @@
                     "name": {
                       "kind": "str",
                       "required": true,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
                       "values": []
                     }
                   },
@@ -447,7 +567,18 @@
                   "body": "required",
                   "children": [],
                   "class": null,
-                  "fields": {},
+                  "fields": {
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
                   "prefix": "e",
                   "tracking": [],
                   "traits": [
@@ -469,9 +600,29 @@
                       "required": true,
                       "values": []
                     },
+                    "dark_blob": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
+                    "dark_media_type": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    },
                     "media_type": {
                       "kind": "str",
                       "required": true,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
                       "values": []
                     }
                   },
@@ -512,6 +663,16 @@
                     "name": {
                       "kind": "str",
                       "required": true,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
                       "values": []
                     },
                     "steps": {
@@ -561,6 +722,38 @@
                     "structural"
                   ]
                 },
+                "instruction": {
+                  "body": "required",
+                  "children": [],
+                  "class": "doc_asset",
+                  "fields": {
+                    "applies_to": {
+                      "kind": "list",
+                      "required": true,
+                      "values": []
+                    },
+                    "locked": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "ai",
+                  "tracking": [],
+                  "traits": [
+                    "normative"
+                  ]
+                },
                 "interface": {
                   "body": "optional",
                   "children": [],
@@ -571,9 +764,24 @@
                       "required": false,
                       "values": []
                     },
+                    "everyday": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "name": {
                       "kind": "str",
                       "required": true,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
                       "values": []
                     }
                   },
@@ -593,6 +801,11 @@
                       "kind": "bool",
                       "required": false,
                       "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
                     }
                   },
                   "prefix": "n",
@@ -605,7 +818,18 @@
                   "body": "required",
                   "children": [],
                   "class": null,
-                  "fields": {},
+                  "fields": {
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
                   "prefix": "p",
                   "tracking": [],
                   "traits": [
@@ -630,10 +854,26 @@
                       "required": false,
                       "values": []
                     },
+                    "planned": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "hide",
+                        "mark"
+                      ]
+                    },
                     "select": {
                       "kind": "list",
                       "required": true,
                       "values": []
+                    },
+                    "since": {
+                      "kind": "enum",
+                      "required": false,
+                      "values": [
+                        "show",
+                        "off"
+                      ]
                     },
                     "title": {
                       "kind": "str",
@@ -705,11 +945,46 @@
                     "informative"
                   ]
                 },
+                "repo_link": {
+                  "body": "forbidden",
+                  "children": [],
+                  "class": "supporting",
+                  "fields": {
+                    "alias": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "profile": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "repo": {
+                      "kind": "str",
+                      "required": true,
+                      "values": []
+                    },
+                    "title": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
+                    }
+                  },
+                  "prefix": "rl",
+                  "tracking": [],
+                  "traits": []
+                },
                 "requirement": {
                   "body": "required",
                   "children": [],
                   "class": null,
                   "fields": {
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "priority": {
                       "kind": "enum",
                       "required": false,
@@ -718,6 +993,11 @@
                         "should",
                         "may"
                       ]
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
                     }
                   },
                   "prefix": "r",
@@ -752,10 +1032,16 @@
                     "decision",
                     "question",
                     "finding",
-                    "source"
+                    "source",
+                    "instruction"
                   ],
                   "class": null,
                   "fields": {
+                    "collapsed": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "lifecycle": {
                       "kind": "enum",
                       "required": false,
@@ -764,6 +1050,16 @@
                         "stable",
                         "deprecated"
                       ]
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
+                      "values": []
                     },
                     "title": {
                       "kind": "str",
@@ -828,9 +1124,19 @@
                       "required": false,
                       "values": []
                     },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "rows": {
                       "kind": "list",
                       "required": true,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
                       "values": []
                     }
                   },
@@ -850,9 +1156,24 @@
                       "required": false,
                       "values": []
                     },
+                    "everyday": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "name": {
                       "kind": "str",
                       "required": true,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
                       "values": []
                     }
                   },
@@ -872,9 +1193,24 @@
                       "required": false,
                       "values": []
                     },
+                    "everyday": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
                     "name": {
                       "kind": "str",
                       "required": true,
+                      "values": []
+                    },
+                    "planned": {
+                      "kind": "bool",
+                      "required": false,
+                      "values": []
+                    },
+                    "since": {
+                      "kind": "str",
+                      "required": false,
                       "values": []
                     },
                     "unit": {
@@ -1002,7 +1338,7 @@
               "tensions": {},
               "version": "0.1.0"
             },
-            "rdy": "0.53.0",
+            "rdy": "0.54.0",
             "theme": "rdy-standard",
             "title": "Publish"
           },

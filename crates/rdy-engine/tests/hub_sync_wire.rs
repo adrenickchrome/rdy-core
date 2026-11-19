@@ -42,12 +42,12 @@ use std::sync::{Arc, OnceLock};
 
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
 const FIXTURE: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v1.json");
-const FIXTURE_SHA256: &str = "18ade8e2c1a301d780270f20fe49fc116110a6aa512baf624d768ef5ba39711f";
+const FIXTURE_SHA256: &str = "60771d5b857135696a355fab2ec388b4aa59a6755549cd041b0b57023a372c95";
 const FIXTURE_V2: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v2.json");
-const FIXTURE_V2_SHA256: &str = "ddc3e17a39425ba7af5a7a4be8531fa89e484b2ff82cc4f4b12d8d37418e33e7";
+const FIXTURE_V2_SHA256: &str = "15a6c243840c2fa58428a2b6d821d87c57466a14de70a423eb7af1477e30c3d8";
 /// rdyhub's fixture v3a (972e7867): the held write reply and the held outcomes.
 const FIXTURE_V3A: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v3a.json");
-const FIXTURE_V3A_SHA256: &str = "101179344b2a81b71878dbaf05864ceeaaed652b1978707fcf2bfd96f0b3b188";
+const FIXTURE_V3A_SHA256: &str = "4fce80edaadbab7df7dc82c2346d82ab413af223c2df74100f89d5bbb9ebe565";
 const PUSH: &str = "0123456789abcdefghjkmnpqrs";
 const REPO_PATH: &str = "/acme/docs";
 
