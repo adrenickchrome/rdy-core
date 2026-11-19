@@ -227,13 +227,81 @@ impl std::fmt::Debug for MapCache {
     }
 }
 
-/// The bytes one cached map is charged: its key, its slot and each entry with its id's text.
+/// The entries of one B-tree node of a [`BlockMap`] (std's `BTreeMap`: `2 * B - 1`, `B = 6`).
+const NODE_ENTRIES: usize = 11;
+
+/// The bytes of one leaf node of a [`BlockMap`]: its parent link, its index in the parent and
+/// its length, then its keys and values, rounded up to the link's alignment.
+fn leaf_node_bytes() -> usize {
+    let link = std::mem::size_of::<usize>();
+    let raw = link
+        + 2 * std::mem::size_of::<u16>()
+        + NODE_ENTRIES * (std::mem::size_of::<BlockId>() + std::mem::size_of::<Hash>());
+    raw.div_ceil(link) * link
+}
+
+/// The bytes of one internal node: a leaf node and its edges.
+fn internal_node_bytes() -> usize {
+    leaf_node_bytes() + (NODE_ENTRIES + 1) * std::mem::size_of::<usize>()
+}
+
+/// The leaf and internal nodes of a map of `n` entries built from sorted entries, as
+/// `BTreeMap`'s bulk build lays them out: each node fills before the next opens, and the entry
+/// after a full node goes up into the lowest ancestor with room (a new root when none has).
+fn bulk_nodes(n: usize) -> (usize, usize) {
+    if n == 0 {
+        return (0, 0);
+    }
+    // the length of the rightmost node at each height, the leaf first
+    let mut open = vec![0usize];
+    let (mut leaves, mut internals) = (1usize, 0usize);
+    for _ in 0..n {
+        if open[0] < NODE_ENTRIES {
+            open[0] += 1;
+            continue;
+        }
+        let h = match open.iter().position(|&len| len < NODE_ENTRIES) {
+            Some(h) => h,
+            None => {
+                open.push(0);
+                internals += 1;
+                open.len() - 1
+            }
+        };
+        open[h] += 1;
+        // a fresh right subtree below the entry: one node at each lower height
+        for (level, len) in open.iter_mut().enumerate().take(h) {
+            *len = 0;
+            if level == 0 {
+                leaves += 1;
+            } else {
+                internals += 1;
+            }
+        }
+    }
+    (leaves, internals)
+}
+
+/// `map` laid out as the cache keeps it: built again from its sorted entries, so its nodes are
+/// full and each id's text takes exactly its length. [`entry_bytes`] measures this layout.
+fn compact(map: &BlockMap) -> BlockMap {
+    map.iter().map(|(id, v)| (id.clone(), *v)).collect()
+}
+
+/// The bytes one cached map holds, measured on the layout [`compact`] gives it: its B-tree nodes,
+/// each id's text, and its slot: the shared pointer's counts and map, the table entry (key,
+/// pointer, bytes) and the order entry.
 fn entry_bytes(map: &BlockMap) -> usize {
-    const SLOT: usize = 32 + 3 * std::mem::size_of::<usize>() + 64;
-    // a B-tree entry: the id, its text, the hash and a share of its node
-    let per = std::mem::size_of::<BlockId>() + std::mem::size_of::<Hash>() + 16;
-    map.keys()
-        .fold(SLOT, |n, id| n.saturating_add(per + id.as_str().len()))
+    const SLOT: usize = 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<BlockMap>()
+        + std::mem::size_of::<Hash>()
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<Hash>();
+    let (leaves, internals) = bulk_nodes(map.len());
+    let text = map
+        .keys()
+        .fold(0usize, |n, id| n.saturating_add(id.as_str().len()));
+    SLOT + leaves * leaf_node_bytes() + internals * internal_node_bytes() + text
 }
 
 impl MapCache {
@@ -289,7 +357,14 @@ impl MapCache {
     /// Keeps `map` as the map of `full`, built from the source `tag` names. Entries of another
     /// source, or of an older epoch, are dropped first; a reader of an older epoch than the
     /// entries' keeps nothing.
+    /// The cache keeps its own compact copy of `map` ([`compact`]), whose bytes it measures and
+    /// charges; `map` itself is not kept.
     pub fn insert(&self, tag: CacheTag, full: Hash, map: Arc<BlockMap>) {
+        if self.get(tag, &full).is_some() {
+            return;
+        }
+        // the copy is made outside the lock
+        let map = Arc::new(compact(&map));
         let mut c = self.lock();
         match c.tag {
             Some(t) if t == tag => {}
