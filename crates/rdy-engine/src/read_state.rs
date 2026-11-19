@@ -10,6 +10,7 @@ use crate::suggest::MentionScan;
 use crate::tensions::Detector;
 use crate::tensions::index::CanonIndex;
 use crate::tensions::set::TensionCell;
+use crate::vectors::{VectorWeights, WeightScope};
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
@@ -84,6 +85,10 @@ pub(crate) struct Built {
     pub(crate) tree: OnceLock<Arc<Vec<TreeNode>>>,
     /// The entity lexicon (FW-EN1), memoised; carried across a write like the graph.
     pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
+    /// The vector weights of this state's lexicon (D-ZX5S6), made on first read; each idf and
+    /// norm in them is computed when a read first asks for it. Never carried: a write drops only
+    /// this state's lazy values, and a held state keeps its own.
+    pub(crate) weights: OnceLock<Arc<VectorWeights>>,
     /// The structural layer of coverage (FW-CH1), memoised; carried across a write with the
     /// graph and the lexicon (`coverage::carry`, cc11).
     pub(crate) structural: OnceLock<Arc<Structural>>,
@@ -110,6 +115,7 @@ impl Built {
             graph: OnceLock::new(),
             tree: OnceLock::new(),
             lexicon: OnceLock::new(),
+            weights: OnceLock::new(),
             structural: OnceLock::new(),
             structural_from: OnceLock::new(),
             mentions: Mutex::new(vec![]),
@@ -125,8 +131,9 @@ impl Built {
     /// so are the mention scans (`MentionScan::carried`). cc11: when the graph, the lexicon and
     /// the structural layer of coverage are all built, that layer is carried too
     /// (`coverage::carry`, under `pack`), unless the ops change entries its dirty set does not
-    /// reach; then the next read rebuilds it. The tree and the tension index and canon part are
-    /// not carried.
+    /// reach; then the next read rebuilds it. The tree, the tension index and canon part, and the
+    /// vector weights are not carried: the next state computes its weights lazily from its own
+    /// lexicon, so nothing here normalizes the corpus.
     pub(crate) fn after(&self, ops: &[Op], pack: &Pack) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
@@ -967,6 +974,32 @@ impl ReadState {
             return None;
         }
         Some(Arc::new(carry(&of(c), old, new)))
+    }
+
+    /// The vector weights of `ws` (D-ZX5S6), nothing computed until a read asks. A read scope's
+    /// weights are made once per build and kept on it, over the scope's lexicon: a floating view
+    /// shares canon's, a write starts the next state's afresh, and a held state keeps its own.
+    /// Review's (D-R2CDN) are canon's lexicon at this state's landing plus the source block, made
+    /// for each call and never cached, since they depend on the source's content.
+    pub fn vector_weights(&self, ws: WeightScope<'_>) -> Result<Arc<VectorWeights>, RdyError> {
+        match ws {
+            WeightScope::Read(scope) => {
+                let built = self.built(scope)?;
+                if let Some(w) = built.weights.get() {
+                    return Ok(Arc::clone(w));
+                }
+                let lexicon = self.lexicon(scope)?;
+                Ok(Arc::clone(
+                    built
+                        .weights
+                        .get_or_init(|| Arc::new(VectorWeights::of(lexicon))),
+                ))
+            }
+            WeightScope::Review(source) => Ok(Arc::new(VectorWeights::review(
+                self.lexicon(&Scope::Canon)?,
+                source,
+            ))),
+        }
     }
 
     /// Whether `scope`'s lexicon is built in this state. Never builds, and never marks an as-of

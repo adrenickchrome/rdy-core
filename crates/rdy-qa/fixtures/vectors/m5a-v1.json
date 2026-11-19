@@ -1,0 +1,1894 @@
+{
+  "blocks": [
+    {
+      "fields": {
+        "doc_type": "page",
+        "title": "Vector golden"
+      },
+      "id": "d-00001",
+      "type": "doc"
+    },
+    {
+      "fields": {
+        "title": "Words"
+      },
+      "id": "s-00001",
+      "parent": "d-00001",
+      "type": "section"
+    },
+    {
+      "fields": {
+        "title": "— · —"
+      },
+      "id": "s-00002",
+      "parent": "d-00001",
+      "type": "section"
+    },
+    {
+      "body": "The gateway routes every request to the ledger.",
+      "id": "c-00001",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "The gateway gateway gateway retries the request.",
+      "id": "c-00002",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "The ledger stores every request; the ledger is append-only.",
+      "id": "c-00003",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "Every request must reach the ledger within 5 ms.",
+      "fields": {
+        "priority": "must"
+      },
+      "id": "r-00001",
+      "links": {
+        "describes": [
+          "c-00001"
+        ]
+      },
+      "parent": "s-00001",
+      "type": "requirement"
+    },
+    {
+      "body": "Café naïve façade: Straße and STRASSE stay distinct.",
+      "id": "r-00002",
+      "parent": "s-00001",
+      "type": "requirement"
+    },
+    {
+      "body": "日本語 テキスト と English words.",
+      "id": "c-00004",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "Ünïcödé ÉCOLE école Ελληνικά λέξη.",
+      "id": "c-00005",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "See {{c-00001}} and {{c-00001}} again; also {{c-00002}}.",
+      "id": "n-00001",
+      "links": {
+        "describes": [
+          "c-00001"
+        ]
+      },
+      "parent": "s-00001",
+      "type": "note"
+    },
+    {
+      "body": "Duplicate links {{c-00003}}.",
+      "id": "n-00002",
+      "links": {
+        "describes": [
+          "c-00003",
+          "c-00003"
+        ],
+        "implements": [
+          "c-00003"
+        ]
+      },
+      "parent": "s-00001",
+      "type": "note"
+    },
+    {
+      "body": "…",
+      "id": "n-00003",
+      "links": {
+        "describes": [
+          "c-00001"
+        ]
+      },
+      "parent": "s-00001",
+      "type": "note"
+    },
+    {
+      "body": "index.redb and rdy-core and v1.2.3 and a-b-c.",
+      "id": "p-00001",
+      "parent": "s-00001",
+      "type": "prose"
+    },
+    {
+      "body": "request request request request request",
+      "id": "p-00002",
+      "parent": "s-00001",
+      "type": "prose"
+    },
+    {
+      "fields": {
+        "aliases": [
+          "gateways",
+          "GW"
+        ],
+        "name": "Gateway"
+      },
+      "id": "en-00001",
+      "parent": "s-00001",
+      "type": "entity"
+    },
+    {
+      "fields": {
+        "kind": "store",
+        "name": "Ledger"
+      },
+      "id": "en-00002",
+      "parent": "s-00001",
+      "type": "entity"
+    },
+    {
+      "body": "The gateway describes {{en-00001}} and {{en-00002}}.",
+      "id": "c-00006",
+      "links": {
+        "describes": [
+          "en-00001"
+        ]
+      },
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "Ledger ledger ledger ledger ledger ledger ledger ledger",
+      "id": "c-00007",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "fields": {
+        "name": "Request flow",
+        "steps": [
+          "Receive the request",
+          "Route it to the gateway",
+          "Write the ledger"
+        ]
+      },
+      "id": "f-00001",
+      "parent": "s-00001",
+      "type": "flow"
+    },
+    {
+      "fields": {
+        "columns": [
+          "Name",
+          "Value"
+        ],
+        "rows": [
+          "gateway | 5",
+          "ledger | 7"
+        ]
+      },
+      "id": "tb-00001",
+      "parent": "s-00001",
+      "type": "table"
+    },
+    {
+      "body": "fn main() {}",
+      "fields": {
+        "lang": "rust"
+      },
+      "id": "cd-00001",
+      "parent": "s-00001",
+      "type": "code"
+    },
+    {
+      "body": "Zebra.",
+      "id": "c-00008",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "the the the the",
+      "id": "c-00009",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "Self {{n-00004}} reference.",
+      "id": "n-00004",
+      "parent": "s-00001",
+      "type": "note"
+    },
+    {
+      "body": "x_1 x_2 x_1.",
+      "id": "c-00010",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "Numbers 1 2 3 1 2 1.",
+      "id": "p-00003",
+      "parent": "s-00001",
+      "type": "prose"
+    },
+    {
+      "body": "Routes, routes; ROUTES!",
+      "id": "c-00011",
+      "parent": "s-00001",
+      "type": "claim"
+    },
+    {
+      "body": "graph TD; A-->B",
+      "fields": {
+        "alt": "Gateway diagram",
+        "lang": "mermaid"
+      },
+      "id": "dg-00001",
+      "parent": "s-00001",
+      "type": "diagram"
+    },
+    {
+      "body": "Links only {{en-00001}} {{en-00002}} {{c-00008}}.",
+      "id": "n-00005",
+      "links": {
+        "affects": [
+          "c-00008"
+        ],
+        "implements": [
+          "en-00002"
+        ]
+      },
+      "parent": "s-00001",
+      "type": "note"
+    }
+  ],
+  "constants": {
+    "ln2_bits": "3fe62e42fefa39ef",
+    "log2_terms": 40,
+    "seed_floor": 100,
+    "seed_share": 10,
+    "weight_cache_bytes": 268435456
+  },
+  "description": "The numerical golden of rdy's model-free vectors: fixed constants, log2 cases and a fixed store of blocks, with the exact bits of every idf, target weight, norm and unit-vector entry. Values are binary64 bits in hex. Never regenerate them at test time.",
+  "expected": {
+    "blocks": {
+      "c-00001": {
+        "counts": [
+          [
+            "every",
+            1
+          ],
+          [
+            "gateway",
+            1
+          ],
+          [
+            "ledger",
+            1
+          ],
+          [
+            "request",
+            1
+          ],
+          [
+            "routes",
+            1
+          ],
+          [
+            "the",
+            2
+          ],
+          [
+            "to",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "every",
+            "3fd8f3a685ad4be8"
+          ],
+          [
+            "gateway",
+            "3fcef9140d3c6620"
+          ],
+          [
+            "ledger",
+            "3fcef9140d3c6620"
+          ],
+          [
+            "request",
+            "3fd13561825e3260"
+          ],
+          [
+            "routes",
+            "3fdd7b342f70ced5"
+          ],
+          [
+            "the",
+            "3fdef9140d3c6620"
+          ],
+          [
+            "to",
+            "3fdd7b342f70ced5"
+          ]
+        ],
+        "lexical_norm": "402087d1e97d6c31",
+        "link": [],
+        "link_norm": null
+      },
+      "c-00002": {
+        "counts": [
+          [
+            "gateway",
+            3
+          ],
+          [
+            "request",
+            1
+          ],
+          [
+            "retries",
+            1
+          ],
+          [
+            "the",
+            2
+          ]
+        ],
+        "lexical": [
+          [
+            "gateway",
+            "3fe3aa24cdf4b129"
+          ],
+          [
+            "request",
+            "3fd0e80c6789a0ea"
+          ],
+          [
+            "retries",
+            "3fe249189abf2909"
+          ],
+          [
+            "the",
+            "3fde6de3fdfa15cc"
+          ]
+        ],
+        "lexical_norm": "4020d36edaac6852",
+        "link": [],
+        "link_norm": null
+      },
+      "c-00003": {
+        "counts": [
+          [
+            "append-only",
+            1
+          ],
+          [
+            "every",
+            1
+          ],
+          [
+            "is",
+            1
+          ],
+          [
+            "ledger",
+            2
+          ],
+          [
+            "request",
+            1
+          ],
+          [
+            "stores",
+            1
+          ],
+          [
+            "the",
+            2
+          ]
+        ],
+        "lexical": [
+          [
+            "append-only",
+            "3fdc7c78d7c44568"
+          ],
+          [
+            "every",
+            "3fd3182d926a2932"
+          ],
+          [
+            "is",
+            "3fdc7c78d7c44568"
+          ],
+          [
+            "ledger",
+            "3fd7b3c336988aa4"
+          ],
+          [
+            "request",
+            "3fca567989880d11"
+          ],
+          [
+            "stores",
+            "3fdc7c78d7c44568"
+          ],
+          [
+            "the",
+            "3fd7b3c336988aa4"
+          ]
+        ],
+        "lexical_norm": "402599f38ec0bd5c",
+        "link": [],
+        "link_norm": null
+      },
+      "c-00004": {
+        "counts": [
+          [
+            "english",
+            1
+          ],
+          [
+            "words",
+            1
+          ],
+          [
+            "と",
+            1
+          ],
+          [
+            "テキスト",
+            1
+          ],
+          [
+            "日本語",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "english",
+            "3fddc08f70892f2b"
+          ],
+          [
+            "words",
+            "3fd790345f7f0e85"
+          ],
+          [
+            "と",
+            "3fddc08f70892f2b"
+          ],
+          [
+            "テキスト",
+            "3fddc08f70892f2b"
+          ],
+          [
+            "日本語",
+            "3fddc08f70892f2b"
+          ]
+        ],
+        "lexical_norm": "4024aea63a95c411",
+        "link": [],
+        "link_norm": null
+      },
+      "c-00005": {
+        "counts": [
+          [
+            "école",
+            2
+          ],
+          [
+            "ünïcödé",
+            1
+          ],
+          [
+            "ελληνικά",
+            1
+          ],
+          [
+            "λέξη",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "école",
+            "3fe83091e6a7f7e7"
+          ],
+          [
+            "ünïcödé",
+            "3fd83091e6a7f7e7"
+          ],
+          [
+            "ελληνικά",
+            "3fd83091e6a7f7e7"
+          ],
+          [
+            "λέξη",
+            "3fd83091e6a7f7e7"
+          ]
+        ],
+        "lexical_norm": "402970295d5e7229",
+        "link": [],
+        "link_norm": null
+      },
+      "c-00006": {
+        "counts": [
+          [
+            "and",
+            1
+          ],
+          [
+            "describes",
+            1
+          ],
+          [
+            "gateway",
+            1
+          ],
+          [
+            "the",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "and",
+            "3fdcc5f8c10096b2"
+          ],
+          [
+            "describes",
+            "3fe8a2cc43852f5f"
+          ],
+          [
+            "gateway",
+            "3fd47f9fc609c80c"
+          ],
+          [
+            "the",
+            "3fd47f9fc609c80c"
+          ]
+        ],
+        "lexical_norm": "4018fa36cdde1cc0",
+        "link": [
+          [
+            "en-00001",
+            "3fe6a09e667f3bcc"
+          ],
+          [
+            "en-00002",
+            "3fe6a09e667f3bcc"
+          ]
+        ],
+        "link_norm": "4006a09e667f3bcd"
+      },
+      "c-00007": {
+        "counts": [
+          [
+            "ledger",
+            8
+          ]
+        ],
+        "lexical": [
+          [
+            "ledger",
+            "3ff0000000000000"
+          ]
+        ],
+        "lexical_norm": "4020000000000000",
+        "link": [],
+        "link_norm": null
+      },
+      "c-00008": {
+        "counts": [
+          [
+            "zebra",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "zebra",
+            "3ff0000000000000"
+          ]
+        ],
+        "lexical_norm": "40133abb3faa0216",
+        "link": [],
+        "link_norm": null
+      },
+      "c-00009": {
+        "counts": [
+          [
+            "the",
+            4
+          ]
+        ],
+        "lexical": [
+          [
+            "the",
+            "3ff0000000000000"
+          ]
+        ],
+        "lexical_norm": "4018000000000000",
+        "link": [],
+        "link_norm": null
+      },
+      "c-00010": {
+        "counts": [
+          [
+            "x_1",
+            2
+          ],
+          [
+            "x_2",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "x_1",
+            "3fec9f25c5bfedd9"
+          ],
+          [
+            "x_2",
+            "3fdc9f25c5bfedd9"
+          ]
+        ],
+        "lexical_norm": "40257fc7f40c1dff",
+        "link": [],
+        "link_norm": null
+      },
+      "c-00011": {
+        "counts": [
+          [
+            "routes",
+            3
+          ]
+        ],
+        "lexical": [
+          [
+            "routes",
+            "3ff0000000000000"
+          ]
+        ],
+        "lexical_norm": "4023af098b9de533",
+        "link": [],
+        "link_norm": null
+      },
+      "cd-00001": {
+        "counts": [],
+        "lexical": [],
+        "lexical_norm": null,
+        "link": [],
+        "link_norm": null
+      },
+      "d-00001": {
+        "counts": [
+          [
+            "golden",
+            1
+          ],
+          [
+            "vector",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "golden",
+            "3fe6a09e667f3bcc"
+          ],
+          [
+            "vector",
+            "3fe6a09e667f3bcc"
+          ]
+        ],
+        "lexical_norm": "401b31cb272ecf65",
+        "link": [],
+        "link_norm": null
+      },
+      "dg-00001": {
+        "counts": [
+          [
+            "diagram",
+            1
+          ],
+          [
+            "gateway",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "diagram",
+            "3fed8b8e8c78982f"
+          ],
+          [
+            "gateway",
+            "3fd89552281fcfbb"
+          ]
+        ],
+        "lexical_norm": "4014d3c0bd1aebbe",
+        "link": [],
+        "link_norm": null
+      },
+      "en-00001": {
+        "counts": [
+          [
+            "gateway",
+            1
+          ],
+          [
+            "gateways",
+            1
+          ],
+          [
+            "gw",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "gateway",
+            "3fd20fdf641f59fc"
+          ],
+          [
+            "gateways",
+            "3fe5b5263211794b"
+          ],
+          [
+            "gw",
+            "3fe5b5263211794b"
+          ]
+        ],
+        "lexical_norm": "401c58c7fdfc81bc",
+        "link": [],
+        "link_norm": null
+      },
+      "en-00002": {
+        "counts": [
+          [
+            "ledger",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "ledger",
+            "3ff0000000000000"
+          ]
+        ],
+        "lexical_norm": "4000000000000000",
+        "link": [],
+        "link_norm": null
+      },
+      "f-00001": {
+        "counts": [
+          [
+            "flow",
+            1
+          ],
+          [
+            "gateway",
+            1
+          ],
+          [
+            "it",
+            1
+          ],
+          [
+            "ledger",
+            1
+          ],
+          [
+            "receive",
+            1
+          ],
+          [
+            "request",
+            2
+          ],
+          [
+            "route",
+            1
+          ],
+          [
+            "the",
+            3
+          ],
+          [
+            "to",
+            1
+          ],
+          [
+            "write",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "flow",
+            "3fd6a6233de70f4a"
+          ],
+          [
+            "gateway",
+            "3fc2d8639b9d1200"
+          ],
+          [
+            "it",
+            "3fd6a6233de70f4a"
+          ],
+          [
+            "ledger",
+            "3fc2d8639b9d1200"
+          ],
+          [
+            "receive",
+            "3fd6a6233de70f4a"
+          ],
+          [
+            "request",
+            "3fd4f0d7c6ee10f8"
+          ],
+          [
+            "route",
+            "3fd6a6233de70f4a"
+          ],
+          [
+            "the",
+            "3fd85b6eb4e00d9c"
+          ],
+          [
+            "to",
+            "3fd1f00a56ffcac9"
+          ],
+          [
+            "write",
+            "3fd6a6233de70f4a"
+          ]
+        ],
+        "lexical_norm": "402b2b2ac301b6fa",
+        "link": [],
+        "link_norm": null
+      },
+      "n-00001": {
+        "counts": [
+          [
+            "again",
+            1
+          ],
+          [
+            "also",
+            1
+          ],
+          [
+            "and",
+            1
+          ],
+          [
+            "see",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "again",
+            "3fe181c703c1bba1"
+          ],
+          [
+            "also",
+            "3fe181c703c1bba1"
+          ],
+          [
+            "and",
+            "3fd472744dae2876"
+          ],
+          [
+            "see",
+            "3fe181c703c1bba1"
+          ]
+        ],
+        "lexical_norm": "402192ff82ff93cd",
+        "link": [
+          [
+            "c-00001",
+            "3fdb4d7d9ff26e86"
+          ],
+          [
+            "c-00002",
+            "3fecf128639f1fb1"
+          ]
+        ],
+        "link_norm": "400a892ad1a8357e"
+      },
+      "n-00002": {
+        "counts": [
+          [
+            "duplicate",
+            1
+          ],
+          [
+            "links",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "duplicate",
+            "3fe915e839c9e828"
+          ],
+          [
+            "links",
+            "3fe3de0e841e0cd4"
+          ]
+        ],
+        "lexical_norm": "40188799ea8f32cd",
+        "link": [
+          [
+            "c-00003",
+            "3ff0000000000000"
+          ]
+        ],
+        "link_norm": "4008000000000000"
+      },
+      "n-00003": {
+        "counts": [],
+        "lexical": [],
+        "lexical_norm": null,
+        "link": [
+          [
+            "c-00001",
+            "3ff0000000000000"
+          ]
+        ],
+        "link_norm": "3ff6a3fe5c604298"
+      },
+      "n-00004": {
+        "counts": [
+          [
+            "reference",
+            1
+          ],
+          [
+            "self",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "reference",
+            "3fe6a09e667f3bcc"
+          ],
+          [
+            "self",
+            "3fe6a09e667f3bcc"
+          ]
+        ],
+        "lexical_norm": "401b31cb272ecf65",
+        "link": [
+          [
+            "n-00004",
+            "3ff0000000000000"
+          ]
+        ],
+        "link_norm": "4008000000000000"
+      },
+      "n-00005": {
+        "counts": [
+          [
+            "links",
+            1
+          ],
+          [
+            "only",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "links",
+            "3fe3de0e841e0cd4"
+          ],
+          [
+            "only",
+            "3fe915e839c9e828"
+          ]
+        ],
+        "lexical_norm": "40188799ea8f32cd",
+        "link": [
+          [
+            "c-00008",
+            "3fe7488e369e0355"
+          ],
+          [
+            "en-00001",
+            "3fdf0b6848d2af1c"
+          ],
+          [
+            "en-00002",
+            "3fdf0b6848d2af1c"
+          ]
+        ],
+        "link_norm": "40107e0f66afed07"
+      },
+      "p-00001": {
+        "counts": [
+          [
+            "a-b-c",
+            1
+          ],
+          [
+            "and",
+            3
+          ],
+          [
+            "index.redb",
+            1
+          ],
+          [
+            "rdy-core",
+            1
+          ],
+          [
+            "v1.2.3",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "a-b-c",
+            "3fd98a983d80af1b"
+          ],
+          [
+            "and",
+            "3fe34724ca96a713"
+          ],
+          [
+            "index.redb",
+            "3fd98a983d80af1b"
+          ],
+          [
+            "rdy-core",
+            "3fd98a983d80af1b"
+          ],
+          [
+            "v1.2.3",
+            "3fd98a983d80af1b"
+          ]
+        ],
+        "lexical_norm": "40281789218589b9",
+        "link": [],
+        "link_norm": null
+      },
+      "p-00002": {
+        "counts": [
+          [
+            "request",
+            5
+          ]
+        ],
+        "lexical": [
+          [
+            "request",
+            "3ff0000000000000"
+          ]
+        ],
+        "lexical_norm": "401d87cf967d4ff2",
+        "link": [],
+        "link_norm": null
+      },
+      "p-00003": {
+        "counts": [
+          [
+            "1",
+            3
+          ],
+          [
+            "2",
+            2
+          ],
+          [
+            "3",
+            1
+          ],
+          [
+            "numbers",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "1",
+            "3fe73a5733555fa3"
+          ],
+          [
+            "2",
+            "3fe1f8b795bed511"
+          ],
+          [
+            "3",
+            "3fd1f8b795bed511"
+          ],
+          [
+            "numbers",
+            "3fd1f8b795bed511"
+          ]
+        ],
+        "lexical_norm": "40311eb024030d59",
+        "link": [],
+        "link_norm": null
+      },
+      "r-00001": {
+        "counts": [
+          [
+            "5",
+            1
+          ],
+          [
+            "every",
+            1
+          ],
+          [
+            "ledger",
+            1
+          ],
+          [
+            "ms",
+            1
+          ],
+          [
+            "must",
+            1
+          ],
+          [
+            "reach",
+            1
+          ],
+          [
+            "request",
+            1
+          ],
+          [
+            "the",
+            1
+          ],
+          [
+            "within",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "5",
+            "3fd559919fcf95d6"
+          ],
+          [
+            "every",
+            "3fd211d6908fd399"
+          ],
+          [
+            "ledger",
+            "3fc66e1dd087c68e"
+          ],
+          [
+            "ms",
+            "3fdaf51913f1877a"
+          ],
+          [
+            "must",
+            "3fdaf51913f1877a"
+          ],
+          [
+            "reach",
+            "3fdaf51913f1877a"
+          ],
+          [
+            "request",
+            "3fc8ec9e38dbc3ea"
+          ],
+          [
+            "the",
+            "3fc66e1dd087c68e"
+          ],
+          [
+            "within",
+            "3fdaf51913f1877a"
+          ]
+        ],
+        "lexical_norm": "4026d390b1a6138a",
+        "link": [
+          [
+            "c-00001",
+            "3ff0000000000000"
+          ]
+        ],
+        "link_norm": "3ff6a3fe5c604298"
+      },
+      "r-00002": {
+        "counts": [
+          [
+            "and",
+            1
+          ],
+          [
+            "café",
+            1
+          ],
+          [
+            "distinct",
+            1
+          ],
+          [
+            "façade",
+            1
+          ],
+          [
+            "naïve",
+            1
+          ],
+          [
+            "stay",
+            1
+          ],
+          [
+            "strasse",
+            1
+          ],
+          [
+            "straße",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "and",
+            "3fcb96921b91d41a"
+          ],
+          [
+            "café",
+            "3fd79f06192588c6"
+          ],
+          [
+            "distinct",
+            "3fd79f06192588c6"
+          ],
+          [
+            "façade",
+            "3fd79f06192588c6"
+          ],
+          [
+            "naïve",
+            "3fd79f06192588c6"
+          ],
+          [
+            "stay",
+            "3fd79f06192588c6"
+          ],
+          [
+            "strasse",
+            "3fd79f06192588c6"
+          ],
+          [
+            "straße",
+            "3fd79f06192588c6"
+          ]
+        ],
+        "lexical_norm": "402a0ce7321d3ded",
+        "link": [],
+        "link_norm": null
+      },
+      "s-00001": {
+        "counts": [
+          [
+            "words",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "words",
+            "3ff0000000000000"
+          ]
+        ],
+        "lexical_norm": "400e75767f54042c",
+        "link": [],
+        "link_norm": null
+      },
+      "s-00002": {
+        "counts": [],
+        "lexical": [],
+        "lexical_norm": null,
+        "link": [],
+        "link_norm": null
+      },
+      "tb-00001": {
+        "counts": [
+          [
+            "5",
+            1
+          ],
+          [
+            "7",
+            1
+          ],
+          [
+            "gateway",
+            1
+          ],
+          [
+            "ledger",
+            1
+          ],
+          [
+            "name",
+            1
+          ],
+          [
+            "value",
+            1
+          ]
+        ],
+        "lexical": [
+          [
+            "5",
+            "3fd96d9fb3203119"
+          ],
+          [
+            "7",
+            "3fe00dafcecbd250"
+          ],
+          [
+            "gateway",
+            "3fcab6ffa9ddce1a"
+          ],
+          [
+            "ledger",
+            "3fcab6ffa9ddce1a"
+          ],
+          [
+            "name",
+            "3fe00dafcecbd250"
+          ],
+          [
+            "value",
+            "3fe00dafcecbd250"
+          ]
+        ],
+        "lexical_norm": "40232a5642cf037d",
+        "link": [],
+        "link_norm": null
+      }
+    },
+    "corpus_links": 7,
+    "corpus_words": 27,
+    "idf": {
+      "1": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "2": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "3": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "5": {
+        "bits": "400e75767f54042c",
+        "df": 2,
+        "seed": true
+      },
+      "7": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "a-b-c": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "again": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "also": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "and": {
+        "bits": "400675767f54042c",
+        "df": 4,
+        "seed": true
+      },
+      "append-only": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "café": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "describes": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "diagram": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "distinct": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "duplicate": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "english": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "every": {
+        "bits": "4009c775ad842579",
+        "df": 3,
+        "seed": true
+      },
+      "façade": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "flow": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "gateway": {
+        "bits": "4000000000000000",
+        "df": 7,
+        "seed": true
+      },
+      "gateways": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "golden": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "gw": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "index.redb": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "is": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "it": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "ledger": {
+        "bits": "4000000000000000",
+        "df": 7,
+        "seed": true
+      },
+      "links": {
+        "bits": "400e75767f54042c",
+        "df": 2,
+        "seed": true
+      },
+      "ms": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "must": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "name": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "naïve": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "numbers": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "only": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "rdy-core": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "reach": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "receive": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "reference": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "request": {
+        "bits": "4001c775ad842579",
+        "df": 6,
+        "seed": true
+      },
+      "retries": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "route": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "routes": {
+        "bits": "400e75767f54042c",
+        "df": 2,
+        "seed": true
+      },
+      "see": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "self": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "stay": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "stores": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "strasse": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "straße": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "the": {
+        "bits": "4000000000000000",
+        "df": 7,
+        "seed": true
+      },
+      "to": {
+        "bits": "400e75767f54042c",
+        "df": 2,
+        "seed": true
+      },
+      "v1.2.3": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "value": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "vector": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "within": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "words": {
+        "bits": "400e75767f54042c",
+        "df": 2,
+        "seed": true
+      },
+      "write": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "x_1": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "x_2": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "zebra": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "école": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "ünïcödé": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "ελληνικά": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "λέξη": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "と": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "テキスト": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      },
+      "日本語": {
+        "bits": "40133abb3faa0216",
+        "df": 1,
+        "seed": true
+      }
+    },
+    "targets": {
+      "c-00001": {
+        "bits": "3ff6a3fe5c604298",
+        "indeg": 3,
+        "seed": true
+      },
+      "c-00002": {
+        "bits": "4008000000000000",
+        "indeg": 1,
+        "seed": true
+      },
+      "c-00003": {
+        "bits": "4008000000000000",
+        "indeg": 1,
+        "seed": true
+      },
+      "c-00008": {
+        "bits": "4008000000000000",
+        "indeg": 1,
+        "seed": true
+      },
+      "en-00001": {
+        "bits": "4000000000000000",
+        "indeg": 2,
+        "seed": true
+      },
+      "en-00002": {
+        "bits": "4000000000000000",
+        "indeg": 2,
+        "seed": true
+      },
+      "n-00004": {
+        "bits": "4008000000000000",
+        "indeg": 1,
+        "seed": true
+      }
+    }
+  },
+  "log2": [
+    {
+      "log2": "0000000000000000",
+      "x": "3ff0000000000000"
+    },
+    {
+      "log2": "3ff0000000000000",
+      "x": "4000000000000000"
+    },
+    {
+      "log2": "bff0000000000000",
+      "x": "3fe0000000000000"
+    },
+    {
+      "log2": "408ff80000000000",
+      "x": "7fe0000000000000"
+    },
+    {
+      "log2": "c08ff00000000000",
+      "x": "0010000000000000"
+    },
+    {
+      "log2": "c090c80000000000",
+      "x": "0000000000000001"
+    },
+    {
+      "log2": "3feffffffffffffc",
+      "x": "3fffffffffffffff"
+    },
+    {
+      "log2": "bcc0000000000000",
+      "x": "3fefffffffffffff"
+    },
+    {
+      "log2": "3cb71547652b82fe",
+      "x": "3ff0000000000001"
+    },
+    {
+      "log2": "4090000000000000",
+      "x": "7fefffffffffffff"
+    },
+    {
+      "log2": "c08ff00000000000",
+      "x": "000fffffffffffff"
+    },
+    {
+      "log2": "c08ff80000000000",
+      "x": "0008000000000000"
+    },
+    {
+      "log2": "c090a0017182a895",
+      "x": "00000000000003ff"
+    },
+    {
+      "log2": "c08fe80000000000",
+      "x": "001fffffffffffff"
+    },
+    {
+      "log2": "3ff95c01a39fbd69",
+      "x": "4008000000000000"
+    },
+    {
+      "log2": "4002934f0979a371",
+      "x": "4014000000000000"
+    },
+    {
+      "log2": "400675767f54042c",
+      "x": "401c000000000000"
+    },
+    {
+      "log2": "400a934f0979a371",
+      "x": "4024000000000000"
+    },
+    {
+      "log2": "401a934f0979a371",
+      "x": "4059000000000000"
+    },
+    {
+      "log2": "4023ee7b471b3a95",
+      "x": "408f400000000000"
+    },
+    {
+      "log2": "3fe2b803473f7ad2",
+      "x": "3ff8000000000000"
+    },
+    {
+      "log2": "3fd49a784bcd1b8b",
+      "x": "3ff4000000000000"
+    },
+    {
+      "log2": "3fe9d5d9fd5010b2",
+      "x": "3ffc000000000000"
+    },
+    {
+      "log2": "3feffa16d8a61fa1",
+      "x": "3ffffbe76c8b4396"
+    },
+    {
+      "log2": "3f22e8a3a5041f41",
+      "x": "3ff00068db8bac71"
+    },
+    {
+      "log2": "4004ae00d1cfdeb4",
+      "x": "4018000000000000"
+    },
+    {
+      "log2": "3fa8387463c61dda",
+      "x": "3ff0888888888889"
+    },
+    {
+      "log2": "3fe79538dea712f2",
+      "x": "3ffaaaaaaaaaaaab"
+    },
+    {
+      "log2": "3ff0017a25866d59",
+      "x": "4000010624dd2f1b"
+    },
+    {
+      "log2": "400a78dcbd2a1964",
+      "x": "4023d260511be196"
+    },
+    {
+      "log2": "400a934f0979a371",
+      "x": "4024000000000000"
+    },
+    {
+      "log2": "3fe0000000000002",
+      "x": "3ff6a09e667f3bcd"
+    },
+    {
+      "log2": "c08f24a09f1a8b89",
+      "x": "01a56e1fc2f8f359"
+    },
+    {
+      "log2": "408f24a09f1a8b89",
+      "x": "7e37e43c8800759c"
+    },
+    {
+      "log2": "c09095ba69b8fa1b",
+      "x": "00000000000017b8"
+    }
+  ]
+}

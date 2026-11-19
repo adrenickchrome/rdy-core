@@ -1,10 +1,11 @@
-//! The entity lexicon (FW-EN1, FW-EN3): entity keys, names and aliases by phrase, and the blocks that hold each code literal and each word. Built on first use per scope and carried across writes like the graph.
+//! The entity lexicon (FW-EN1, FW-EN3): entity keys, names and aliases by phrase, and the blocks that hold each code literal and each word. It also keeps each block's word counts and link targets, which the vector weights read (D-ZX5S6). Built on first use per scope and carried across writes like the graph.
 //!
 //! One name matcher (D-YXBXH, D-JDW8A): a name or an alias is filed under every key
 //! [`phrase_keys`] gives it, and a text phrase names it when one of the phrase's keys is among
 //! them. An entity's `key` is an exact identifier, filed under its phrase only. An everyday
 //! entity (`everyday: true`) is named only in the text of a block tied to it (O5).
 use crate::Materialized;
+use crate::vectors::{LinkTargets, WordCounts};
 use rdy_graph::{EdgeKind, Graph, edges_of};
 use rdy_model::entity::{
     aliases, code_literals, lines_at, phrase, phrase_keys, shown_sources, source_field,
@@ -85,8 +86,9 @@ pub(crate) struct MentionSource {
     ties: BTreeSet<BlockId>,
 }
 
-/// The entity lexicon of one scope. Every part is a function of single blocks, so carrying it
-/// across a write (`with_changes`) equals a rebuild.
+/// The entity lexicon of one scope, with the word counts and link targets of its blocks. Every
+/// part is a function of single blocks, so carrying it across a write (`with_changes`) equals a
+/// rebuild, counts included.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lexicon {
     /// The pack's entity types: every type with `defines`.
@@ -105,6 +107,13 @@ pub struct Lexicon {
     /// Each word (case-folded, as [`words`] splits text) and the blocks whose text holds it: a
     /// phrase can only be found in a block that holds each of its words.
     words: imbl::OrdMap<String, imbl::OrdSet<BlockId>>,
+    /// Each block whose text holds a word, and how often it holds each (D-ZX5S6): the words of
+    /// `terms_of`, counted over all the block's sources. The vector weights read them.
+    counts: imbl::OrdMap<BlockId, WordCounts>,
+    /// Each block with a link target, and its distinct targets (`link_targets_of`).
+    targets: imbl::OrdMap<BlockId, LinkTargets>,
+    /// Each link target and the blocks that have it among their `targets`.
+    pointed: imbl::OrdMap<BlockId, imbl::OrdSet<BlockId>>,
 }
 
 impl Lexicon {
@@ -124,28 +133,48 @@ impl Lexicon {
             everyday: imbl::OrdSet::new(),
             literals: imbl::OrdMap::new(),
             words: imbl::OrdMap::new(),
+            counts: imbl::OrdMap::new(),
+            targets: imbl::OrdMap::new(),
+            pointed: imbl::OrdMap::new(),
         };
         // the term maps are gathered in plain maps first and made persistent once: one insert
         // per (term, block) into a persistent set costs several times more
         let mut literals: HashMap<String, Vec<BlockId>> = HashMap::new();
         let mut folded: HashMap<String, Vec<BlockId>> = HashMap::new();
+        let mut pointed: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        let (mut counts, mut targets) = (vec![], vec![]);
         for b in blocks {
             l.add_names(b);
             let (lits, ws) = l.terms_of(b);
             for t in lits {
                 literals.entry(t).or_default().push(b.id.clone());
             }
-            for t in ws {
-                folded.entry(t).or_default().push(b.id.clone());
+            for (t, _) in ws.iter() {
+                folded.entry(t.to_string()).or_default().push(b.id.clone());
+            }
+            if !ws.is_empty() {
+                counts.push((b.id.clone(), ws));
+            }
+            let ts = link_targets_of(b);
+            for t in ts.iter() {
+                pointed.entry(t.clone()).or_default().push(b.id.clone());
+            }
+            if !ts.is_empty() {
+                targets.push((b.id.clone(), ts));
             }
         }
-        let persist = |m: HashMap<String, Vec<BlockId>>| {
+        fn persist<K: Ord + Clone>(
+            m: HashMap<K, Vec<BlockId>>,
+        ) -> imbl::OrdMap<K, imbl::OrdSet<BlockId>> {
             m.into_iter()
                 .map(|(t, ids)| (t, ids.into_iter().collect::<imbl::OrdSet<BlockId>>()))
-                .collect::<imbl::OrdMap<_, _>>()
-        };
+                .collect()
+        }
         l.literals = persist(literals);
         l.words = persist(folded);
+        l.pointed = persist(pointed);
+        l.counts = counts.into_iter().collect();
+        l.targets = targets.into_iter().collect();
         l
     }
 
@@ -163,6 +192,53 @@ impl Lexicon {
             l.add(b);
         }
         l
+    }
+
+    /// How often each word occurs in block `id`'s text; `None` for a block with no word (or
+    /// none in the lexicon).
+    pub fn word_counts(&self, id: &BlockId) -> Option<&WordCounts> {
+        self.counts.get(id)
+    }
+
+    /// `N` of the vector weights: how many blocks hold a word.
+    pub fn word_blocks(&self) -> usize {
+        self.counts.len()
+    }
+
+    /// `df(word)`: how many blocks hold the folded word `word`.
+    pub fn word_df(&self, word: &str) -> usize {
+        self.words.get(word).map_or(0, |set| set.len())
+    }
+
+    /// The blocks that hold the folded word `word`, by id.
+    pub fn word_blocks_of(&self, word: &str) -> Option<&imbl::OrdSet<BlockId>> {
+        self.words.get(word)
+    }
+
+    /// Block `id`'s distinct link targets; `None` for a block with none.
+    pub fn link_targets(&self, id: &BlockId) -> Option<&LinkTargets> {
+        self.targets.get(id)
+    }
+
+    /// `L` of the vector weights: how many blocks have a link target.
+    pub fn link_blocks(&self) -> usize {
+        self.targets.len()
+    }
+
+    /// `indeg(target)`: how many blocks have `target` as a link target.
+    pub fn indeg(&self, target: &BlockId) -> usize {
+        self.pointed.get(target).map_or(0, |set| set.len())
+    }
+
+    /// The blocks that have `target` as a link target, by id.
+    pub fn pointing_at(&self, target: &BlockId) -> Option<&imbl::OrdSet<BlockId>> {
+        self.pointed.get(target)
+    }
+
+    /// The word counts and link targets of `b` read this lexicon's way, whether or not the
+    /// lexicon holds `b`: what review's overlay counts for its in-flight source block.
+    pub(crate) fn features_of(&self, b: &Block) -> (WordCounts, LinkTargets) {
+        (self.terms_of(b).1, link_targets_of(b))
     }
 
     /// Whether `block_type` is an entity type (it has `defines`).
@@ -480,29 +556,47 @@ impl Lexicon {
         out.into_iter().collect()
     }
 
-    /// The distinct code literals and the distinct folded words of `b`'s text sources.
-    fn terms_of(&self, b: &Block) -> (BTreeSet<String>, BTreeSet<String>) {
+    /// The distinct code literals of `b`'s text sources, and how often each folded word occurs
+    /// over all of them.
+    fn terms_of(&self, b: &Block) -> (BTreeSet<String>, WordCounts) {
         let sources = self.sources(b);
         let literals = sources
             .iter()
             .flat_map(|(_, text)| code_literals(text))
             .collect();
-        let folded = sources
-            .iter()
-            .flat_map(|(_, text)| words(text))
-            .map(|w| w.folded)
-            .collect();
+        let folded = WordCounts::of(
+            sources
+                .iter()
+                .flat_map(|(_, text)| words(text))
+                .map(|w| w.folded),
+        );
         (literals, folded)
     }
 
     fn add(&mut self, b: &Block) {
         self.add_names(b);
-        let (literals, words) = self.terms_of(b);
+        let (literals, counts) = self.terms_of(b);
         for lit in literals {
             self.literals.entry(lit).or_default().insert(b.id.clone());
         }
-        for w in words {
-            self.words.entry(w).or_default().insert(b.id.clone());
+        for (w, _) in counts.iter() {
+            self.words
+                .entry(w.to_string())
+                .or_default()
+                .insert(b.id.clone());
+        }
+        if !counts.is_empty() {
+            self.counts.insert(b.id.clone(), counts);
+        }
+        let targets = link_targets_of(b);
+        for t in targets.iter() {
+            self.pointed
+                .entry(t.clone())
+                .or_default()
+                .insert(b.id.clone());
+        }
+        if !targets.is_empty() {
+            self.targets.insert(b.id.clone(), targets);
         }
     }
 
@@ -540,8 +634,12 @@ impl Lexicon {
             }
         }
         self.everyday.remove(&b.id);
-        let (literals, words) = self.terms_of(b);
-        for (map, terms) in [(&mut self.literals, literals), (&mut self.words, words)] {
+        let (literals, counts) = self.terms_of(b);
+        let words: Vec<String> = counts.iter().map(|(w, _)| w.to_string()).collect();
+        for (map, terms) in [
+            (&mut self.literals, literals),
+            (&mut self.words, words.into_iter().collect()),
+        ] {
             for t in terms {
                 if let Some(set) = map.get_mut(&t) {
                     set.remove(&b.id);
@@ -551,7 +649,30 @@ impl Lexicon {
                 }
             }
         }
+        self.counts.remove(&b.id);
+        for t in link_targets_of(b).iter() {
+            if let Some(set) = self.pointed.get_mut(t) {
+                set.remove(&b.id);
+                if set.is_empty() {
+                    self.pointed.remove(t);
+                }
+            }
+        }
+        self.targets.remove(&b.id);
     }
+}
+
+/// `b`'s link targets (D-ZX5S6): every target of [`edges_of`], each reference and each link out
+/// of it, once, whatever the edges' kinds and number. `edges_of` gives no `Contains` edge, so
+/// neither the parent nor a child is a target.
+fn link_targets_of(b: &Block) -> LinkTargets {
+    LinkTargets::of(
+        edges_of(b)
+            .into_iter()
+            .filter(|e| e.kind != EdgeKind::Contains)
+            .map(|e| e.to)
+            .collect(),
+    )
 }
 
 /// Where the words at `range` of `stored`, the stored text of leaf `field`, are: the one-based

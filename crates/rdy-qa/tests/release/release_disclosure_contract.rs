@@ -45,9 +45,12 @@ const SUCCESSOR: &str = "disclosure-review-v1.json";
 /// never an edit of this file.
 const SUCCESSOR_SHA: &str = "956044b4b5e6a51a9810f31a4c0c16ad81aa9a035d735ed4d8b9d7a1d9edf139";
 
-/// The current fixture, SD1's successor of [`SUCCESSOR`]; `sdl7_contract_changes_only_delta_surfaces`
-/// in `release_contract.rs` closes its changes.
-const CURRENT: &str = "sync-client-v1.json";
+/// The current fixture, M5a's successor of the frozen `sync-client-v1.json` (itself SD1's and Sync
+/// client A's successor of [`SUCCESSOR`]), which every selector names.
+const CURRENT: &str = "m5a-v1.json";
+
+/// The fixture before [`CURRENT`]: Sync client A's, beside the frozen ones in the folder.
+const BEFORE_CURRENT: &str = "sync-client-v1.json";
 
 /// The predecessor of this plan's fixture, which every selector named before this plan.
 const PREDECESSOR: &str = "readme-from-rdy-v1.json";
@@ -370,7 +373,7 @@ fn drv6_contract_changes_only_review_results() {
 }
 
 /// drv6: every frozen fixture keeps its bytes, the predecessor and this plan's successor
-/// included, and the current fixture is the only one beside them.
+/// included, and `sync-client-v1.json` and the current fixture are the only ones beside them.
 #[test]
 fn drv6_predecessor_fixtures_keep_their_bytes() {
     for (name, digest) in FROZEN {
@@ -383,6 +386,7 @@ fn drv6_predecessor_fixtures_keep_their_bytes() {
         .collect();
     names.sort();
     let mut want: Vec<String> = FROZEN.iter().map(|(n, _)| (*n).to_string()).collect();
+    want.push(BEFORE_CURRENT.to_string());
     want.push(CURRENT.to_string());
     want.sort();
     assert_eq!(

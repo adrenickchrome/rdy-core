@@ -7,6 +7,7 @@ mod release_disclosure_contract;
 mod release_install;
 mod release_install_unix;
 mod release_keys;
+mod release_m5a_contract;
 mod release_mcp_http_contract;
 mod release_notices;
 mod release_notices_unix;

@@ -27,8 +27,11 @@ const PREDECESSOR: &str = "sd1-v1.json";
 /// change is a successor fixture, never an edit of that file.
 const PREDECESSOR_SHA: &str = "012ff9ed50f654618517e629e3dcfa6c8e28935bf311c880de2faaa40576aea2";
 
-/// The current fixture, which every selector names.
+/// This plan's fixture: the current one until M5a's successor, frozen since.
 const CURRENT: &str = "sync-client-v1.json";
+
+/// M5a's successor of [`CURRENT`], which every selector names since.
+const SUCCESSOR: &str = "m5a-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -488,7 +491,7 @@ fn leaves(was: &Value, now: &Value, path: &str, out: &mut Vec<String>) {
 }
 
 /// scc1: the current fixture starts from the shipped predecessor: `sd1-v1.json` keeps the bytes
-/// rdy 0.52.0 shipped, every selector names `sync-client-v1.json` and none names the
+/// rdy 0.52.0 shipped, every selector names M5a's successor `m5a-v1.json` and none names the
 /// predecessor, and no member of the predecessor is removed.
 #[test]
 fn scc1_successor_starts_from_the_shipped_predecessor() {
@@ -502,8 +505,8 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert!(
-            text.contains(&format!("fixtures/contracts/{CURRENT}\"")),
-            "{file} selects {CURRENT}"
+            text.contains(&format!("fixtures/contracts/{SUCCESSOR}\"")),
+            "{file} selects {SUCCESSOR}"
         );
         assert!(
             !text.contains(&format!("contracts/{PREDECESSOR}\"")),
@@ -1032,7 +1035,8 @@ const FROZEN: &[(&str, &str)] = &[
 ];
 
 /// scc7: every frozen fixture keeps its shipped bytes, `sd1-v1.json` included, and the contracts
-/// folder holds these and the current fixture alone, so a capture never wrote a baseline.
+/// folder holds these, this plan's fixture and M5a's successor alone, so a capture never wrote a
+/// baseline.
 #[test]
 fn scc7_predecessor_fixtures_keep_their_bytes() {
     for (name, want) in FROZEN {
@@ -1043,11 +1047,15 @@ fn scc7_predecessor_fixtures_keep_their_bytes() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    let mut want: Vec<&str> = FROZEN.iter().map(|(n, _)| *n).chain([CURRENT]).collect();
+    let mut want: Vec<&str> = FROZEN
+        .iter()
+        .map(|(n, _)| *n)
+        .chain([CURRENT, SUCCESSOR])
+        .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds the frozen fixtures and {CURRENT}"
+        "the folder holds the frozen fixtures, {CURRENT} and {SUCCESSOR}"
     );
     assert!(
         FROZEN.iter().any(|(n, _)| *n == "sd1-v1.json"),

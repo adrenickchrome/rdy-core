@@ -1,10 +1,11 @@
 //! The Release 1 contract of the command line (D-TXFHR: the contract surfaces include the CLI's
 //! commands, flags, positional arguments and defaults). This test-only module walks the real clap
 //! `Command` tree, hidden commands and hidden flags included, and compares it with the `cli.tree`
-//! member of the current contract fixture (`rdy-qa/fixtures/contracts/sync-client-v1.json`, the
-//! successor of the frozen `sd1-v1.json`; the released `release-1.json`,
+//! member of the current contract fixture (`rdy-qa/fixtures/contracts/m5a-v1.json`, the
+//! successor of the frozen `sync-client-v1.json`; the released `release-1.json`,
 //! `repo-links-v1.json`, `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`,
-//! `readme-from-rdy-v1.json`, `disclosure-review-v1.json` and `sd1-v1.json` stay frozen). It adds no command,
+//! `readme-from-rdy-v1.json`, `disclosure-review-v1.json`, `sd1-v1.json` and
+//! `sync-client-v1.json` stay frozen). It adds no command,
 //! flag or production code path. The rest of the fixture, and the runtime facts of the
 //! `cli` member, belong to the rdy-qa `release` area (`release_contract.rs`).
 //!
@@ -19,11 +20,10 @@ use std::path::PathBuf;
 
 /// The current contract fixture, which the rdy-qa `release` area also reads. The released
 /// baselines (`release-1.json`, `repo-links-v1.json`, `mcp-http-v1.json`, `m4a-v1.json`,
-/// `m4bc-v1.json`, `readme-from-rdy-v1.json`, `disclosure-review-v1.json`) are frozen: a capture
-/// never writes them.
+/// `m4bc-v1.json`, `readme-from-rdy-v1.json`, `disclosure-review-v1.json`, `sd1-v1.json` and
+/// `sync-client-v1.json`) are frozen: a capture never writes them.
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../rdy-qa/fixtures/contracts/sync-client-v1.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rdy-qa/fixtures/contracts/m5a-v1.json")
 }
 
 /// The fixture's text; the baseline-absent failure names the capture switch.
