@@ -1086,7 +1086,7 @@ fn hc7_failures_at_each_placement_step_restore_only_owned_paths() {
 #[test]
 fn hc7_chain_pending_limits_do_not_reset() {
     // the chain load runs one ingest for every file: its pending-drop bounds are pinned at the
-    // store (`rdy-store/tests/ingest_chain.rs`); here, the load of a chain with drops in two
+    // store (`rdy-store/tests/sync/ingest_chain.rs`); here, the load of a chain with drops in two
     // files, each released by its apply, takes them all through one ingest
     let _clock = pin_clock(1_000_000);
     let d = tempfile::tempdir().unwrap();

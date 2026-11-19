@@ -1,0 +1,335 @@
+use rdy_model::Hash;
+use rdy_store::index::{Index, IndexEntry};
+use rdy_store::segment::Location;
+
+#[test]
+fn fresh_index_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let idx = Index::open(&dir.path().join("index.redb")).unwrap();
+    assert_eq!(
+        idx.indexed_upto().unwrap(),
+        Location {
+            segment: 0,
+            offset: 0
+        }
+    );
+    assert_eq!(idx.object(&Hash::of(b"x")).unwrap(), None);
+    assert_eq!(idx.get_ref("canon").unwrap(), None);
+}
+
+#[test]
+fn apply_persists_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    let (h, v, c) = (Hash::of(b"obj"), Hash::of(b"ver"), Hash::of(b"chg"));
+    let loc = Location {
+        segment: 2,
+        offset: 99,
+    };
+    {
+        let idx = Index::open(&path).unwrap();
+        idx.apply(
+            &[
+                IndexEntry::Object {
+                    kind: rdy_store::kinds::BLOB_CHUNK,
+                    hash: h,
+                    loc,
+                },
+                IndexEntry::Producer {
+                    version: v,
+                    change: c,
+                },
+                IndexEntry::Ref("view/work".into(), vec![1, 2]),
+                IndexEntry::Ref("view/other".into(), vec![3]),
+                IndexEntry::Ref("canon".into(), vec![9]),
+            ],
+            Location {
+                segment: 2,
+                offset: 200,
+            },
+        )
+        .unwrap();
+        idx.checkpoint().unwrap(); // `apply` alone is not durable
+    }
+    let idx = Index::open(&path).unwrap();
+    assert_eq!(idx.object(&h).unwrap(), Some(loc));
+    // merge1 fix round 1: a version keeps every producer, so the index lists them
+    assert_eq!(idx.producers(&v).unwrap(), vec![c]);
+    assert_eq!(idx.get_ref("canon").unwrap(), Some(vec![9]));
+    let views = idx.refs_with_prefix("view/").unwrap();
+    assert_eq!(
+        views,
+        vec![
+            ("view/other".to_string(), vec![3]),
+            ("view/work".to_string(), vec![1, 2])
+        ]
+    );
+    assert_eq!(
+        idx.indexed_upto().unwrap(),
+        Location {
+            segment: 2,
+            offset: 200
+        }
+    );
+}
+
+#[test]
+fn a_malformed_producer_entry_is_a_decode_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    drop(Index::open(&path).unwrap());
+    {
+        let db = redb::Database::create(&path).unwrap();
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w
+                .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("producers"))
+                .unwrap();
+            // merge1 fix round 1: an entry is the version then the change, so a key with a short
+            // change hash is the malformed entry
+            let mut key = vec![7u8; 32];
+            key.extend_from_slice(b"short");
+            t.insert(&key[..], &[][..]).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    let idx = Index::open(&path).unwrap();
+    assert!(matches!(
+        idx.producers(&Hash([7u8; 32])),
+        Err(rdy_store::StoreError::Decode(_))
+    ));
+}
+
+/// Opens the index at `path` and applies one entry with a commit that is not durable, as a
+/// write leaves it before a kill.
+fn live_index(path: &std::path::Path) -> Index {
+    let idx = Index::open(path).unwrap();
+    let upto = Location {
+        segment: 0,
+        offset: 64,
+    };
+    idx.apply(
+        &[IndexEntry::Object {
+            kind: rdy_store::kinds::BLOB_CHUNK,
+            hash: Hash::of(b"pending"),
+            loc: upto,
+        }],
+        upto,
+    )
+    .unwrap();
+    idx
+}
+
+/// The child of `kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean`
+/// on Windows: holds [`live_index`] on `RDY_WX7_INDEX`, says so, and waits to be killed.
+#[test]
+#[ignore = "kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean runs this in a child process"]
+fn wx7_live_index_child() {
+    use std::io::Write;
+    let Ok(path) = std::env::var("RDY_WX7_INDEX") else {
+        return;
+    };
+    let _idx = live_index(std::path::Path::new(&path));
+    println!("WX7-LIVE");
+    std::io::stdout().flush().unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Final review (Important 2), pinning what redb 4.3 reports, which `open_index`'s classification
+/// rests on: a copy of a live index (a non-durable commit pending, as a kill leaves it) is
+/// repaired at open (the repair callback fires) and `check_integrity` then reports it clean. So a
+/// kill reaches the trusted `Ok` arm through `clean`, not through the sentinel; the sentinel only
+/// decides the `Ok(clean == false)` arm, which redb 4.3 was not seen to produce. If a redb upgrade
+/// changes this, revisit `open_index`. On Windows a live index is locked against every other
+/// handle, so the live index is a child's, copied once the child is killed.
+#[test]
+fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    #[cfg(unix)]
+    let idx = live_index(&path);
+    #[cfg(windows)]
+    {
+        use std::io::BufRead;
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                harness_name("wx7_live_index_child").as_str(),
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .env("RDY_WX7_INDEX", &path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("WX7-LIVE") {
+            line.clear();
+            assert!(out.read_line(&mut line).unwrap() > 0, "the child ended");
+        }
+        child.kill().unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(
+            rdy_store::pio::ended(&status),
+            rdy_store::pio::Ended::Killed
+        );
+    }
+    let copy = dir.path().join("copy.redb");
+    std::fs::copy(&path, &copy).unwrap();
+    let c = Index::open_checked(&copy).unwrap();
+    assert!(c.repaired_at_open, "redb repairs a killed file at open");
+    assert!(c.clean, "and check_integrity reports it clean afterwards");
+    drop(c);
+    let c = Index::open_checked(&copy).unwrap();
+    assert!(c.clean && !c.repaired_at_open, "a second open is clean");
+    drop(c);
+    #[cfg(unix)]
+    drop(idx);
+    // the killed child's file, repaired at this open and closed cleanly
+    #[cfg(windows)]
+    drop(Index::open(&path).unwrap());
+    let c = Index::open_checked(&path).unwrap();
+    assert!(c.clean && !c.repaired_at_open, "a cleanly closed file");
+}
+
+#[test]
+fn kind1_typed_entries_coexist_and_the_untyped_entry_is_the_first_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let idx = Index::open(&dir.path().join("index.redb")).unwrap();
+    let h = Hash::of(b"same bytes");
+    let (a, b) = (
+        Location {
+            segment: 0,
+            offset: 10,
+        },
+        Location {
+            segment: 0,
+            offset: 90,
+        },
+    );
+    idx.apply(
+        &[
+            IndexEntry::Object {
+                kind: rdy_store::kinds::BLOB_CHUNK,
+                hash: h,
+                loc: a,
+            },
+            IndexEntry::Object {
+                kind: rdy_store::kinds::SNAPSHOT,
+                hash: h,
+                loc: b,
+            },
+        ],
+        Location {
+            segment: 0,
+            offset: 200,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        idx.typed(rdy_store::kinds::BLOB_CHUNK, &h).unwrap(),
+        Some(a)
+    );
+    assert_eq!(idx.typed(rdy_store::kinds::SNAPSHOT, &h).unwrap(), Some(b));
+    assert_eq!(idx.typed(rdy_store::kinds::TAG, &h).unwrap(), None);
+    assert_eq!(
+        idx.object(&h).unwrap(),
+        Some(a),
+        "untyped: the first written"
+    );
+}
+
+/// Final review fix round 1 (R5): the open-proposal table mirrors the `open/` refs that name a
+/// proposal. A landing empties its view's ref: `refs` keeps the empty ref, the table drops it.
+#[test]
+fn di_final_the_open_proposal_table_follows_the_open_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let idx = Index::open(&dir.path().join("index.redb")).unwrap();
+    let (a, b) = (Hash::of(b"a").0.to_vec(), Hash::of(b"b").0.to_vec());
+    let at = |offset| Location { segment: 0, offset };
+    idx.apply(
+        &[
+            IndexEntry::Ref("open/a".into(), a.clone()),
+            IndexEntry::Ref("open/b".into(), b.clone()),
+            IndexEntry::Ref("opener".into(), vec![1]),
+        ],
+        at(10),
+    )
+    .unwrap();
+    assert_eq!(
+        idx.open_proposal_refs().unwrap(),
+        vec![
+            ("open/a".to_string(), a.clone()),
+            ("open/b".to_string(), b.clone())
+        ]
+    );
+    idx.apply(&[IndexEntry::Ref("open/a".into(), vec![])], at(20))
+        .unwrap();
+    assert_eq!(
+        idx.open_proposal_refs().unwrap(),
+        vec![("open/b".to_string(), b.clone())]
+    );
+    assert_eq!(
+        idx.refs_with_prefix("open/").unwrap(),
+        vec![
+            ("open/a".to_string(), vec![]),
+            ("open/b".to_string(), b.clone())
+        ],
+        "the refs keep the empty ref, as a dump lists it"
+    );
+    // a proposal of view a again
+    idx.apply(&[IndexEntry::Ref("open/a".into(), a.clone())], at(30))
+        .unwrap();
+    assert_eq!(idx.open_proposal_refs().unwrap().len(), 2);
+}
+
+/// An index written before the open-proposal table existed gets it filled from its refs when it
+/// opens, so a project's open proposals are not lost until a reindex.
+#[test]
+fn di_final_an_index_without_the_open_proposal_table_fills_it_from_its_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    let b = Hash::of(b"b").0.to_vec();
+    {
+        let idx = Index::open(&path).unwrap();
+        idx.apply(
+            &[
+                IndexEntry::Ref("open/a".into(), vec![]),
+                IndexEntry::Ref("open/b".into(), b.clone()),
+            ],
+            Location {
+                segment: 0,
+                offset: 10,
+            },
+        )
+        .unwrap();
+        idx.checkpoint().unwrap();
+    }
+    {
+        let raw = redb::Database::create(&path).unwrap();
+        let w = raw.begin_write().unwrap();
+        let def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("open_proposals");
+        assert!(w.delete_table(def).unwrap(), "the table was there");
+        w.commit().unwrap();
+    }
+    let idx = Index::open(&path).unwrap();
+    assert_eq!(
+        idx.open_proposal_refs().unwrap(),
+        vec![("open/b".to_string(), b)]
+    );
+}
+
+/// `name` as the test harness lists it: a grouped test binary puts this file's module path
+/// first, and a child process started with `--exact` must name the test that way.
+#[cfg(windows)]
+fn harness_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_string(),
+    }
+}

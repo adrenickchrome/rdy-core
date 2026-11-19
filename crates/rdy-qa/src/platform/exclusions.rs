@@ -323,14 +323,14 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         counterparts: &["wx29b_a_reparse_point_of_no_link_is_untracked_and_kept"],
     },
     Exclusion {
-        file: "crates/rdy-store/tests/fileid.rs",
+        file: "crates/rdy-store/tests/format/fileid.rs",
         gate: Gate::Item,
         tests: &["ps2_open_locked_takes_its_own_lock_after_the_store_dir_is_renamed"],
         mechanism: "The Unix held-lock contract of a renamed store directory; Windows closes the loading store under the start lock instead.",
         counterparts: &["wx8b_start_lock_covers_close_rename_reopen"],
     },
     Exclusion {
-        file: "crates/rdy-store/tests/private_write.rs",
+        file: "crates/rdy-store/tests/format/private_write.rs",
         gate: Gate::Item,
         tests: &[
             "hsa2_private_bytes_are_private_before_write",
