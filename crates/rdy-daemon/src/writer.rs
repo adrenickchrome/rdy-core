@@ -73,6 +73,11 @@ pub struct WriterHandle {
     thread: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
+/// Whether `e` is a landing's event.
+fn is_landing(e: &Event) -> bool {
+    matches!(e.kind, rdy_engine::EventKind::Landed { .. })
+}
+
 fn gone() -> RdyError {
     RdyError::new(
         E_DAEMON_GONE,
@@ -158,14 +163,25 @@ impl Writer {
                 let _ = sh.notify.send(NotifyMsg::Events { events, subs });
             }
         };
+        let mut landed = is_landing(&first);
         let mut batch = vec![first];
         while let Ok(e) = self.events.try_recv() {
             if batch[0].seq != e.seq {
                 send(std::mem::take(&mut batch));
             }
+            landed |= is_landing(&e);
             batch.push(e);
         }
         send(batch);
+        if landed {
+            // the state before the landing is replaced, and its scopes' builds with it: give the
+            // allocator's free memory back, as the site does after a build
+            crate::sys::release_free_memory();
+            #[cfg(test)]
+            if let Some(sh) = &sh {
+                sh.landing_memory_releases.fetch_add(1, Ordering::SeqCst);
+            }
+        }
     }
 
     /// Stores `rdy`'s current state into the shared state. False if every `Shared` is gone.
@@ -862,6 +878,60 @@ mod tests {
                 "the retried clean republish succeeded".to_string(),
             ]
         );
+    }
+
+    /// A write that lands gives the allocator's free memory back once after its publish; a
+    /// write that does not land gives none.
+    #[test]
+    fn a_landing_releases_free_memory() {
+        use rdy_engine::{Session, WriteRequest};
+        use rdy_model::Role;
+        use serde_json::json;
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        let engine = sh.engine();
+        let human = |role| Session::human("human:qa".into(), role).unwrap();
+        let write = |view: &'static str, land: bool| {
+            engine
+                .write(Box::new(move |r: &mut Rdy| {
+                    let s = human(Role::Writer);
+                    let w = r.write(
+                        &s,
+                        WriteRequest {
+                            view: view.to_string(),
+                            ops: serde_json::from_value(json!([
+                                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": view, "title": "Spec", "doc_type": "overview"}}
+                            ]))
+                            .unwrap(),
+                            justification: None,
+                            message: String::new(),
+                        },
+                    )?;
+                    if land {
+                        let p = r.propose(&s, view, "t", Some("test summary"))?;
+                        r.land(&human(Role::Approver), &p.id)?;
+                    }
+                    Ok(serde_json::to_value(w).unwrap())
+                }))
+                .unwrap()
+        };
+        // the writer forwards a write's events after its reply: the next message on the writer
+        // returns only once that forward ran
+        let next = || {
+            let out = sh
+                .writer
+                .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));
+            assert!(out.is_ok(), "{out:?}");
+        };
+        write("draft", false);
+        next();
+        assert_eq!(sh.landing_memory_releases.load(Ordering::SeqCst), 0);
+        write("work", true);
+        next();
+        assert_eq!(sh.landing_memory_releases.load(Ordering::SeqCst), 1);
+        sh.shutdown().unwrap();
     }
 
     /// Fix round 2 of task 11 (ruling task-11.1): in one write message, a pack reload seals and
