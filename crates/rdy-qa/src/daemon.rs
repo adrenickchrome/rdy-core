@@ -610,10 +610,15 @@ pub fn wait_endpoint_gone(run: &RunDir) {
     }
 }
 
-/// Waits until the project's endpoint stands ([`endpoint_live`]), or panics past [`STOP_WAIT`].
+/// Waits until the project's endpoint accepts connections, or panics past [`STOP_WAIT`].
+///
+/// On Unix the socket file appears at `bind(2)`, before the `listen(2)` that follows it, and a
+/// connect in between is refused. So this also waits for `daemon.sock` (the socket record), which
+/// the daemon writes only after the listener is up (`rdy_daemon::socket::bind`). On Windows
+/// [`endpoint_live`] already connects.
 pub fn wait_endpoint_live(run: &RunDir) {
     let t0 = std::time::Instant::now();
-    while !endpoint_live(run) {
+    while !(endpoint_live(run) && (cfg!(windows) || run.socket_record().exists())) {
         assert!(
             t0.elapsed() < STOP_WAIT,
             "the daemon never bound {}",
@@ -696,11 +701,28 @@ impl Served {
         )
     }
 
-    fn with(
+    /// `new`, with the project made by `seed` (which inits it at the path it is given, with
+    /// the `rdy-standard` pack) instead of an empty one.
+    pub fn seeded(seed: impl FnOnce(&Path)) -> Served {
+        Served::with_seed(
+            short_tempdir(),
+            crate::fixtures::human_env("human:qa"),
+            seed,
+        )
+    }
+
+    fn with(dir: tempfile::TempDir, cfg_env: (tempfile::TempDir, Vec<(String, String)>)) -> Served {
+        Served::with_seed(dir, cfg_env, |p| {
+            drop(Rdy::init(p, "rdy-standard").expect("init the served project"))
+        })
+    }
+
+    fn with_seed(
         dir: tempfile::TempDir,
         (cfg, env): (tempfile::TempDir, Vec<(String, String)>),
+        seed: impl FnOnce(&Path),
     ) -> Served {
-        drop(Rdy::init(dir.path(), "rdy-standard").expect("init the served project"));
+        seed(dir.path());
         let mut file = OpenOptions::new()
             .append(true)
             .open(dir.path().join(".rdy.yaml"))
@@ -823,7 +845,9 @@ impl Served {
     /// The pid in `.rdy/run/daemon.pid`, if it parses and that process is alive.
     pub fn daemon_pid(&self) -> Option<u32> {
         let pid = self.pid_file()?;
-        platform::process_running(pid).then_some(pid)
+        // a killed daemon that its parent has not reaped yet is no daemon, though `kill -0`
+        // still finds it: `wait_killed` already counts it as exited
+        (platform::process_running(pid) && !exited(pid)).then_some(pid)
     }
 
     fn pid_file(&self) -> Option<u32> {

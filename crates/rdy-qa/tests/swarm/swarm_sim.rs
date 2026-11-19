@@ -2288,8 +2288,11 @@ fn sg5_a_landing_whose_rekeyed_claim_changed_after_the_proposal_is_refused_then_
     a0[1] = Act::Propose;
     let mut a1 = vec![read(1); 10];
     a1[0] = create();
-    a1[2] = Act::Propose;
-    a1[3] = Act::Write {
+    // two steps after a0's propose: a step runs once every agent has reached the step before
+    // it, so only a step two later runs after a0's propose has ended, and a0's version is the
+    // first the person's queue takes
+    a1[3] = Act::Propose;
+    a1[4] = Act::Write {
         target: Pick::Own(0),
         stable: true,
     };

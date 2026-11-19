@@ -40,12 +40,15 @@ const GIT_VARS: [&str; 4] = [
     "GIT_COMMON_DIR",
 ];
 
-/// `cmd` with no system Git configuration and the empty global configuration `global`.
+/// `cmd` with no system Git configuration, the empty global configuration `global` and the
+/// tests' long hook deadline.
 fn git_isolated<'a>(cmd: &'a mut Command, global: &Path) -> &'a mut Command {
     for v in GIT_VARS {
         cmd.env_remove(v);
     }
-    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+    // a hook this Git runs starts the real host: give it the tests' long deadline
+    rdy_qa::fixtures::long_hook_deadline(cmd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", global)
 }
 
@@ -95,7 +98,7 @@ struct Hooked {
 
 impl Hooked {
     fn new() -> Hooked {
-        let w = World::new();
+        let w = World::new().with_long_hook_deadline();
         let project = w.project();
         let decision = seed_decision(project.path());
         let tmp = short_tempdir();
@@ -229,29 +232,26 @@ impl Hooked {
     ) -> Value {
         let file = self.tmp.path().join("MSG ü 'x'");
         let env: Vec<(&str, &Path)> = index.map(|i| ("GIT_INDEX_FILE", i)).into_iter().collect();
-        retry_on_deadline("run_code", || {
-            // each attempt starts from the same message file
-            std::fs::write(&file, message).unwrap();
-            let v = self.ok_json(
-                cwd,
-                direct,
-                &env,
-                &[
-                    "hook",
-                    "run-code",
-                    "--repo",
-                    repo,
-                    "--message-file",
-                    file.to_str().unwrap(),
-                ],
-            );
-            assert_eq!(
-                std::fs::read_to_string(&file).unwrap(),
-                message,
-                "the message stays"
-            );
-            v
-        })
+        std::fs::write(&file, message).unwrap();
+        let v = self.ok_json(
+            cwd,
+            direct,
+            &env,
+            &[
+                "hook",
+                "run-code",
+                "--repo",
+                repo,
+                "--message-file",
+                file.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            message,
+            "the message stays"
+        );
+        v
     }
 
     /// Starts the project's daemon, so a hook run's deadline never covers a daemon start.
@@ -310,30 +310,6 @@ fn warnings(v: &Value) -> Vec<(String, Vec<String>)> {
             (w["code"].as_str().unwrap().to_string(), paths)
         })
         .collect()
-}
-
-/// Runs `attempt` up to 3 times and returns the first result that is not a deadline miss.
-///
-/// The product gives every hook run a fixed 2 s deadline (`HOOK_DEADLINE` in
-/// `rdy-engine/src/hooks.rs`) and, past it, its designed fail-open answer: `checked` false with
-/// one `W_HOOK_UNAVAILABLE` warning whose reason is `deadline`. These tests run the real binary
-/// and Git, so a loaded host can pass the deadline (known issue 2240). This retry covers load
-/// only: it fires on exactly that answer and no other, so every other result, including an
-/// unavailable check for another reason, reaches the caller's assertions unchanged.
-fn retry_on_deadline(helper: &str, mut attempt: impl FnMut() -> Value) -> Value {
-    let mut n = 1;
-    loop {
-        let v = attempt();
-        let missed = v["checked"] == false
-            && v["warnings"].as_array().is_some_and(|w| {
-                w.len() == 1 && w[0]["code"] == "W_HOOK_UNAVAILABLE" && w[0]["reason"] == "deadline"
-            });
-        if !missed || n == 3 {
-            return v;
-        }
-        n += 1;
-        eprintln!("{helper}: hook run passed the 2 s deadline under load; attempt {n} of 3");
-    }
 }
 
 /// A clean code check.
@@ -758,21 +734,19 @@ fn m4a3_cli_and_direct_mode_share_hook_results() {
         json!({"paths": [root.join(".rdy.yaml").to_str().unwrap(), root.join("notes.md").to_str().unwrap()]}),
     );
     let check = |direct: bool, kind: &str, file: &Path| {
-        retry_on_deadline("check", || {
-            h.ok_json(
-                &app,
-                direct,
-                &[],
-                &[
-                    "hook",
-                    "check",
-                    "--kind",
-                    kind,
-                    "--input",
-                    file.to_str().unwrap(),
-                ],
-            )
-        })
+        h.ok_json(
+            &app,
+            direct,
+            &[],
+            &[
+                "hook",
+                "check",
+                "--kind",
+                kind,
+                "--input",
+                file.to_str().unwrap(),
+            ],
+        )
     };
     for (kind, file) in [("code", &warned), ("code", &cited), ("edit", &edit)] {
         let daemon = check(false, kind, file);
@@ -1081,7 +1055,7 @@ fn m4a3_setup_installs_only_selected_hooks() {
     );
 
     // outside every project: skipped, and no file anywhere
-    let w = World::new();
+    let w = World::new().with_long_hook_deadline();
     let outside = short_tempdir();
     let v = setup_json(&w, outside.path(), &both);
     assert_eq!(
@@ -1104,7 +1078,7 @@ fn m4a3_bare_setup_keeps_meta_and_stub_contract() {
     let shown = |p: &Path| rdy_store::pio::display_path(p);
 
     // a repeat: written, then kept; no hooks member and no hook file
-    let w = World::new();
+    let w = World::new().with_long_hook_deadline();
     let pd = w.project();
     let meta = w.default_meta();
     let root = std::fs::canonicalize(pd.path()).unwrap();
@@ -1146,7 +1120,7 @@ fn m4a3_bare_setup_keeps_meta_and_stub_contract() {
     );
 
     // a configured meta place
-    let w = World::new();
+    let w = World::new().with_long_hook_deadline();
     let pd = w.project();
     let parent = short_tempdir();
     let chosen = parent.path().join("rules");
@@ -1157,7 +1131,7 @@ fn m4a3_bare_setup_keeps_meta_and_stub_contract() {
     assert!(!w.default_meta().exists());
 
     // outside every project
-    let w = World::new();
+    let w = World::new().with_long_hook_deadline();
     let outside = short_tempdir();
     let v = setup_json(&w, outside.path(), &[]);
     assert_eq!(keys(&v), bare, "{v}");

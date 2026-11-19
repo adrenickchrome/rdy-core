@@ -5,7 +5,7 @@ use crate::error::{E_BAD_INPUT, E_LIMIT, ErrorReply};
 use crate::handler::Handler;
 use crate::session::{SessionInfo, Sessions};
 use crate::signing_transport::{CALLBACK_MARK, HostInbound, MAX_CALLBACK_LINE_BYTES, host_link};
-use rdy_engine::hooks::{HOOK_DEADLINE, RunContext};
+use rdy_engine::hooks::{RunContext, hook_deadline};
 use rdy_engine::signing_crypto::SigningAgent;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
@@ -225,11 +225,11 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
 /// request, and a lost connection cancels it (FW-HOOK).
 pub const HOOK_OP: &str = "hook";
 
-/// The run context of a request of `op`: for the `hook` op, [`HOOK_DEADLINE`] from now, so the
+/// The run context of a request of `op`: for the `hook` op, [`hook_deadline`] from now, so the
 /// daemon stops its work at the deadline whether or not the client is still there; none for any
 /// other op.
 fn run_context(op: &str) -> Option<RunContext> {
-    (op == HOOK_OP).then(|| RunContext::new().with_deadline(Instant::now() + HOOK_DEADLINE))
+    (op == HOOK_OP).then(|| RunContext::new().with_deadline(Instant::now() + hook_deadline()))
 }
 
 /// Runs the handler on the blocking pool, under `run` when the op has one

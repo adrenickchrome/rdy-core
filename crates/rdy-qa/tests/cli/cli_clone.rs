@@ -290,6 +290,7 @@ fn ec12_a_url_source_names_the_sync_client() {
     let env = s.env_pairs();
     let to = scratch.path().join("to");
     let to_arg = to.to_str().unwrap();
+    // a URL that is not HTTPS gets rdy remote add's refusal (D-47HVF)
     for url in ["file:///nowhere/p.rdydump", "rdy://hub/team/project"] {
         let out = human_command(scratch.path(), &env, &["--json", "clone", url, to_arg])
             .output()
@@ -297,17 +298,39 @@ fn ec12_a_url_source_names_the_sync_client() {
         let (ok, e) = parsed(&out);
         assert!(!ok, "{url}: {e}");
         assert_eq!(e["code"], "E_BAD_INPUT", "{url}: {e}");
+        assert_eq!(e["message"], "the hub address is not an HTTPS URL", "{e}");
         assert_eq!(
-            e["message"],
-            format!("{url} is a URL: cloning from a hub comes with the sync client"),
-            "{e}"
-        );
-        assert_eq!(
-            e["fix"], "run rdy dump --out <file> in that project, then clone the file",
+            e["fix"], "use an HTTPS address without credentials, a query or a fragment",
             "{e}"
         );
         assert!(!to.exists(), "{url}: the target is untouched");
     }
+    // an https URL is a hub clone, which never forks: refused before any request
+    let out = human_command(
+        scratch.path(),
+        &env,
+        &[
+            "--json",
+            "clone",
+            "https://127.0.0.1:9/acme/docs",
+            to_arg,
+            "--fork",
+        ],
+    )
+    .output()
+    .unwrap();
+    let (ok, e) = parsed(&out);
+    assert!(!ok, "{e}");
+    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+    assert_eq!(
+        e["message"], "a fork starts from a project or a dump, not from a hub URL",
+        "{e}"
+    );
+    assert_eq!(
+        e["fix"], "clone the hub repo, then run rdy clone --fork <that project> <dir>",
+        "{e}"
+    );
+    assert!(!to.exists(), "the target is untouched");
 
     // a directory that is no project is refused too (O7, closed)
     let plain = scratch.path().join("plain");

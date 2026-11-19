@@ -470,6 +470,9 @@ pub fn test_areas(tests_dir: &Path) -> Vec<String> {
     v
 }
 
+/// The folder of shared test helpers (no test binary of its own).
+const SUPPORT_DIR: &str = "support";
+
 /// What is wrong with the test layout (one test binary per area, `tests/<area>/main.rs`
 /// with one `mod <stem>;` line per test file), one message per problem, sorted. Empty when
 /// the layout is right. A test file without its `mod` line compiles and never runs.
@@ -488,6 +491,22 @@ pub fn layout_problems(tests_dir: &Path) -> Vec<String> {
             continue;
         }
         if !p.is_dir() || !holds_rs(&p) {
+            continue;
+        }
+        // `tests/support/` holds helpers that areas include with `#[path]`; it is no test binary.
+        // A `#[test]` there would run once per area that includes it, so tests stay in an area.
+        if name == SUPPORT_DIR {
+            for f in dir_paths(&p).into_iter().filter(|f| is_rs_file(f)) {
+                if std::fs::read_to_string(&f)
+                    .unwrap_or_default()
+                    .contains("#[test]")
+                {
+                    out.push(format!(
+                        "tests/{name}/{} holds a test: move it to an area",
+                        name_of(&f)
+                    ));
+                }
+            }
             continue;
         }
         let main = p.join("main.rs");
@@ -537,6 +556,49 @@ pub struct Gate {
     pub pass: bool,
     /// Passed/failed/ignored counts for test steps; empty otherwise.
     pub detail: String,
+    /// Whether the step ran, or was skipped after a step it needs failed.
+    #[serde(flatten)]
+    pub state: RowState,
+}
+
+/// Whether a gate row's step ran. A skipped step never passes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RowState {
+    #[default]
+    Ran,
+    /// Not run: `after`, a step it needs, failed (the gate runs without `--all-stages`).
+    Skipped { after: crate::gate_steps::StepId },
+}
+
+impl Gate {
+    /// The row of a step that ran.
+    pub fn ran(name: &str, pass: bool, detail: String) -> Gate {
+        Gate {
+            name: name.into(),
+            pass,
+            detail,
+            state: RowState::Ran,
+        }
+    }
+
+    /// The row of a step skipped after the failed step `after`.
+    pub fn skipped(name: &str, after: crate::gate_steps::StepId) -> Gate {
+        Gate {
+            name: name.into(),
+            pass: false,
+            detail: String::new(),
+            state: RowState::Skipped { after },
+        }
+    }
+}
+
+/// The result cell of a gate row: PASS, FAIL or `SKIPPED (after <step> failed)`.
+pub fn gate_result(g: &Gate) -> String {
+    match &g.state {
+        RowState::Ran => mark(g.pass).to_string(),
+        RowState::Skipped { after } => format!("SKIPPED (after {after} failed)"),
+    }
 }
 
 /// One area of the `rdy-qa` hardening suite.
@@ -721,6 +783,114 @@ pub fn missing_binaries(expected: &[String], found: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// One timed child of the gate: its label, seconds, result, and when it ended (seconds since
+/// the gate started).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StageRecord {
+    pub label: String,
+    pub secs: f64,
+    pub ok: bool,
+    pub ended_at: f64,
+}
+
+/// One row of the report's `## Timing` table.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StageTime {
+    pub stage: String,
+    pub secs: f64,
+    pub ok: bool,
+}
+
+/// Where the minutes of a gate run went.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Timing {
+    /// Seconds the run waited for the gate lock, when the caller knows it.
+    pub queue_secs: Option<f64>,
+    pub stages: Vec<StageTime>,
+    /// The first failed stage and the seconds from the gate start to its end.
+    pub first_failure: Option<(String, f64)>,
+}
+
+/// The table row name of a child label: the fetch, the CLI build, clippy, the workspace
+/// compile and run, discovery, and one row per QA area. Format checks fold into one `fmt` row.
+fn stage_name(label: &str) -> String {
+    match label {
+        "fetch locked dependencies" => "fetch".into(),
+        "build rdy-cli" => "CLI build".into(),
+        "workspace compile" => "workspace compile".into(),
+        "workspace tests" => "workspace run".into(),
+        "discover rdy-qa test binaries" => "QA discovery".into(),
+        "workspace members" => "fmt".into(),
+        l if l.starts_with("fmt ") => "fmt".into(),
+        "rdy-qa unit tests" => "QA lib".into(),
+        l => l
+            .strip_prefix("rdy-qa ")
+            .map_or(l.to_string(), |a| format!("QA {a}")),
+    }
+}
+
+impl Timing {
+    /// The timing of a run from its child records, in the order they ran. Records of one
+    /// stage name add up.
+    pub fn from_records(records: &[StageRecord], queue_secs: Option<f64>) -> Timing {
+        let mut stages: Vec<StageTime> = vec![];
+        let mut first_failure: Option<(String, f64)> = None;
+        for r in records {
+            let name = stage_name(&r.label);
+            if !r.ok && first_failure.is_none() {
+                first_failure = Some((name.clone(), r.ended_at));
+            }
+            match stages.iter_mut().find(|s| s.stage == name) {
+                Some(s) => {
+                    s.secs += r.secs;
+                    s.ok &= r.ok;
+                }
+                None => stages.push(StageTime {
+                    stage: name,
+                    secs: r.secs,
+                    ok: r.ok,
+                }),
+            }
+        }
+        Timing {
+            queue_secs,
+            stages,
+            first_failure,
+        }
+    }
+
+    /// The `## Timing` section: `| stage | seconds | result |` rows (result `ok` or `failed`, never PASS or FAIL, so the gate script's failure grep skips them), one per stage, then a
+    /// `first failure at` row (seconds since the gate start, and the stage; `-` when none
+    /// failed). A `queue` row comes first when the wait is known. Empty when nothing was timed.
+    pub fn markdown(&self) -> String {
+        if self.stages.is_empty() {
+            return String::new();
+        }
+        let mut s = String::from("\n## Timing\n\n| Stage | Seconds | Result |\n|---|---|---|\n");
+        if let Some(q) = self.queue_secs {
+            let _ = writeln!(s, "| queue | {q:.1} | - |");
+        }
+        for t in &self.stages {
+            let _ = writeln!(
+                s,
+                "| {} | {:.1} | {} |",
+                t.stage,
+                t.secs,
+                if t.ok { "ok" } else { "failed" }
+            );
+        }
+        match &self.first_failure {
+            Some((stage, at)) => {
+                let _ = writeln!(s, "| first failure at | {at:.1} | {stage} |");
+            }
+            None => {
+                let _ = writeln!(s, "| first failure at | - | - |");
+            }
+        }
+        s
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Report {
     pub revision: String,
@@ -742,6 +912,8 @@ pub struct Report {
     /// Tests this OS does not compile (`platform::exclusions`), as `<file>: <test>`. They are
     /// neither ignored nor deep-only tests.
     pub os_excluded: Vec<String>,
+    /// Where the time went, per stage; empty when nothing was timed.
+    pub timing: Timing,
 }
 
 /// The M3 gate's required witnesses that another area proves, not the swarm (rulings task-8
@@ -832,7 +1004,7 @@ pub fn markdown(r: &Report) -> String {
         "## Build gates\n\n| Step | Result | Detail |\n|---|---|---|"
     );
     for g in &r.gates {
-        let _ = writeln!(s, "| {} | {} | {} |", g.name, mark(g.pass), g.detail);
+        let _ = writeln!(s, "| {} | {} | {} |", g.name, gate_result(g), g.detail);
     }
 
     let _ = writeln!(
@@ -994,6 +1166,8 @@ pub fn markdown(r: &Report) -> String {
     for f in &r.failing_seeds {
         let _ = writeln!(s, "- `{f}`");
     }
+
+    s.push_str(&r.timing.markdown());
 
     let _ = writeln!(s, "\n## Guarded defect ids\n");
     if r.guarded.is_empty() {
@@ -1251,6 +1425,20 @@ mod tests {
     }
 
     #[test]
+    fn tlay1_support_holds_helpers_and_no_tests() {
+        let ok = tree(&[
+            ("cli/main.rs", "mod cli_a;\n"),
+            ("cli/cli_a.rs", ""),
+            ("support/hub.rs", "pub fn hub() {}\n"),
+        ]);
+        assert_eq!(layout_problems(ok.path()), Vec::<String>::new());
+        let bad = tree(&[("support/hub.rs", "#[test]\nfn t() {}\n")]);
+        let p = layout_problems(bad.path());
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("support/hub.rs holds a test"), "{p:?}");
+    }
+
+    #[test]
     fn tlay1_a_mod_line_without_its_file_is_named() {
         let d = tree(&[
             ("engine/main.rs", "mod engine_a;\nmod engine_gone;\n"),
@@ -1303,11 +1491,7 @@ mod tests {
     }
 
     fn gate(pass: bool) -> Gate {
-        Gate {
-            name: "g".into(),
-            pass,
-            detail: String::new(),
-        }
+        Gate::ran("g", pass, String::new())
     }
 
     #[test]
@@ -1456,6 +1640,7 @@ mod tests {
             notes: vec![],
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
+            timing: Timing::default(),
         };
         assert!(
             markdown(&r).contains(
@@ -1464,6 +1649,49 @@ mod tests {
             "{}",
             markdown(&r)
         );
+    }
+
+    #[test]
+    fn report_has_timing_rows() {
+        let rec = |label: &str, secs: f64, ok: bool, ended_at: f64| StageRecord {
+            label: label.into(),
+            secs,
+            ok,
+            ended_at,
+        };
+        let t = Timing::from_records(
+            &[
+                rec("fetch locked dependencies", 2.0, true, 2.0),
+                rec("clippy", 30.5, false, 33.0),
+                rec("rdy-qa engine", 10.0, true, 43.0),
+            ],
+            None,
+        );
+        let mut r = report_of(vec![]);
+        r.timing = t;
+        let md = markdown(&r);
+        let rows: Vec<&str> = md
+            .split("## Timing")
+            .nth(1)
+            .expect("a Timing section")
+            .lines()
+            .filter(|l| l.starts_with("| ") && !l.starts_with("| Stage"))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "| fetch | 2.0 | ok |",
+                "| clippy | 30.5 | failed |",
+                "| QA engine | 10.0 | ok |",
+                "| first failure at | 33.0 | clippy |",
+            ]
+        );
+        let q = Timing::from_records(&[rec("build rdy-cli", 1.0, true, 1.0)], Some(5.0));
+        assert!(
+            q.markdown()
+                .contains("| queue | 5.0 | - |\n| CLI build | 1.0 | ok |")
+        );
+        assert!(!markdown(&report_of(vec![])).contains("## Timing"));
     }
 
     /// A `Report` holding one area, for the rendering pins.
@@ -1483,6 +1711,7 @@ mod tests {
             notes: vec![],
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
+            timing: Timing::default(),
         }
     }
 
@@ -1781,6 +2010,7 @@ error: 2 targets failed:
             notes: vec![],
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
+            timing: Timing::default(),
         };
         let md = markdown(&r);
         assert!(
@@ -1843,6 +2073,7 @@ error: 2 targets failed:
             notes: vec![],
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
+            timing: Timing::default(),
         };
         let md = markdown(&r);
         assert!(

@@ -4817,6 +4817,13 @@ impl Store {
 }
 
 impl StoreReader {
+    /// The bytes the store's capped map cache holds (charged against its budget,
+    /// [`crate::snapshot::MAP_CACHE_BYTES`]). The deep-gate memory soak subtracts it from the
+    /// daemon's live memory.
+    pub fn map_cache_bytes(&self) -> usize {
+        self.shared.maps.stats().1
+    }
+
     /// The deps the store gives `change` when it commits it to `view` (or, with no view, through
     /// `commit_change`), sorted ascending and deduplicated:
     /// - for each op's base, its producers that `view` includes; when it includes none (the base

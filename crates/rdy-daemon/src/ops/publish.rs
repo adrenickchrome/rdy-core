@@ -27,7 +27,8 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 /// The HTTPS transport fenced to `install`, from the settings of `project` and `user_file`.
-fn fenced(
+/// The sync op builds its wire the same way.
+pub(crate) fn fenced(
     project: &Path,
     user_file: &Path,
     install: &Origin,
@@ -36,11 +37,11 @@ fn fenced(
     HttpHubTransport::new(settings.fence(install)?)
 }
 
-/// The credential transport of one publish call, built on its first request.
-struct CredentialTransport<'a> {
-    project: &'a Path,
-    user_file: &'a Path,
-    built: OnceLock<Result<HttpHubTransport, RdyError>>,
+/// The credential transport of one publish (or sync) call, built on its first request.
+pub(crate) struct CredentialTransport<'a> {
+    pub(crate) project: &'a Path,
+    pub(crate) user_file: &'a Path,
+    pub(crate) built: OnceLock<Result<HttpHubTransport, RdyError>>,
 }
 
 impl HubTransport for CredentialTransport<'_> {

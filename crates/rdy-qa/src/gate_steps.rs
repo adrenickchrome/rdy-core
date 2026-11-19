@@ -1,11 +1,188 @@
 //! The gate's prerequisite steps (the locked dependency fetch, then the release build), its format
 //! check (one workspace member at a time) and its structured test discovery: Cargo's artifact
 //! record names each test executable, and the gate lists each one directly, with no shell.
+//!
+//! Each stage is a [`GateStep`]: it names the steps it needs, and a failed step skips them
+//! ([`Stages`], [`run_steps`]) unless the gate runs with `--all-stages`. Each child runs under a
+//! wall-clock deadline ([`run_stage`]); past it the child's process group gets TERM, then KILL
+//! after [`KILL_GRACE`], and the row names the stage.
+use crate::platform::ProcessGroup;
 use crate::report::{self, Gate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+/// A gate step's id: the name of its report row.
+pub type StepId = String;
+
+/// One stage of the gate: its report row, the steps it needs, and its child's deadline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateStep {
+    pub id: StepId,
+    /// The steps this one needs. When one of them failed or was skipped, this one is skipped.
+    pub after: Vec<StepId>,
+    /// The wall-clock limit of each child this step starts.
+    pub deadline: Duration,
+}
+
+impl GateStep {
+    pub fn new(id: impl Into<StepId>, after: &[&str], deadline: Duration) -> Self {
+        Self {
+            id: id.into(),
+            after: after.iter().map(|s| s.to_string()).collect(),
+            deadline,
+        }
+    }
+}
+
+/// The steps that failed or were skipped, each with the failed step at its root.
+#[derive(Debug, Default)]
+pub struct Stages {
+    all_stages: bool,
+    broken: BTreeMap<StepId, StepId>,
+}
+
+impl Stages {
+    /// `all_stages`: run every step whatever failed before it (`--all-stages`).
+    pub fn new(all_stages: bool) -> Self {
+        Self {
+            all_stages,
+            broken: BTreeMap::new(),
+        }
+    }
+
+    /// The failed step that keeps `step` from running, if any. With `--all-stages`, none.
+    pub fn blocked(&self, step: &GateStep) -> Option<StepId> {
+        if self.all_stages {
+            return None;
+        }
+        step.after
+            .iter()
+            .find_map(|dep| self.broken.get(dep).cloned())
+    }
+
+    /// Records the result of a step that ran.
+    pub fn record(&mut self, step: &GateStep, ok: bool) {
+        if !ok {
+            self.broken.insert(step.id.clone(), step.id.clone());
+        }
+    }
+
+    /// Records `step` as skipped after the failed step `root`, and returns its report row.
+    pub fn skip(&mut self, step: &GateStep, root: StepId) -> Gate {
+        eprintln!("==> {}: SKIPPED (after {root} failed)", step.id);
+        self.broken.insert(step.id.clone(), root.clone());
+        Gate::skipped(&step.id, root)
+    }
+}
+
+/// Runs `steps` in order through `run` (step in, success and output back), skipping each step
+/// whose dependency failed or was skipped (unless `all_stages`). One report row per step; a
+/// failed row keeps the tail of its output.
+pub fn run_steps(
+    steps: &[GateStep],
+    all_stages: bool,
+    mut run: impl FnMut(&GateStep) -> (bool, String),
+) -> Vec<Gate> {
+    let mut stages = Stages::new(all_stages);
+    steps
+        .iter()
+        .map(|step| match stages.blocked(step) {
+            Some(root) => stages.skip(step, root),
+            None => {
+                let (ok, out) = run(step);
+                stages.record(step, ok);
+                Gate::ran(&step.id, ok, fail_tail(ok, &out))
+            }
+        })
+        .collect()
+}
+
+/// How long a child past its deadline has, after TERM, before KILL.
+pub const KILL_GRACE: Duration = Duration::from_secs(10);
+
+/// The shortest default deadline of a child.
+pub const DEADLINE_FLOOR: Duration = Duration::from_secs(600);
+
+/// The kinds of gate child, for their default deadlines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageKind {
+    /// `cargo fetch --locked`.
+    Fetch,
+    /// The release build of `rdy-cli`.
+    Build,
+    /// One `cargo fmt --check -p <member>` (or `cargo metadata`).
+    Fmt,
+    /// Workspace clippy.
+    Clippy,
+    /// The workspace tests outside `rdy-qa`.
+    WorkspaceTests,
+    /// The build of every `rdy-qa` test binary (`--no-run`).
+    Discover,
+    /// One `rdy-qa` area binary.
+    Area,
+    /// The `rdy-qa` unit tests.
+    Lib,
+    /// The perf tier.
+    Perf,
+    /// One test binary's `--list`.
+    Listing,
+}
+
+/// The median wall time of a whole fast gate run on each platform, in seconds: Linux from 159
+/// runs on the 24-thread gate server, macOS from 16 and Windows from 23 native runs (gate
+/// records to 2026-11-19). The records hold whole runs only, so a child's median is taken as a
+/// share of its platform's whole run ([`STAGE_SHARE_PCT`]).
+pub const RUN_MEDIAN_SECS: &[(&str, u64)] = &[("linux", 3290), ("macos", 4152), ("windows", 8767)];
+
+/// The share of a whole run, in percent, taken as one child's median. No child has been timed
+/// alone yet, and a deadline that kills a slow but healthy child costs more than one that waits
+/// too long for a hung one, so until per-stage times are measured every kind is 50: its deadline
+/// (twice the median) is its platform's whole-run median. A hung child is still caught well
+/// before the CI job timeout. Measured times replace these values per kind; a kind not listed
+/// gets the floor.
+pub const STAGE_SHARE_PCT: &[(StageKind, u64)] = &[
+    (StageKind::Fetch, 50),
+    (StageKind::Build, 50),
+    (StageKind::Fmt, 50),
+    (StageKind::Clippy, 50),
+    (StageKind::WorkspaceTests, 50),
+    (StageKind::Discover, 50),
+    (StageKind::Area, 50),
+    (StageKind::Lib, 50),
+    (StageKind::Perf, 50),
+    (StageKind::Listing, 50),
+];
+
+/// The default deadline of a child of `kind` on `os` (`std::env::consts::OS`): twice its median
+/// ([`RUN_MEDIAN_SECS`] times [`STAGE_SHARE_PCT`]), never under [`DEADLINE_FLOOR`]. An OS with
+/// no record takes the slowest platform's median.
+pub fn default_deadline(kind: StageKind, os: &str) -> Duration {
+    let run = RUN_MEDIAN_SECS
+        .iter()
+        .find(|(o, _)| *o == os)
+        .or_else(|| RUN_MEDIAN_SECS.iter().max_by_key(|(_, s)| *s))
+        .map_or(0, |(_, s)| *s);
+    let share = STAGE_SHARE_PCT
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map_or(0, |(_, p)| *p);
+    Duration::from_secs(2 * run * share / 100).max(DEADLINE_FLOOR)
+}
+
+/// The report line of a child that passed its deadline.
+pub fn deadline_line(stage: &str, deadline: Duration) -> String {
+    let secs = deadline.as_secs_f64();
+    let text = if secs.fract() == 0.0 {
+        format!("{}s", deadline.as_secs())
+    } else {
+        format!("{secs:.1}s")
+    };
+    format!("deadline {text} passed in stage {stage}")
+}
 
 /// The most bytes the gate keeps of one stream of one child. The tail is kept, because a test
 /// run ends with its `test result:` lines.
@@ -21,6 +198,8 @@ pub struct ChildOutput {
     pub stderr: String,
     /// The bytes dropped from the front of the two streams, over `MAX_CHILD_BYTES`.
     pub dropped: usize,
+    /// The child passed its deadline and was ended.
+    pub timed_out: bool,
 }
 
 impl ChildOutput {
@@ -66,35 +245,125 @@ pub fn read_tail(mut r: impl Read, cap: usize) -> (Vec<u8>, usize) {
     (buf, dropped)
 }
 
-/// Runs `cmd` with both streams captured and bounded. A process that does not start is a failed
-/// child whose `stderr` says why.
-pub fn run_bounded(mut cmd: Command) -> ChildOutput {
+/// Runs `cmd` with both streams captured and bounded, and no deadline. A process that does not
+/// start is a failed child whose `stderr` says why.
+pub fn run_bounded(cmd: Command) -> ChildOutput {
+    run_child(cmd, None, KILL_GRACE)
+}
+
+/// Runs `cmd` for the stage `stage` as [`run_bounded`] does, under `deadline`. Past it, the
+/// child's process group gets TERM, then KILL after [`KILL_GRACE`]; the result is a failure whose
+/// last `stderr` line is [`deadline_line`], which is also printed.
+pub fn run_stage(stage: &str, cmd: Command, deadline: Duration) -> ChildOutput {
+    let mut out = run_child(cmd, Some(deadline), KILL_GRACE);
+    if out.timed_out {
+        let line = deadline_line(stage, deadline);
+        eprintln!("{line}");
+        if !out.stderr.is_empty() && !out.stderr.ends_with('\n') {
+            out.stderr.push('\n');
+        }
+        out.stderr.push_str(&line);
+        out.stderr.push('\n');
+    }
+    out
+}
+
+/// What the workers of one child run report.
+enum ChildEvent {
+    Stdout((Vec<u8>, usize)),
+    Stderr((Vec<u8>, usize)),
+    Exited(std::io::Result<ExitStatus>),
+}
+
+/// The bounded runner: the child starts in a process group of its own (a Job Object on
+/// Windows), so a stop reaches what it started and nothing else. With a deadline, the whole run
+/// (exit and both streams) must end by then; past it the group is stopped ([`ProcessGroup::stop`]:
+/// TERM, `grace`, KILL) and the workers get `grace` more to finish. A stream whose worker does
+/// not finish (a process outside the group holds it) is left empty.
+fn run_child(mut cmd: Command, deadline: Option<Duration>, grace: Duration) -> ChildOutput {
+    let failed = |e: std::io::Error| ChildOutput {
+        stderr: format!("could not run: {e}"),
+        ..ChildOutput::default()
+    };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = match cmd.spawn() {
+    let group = match ProcessGroup::new() {
+        Ok(g) => g,
+        Err(e) => return failed(e),
+    };
+    let mut child = match group.spawn(&mut cmd) {
         Ok(c) => c,
-        Err(e) => {
-            return ChildOutput {
-                stderr: format!("could not run: {e}"),
-                ..ChildOutput::default()
-            };
-        }
+        Err(e) => return failed(e),
     };
     let out = child.stdout.take().expect("piped stdout");
     let err = child.stderr.take().expect("piped stderr");
-    let (out, err) = std::thread::scope(|sc| {
-        let t = sc.spawn(|| read_tail(out, MAX_CHILD_BYTES));
-        let e = read_tail(err, MAX_CHILD_BYTES);
-        (t.join().unwrap_or_default(), e)
-    });
-    let status = child.wait();
+    let (tx, rx) = mpsc::channel();
+    let workers = [
+        {
+            let tx = tx.clone();
+            std::thread::Builder::new().spawn(move || {
+                let _ = tx.send(ChildEvent::Stdout(read_tail(out, MAX_CHILD_BYTES)));
+            })
+        },
+        {
+            let tx = tx.clone();
+            std::thread::Builder::new().spawn(move || {
+                let _ = tx.send(ChildEvent::Stderr(read_tail(err, MAX_CHILD_BYTES)));
+            })
+        },
+        std::thread::Builder::new().spawn(move || {
+            let _ = tx.send(ChildEvent::Exited(child.wait()));
+        }),
+    ];
+    let expected = workers.iter().filter(|w| w.is_ok()).count();
+    if let Some(Err(e)) = workers.into_iter().find(|w| w.is_err()) {
+        let _ = group.kill();
+        return failed(e);
+    }
+    let until = deadline.and_then(|d| Instant::now().checked_add(d));
+    let mut stdout = (Vec::new(), 0);
+    let mut stderr = (Vec::new(), 0);
+    let mut status = None;
+    let mut timed_out = false;
+    let mut received = 0;
+    while received < expected {
+        let event = match (until, timed_out) {
+            (Some(at), false) => {
+                match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                    Ok(e) => e,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        timed_out = true;
+                        let _ = group.stop(grace);
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            (_, true) => match rx.recv_timeout(grace) {
+                Ok(e) => e,
+                Err(_) => break,
+            },
+            (None, false) => match rx.recv() {
+                Ok(e) => e,
+                Err(_) => break,
+            },
+        };
+        received += 1;
+        match event {
+            ChildEvent::Stdout(o) => stdout = o,
+            ChildEvent::Stderr(e) => stderr = e,
+            ChildEvent::Exited(s) => status = Some(s),
+        }
+    }
+    let status = status.and_then(Result::ok);
     ChildOutput {
-        ok: status.as_ref().is_ok_and(|s| s.success()),
-        code: status.as_ref().ok().and_then(|s| s.code()),
-        stdout: String::from_utf8_lossy(&out.0).into_owned(),
-        stderr: String::from_utf8_lossy(&err.0).into_owned(),
-        dropped: out.1 + err.1,
+        ok: !timed_out && status.is_some_and(|s| s.success()),
+        code: status.and_then(|s| s.code()),
+        stdout: String::from_utf8_lossy(&stdout.0).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr.0).into_owned(),
+        dropped: stdout.1 + stderr.1,
+        timed_out,
     }
 }
 
@@ -228,6 +497,214 @@ pub fn cargo(args: &[&str]) -> Command {
     c
 }
 
+/// The area binaries that run alone: no other area runs while one of them runs. Each one's tests
+/// load the machine in a way that slows a neighbour's timing-sensitive tests or is slowed by it:
+/// - `cli`: most files start the release `rdy` binary or a daemon, with waits on its endpoint;
+/// - `daemon`: nearly every file starts a daemon and times its endpoints, stops and restarts;
+/// - `io`: crash, fsync and reindex runs, and follower and migration child processes;
+/// - `mcp`: most files start a daemon or the HTTP MCP surface, with the largest payloads;
+/// - `release`: runs Cargo itself, packages and installs the release binary;
+/// - `store`: crash, reopen and fsync runs over many stores (disk-heavy);
+/// - `swarm`: many concurrent agents against one store, with kills and restarts.
+pub const SERIAL_AREAS: &[&str] = &["cli", "daemon", "io", "mcp", "release", "store", "swarm"];
+
+/// The area binaries launched directly when [`DIRECT_AREAS_VAR`] is not set: the pilot.
+pub const PILOT_AREAS: &[&str] = &["model", "schema"];
+
+/// Names the area binaries the gate launches directly: `all`, `none`, or a comma list. Unset, it
+/// is [`PILOT_AREAS`]. Every other area runs through `cargo test`, alone, as before.
+pub const DIRECT_AREAS_VAR: &str = "RDY_QA_DIRECT_AREAS";
+
+/// The area binaries of `files` to launch directly, for the value of [`DIRECT_AREAS_VAR`].
+pub fn direct_areas(value: Option<&str>, files: &[String]) -> BTreeSet<String> {
+    let chosen: Vec<&str> = match value.map(str::trim) {
+        None => PILOT_AREAS.to_vec(),
+        Some("all") => files.iter().map(String::as_str).collect(),
+        Some(v) => v.split(',').map(str::trim).collect(),
+    };
+    files
+        .iter()
+        .filter(|f| chosen.contains(&f.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// How many area binaries run at once on a machine with `cpus` threads: a quarter of them, from
+/// 1 to 4. Each binary already runs its tests on every thread.
+pub fn area_jobs(cpus: usize) -> usize {
+    (cpus / 4).clamp(1, 4)
+}
+
+/// Runs `run` on every item. The items for which `alone` is false share up to `jobs` workers;
+/// after them, each item for which `alone` is true runs by itself, so it never overlaps another.
+/// The results come back in the order of `items`.
+pub fn run_areas<T: Sync, R: Send>(
+    items: &[T],
+    alone: impl Fn(&T) -> bool,
+    jobs: usize,
+    run: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let shared: Vec<usize> = (0..items.len()).filter(|&i| !alone(&items[i])).collect();
+    let next = AtomicUsize::new(0);
+    let done: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(items.len()));
+    std::thread::scope(|s| {
+        for _ in 0..jobs.max(1).min(shared.len()) {
+            s.spawn(|| {
+                while let Some(&i) = shared.get(next.fetch_add(1, Ordering::SeqCst)) {
+                    let r = run(&items[i]);
+                    done.lock().unwrap_or_else(|p| p.into_inner()).push((i, r));
+                }
+            });
+        }
+    });
+    let mut results: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    for (i, r) in done.into_inner().unwrap_or_else(|p| p.into_inner()) {
+        results[i] = Some(r);
+    }
+    for (i, item) in items.iter().enumerate() {
+        if alone(item) {
+            results[i] = Some(run(item));
+        }
+    }
+    results
+        .into_iter()
+        .map(|r| r.expect("every item ran"))
+        .collect()
+}
+
+/// The working directory and the whole environment that `cargo test` gives an `rdy-qa` test
+/// binary. Cargo gives every test target of a package the same ones.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AreaEnv {
+    pub cwd: PathBuf,
+    pub vars: BTreeMap<String, String>,
+}
+
+/// One area binary run by [`launch_area`].
+#[derive(Clone, Debug)]
+pub struct AreaRun {
+    pub out: ChildOutput,
+    pub elapsed: Duration,
+}
+
+/// The command that starts the test binary `bin` with `args`, in `env`'s working directory, with
+/// `env`'s variables and no others.
+pub fn area_command(bin: &Path, env: &AreaEnv, args: &[&str]) -> Command {
+    let mut c = Command::new(bin);
+    c.args(args)
+        .current_dir(&env.cwd)
+        .env_clear()
+        .envs(&env.vars);
+    c
+}
+
+/// Starts the test binary `bin` directly, as `cargo test` would ([`area_command`]), for the stage
+/// `stage` under `deadline` ([`run_stage`]).
+pub fn launch_area(
+    bin: &Path,
+    env: &AreaEnv,
+    args: &[&str],
+    stage: &str,
+    deadline: Duration,
+) -> AreaRun {
+    let start = Instant::now();
+    let out = run_stage(stage, area_command(bin, env, args), deadline);
+    AreaRun {
+        out,
+        elapsed: start.elapsed(),
+    }
+}
+
+/// Names the file the env probe test writes its record to.
+pub const ENV_PROBE_VAR: &str = "RDY_QA_ENV_PROBE";
+/// The area binary that holds the env probe test.
+pub const ENV_PROBE_BINARY: &str = "model";
+/// The env probe test's full name in [`ENV_PROBE_BINARY`].
+pub const ENV_PROBE_TEST: &str = "env_probe::env_probe_dump";
+
+/// The env probe's record of this process: its working directory and every variable, as JSON.
+/// A name or value that is not UTF-8 makes it an error record.
+pub fn env_probe_record() -> String {
+    let record = (|| {
+        let cwd = std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?;
+        let cwd = cwd
+            .to_str()
+            .ok_or("the working directory is not UTF-8")?
+            .to_string();
+        let mut vars = serde_json::Map::new();
+        for (k, v) in std::env::vars_os() {
+            let (Some(k), Some(v)) = (k.to_str(), v.to_str()) else {
+                return Err(format!("the variable {k:?} is not UTF-8"));
+            };
+            vars.insert(k.to_string(), v.into());
+        }
+        Ok(serde_json::json!({ "cwd": cwd, "vars": vars }))
+    })();
+    match record {
+        Ok(v) => v.to_string(),
+        Err(e) => serde_json::json!({ "error": e }).to_string(),
+    }
+}
+
+/// The [`AreaEnv`] in an env probe record, without [`ENV_PROBE_VAR`].
+pub fn parse_env_probe(text: &str) -> Result<AreaEnv, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("env probe record: {e}"))?;
+    if let Some(e) = v["error"].as_str() {
+        return Err(format!("env probe: {e}"));
+    }
+    let cwd = v["cwd"].as_str().ok_or("env probe record has no cwd")?;
+    let mut vars = BTreeMap::new();
+    for (k, val) in v["vars"]
+        .as_object()
+        .ok_or("env probe record has no vars")?
+    {
+        let val = val.as_str().ok_or("env probe value is not a string")?;
+        vars.insert(k.clone(), val.to_string());
+    }
+    vars.remove(ENV_PROBE_VAR);
+    Ok(AreaEnv {
+        cwd: PathBuf::from(cwd),
+        vars,
+    })
+}
+
+/// The `cargo test` arguments that run the env probe test alone.
+pub const ENV_PROBE_ARGS: [&str; 9] = [
+    "test",
+    "-p",
+    "rdy-qa",
+    "--release",
+    "--test",
+    ENV_PROBE_BINARY,
+    "--",
+    ENV_PROBE_TEST,
+    "--exact",
+];
+
+/// Asks Cargo for the environment it gives an `rdy-qa` test binary: runs the env probe test
+/// through `run` (the command in, its output back; the caller sets the working directory) and
+/// reads its record.
+pub fn capture_area_env(run: impl FnOnce(Command) -> ChildOutput) -> Result<AreaEnv, String> {
+    let dir = tempfile::tempdir().map_err(|e| format!("env probe: {e}"))?;
+    let file = dir.path().join("env.json");
+    let mut c = cargo(&ENV_PROBE_ARGS);
+    c.env(ENV_PROBE_VAR, &file);
+    let out = run(c);
+    if !out.ok {
+        return Err(format!(
+            "env probe exited with {}: {}",
+            out.status_text(),
+            report::tail(&out.combined(), 5)
+        ));
+    }
+    let text = std::fs::read_to_string(&file)
+        .map_err(|e| format!("env probe wrote no record ({e}): no test matched?"))?;
+    parse_env_probe(&text)
+}
+
 pub fn fail_tail(ok: bool, out: &str) -> String {
     if ok {
         String::new()
@@ -236,33 +713,49 @@ pub fn fail_tail(ok: bool, out: &str) -> String {
     }
 }
 
-/// Runs the prerequisite steps through `run` (label and command in, success and output back):
-/// the locked fetch of every target's crates, then the release build. Both always run; a failed
-/// step is a failed gate row, and its output goes to stderr.
-pub fn build_steps(mut run: impl FnMut(&str, Command) -> (bool, String)) -> Vec<Gate> {
-    let steps: [(&str, &str, &[&str]); 2] = [
-        (
-            "fetch locked dependencies",
+/// The prerequisite steps: the locked fetch of every target's crates, then the release build,
+/// which needs it.
+pub fn prerequisite_steps(os: &str) -> [GateStep; 2] {
+    [
+        GateStep::new(
             "cargo fetch --locked",
-            &["fetch", "--locked"],
+            &[],
+            default_deadline(StageKind::Fetch, os),
         ),
-        (
-            "build rdy-cli",
+        GateStep::new(
             "cargo build --release -p rdy-cli",
-            &["build", "--release", "-p", "rdy-cli"],
+            &["cargo fetch --locked"],
+            default_deadline(StageKind::Build, os),
         ),
+    ]
+}
+
+/// Runs the prerequisite steps ([`prerequisite_steps`]) through `run` (label, command and
+/// deadline in, success and output back). A failed step is a failed gate row, and its output goes
+/// to stderr; a failed fetch skips the build unless `stages` runs every stage.
+pub fn build_steps(
+    stages: &mut Stages,
+    mut run: impl FnMut(&str, Command, Duration) -> (bool, String),
+) -> Vec<Gate> {
+    let commands: [(&str, &[&str]); 2] = [
+        ("fetch locked dependencies", &["fetch", "--locked"]),
+        ("build rdy-cli", &["build", "--release", "-p", "rdy-cli"]),
     ];
-    let mut gates = Vec::with_capacity(steps.len());
-    for (label, name, args) in steps {
-        let (ok, out) = run(label, cargo(args));
+    let mut gates = Vec::with_capacity(commands.len());
+    for (step, (label, args)) in prerequisite_steps(std::env::consts::OS)
+        .iter()
+        .zip(commands)
+    {
+        if let Some(root) = stages.blocked(step) {
+            gates.push(stages.skip(step, root));
+            continue;
+        }
+        let (ok, out) = run(label, cargo(args), step.deadline);
         if !ok {
             eprintln!("{out}");
         }
-        gates.push(Gate {
-            name: name.into(),
-            pass: ok,
-            detail: fail_tail(ok, &out),
-        });
+        stages.record(step, ok);
+        gates.push(Gate::ran(&step.id, ok, fail_tail(ok, &out)));
     }
     gates
 }
@@ -299,20 +792,18 @@ pub fn workspace_members(out: &str) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-/// Checks the format of every workspace member through `run` (label and command in, success and
-/// output back), one `cargo fmt --check -p <member>` each. `cargo fmt --all --check` passes every
+/// Checks the format of every workspace member through `run` (label, command and deadline in,
+/// success and output back), one `cargo fmt --check -p <member>` each. `cargo fmt --all --check` passes every
 /// target root of the workspace to one rustfmt command, and Windows refuses a command line over
 /// 32767 characters. Every member is checked; the row fails when the member list cannot be read
 /// or any member fails, and its detail names each failing member with the tail of its output.
-pub fn fmt_step(mut run: impl FnMut(&str, Command) -> (bool, String)) -> Gate {
-    let fail = |detail: String| Gate {
-        name: FMT_GATE.into(),
-        pass: false,
-        detail,
-    };
+pub fn fmt_step(mut run: impl FnMut(&str, Command, Duration) -> (bool, String)) -> Gate {
+    let fail = |detail: String| Gate::ran(FMT_GATE, false, detail);
+    let deadline = default_deadline(StageKind::Fmt, std::env::consts::OS);
     let (ok, out) = run(
         "workspace members",
         cargo(&["metadata", "--no-deps", "--format-version", "1"]),
+        deadline,
     );
     if !ok {
         eprintln!("{out}");
@@ -330,6 +821,7 @@ pub fn fmt_step(mut run: impl FnMut(&str, Command) -> (bool, String)) -> Gate {
         let (ok, out) = run(
             &format!("fmt {member}"),
             cargo(&["fmt", "--check", "-p", member]),
+            deadline,
         );
         if !ok {
             eprintln!("{out}");
@@ -340,11 +832,7 @@ pub fn fmt_step(mut run: impl FnMut(&str, Command) -> (bool, String)) -> Gate {
         }
     }
     if failed.is_empty() {
-        Gate {
-            name: FMT_GATE.into(),
-            pass: true,
-            detail: String::new(),
-        }
+        Gate::ran(FMT_GATE, true, String::new())
     } else {
         fail(failed.join("\n"))
     }
@@ -363,7 +851,7 @@ mod tests {
     #[test]
     fn plz3_fetch_precedes_build() {
         let mut seen: Vec<(String, Vec<String>)> = vec![];
-        let gates = build_steps(|label, cmd| {
+        let gates = build_steps(&mut Stages::new(false), |label, cmd, _| {
             seen.push((label.to_string(), args_of(&cmd)));
             (true, String::new())
         });
@@ -390,8 +878,27 @@ mod tests {
 
     #[test]
     fn plz3_fetch_failure_remains_a_failed_gate() {
+        // a failed fetch skips the build, which needs it
         let mut labels: Vec<String> = vec![];
-        let gates = build_steps(|label, _| {
+        let gates = build_steps(&mut Stages::new(false), |label, _, _| {
+            labels.push(label.to_string());
+            (false, "locked fetch failed".to_string())
+        });
+        assert_eq!(labels, ["fetch locked dependencies"]);
+        assert_eq!(gates.len(), 2);
+        assert!(!gates[0].pass);
+        assert_eq!(gates[0].detail, "locked fetch failed");
+        assert!(!gates[1].pass);
+        assert_eq!(
+            gates[1].state,
+            report::RowState::Skipped {
+                after: "cargo fetch --locked".into()
+            }
+        );
+        assert!(!report::overall(&gates, &[], true));
+        // with every stage, both run
+        let mut labels: Vec<String> = vec![];
+        let gates = build_steps(&mut Stages::new(true), |label, _, _| {
             labels.push(label.to_string());
             if label == "fetch locked dependencies" {
                 (false, "locked fetch failed".to_string())
@@ -400,11 +907,46 @@ mod tests {
             }
         });
         assert_eq!(labels, ["fetch locked dependencies", "build rdy-cli"]);
-        assert_eq!(gates.len(), 2);
         assert!(!gates[0].pass);
-        assert_eq!(gates[0].detail, "locked fetch failed");
         assert!(gates[1].pass);
         assert!(!report::overall(&gates, &[], true));
+    }
+
+    #[test]
+    fn tgs2_default_deadlines_are_twice_the_median_with_a_floor() {
+        // until stages are timed, every child's deadline is its platform's whole-run median
+        let whole = [("linux", 3290), ("macos", 4152), ("windows", 8767)];
+        for kind in [
+            StageKind::Fetch,
+            StageKind::Build,
+            StageKind::Fmt,
+            StageKind::Clippy,
+            StageKind::WorkspaceTests,
+            StageKind::Discover,
+            StageKind::Area,
+            StageKind::Lib,
+            StageKind::Perf,
+            StageKind::Listing,
+        ] {
+            for (os, secs) in whole {
+                assert_eq!(
+                    default_deadline(kind, os),
+                    Duration::from_secs(secs),
+                    "{kind:?} on {os}"
+                );
+            }
+        }
+        // never under the 10 minute floor
+        assert!(DEADLINE_FLOOR == Duration::from_secs(600));
+        // an OS with no record takes the slowest platform's
+        assert_eq!(
+            default_deadline(StageKind::Build, "freebsd"),
+            default_deadline(StageKind::Build, "windows")
+        );
+        assert_eq!(
+            deadline_line("rdy-qa swarm", Duration::from_secs(1)),
+            "deadline 1s passed in stage rdy-qa swarm"
+        );
     }
 
     const METADATA: &str = r#"{"packages":[{"name":"rdy-store","id":"path+file:///w/crates/rdy-store#0.1.0"},{"name":"serde","id":"registry+https://x#serde@1.0.0"},{"name":"rdy-qa","id":"path+file:///w/crates/rdy-qa#0.1.0"}],"workspace_members":["path+file:///w/crates/rdy-store#0.1.0","path+file:///w/crates/rdy-qa#0.1.0"],"workspace_root":"/w"}"#;
@@ -415,7 +957,7 @@ mod tests {
         // carries every target root of the workspace (Windows refuses a command line over 32767
         // characters)
         let mut seen: Vec<(String, Vec<String>)> = vec![];
-        let gate = fmt_step(|label, cmd| {
+        let gate = fmt_step(|label, cmd, _| {
             seen.push((label.to_string(), args_of(&cmd)));
             if label == "workspace members" {
                 (true, format!("{METADATA}\nwarning: a stray line\n"))
@@ -452,7 +994,7 @@ mod tests {
     #[test]
     fn wx34_fmt_names_each_failing_member_and_checks_the_rest() {
         let mut labels: Vec<String> = vec![];
-        let gate = fmt_step(|label, _| {
+        let gate = fmt_step(|label, _, _| {
             labels.push(label.to_string());
             match label {
                 "workspace members" => (true, METADATA.to_string()),
@@ -474,7 +1016,7 @@ mod tests {
     #[test]
     fn wx34_fmt_fails_when_the_members_cannot_be_listed() {
         let mut labels: Vec<String> = vec![];
-        let gate = fmt_step(|label, _| {
+        let gate = fmt_step(|label, _, _| {
             labels.push(label.to_string());
             (false, "error: could not find Cargo.toml\n".to_string())
         });
@@ -482,10 +1024,10 @@ mod tests {
         assert!(!gate.pass);
         assert!(gate.detail.contains("could not find"), "{}", gate.detail);
         // an answer with no members is a failure too: the step must check something
-        let gate = fmt_step(|_, _| (true, "not json\n".to_string()));
+        let gate = fmt_step(|_, _, _| (true, "not json\n".to_string()));
         assert!(!gate.pass);
         let empty = r#"{"packages":[],"workspace_members":[]}"#;
-        let gate = fmt_step(|_, _| (true, empty.to_string()));
+        let gate = fmt_step(|_, _, _| (true, empty.to_string()));
         assert!(!gate.pass);
     }
 

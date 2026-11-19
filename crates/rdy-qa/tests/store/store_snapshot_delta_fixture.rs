@@ -180,7 +180,7 @@ fn write_new(p: &Path, bytes: &[u8]) {
 }
 
 /// What the sync batch `bytes` holds, as the released tag-history expect files state it (the
-/// form `rdy-store/tests/foreign_compatibility.rs` reads): the header, each record and the
+/// form `rdy-store/tests/sync/foreign_compatibility.rs` reads): the header, each record and the
 /// trailer's totals.
 fn stream_facts(bytes: &[u8]) -> Value {
     let (mut rd, header) = StreamReader::open(bytes).unwrap();

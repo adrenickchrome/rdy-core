@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// The shipped predecessor of the current fixture. It is frozen.
 const PREDECESSOR: &str = "sd1-v1.json";
@@ -27,11 +28,12 @@ const PREDECESSOR: &str = "sd1-v1.json";
 /// change is a successor fixture, never an edit of that file.
 const PREDECESSOR_SHA: &str = "012ff9ed50f654618517e629e3dcfa6c8e28935bf311c880de2faaa40576aea2";
 
-/// This plan's fixture: the current one until M5a's successor, frozen since.
+/// This plan's fixture: the current one until Sync client B's successor, frozen since.
 const CURRENT: &str = "sync-client-v1.json";
 
-/// M5a's successor of [`CURRENT`], which every selector names since.
-const SUCCESSOR: &str = "m5a-v1.json";
+/// The successors of [`CURRENT`] in order: Sync client B's, then M5a's, which every selector
+/// names since.
+const SUCCESSORS: [&str; 2] = ["sync-client-b-v1.json", "m5a-v1.json"];
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -431,6 +433,13 @@ fn read(name: &str) -> Value {
     serde_json::from_slice(&bytes(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
+/// The predecessor and the current fixture, parsed once for the tests that read both.
+static PARSED: OnceLock<(Value, Value)> = OnceLock::new();
+
+fn parsed() -> &'static (Value, Value) {
+    PARSED.get_or_init(|| (read(PREDECESSOR), read(CURRENT)))
+}
+
 fn sha(b: &[u8]) -> String {
     Sha256::digest(b)
         .iter()
@@ -491,7 +500,7 @@ fn leaves(was: &Value, now: &Value, path: &str, out: &mut Vec<String>) {
 }
 
 /// scc1: the current fixture starts from the shipped predecessor: `sd1-v1.json` keeps the bytes
-/// rdy 0.52.0 shipped, every selector names M5a's successor `m5a-v1.json` and none names the
+/// rdy 0.52.0 shipped, every selector names a successor of `sync-client-v1.json` and none names the
 /// predecessor, and no member of the predecessor is removed.
 #[test]
 fn scc1_successor_starts_from_the_shipped_predecessor() {
@@ -504,9 +513,11 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     for file in SELECTORS {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        // ruling R-F2: a successor of `sync-client-v1.json` is the selected file
+        let selects = |name: &str| text.contains(&format!("fixtures/contracts/{name}\""));
         assert!(
-            text.contains(&format!("fixtures/contracts/{SUCCESSOR}\"")),
-            "{file} selects {SUCCESSOR}"
+            selects(CURRENT) || SUCCESSORS.iter().any(|s| selects(s)),
+            "{file} selects {CURRENT} or a successor"
         );
         assert!(
             !text.contains(&format!("contracts/{PREDECESSOR}\"")),
@@ -544,21 +555,13 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     }
 }
 
-/// scc1 (F13): the successor adds only the holder's storage, scc2's changes and the baseline's
-/// error values ([`SCC7_CHANGES`]). Every changed path is listed with its reason; the registered row of `hub_canon` is incompatible at 0.53.0; the store row holds
+/// scc1 (F13): the holder's storage in the successor. The whole delta is owned by
+/// `scc7_contract_delta_is_exactly_the_owned_leaves`. The registered row of `hub_canon` is incompatible at 0.53.0; the store row holds
 /// the digest of each file of the native holder, and the dump row of each file of its dump pair,
 /// each as its length and blake3.
 #[test]
 fn scc1_contract_adds_only_holder_storage() {
-    let (old, new) = (read(PREDECESSOR), read(CURRENT));
-    let mut found = vec![];
-    leaves(&keyed(&old), &keyed(&new), "", &mut found);
-    let want = all_changes();
-    found.sort();
-    assert_eq!(
-        found, want,
-        "every changed path of {CURRENT} is listed with its reason, and none else"
-    );
+    let (old, new) = parsed();
     let row = new["store"]["features"]
         .as_array()
         .unwrap()
@@ -596,21 +599,14 @@ fn scc1_contract_adds_only_holder_storage() {
     }
 }
 
-/// scc2 (F13): the successor adds only sync stream format 4, the minimum rule and the sync state.
-/// Every scc2 path is a changed path of the fixture; the registered row of `sync_state` is
+/// scc2 (F13): sync stream format 4, the minimum rule and the sync state in the successor. The
+/// whole delta is owned by `scc7_contract_delta_is_exactly_the_owned_leaves`. The registered row of `sync_state` is
 /// incompatible at 0.53.0; the purposes gain bytes 2 and 3, each with its root kind; only the
 /// incompatible and read-only-compatible classes raise the minimum; and the sync row holds the
 /// digest of each `sync4-*` file, as its length and blake3.
 #[test]
 fn scc2_contract_adds_only_sync4_and_minimums() {
-    let (old, new) = (read(PREDECESSOR), read(CURRENT));
-    let mut found = vec![];
-    leaves(&keyed(&old), &keyed(&new), "", &mut found);
-    for (p, _) in SCC2_CHANGES {
-        assert!(found.iter().any(|f| f == p), "{p} is a change of {CURRENT}");
-    }
-    found.sort();
-    assert_eq!(found, all_changes(), "no change outside the listed tasks");
+    let (old, new) = parsed();
     let row = new["store"]["features"]
         .as_array()
         .unwrap()
@@ -1035,7 +1031,7 @@ const FROZEN: &[(&str, &str)] = &[
 ];
 
 /// scc7: every frozen fixture keeps its shipped bytes, `sd1-v1.json` included, and the contracts
-/// folder holds these, this plan's fixture and M5a's successor alone, so a capture never wrote a
+/// folder holds these, this plan's fixture and its successors alone, so a capture never wrote a
 /// baseline.
 #[test]
 fn scc7_predecessor_fixtures_keep_their_bytes() {
@@ -1047,15 +1043,17 @@ fn scc7_predecessor_fixtures_keep_their_bytes() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
+    // ruling R-F2: the folder also holds the successors
     let mut want: Vec<&str> = FROZEN
         .iter()
         .map(|(n, _)| *n)
-        .chain([CURRENT, SUCCESSOR])
+        .chain([CURRENT])
+        .chain(SUCCESSORS)
         .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds the frozen fixtures, {CURRENT} and {SUCCESSOR}"
+        "the folder holds the frozen fixtures, {CURRENT} and {SUCCESSORS:?}"
     );
     assert!(
         FROZEN.iter().any(|(n, _)| *n == "sd1-v1.json"),

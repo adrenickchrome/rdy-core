@@ -2,11 +2,13 @@
 //! O6); chained dumps and stopped loads (D-2FMRR, D-QF2HQ). Any session may call them. Relative paths resolve against the project directory.
 //! ok11: `rdy_upgrade` (D-WWAK7, D-KQ4CA, D-1HDVA) on the connected project only.
 use super::*;
-use rdy_engine::clone::{CloneSource, SourceKind, clone, source_kind};
+use rdy_engine::clone::{CloneSource, SourceKind, clone, clone_url, source_kind, url_fork};
+use rdy_engine::config_levels::user_file_from_env;
 use rdy_engine::dump_error;
 use rdy_engine::dump_stop::{DumpStop, MAX_CHAIN_FILES};
+use rdy_engine::hub_credentials::require_user_file;
 use rdy_engine::stream_check::check_batch;
-use rdy_engine::{E_BAD_INPUT, E_IO, RdyError};
+use rdy_engine::{CLONE_URL_FILE_FIX, CLONE_URL_FILE_MESSAGE, E_BAD_INPUT, E_IO, RdyError};
 use rdy_model::RepoId;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -44,6 +46,8 @@ pub struct CloneParams {
     pub file: Option<String>,
     /// true: the clone gets a new repo id and records forked_from.
     pub fork: Option<bool>,
+    /// An https hub repo URL to clone instead, with the hub's settings and a share remote named hub. Not with file or fork.
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -107,14 +111,31 @@ pub fn rdy_load(st: &mut McpState, p: LoadParams) -> Result<Value, RdyError> {
     Ok(serde_json::to_value(summary).expect("a reply serializes"))
 }
 
-/// `rdy_clone`: clones this project, or the dump `file`, into `dir`, a directory with no store.
-/// It runs in this process (the daemon's, or the server's with `--no-daemon`) and opens and
-/// closes the new project itself. A session is required, as for `rdy_dump`.
+/// `rdy_clone`: clones this project, the dump `file`, or the hub repo at `url` (D-47HVF), into
+/// `dir`, a directory with no store. `url` takes neither `file` nor `fork`. It runs in this
+/// process (the daemon's, or the server's with `--no-daemon`) and opens and closes the new
+/// project itself. A session is required, as for `rdy_dump`; a URL clone needs only read access
+/// on the hub.
 pub fn rdy_clone(st: &mut McpState, p: CloneParams) -> Result<Value, RdyError> {
-    session(st)?;
+    let s = session(st)?;
     let root = st.engine.root();
     let dir = under(&root, &p.dir);
     let fork = p.fork.unwrap_or(false);
+    if let Some(url) = &p.url {
+        if p.file.is_some() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                CLONE_URL_FILE_MESSAGE,
+                CLONE_URL_FILE_FIX,
+            ));
+        }
+        if fork {
+            return Err(url_fork());
+        }
+        let user_file = require_user_file(user_file_from_env())?;
+        let summary = clone_url(&s, url, &dir, &user_file)?;
+        return Ok(serde_json::to_value(summary).expect("a reply serializes"));
+    }
     let summary = match p.file {
         None => clone(CloneSource::State(&st.engine.read()), &dir, fork)?,
         Some(file) => {
@@ -139,8 +160,9 @@ fn dump_file(root: &Path, given: &str) -> Result<std::path::PathBuf, RdyError> {
     }
     match source_kind(&path)? {
         SourceKind::File => Ok(path),
-        // `source_kind` names only a directory a project, and a directory is refused above
-        SourceKind::Project => Err(not_a_dump(&path)),
+        // `source_kind` names only a directory a project, and a directory is refused above; a
+        // hub URL goes in `url`
+        SourceKind::Project | SourceKind::Url => Err(not_a_dump(&path)),
     }
 }
 

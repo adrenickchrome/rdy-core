@@ -99,9 +99,9 @@ fn workspace_root() -> PathBuf {
 
 /// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
 /// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json`,
-/// `disclosure-review-v1.json`, `sd1-v1.json` and `sync-client-v1.json`, all frozen) with the
-/// additions since. A capture writes this file, never a baseline. It starts as a byte copy of its
-/// predecessor `sync-client-v1.json`, whose bytes `release_m5a_contract.rs` pins; a later
+/// `disclosure-review-v1.json`, `sd1-v1.json`, `sync-client-v1.json` and `sync-client-b-v1.json`,
+/// all frozen) with the additions since. A capture writes this file, never a baseline. It starts as a byte copy of its
+/// predecessor `sync-client-b-v1.json`, whose bytes `release_m5a_contract.rs` pins; a later
 /// contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
     qa_root().join("fixtures/contracts/m5a-v1.json")
@@ -2132,6 +2132,8 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "makes a baseline of a tagged publication; cli_sync_baseline pins its replies",
     ),
     ("publish", "uploads a site to a host"),
+    ("pull", "pulls from a hub; cli_sync pins its replies"),
+    ("push", "pushes to a hub; cli_sync pins its replies"),
     (
         "reaffirm",
         "needs a suspect decision; the write op of the same name is an MCP write",
@@ -3284,6 +3286,8 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
         "makes a baseline of a tagged publication; cli_sync_baseline and mcp_sync_baseline pin its replies",
     ),
     ("rdy_publish", "uploads a site to a host"),
+    ("rdy_pull", "pulls from a hub; mcp_sync pins its replies"),
+    ("rdy_push", "pushes to a hub; mcp_sync pins its replies"),
     ("rdy_redact", "destroys content; no dry run is probed"),
     ("rdy_remote", "edits the remotes of the project"),
     (

@@ -119,6 +119,8 @@ pub struct KillGate {
     expects_kill: bool,
     /// Set by the run just before it kills the daemon (`killing`).
     killing: AtomicBool,
+    /// When `killing` and `restarted` were called, for a failure's message.
+    times: Mutex<(Option<Instant>, Option<Instant>)>,
     turn: RwLock<()>,
     plan: RwLock<()>,
 }
@@ -146,7 +148,17 @@ impl KillGate {
     /// The run is about to kill the daemon: from now until `restarted`, a lost call is the
     /// scripted kill's (final review M5).
     pub fn killing(&self) {
+        self.times.lock().unwrap_or_else(PoisonError::into_inner).0 = Some(Instant::now());
         self.killing.store(true, Ordering::SeqCst);
+    }
+
+    /// How long ago the run started its kill and restarted the daemon, as words.
+    pub fn kill_times(&self) -> String {
+        let (kill, restart) = *self.times.lock().unwrap_or_else(PoisonError::into_inner);
+        let ago = |t: Option<Instant>| {
+            t.map_or("never".to_string(), |t| format!("{:?} ago", t.elapsed()))
+        };
+        format!("kill started {}, restarted {}", ago(kill), ago(restart))
     }
 
     /// Whether the run has started its kill (`killing`).
@@ -179,6 +191,7 @@ impl KillGate {
     /// The daemon was killed and may start again: the generation moves to its next number and
     /// every waiting actor goes on.
     pub fn restarted(&self) {
+        self.times.lock().unwrap_or_else(PoisonError::into_inner).1 = Some(Instant::now());
         *self.epoch.lock().unwrap_or_else(PoisonError::into_inner) += 1;
         self.changed.notify_all();
     }
@@ -407,7 +420,8 @@ impl Link {
                 let exited =
                     text.contains("no reply to request") && started.elapsed() < CALL_BUDGET / 2;
                 if text.contains("closed its input") || exited {
-                    self.lost(act, &text)
+                    let took = started.elapsed();
+                    self.lost(act, &format!("{text} ({took:?} into call {})", self.calls))
                 } else {
                     self.fail(act, &format!("failed: {text}"))
                 }
@@ -428,7 +442,21 @@ impl Link {
             } else {
                 format!("after the restart (epoch {})", self.epoch)
             };
-            self.fail(act, &format!("lost the daemon {when}: {why}"))
+            // the gate's state too, so a failure names which side of the kill window it hit
+            self.fail(
+                act,
+                &format!(
+                    "lost the daemon {when}: {why} [gate: expects kill {}, killing {}, epoch {}, \
+                     {}; this actor's epoch {}, recovered {}]; the end of the daemon log: {:?}",
+                    self.gate.expects_kill(),
+                    self.gate.is_killing(),
+                    self.gate.epoch(),
+                    self.gate.kill_times(),
+                    self.epoch,
+                    self.recovered,
+                    daemon_log_tail(&self.at.dir),
+                ),
+            )
         }
     }
 
@@ -506,6 +534,16 @@ impl Link {
 /// Whether a call may be lost: the run kills the daemon once, it has started the kill
 /// (`KillGate::killing`), and the actor still runs on the daemon that dies (epoch 0). A lost
 /// daemon before the kill starts is a product crash (final review M5).
+/// The last bytes of the daemon log of the project at `dir`: why a daemon ended, if it said.
+fn daemon_log_tail(dir: &std::path::Path) -> String {
+    const TAIL: usize = 2048;
+    let log = rdy_daemon::RunDir::of_project(dir).log_file();
+    let Ok(bytes) = std::fs::read(&log) else {
+        return format!("{} unreadable", log.display());
+    };
+    String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(TAIL)..]).into_owned()
+}
+
 fn may_lose(expects_kill: bool, killing: bool, epoch: u32) -> bool {
     expects_kill && killing && epoch == 0
 }

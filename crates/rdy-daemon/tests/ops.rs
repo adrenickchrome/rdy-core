@@ -39,7 +39,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 71);
+    assert_eq!(OPS.len(), 74);
     assert_eq!(OPS[0], "session");
     let impact = OPS.iter().position(|o| *o == "impact").unwrap();
     assert_eq!(
@@ -111,9 +111,12 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
             "key_retire",
             "key_revoke",
             "publish",
-            "hook"
+            "hook",
+            "push",
+            "pull",
+            "restore"
         ],
-        "sig9: sign and key_show follow answer; hsa9: remote, key_bind, key_retire and key_revoke follow key_show; hpb15: publish follows key_revoke; m4a2: hook follows publish"
+        "sig9: sign and key_show follow answer; hsa9: remote, key_bind, key_retire and key_revoke follow key_show; hpb15: publish follows key_revoke; m4a2: hook follows publish; scc8: push and pull follow hook, then restore"
     );
     let resolve = OPS.iter().position(|o| *o == "resolve").unwrap();
     assert_eq!(
@@ -139,6 +142,17 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
             .any(|o| o.trim_start_matches("one of: ") == "rule"),
         "rtc4: the unknown-op fix names rule: {err}"
     );
+    // scc8: push, pull and restore take their own strict arguments, refused before any
+    // config is read
+    for (op, args) in [
+        ("push", json!({"remote": "shared", "tag": "v1"})),
+        ("pull", json!({"views": "not a list"})),
+        ("restore", json!({"dump": "a.rdydump", "force": true})),
+        ("restore", json!({"remote": "shared"})),
+    ] {
+        let err = dispatch(&cx(&e, &s, d.path()), op, args).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{op}: {err}");
+    }
 }
 
 /// hpb15 (D-8QV9G, D-KQ4CA): the `publish` op takes the coordinator's strict request
@@ -222,6 +236,8 @@ fn ctl2_status_reports_views_owners_seq_open_report_and_quarantine() {
     let v = dispatch(&cx(&e, &s, d.path()), "status", json!({"log_bytes": true})).unwrap();
     assert!(v["log_bytes"].as_u64().unwrap() > 0, "{v}");
     assert_eq!(v["removed_bytes"], 0);
+    // the memory report is the daemon's: a run with no daemon leaves it out
+    assert!(v.get("memory").is_none(), "{v}");
     let rows = v["by_kind"].as_array().unwrap();
     assert!(!rows.is_empty(), "{v}");
     assert_eq!(

@@ -60,25 +60,56 @@ pub fn raw(addr: SocketAddr, request: &str) -> Response {
     try_raw(addr, request).unwrap_or_else(|e| panic!("connect {addr}: {e}"))
 }
 
+thread_local! {
+    /// How the last [`try_raw`] of this thread ended, for a test's failure message.
+    static LAST: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// How the last [`raw`] or [`try_raw`] of this thread ended at the socket: the local and peer
+/// ports, the write's result, how the read ended, the bytes read and the time taken. A test puts
+/// it in the message of an assertion on a status 0 answer, which says only that nothing came back.
+pub fn last_transport() -> String {
+    LAST.with(|l| l.borrow().clone())
+}
+
 /// [`raw`], with a failed connect as its error: nothing listens at `addr`.
 pub fn try_raw(addr: SocketAddr, request: &str) -> std::io::Result<Response> {
+    let t0 = Instant::now();
     let mut s = TcpStream::connect(addr)?;
     s.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+    let local = s
+        .local_addr()
+        .map_or_else(|e| e.to_string(), |a| a.to_string());
     let mut got = Vec::new();
+    let mut ended = String::from("not read");
     // a server that closes at once may reset the write: what it sent still counts
-    if s.write_all(request.as_bytes()).is_ok() {
+    let wrote = s.write_all(request.as_bytes());
+    if wrote.is_ok() {
         let mut chunk = [0u8; 8192];
         loop {
             match s.read(&mut chunk) {
-                Ok(0) => break,
+                Ok(0) => {
+                    ended = "end of stream".into();
+                    break;
+                }
                 Ok(n) => got.extend_from_slice(&chunk[..n]),
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                     panic!("no answer from {addr} in {READ_TIMEOUT:?}")
                 }
-                Err(_) => break,
+                Err(e) => {
+                    ended = format!("read error {:?}: {e}", e.kind());
+                    break;
+                }
             }
         }
     }
+    let note = format!(
+        "{local} -> {addr}: write {}, {ended} after {} bytes, {:?}",
+        wrote.map_or_else(|e| format!("error {:?}: {e}", e.kind()), |()| "ok".into()),
+        got.len(),
+        t0.elapsed()
+    );
+    LAST.with(|l| *l.borrow_mut() = note);
     Ok(parse(&got))
 }
 

@@ -164,27 +164,27 @@ pub const WINDOWS_TEST_FILES: &[(&str, &str)] = &[
         "the file type of a reparse point",
     ),
     (
-        "crates/rdy-store/tests/follower_guard.rs",
+        "crates/rdy-store/tests/durability/follower_guard.rs",
         "links and an exclusive open on Windows",
     ),
     (
-        "crates/rdy-store/tests/read_only.rs",
+        "crates/rdy-store/tests/durability/read_only.rs",
         "a file link in a store directory",
     ),
     (
-        "crates/rdy-store/tests/store.rs",
+        "crates/rdy-store/tests/durability/store.rs",
         "an exclusive open on Windows",
     ),
     (
-        "crates/rdy-store/tests/transition.rs",
+        "crates/rdy-store/tests/durability/transition.rs",
         "an exclusive open on Windows",
     ),
     (
-        "crates/rdy-store/tests/upgrade.rs",
+        "crates/rdy-store/tests/durability/upgrade.rs",
         "links made with the Windows call",
     ),
     (
-        "crates/rdy-store/tests/windows_durability.rs",
+        "crates/rdy-store/tests/durability/windows_durability.rs",
         "an exclusive open on Windows",
     ),
 ];

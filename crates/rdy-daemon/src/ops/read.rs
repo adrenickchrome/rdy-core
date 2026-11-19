@@ -133,6 +133,12 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
     for w in &carried {
         warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
     }
+    // a local change that holds removed content no removal covers repeats on every read
+    // (D-FNRXT, D-47HVF): `sync_redaction` is the only provider of these warnings
+    let uncovered = st.uncovered_warnings()?;
+    for w in &uncovered {
+        warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
+    }
     let suspects = st.suspect_details(&Scope::Canon)?.len();
     // cc15 (FW-CH3a): the current score, its dimensions, the issue count and the kinds, from
     // the memoised summary; the pages, areas and issues are `rdy coverage`'s. A coverage read
@@ -192,6 +198,13 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
     if !carried.is_empty() {
         v["redaction_warnings"] = to_json(&carried);
     }
+    // D-3RSCW: each remote's sync state; left out when no remote has any
+    if let Some(sync) = rdy_mcp::tools::sync_status(&st)? {
+        v["sync"] = sync;
+    }
+    if !uncovered.is_empty() {
+        v["uncovered_warnings"] = to_json(&uncovered);
+    }
     // D-CRXNA: each upgrade backup beside the store, with its size; none, no member
     if let Some(b) = rdy_engine::maintenance::backups_json(&cx.engine.root()) {
         v["upgrade_backups"] = b;
@@ -215,6 +228,15 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
         }))?;
         if let (Some(into), Value::Object(from)) = (v.as_object_mut(), bytes) {
             into.extend(from);
+        }
+        // the daemon's memory report (deep-gate soak): the allocator's live bytes (Linux with
+        // glibc, else null) and the bytes the capped caches say they hold. A run with no daemon
+        // has no long-lived process to report on, so it leaves it out.
+        if cx.engine.daemon_identity().is_some() {
+            v["memory"] = json!({
+                "live_bytes": crate::sys::malloc_live_bytes(),
+                "capped_cache_bytes": st.reader().map_cache_bytes(),
+            });
         }
     }
     Ok(v)

@@ -94,6 +94,12 @@ pub fn process_exited(pid: u32) -> bool {
     }
 }
 
+/// The anonymous resident memory of process `pid`: a Linux reading, `None` here.
+pub fn rss_anon_bytes(pid: u32) -> Option<u64> {
+    let _ = pid;
+    None
+}
+
 /// Whether process `pid` is alive. A process this account cannot open counts, as it may be
 /// running; the harness only asks about its own children.
 pub fn process_running(pid: u32) -> bool {
@@ -283,6 +289,12 @@ impl ProcessGroup {
     /// Ends every process in the job. A job with nothing left is already stopped, which is
     /// success.
     pub fn kill(&self) -> io::Result<()> {
+        self.job.terminate()
+    }
+
+    /// Ends every process in the job. Windows has no TERM that a whole process tree can be
+    /// sent, so the job ends at once and `grace` is not used; Unix asks first.
+    pub fn stop(&self, _grace: Duration) -> io::Result<()> {
         self.job.terminate()
     }
 }

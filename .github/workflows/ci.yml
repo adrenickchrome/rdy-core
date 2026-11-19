@@ -1,19 +1,26 @@
-# Cheap checks (FW-HD2): fmt, clippy and the fast suite; a coverage report beside them. The deep and perf gates run
-# elsewhere; the external gate decides merges.
+# Cheap checks (FW-HD2): fmt, clippy and the fast suite on every PR and push. The coverage report runs on push to main,
+# nightly, and on a PR only when it carries the `coverage` label. The deep and perf gates run elsewhere; the external
+# gate decides merges.
 name: ci
 on:
   pull_request:
     branches: [main]
+    # `labeled` lets the `coverage` label start the coverage job; the other jobs ignore a labeled event.
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
+  schedule:
+    - cron: "0 3 * * *"
   workflow_dispatch:
 permissions: {}
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # A label event has its own group, so adding a label never cancels a running fast gate.
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'labeled' && 'label' || 'run' }}
   cancel-in-progress: true
 jobs:
   fast:
     name: Fast gate (Linux x86-64)
+    if: github.event_name != 'schedule' && github.event.action != 'labeled'
     runs-on: ubuntu-26.04
     # the suite outgrew 60 minutes at 0cb13504 (rules from chat) and Windows added more
     timeout-minutes: 120
@@ -53,16 +60,45 @@ jobs:
           # print the qa report's failing tests and their panic excerpts, so the log names the cause
           test -f target/qa/report.md || exit 0
           sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
+      - name: Test selection (shadow)
+        # Reported only (FW-HD2): which crates and rdy-qa areas this diff would select, and which of the
+        # full suite's failures that selection would have missed. It reads the report the fast gate just
+        # wrote and runs no test. It cannot fail the job, and the full suite stays the gate.
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          python3 scripts/ci/select_tests.py --base "$BASE_SHA" --report target/qa/report.json --out selection-shadow.json
+          { echo '## Test selection (shadow)'; echo '```'; cat selection-shadow.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        with:
+          name: selection-shadow
+          path: selection-shadow.json
+          if-no-files-found: ignore
+          retention-days: 30
       - name: No tracked file changed
         run: git diff --exit-code
   coverage:
     # Line and branch coverage of the workspace test suite (cargo-llvm-cov). Reported only:
-    # it never blocks a merge. The summary goes to the run page; the HTML report is an artifact.
+    # it is not a required check and the Core CI result ignores it. The summary goes to the run page; the HTML report
+    # is an artifact. It runs on push to main, nightly and manual runs, and on a PR only with the `coverage` label.
+    # continue-on-error keeps the ci run green; a failed nightly run opens an issue from the last step.
+    if: >-
+      github.event_name != 'pull_request'
+      || (contains(github.event.pull_request.labels.*.name, 'coverage')
+      && (github.event.action != 'labeled' || github.event.label.name == 'coverage'))
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     continue-on-error: true
     permissions:
       contents: read
+      # held by this job only, for the nightly failure issue (the workflow's own token, no new secrets)
+      issues: write
     env:
       # The instrumented build and its raw profiles fill the runner's disk: no debug info (coverage maps
       # do not need it), and the preinstalled toolchains we never use are removed first.
@@ -121,8 +157,19 @@ jobs:
             coverage-summary.txt
             coverage-summary.json
           retention-days: 7
+      - name: Open an issue for a failed nightly run
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "nightly coverage failed $SHA" \
+            --body "The nightly coverage run failed on $SHA. Run: $RUN_URL"
   policy-tests:
     name: CI control tests
+    if: github.event_name != 'schedule' && github.event.action != 'labeled'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -145,8 +192,9 @@ jobs:
           python3 -m unittest discover -s tests/ci -v
   required:
     # One result for the fast gate and the control tests together. It is not a required check.
+    # It is skipped on a nightly or label event, when neither of those jobs runs.
     name: Core CI
-    if: always()
+    if: always() && github.event_name != 'schedule' && github.event.action != 'labeled'
     needs: [fast, policy-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 5

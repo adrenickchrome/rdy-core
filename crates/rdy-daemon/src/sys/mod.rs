@@ -54,8 +54,9 @@
 //!   (`make_launcher_executable`, `launcher_is_executable`; Windows has none: Git for Windows runs
 //!   an extensionless `commit-msg` through its own shell).
 //! - the allocator's large-block threshold on Linux with glibc (`fix_malloc_threshold`), its
-//!   mapped-bytes counter (`malloc_mapped_bytes`) and the release of its free arena memory after
-//!   a site build (`release_free_memory`); all do nothing elsewhere.
+//!   mapped-bytes and live-bytes counters (`malloc_mapped_bytes`, `malloc_live_bytes`) and the
+//!   release of its free arena memory after a site build (`release_free_memory`); all do nothing
+//!   elsewhere.
 
 pub mod records;
 mod site_socket;

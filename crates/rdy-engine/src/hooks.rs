@@ -51,8 +51,28 @@ pub const MAX_HOOK_HEAD: usize = 64;
 pub const MAX_SHOWN_PATHS: usize = 20;
 /// The largest Git hook launcher, in bytes; a larger existing file is refused unread.
 pub const MAX_LAUNCHER_BYTES: usize = 16_384;
-/// How long one host run, and the installer lock, may take.
+/// How long one host run, and the installer lock, may take, unless [`TEST_DEADLINE_VAR`] sets a
+/// longer one. Read it through [`hook_deadline`].
 pub const HOOK_DEADLINE: Duration = Duration::from_secs(2);
+/// For tests only: a longer hook deadline in milliseconds, for end-to-end tests that run the real
+/// host and Git on a loaded machine. A value at or below [`HOOK_DEADLINE`], or one that is not a
+/// number, is ignored; a value above [`MAX_TEST_DEADLINE`] is cut to it.
+pub const TEST_DEADLINE_VAR: &str = "RDY_TEST_HOOK_DEADLINE_MS";
+/// The longest deadline [`TEST_DEADLINE_VAR`] may set.
+pub const MAX_TEST_DEADLINE: Duration = Duration::from_secs(120);
+
+/// The deadline of one host run and of the installer lock: [`HOOK_DEADLINE`], or the longer one
+/// [`TEST_DEADLINE_VAR`] sets.
+pub fn hook_deadline() -> Duration {
+    deadline_from(std::env::var(TEST_DEADLINE_VAR).ok().as_deref())
+}
+
+fn deadline_from(var: Option<&str>) -> Duration {
+    var.and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .filter(|d| *d > HOOK_DEADLINE)
+        .map_or(HOOK_DEADLINE, |d| d.min(MAX_TEST_DEADLINE))
+}
 /// Every top-level key of a hook request.
 pub const HOOK_KEYS: [&str; 9] = [
     "op", "kind", "repo", "checkout", "head", "paths", "message", "harness", "worktree",
@@ -1329,5 +1349,22 @@ pub fn check_edit(st: &ReadState, req: &EditCheck, ctx: &RunContext) -> HookChec
         kind,
         checked,
         warnings,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The test deadline variable only lengthens the deadline, up to its cap.
+    #[test]
+    fn hook_deadline_var_only_lengthens() {
+        assert_eq!(deadline_from(None), HOOK_DEADLINE);
+        assert_eq!(deadline_from(Some("")), HOOK_DEADLINE);
+        assert_eq!(deadline_from(Some("soon")), HOOK_DEADLINE);
+        assert_eq!(deadline_from(Some("500")), HOOK_DEADLINE);
+        assert_eq!(deadline_from(Some("2000")), HOOK_DEADLINE);
+        assert_eq!(deadline_from(Some("30000")), Duration::from_secs(30));
+        assert_eq!(deadline_from(Some("999999999")), MAX_TEST_DEADLINE);
     }
 }

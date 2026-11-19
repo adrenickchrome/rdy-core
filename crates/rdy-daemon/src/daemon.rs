@@ -1379,14 +1379,15 @@ impl Conn {
                     version: self.version.clone(),
                 };
                 // before the reply: the client spawns a successor as soon as it reads it, and the
-                // successor's run files must not be removed by `run`'s cleanup afterwards
+                // successor's run files must not be removed by `run`'s cleanup afterwards; and the
+                // reason, so a stop that comes once the client has read the reply finds it set
                 self.files.remove(&self.run);
+                let _ = self.reason.set(ExitReason::VersionReplaced);
                 close_after_reply(stream, &reply).await;
                 log(&format!(
                     "a client of version {} arrived with no sessions; exiting to be replaced",
                     hello.version
                 ));
-                let _ = self.reason.set(ExitReason::VersionReplaced);
                 self.info.stop.send_replace(true);
             } else {
                 let error = ErrorReply::new(
@@ -1441,13 +1442,17 @@ impl Conn {
         // (f) the protocol
         match hello.proto {
             Proto::Ctl => {
-                let (r, w) = sys::split(stream);
+                let (mut r, mut w) = sys::split(stream);
                 let handler = Arc::clone(&self.handler);
-                if let Err(e) = serve_ctl(r, w, session, handler, self.info.clone()).await
+                if let Err(e) = serve_ctl(&mut r, &mut w, session, handler, self.info.clone()).await
                     && !is_hang_up(&e)
                 {
                     log(&format!("ctl session ended with an error: {e}"));
                 }
+                // the session ends before the connection closes: a client that reads the close
+                // and connects again at once (a client of another version too) finds it gone
+                drop(end);
+                drop((r, w));
             }
             Proto::Mcp => {
                 let id = session.id;

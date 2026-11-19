@@ -119,7 +119,8 @@ fn serve_stdin() -> Stdio {
 /// --spawned --project <project>` in `sys::daemon_start_dir` (`--spawned` tells `rdy serve --detach`
 /// to serve in that process rather than spawn another), stdin from /dev/null (or, under a start armed on
 /// this thread, the private pipe of its token), stdout and stderr appended to the run dir's `daemon.log` (created 0600; refused if it is a symlink), every `RDY_*`
-/// variable removed from its environment, and a new session (so a new process group) of its own
+/// variable but the test hook deadline (`rdy_engine::hooks::TEST_DEADLINE_VAR`) removed from its
+/// environment, and a new session (so a new process group) of its own
 /// from before its exec. The run dir is made absolute first, and a socket path the daemon could
 /// not bind (`socket::check_socket_path`) is refused on that absolute path, before anything is
 /// created, rather than spawning a daemon that would only die at its bind. A relative `project`
@@ -150,7 +151,7 @@ pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result
     // a new session, so the daemon's own `detach` can leave ours
     sys::new_session_on_spawn(&mut cmd);
     for (k, _) in std::env::vars_os() {
-        if k.as_encoded_bytes().starts_with(b"RDY_") {
+        if k.as_encoded_bytes().starts_with(b"RDY_") && k != rdy_engine::hooks::TEST_DEADLINE_VAR {
             cmd.env_remove(k);
         }
     }

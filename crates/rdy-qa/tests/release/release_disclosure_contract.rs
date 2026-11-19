@@ -45,12 +45,12 @@ const SUCCESSOR: &str = "disclosure-review-v1.json";
 /// never an edit of this file.
 const SUCCESSOR_SHA: &str = "956044b4b5e6a51a9810f31a4c0c16ad81aa9a035d735ed4d8b9d7a1d9edf139";
 
-/// The current fixture, M5a's successor of the frozen `sync-client-v1.json` (itself SD1's and Sync
-/// client A's successor of [`SUCCESSOR`]), which every selector names.
+/// The current fixture, M5a's successor of the frozen `sync-client-b-v1.json` (Sync client B's
+/// successor of SD1's and Sync client A's fixtures), which every selector names.
 const CURRENT: &str = "m5a-v1.json";
 
-/// The fixture before [`CURRENT`]: Sync client A's, beside the frozen ones in the folder.
-const BEFORE_CURRENT: &str = "sync-client-v1.json";
+/// The fixture before [`CURRENT`]: Sync client B's, beside the frozen ones in the folder.
+const BEFORE_CURRENT: &str = "sync-client-b-v1.json";
 
 /// The predecessor of this plan's fixture, which every selector named before this plan.
 const PREDECESSOR: &str = "readme-from-rdy-v1.json";
@@ -86,6 +86,10 @@ const FROZEN: &[(&str, &str)] = &[
     (
         "sd1-v1.json",
         "012ff9ed50f654618517e629e3dcfa6c8e28935bf311c880de2faaa40576aea2",
+    ),
+    (
+        "sync-client-v1.json",
+        "a8bc2d43a01a728f14d7926cb7ace8fd82d4312047f0c03f39720018efcae10c",
     ),
 ];
 
@@ -373,7 +377,7 @@ fn drv6_contract_changes_only_review_results() {
 }
 
 /// drv6: every frozen fixture keeps its bytes, the predecessor and this plan's successor
-/// included, and `sync-client-v1.json` and the current fixture are the only ones beside them.
+/// included, and `sync-client-b-v1.json` and the current fixture are the only ones beside them.
 #[test]
 fn drv6_predecessor_fixtures_keep_their_bytes() {
     for (name, digest) in FROZEN {

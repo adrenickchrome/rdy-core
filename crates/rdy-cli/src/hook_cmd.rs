@@ -13,7 +13,7 @@
 //! The public commands keep the ordinary CLI contract: a usage error is the parser's exit 2 and
 //! a refused form exits 1. The host entry points never fail the action they look at: every
 //! operational failure is a `W_HOOK_UNAVAILABLE` warning, and they exit 0. Each host run is
-//! bounded by [`HOOK_DEADLINE`]: a worker process (this binary again) does the work under a run
+//! bounded by [`hook_deadline`]: a worker process (this binary again) does the work under a run
 //! context with a slightly earlier deadline, so it stops and reaps its own Git children, and the
 //! entry point kills and reaps the worker through its own process handle if it is still running
 //! at the deadline. A worker that dies closes its daemon connection, which cancels the daemon's
@@ -23,8 +23,8 @@ use crate::conn::{Conn, Env, call, find_project};
 use clap::{Args, Subcommand};
 use rdy_daemon::ErrorReply;
 use rdy_engine::hooks::{
-    HOOK_DEADLINE, HookCheck, HookKind, HookWarning, MAX_HOOK_INPUT, MAX_HOOK_MESSAGE, RunContext,
-    Unavailable, collect_staged, form_error, limit,
+    HookCheck, HookKind, HookWarning, MAX_HOOK_INPUT, MAX_HOOK_MESSAGE, RunContext, Unavailable,
+    collect_staged, form_error, hook_deadline, limit,
 };
 use rdy_engine::{E_IO, RdyError};
 use serde_json::{Map, Value, json};
@@ -310,7 +310,7 @@ pub(crate) fn host(cmd: &HookCmd, json: bool, project: Option<&Path>, no_daemon:
     let kind = kind_of(cmd);
     if std::env::var_os(WORKER_ENV).is_some() {
         let ctx = RunContext::new()
-            .with_deadline(Instant::now() + HOOK_DEADLINE.saturating_sub(CLEANUP_MARGIN));
+            .with_deadline(Instant::now() + hook_deadline().saturating_sub(CLEANUP_MARGIN));
         let v = work(cmd, kind, project, no_daemon, &ctx);
         let _ = writeln!(std::io::stdout(), "{v}");
         return ExitCode::SUCCESS;
@@ -321,10 +321,10 @@ pub(crate) fn host(cmd: &HookCmd, json: bool, project: Option<&Path>, no_daemon:
 }
 
 /// Runs this binary again as the worker of this host run, with the same arguments, and waits
-/// for its answer until [`HOOK_DEADLINE`]. A worker still running then is killed and reaped
+/// for its answer until [`hook_deadline`]. A worker still running then is killed and reaped
 /// through its own handle, and the answer is the `deadline` warning.
 fn supervise(kind: HookKind) -> Value {
-    let deadline = Instant::now() + HOOK_DEADLINE;
+    let deadline = Instant::now() + hook_deadline();
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {

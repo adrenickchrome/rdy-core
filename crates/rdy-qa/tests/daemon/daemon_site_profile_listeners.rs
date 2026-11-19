@@ -27,7 +27,7 @@ use rdy_qa::http::{self, Sse};
 use rdy_qa::platform;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Barrier, Mutex};
@@ -694,17 +694,22 @@ fn spv7_same_key_concurrent_starts_return_one_port() {
     assert!(urls.iter().all(|u| *u == urls[0]), "{urls:?}");
     assert_eq!(sh.profile_sites.keys(), vec!["guide".to_string()]);
     let guide = port_of(&urls[0]);
-    assert!(
-        profile_candidates(&root_of(w.h.dir.path()), "guide").contains(&guide),
-        "{guide}"
+    let candidates = profile_candidates(&root_of(w.h.dir.path()), "guide");
+    let won = candidates
+        .iter()
+        .position(|p| *p == guide)
+        .unwrap_or_else(|| panic!("{guide} is not a candidate: {candidates:?}"));
+    // one walk of the candidates, in order, up to the port it took, then [::1] on that port: one
+    // listener set. The profile hash does not keep the source's port out of the candidates, so
+    // the walk tries it when the ports before it are busy, but never takes it
+    let mut walk: Vec<SocketAddr> = candidates[..=won].iter().map(|p| sock(*p)).collect();
+    walk.push(SocketAddr::from((Ipv6Addr::LOCALHOST, guide)));
+    assert_eq!(
+        rec.binds(),
+        walk,
+        "one listener set (source port {source}, candidates {candidates:?})"
     );
-    let v4: Vec<SocketAddr> = rec
-        .binds()
-        .into_iter()
-        .filter(|a| *a == sock(guide))
-        .collect();
-    assert_eq!(v4, vec![sock(guide)], "one listener set: {:?}", rec.binds());
-    assert!(rec.binds().iter().all(|a| a.port() != source));
+    assert_ne!(guide, source);
     assert_eq!(
         rec.logs()
             .iter()
@@ -809,6 +814,13 @@ fn plb4_recorder_clears_on_unwind() {
 /// The marker a wrapped fixture's child prints once every assertion and its cleanup passed.
 const PLX2_DONE: &str = "PLX2 retry fixture completed";
 
+/// The hang guard of a wrapped test's child: a whole test, sized as the other whole-test child
+/// guards of rdy-qa (600 s). A wrapped fixture builds several projects and starts a daemon for
+/// each; that takes about 4 s on an idle machine and over 2 minutes beside a loaded area run,
+/// with each step still making progress, so a guard sized for a short tool call
+/// ([`platform::RELEASE_CHILD_DEADLINE`]) failed a run that was not hung.
+const PLX2_CHILD_DEADLINE: Duration = Duration::from_secs(600);
+
 /// Runs the named test again as a child that runs it alone (`--exact`, one thread), and judges
 /// the child: it must exit with success, report one passed test and print [`PLX2_DONE`]. It
 /// returns true in the parent, which then has nothing left to do, and false in the child (the
@@ -832,7 +844,7 @@ fn run_plx2_child(test_name: &str) -> bool {
         child,
         None,
         platform::RELEASE_CHILD_OUTPUT_MAX,
-        platform::RELEASE_CHILD_DEADLINE,
+        PLX2_CHILD_DEADLINE,
     )
     .unwrap_or_else(|e| panic!("the child of {test_name} did not finish: {e}"));
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -962,6 +974,7 @@ fn plx2_a_failed_child_reaches_the_report_once_with_its_cause() {
         notes: vec![],
         guarded: Default::default(),
         os_excluded: Default::default(),
+        timing: Default::default(),
     };
     let md = report::markdown(&r);
     assert_eq!(md.matches(&format!("- `{probe}`")).count(), 1, "{md}");
@@ -1120,14 +1133,13 @@ fn spv7_registry_and_shared_http_limits_are_bounded() {
 
     // connections: one limit across every port
     let (k01, k02) = (ports["k01"], ports["k02"]);
-    let half = MAX_CONNECTIONS / 2;
-    let mut held: Vec<TcpStream> = (0..half)
+    let held: Vec<TcpStream> = (0..MAX_CONNECTIONS)
         .map(|_| TcpStream::connect(sock(source)).unwrap())
         .collect();
-    // the server accepts in order on each listener: an answer means every earlier connection on
-    // it holds its permit
-    assert_eq!(get(source, "index.html").status, 200);
-    held.extend((0..half).map(|_| TcpStream::connect(sock(k01)).unwrap()));
+    // the server accepts in order on each listener, and a Busy answer holds no permit: Busy on
+    // the source port means every held connection holds one. A probe that got a page would
+    // hold a permit of its own until the server's side of it ends, after the reply is read
+    assert_refusal(&get(source, "index.html"), Refusal::Busy, "the source port");
     let busy = get(k01, "manual/intro.html");
     assert_refusal(&busy, Refusal::Busy, "the limit is shared, not per port");
     assert_refusal(
@@ -1135,7 +1147,6 @@ fn spv7_registry_and_shared_http_limits_are_bounded() {
         Refusal::Busy,
         "another port",
     );
-    assert_refusal(&get(source, "index.html"), Refusal::Busy, "the source port");
     drop(held);
     // the held connections close: the permits come back
     let mut tries = 0;

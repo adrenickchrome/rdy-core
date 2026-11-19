@@ -41,6 +41,8 @@
         "policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
         "publication baseline": "makes a baseline of a tagged publication; cli_sync_baseline pins its replies",
         "publish": "uploads a site to a host",
+        "pull": "pulls from a hub; cli_sync pins its replies",
+        "push": "pushes to a hub; cli_sync pins its replies",
         "reaffirm": "needs a suspect decision; the write op of the same name is an MCP write",
         "redact": "destroys content; no dry run is probed",
         "reindex": "rebuilds derived state; the derived_identities row covers it",
@@ -12842,6 +12844,343 @@
           "args": [
             {
               "action": "set",
+              "id": "remote",
+              "long": "remote",
+              "num_args": "1",
+              "value_names": [
+                "REMOTE"
+              ]
+            },
+            {
+              "action": "append",
+              "id": "views",
+              "long": "view",
+              "num_args": "1",
+              "value_names": [
+                "NAME"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "force",
+              "long": "force",
+              "num_args": "0",
+              "value_names": [
+                "FORCE"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "restore",
+              "long": "restore",
+              "num_args": "1",
+              "value_names": [
+                "DUMP"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "card_hash",
+              "long": "card-hash",
+              "num_args": "1",
+              "value_names": [
+                "CARD_HASH"
+              ]
+            },
+            {
+              "action": "set",
+              "choices": [
+                "confirm",
+                "cancel"
+              ],
+              "id": "answer",
+              "long": "answer",
+              "num_args": "1",
+              "value_names": [
+                "ANSWER"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "relayed_by",
+              "long": "relayed-by",
+              "num_args": "1",
+              "value_names": [
+                "ACTOR"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "evidence",
+              "long": "evidence",
+              "num_args": "1",
+              "value_names": [
+                "EVIDENCE"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "question",
+              "long": "question",
+              "num_args": "1",
+              "value_names": [
+                "QUESTION"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "session_ref",
+              "long": "session-ref",
+              "num_args": "1",
+              "value_names": [
+                "SESSION_REF"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "PushArgs",
+              "multiple": true,
+              "required": false
+            },
+            {
+              "args": [
+                "answer",
+                "card_hash",
+                "evidence",
+                "question",
+                "relayed_by",
+                "session_ref"
+              ],
+              "id": "RelayArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "push",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set",
+              "id": "remote",
+              "long": "remote",
+              "num_args": "1",
+              "value_names": [
+                "REMOTE"
+              ]
+            },
+            {
+              "action": "append",
+              "id": "views",
+              "long": "view",
+              "num_args": "1",
+              "value_names": [
+                "NAME"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "take",
+              "long": "take",
+              "num_args": "0",
+              "value_names": [
+                "TAKE"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "strict",
+              "long": "strict",
+              "num_args": "0",
+              "value_names": [
+                "STRICT"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "card_hash",
+              "long": "card-hash",
+              "num_args": "1",
+              "value_names": [
+                "CARD_HASH"
+              ]
+            },
+            {
+              "action": "set",
+              "choices": [
+                "confirm",
+                "cancel"
+              ],
+              "id": "answer",
+              "long": "answer",
+              "num_args": "1",
+              "value_names": [
+                "ANSWER"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "relayed_by",
+              "long": "relayed-by",
+              "num_args": "1",
+              "value_names": [
+                "ACTOR"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "evidence",
+              "long": "evidence",
+              "num_args": "1",
+              "value_names": [
+                "EVIDENCE"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "question",
+              "long": "question",
+              "num_args": "1",
+              "value_names": [
+                "QUESTION"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "session_ref",
+              "long": "session-ref",
+              "num_args": "1",
+              "value_names": [
+                "SESSION_REF"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "PullArgs",
+              "multiple": true,
+              "required": false
+            },
+            {
+              "args": [
+                "answer",
+                "card_hash",
+                "evidence",
+                "question",
+                "relayed_by",
+                "session_ref"
+              ],
+              "id": "RelayArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "pull",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set",
               "id": "path",
               "index": 1,
               "num_args": "1",
@@ -19485,6 +19824,7 @@
       "E_DAEMON_VERSION": "\"E_DAEMON_VERSION\"",
       "E_DEFERRAL_OPEN": "\"E_DEFERRAL_OPEN\"",
       "E_DEPS_MISSING": "\"E_DEPS_MISSING\"",
+      "E_DIVERGED": "\"E_DIVERGED\"",
       "E_DUMP": "\"E_DUMP\"",
       "E_DUMP_CHAIN": "\"E_DUMP_CHAIN\"",
       "E_ELICITATION_UNAVAILABLE": "\"E_ELICITATION_UNAVAILABLE\"",
@@ -19619,6 +19959,8 @@
       "W_STOP_BEFORE_REDACTION": "\"W_STOP_BEFORE_REDACTION\"",
       "W_UNAPPLIED_DECISION": "\"W_UNAPPLIED_DECISION\"",
       "W_UPSTREAM_HANDLE_CHANGED": "\"W_UPSTREAM_HANDLE_CHANGED\"",
+      "W_UPSTREAM_HELD_LOOKUP": "\"W_UPSTREAM_HELD_LOOKUP\"",
+      "W_UPSTREAM_PACK_MISMATCH": "\"W_UPSTREAM_PACK_MISMATCH\"",
       "W_UPSTREAM_SIGNOUT_LOCAL": "\"W_UPSTREAM_SIGNOUT_LOCAL\"",
       "W_WC_KEPT": "\"W_WC_KEPT\"",
       "W_WC_UNSTAGED_MOVE": "\"W_WC_UNSTAGED_MOVE\"",
@@ -20064,7 +20406,12 @@
       [
         "E_UPSTREAM_UNCERTAIN",
         "the hub request may have completed",
-        "check its state on the hub before trying again; for a publish upload, check push {push} on the hub"
+        "check its state on the hub before trying again; for a publish upload, check push {push} on the hub; for a sync write, run rdy_push or rdy_pull again: rdy finds the outcome of push {push} before it writes again"
+      ],
+      [
+        "E_DIVERGED",
+        "a push whose local canon does not hold the hub tip <tip>",
+        "run rdy_pull to replay the local landings, then push again; rdy_push with force moves hub canon to local canon after the person confirms its card"
       ],
       [
         "E_UPSTREAM_CONFIRM_HOST",
@@ -20095,6 +20442,11 @@
         "W_UPSTREAM_SIGNOUT_LOCAL",
         "the local credential was removed; hub sign-out was not confirmed",
         "end the credential on the hub if it is still active"
+      ],
+      [
+        "W_UPSTREAM_HELD_LOOKUP",
+        "the outcome of held push <push> could not be read: <code>",
+        "the hub's fix, or for a code with no fix, pull again later"
       ],
       [
         "E_BAD_RECORD",
@@ -20313,6 +20665,17 @@
       "CHAIN_LIMIT_FIX": "\"exclude the replayed change and import the source tree into a new view\"",
       "CHALLENGE_EXPIRED_FIX": "\"start key binding again\"",
       "CHALLENGE_EXPIRED_MESSAGE": "\"the key binding challenge expired\"",
+      "CLONE_NO_CANON_FIX": "\"make the project with rdy init, add this hub repo as a share remote, then push\"",
+      "CLONE_NO_CANON_MESSAGE": "\"hub repo <url> has no canon to clone\"",
+      "CLONE_SETTING_MESSAGE": "\"the <member> of hub repo <url> comes from rdy <captured> and does not fit rdy <this>\"",
+      "CLONE_SETTING_NEWER_FIX": "\"update rdy to <captured> or later, then clone again\"",
+      "CLONE_SETTING_OLDER_FIX": "\"have the hub repo's next push come from rdy <this>, then clone again\"",
+      "CLONE_SETTING_UNNAMED_FIX": "\"update rdy, or have the hub repo's next push come from rdy <this>\"",
+      "CLONE_SETTING_UNNAMED_MESSAGE": "\"the <member> of hub repo <url> does not fit rdy <this>\"",
+      "CLONE_URL_FILE_FIX": "\"remove file or url\"",
+      "CLONE_URL_FILE_MESSAGE": "\"file is not used by clone with url\"",
+      "CLONE_URL_FORK_FIX": "\"clone the hub repo, then run rdy clone --fork <that project> <dir>\"",
+      "CLONE_URL_FORK_MESSAGE": "\"a fork starts from a project or a dump, not from a hub URL\"",
       "CODE_KEPT_FIX": "\"check the block against its code, then repin it with code: true\"",
       "CONFIG_LIMIT_FIX": "\"reduce the config file to the stated limit\"",
       "CONFLICT_FIX": "\"write the block from the version you want (rdy_context lists the sides), or exclude one side's change\"",
@@ -20455,9 +20818,17 @@
       "SUPERSEDE_CONFIRM_FIX": "\"this block states no removed value. Check that it still holds, then point each listed link at the decision in force.\"",
       "SUPERSEDE_CUT_FIX": "\"rdy checked only the first 16384 bytes. Check the rest, then point each listed link at the decision in force.\"",
       "SUPERSEDE_UPDATE_FIX": "\"update the block for the removed values. Point each listed link at the decision in force.\"",
+      "SYNC_DIVERGED_FIX": "\"run rdy pull to replay local landings, then push again\"",
+      "SYNC_DIVERGED_MESSAGE": "\"local canon does not hold hub tip <tip>\"",
       "SYNC_FORK_SOURCE_FIX": "\"push the source view too, or start a view from canon and include the changes\"",
       "SYNC_FORK_SOURCE_MESSAGE": "\"view <name> forks from view <source>, which the hub does not hold\"",
       "SYNC_LOCKED_FIX": "\"wait for it to end, then try again\"",
+      "SYNC_MIN_RDY_FIX": "\"update rdy to <version> or later\"",
+      "SYNC_MIN_RDY_MESSAGE": "\"hub repo <name> needs rdy <version>\"",
+      "SYNC_REMOTE_MODE_FIX": "\"set its mode to share, or choose a share remote\"",
+      "SYNC_REMOTE_MODE_MESSAGE": "\"remote <name> is not a share remote\"",
+      "SYNC_UNCERTAIN_FIX": "\"run rdy push or rdy pull again: rdy finds the outcome of push <push> before it writes again\"",
+      "SYNC_UNCERTAIN_MESSAGE": "\"the sync write of push <push> may have completed\"",
       "SYNC_UNCOVERED_FIX": "\"redact this content here; a person approves the removal\"",
       "SYNC_UNCOVERED_MESSAGE": "\"change <change> holds content removed by <removal>\"",
       "SYNC_UNDO_OWNER_FIX": "\"use rdy view own\"",
@@ -20489,9 +20860,13 @@
       "UPSTREAM_CA_MESSAGE": "\"the configured CA file cannot be used\"",
       "UPSTREAM_CONFIRM_HOST_FIX": "\"show the sign-in card, then relay the answer with its card_hash\"",
       "UPSTREAM_CONFIRM_HOST_MESSAGE": "\"the install host has not been confirmed\"",
+      "UPSTREAM_HELD_LOOKUP_FIX": "\"pull again later\"",
+      "UPSTREAM_HELD_LOOKUP_MESSAGE": "\"the outcome of held push <push> could not be read: <code>\"",
       "UPSTREAM_KEY_PROOF_FIX": "\"check the configured public key and SSH agent, then bind again\"",
       "UPSTREAM_KEY_PROOF_MESSAGE": "\"the agent's key proof is invalid\"",
       "UPSTREAM_ORIGIN_FIX": "\"use the install origin\"",
+      "UPSTREAM_PACK_MISMATCH_FIX": "\"push the project to the hub repo again from a machine that has its pack, then clone again\"",
+      "UPSTREAM_PACK_MISMATCH_MESSAGE": "\"hub repo <url> holds gate settings for another pack, so this clone uses rdy's default pack\"",
       "UPSTREAM_PROTOCOL_FIX": "\"check that this rdy version supports the hub's API\"",
       "UPSTREAM_PROTOCOL_MESSAGE": "\"the hub reply does not match the client contract\"",
       "UPSTREAM_PUBLISH_ORIGIN_FIX": "\"use the install origin, or add its destination to the pinned origins of this install (hub.installs.<install>.pinned_origins)\"",
@@ -20966,12 +21341,14 @@
       "E_UPSTREAM_TRANSPORT",
       "E_UPSTREAM_REFUSED",
       "E_UPSTREAM_UNCERTAIN",
+      "E_DIVERGED",
       "E_UPSTREAM_CONFIRM_HOST",
       "E_UPSTREAM_CA",
       "E_UPSTREAM_KEY_PROOF",
       "E_UPSTREAM_ACTOR_CLAIM",
       "W_UPSTREAM_HANDLE_CHANGED",
       "W_UPSTREAM_SIGNOUT_LOCAL",
+      "W_UPSTREAM_HELD_LOOKUP",
       "E_BAD_RECORD",
       "E_UNRESOLVED_REF",
       "E_STREAM_TRUNCATED",
@@ -24492,6 +24869,10 @@
               "fix": "string",
               "when": "string"
             },
+            "E_DIVERGED": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_DUMP": {
               "fix": "string",
               "when": "string"
@@ -24913,6 +25294,10 @@
               "when": "string"
             },
             "W_UPSTREAM_HANDLE_CHANGED": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_UPSTREAM_HELD_LOOKUP": {
               "fix": "string",
               "when": "string"
             },
@@ -25585,6 +25970,8 @@
       "rdy_policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
       "rdy_publication_baseline": "makes a baseline of a tagged publication; cli_sync_baseline and mcp_sync_baseline pin its replies",
       "rdy_publish": "uploads a site to a host",
+      "rdy_pull": "pulls from a hub; mcp_sync pins its replies",
+      "rdy_push": "pushes to a hub; mcp_sync pins its replies",
       "rdy_redact": "destroys content; no dry run is probed",
       "rdy_remote": "edits the remotes of the project",
       "rdy_render": "writes a site to a directory; the site_urls row covers its routes",
@@ -25634,6 +26021,8 @@
       "rdy_publication_baseline",
       "rdy_publication_check",
       "rdy_publish",
+      "rdy_pull",
+      "rdy_push",
       "rdy_query",
       "rdy_read",
       "rdy_redact",
@@ -26118,6 +26507,13 @@
               "description": "true: the clone gets a new repo id and records forked_from.",
               "type": [
                 "boolean",
+                "null"
+              ]
+            },
+            "url": {
+              "description": "An https hub repo URL to clone instead, with the hub's settings and a share remote named hub. Not with file or fork.",
+              "type": [
+                "string",
                 "null"
               ]
             }
@@ -27832,6 +28228,184 @@
             "tag",
             "to"
           ],
+          "type": "object"
+        }
+      },
+      "rdy_pull": {
+        "input_schema": {
+          "$defs": {
+            "AuthAnswerParam": {
+              "description": "The person's answer to the sign-in card.",
+              "enum": [
+                "confirm",
+                "cancel"
+              ],
+              "type": "string"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthAnswerParam"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The person's answer to the card: confirm or cancel. With card_hash."
+            },
+            "card_hash": {
+              "description": "The card_hash of the card the person answered. With answer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "description": "The person's words, quoted (1 to 2000 characters). With card_hash and answer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "The question you asked the person. With evidence.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "remote": {
+              "description": "The share remote to pull from, by its name. Default: the share remote, else the only remote.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_ref": {
+              "description": "The chat session the person spoke in (default: mcp). With evidence.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "strict": {
+              "description": "true stops a replay at its first conflict. Not with take and no views.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "take": {
+              "description": "true takes hub canon with no replay (a card first); with views it takes only those views and canon pulls as usual.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "views": {
+              "description": "Views to pull after canon: at most 256 names, each once. No view is pulled unless named.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "rdy_push": {
+        "input_schema": {
+          "$defs": {
+            "AuthAnswerParam": {
+              "description": "The person's answer to the sign-in card.",
+              "enum": [
+                "confirm",
+                "cancel"
+              ],
+              "type": "string"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthAnswerParam"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The person's answer to the card: confirm or cancel. With card_hash."
+            },
+            "card_hash": {
+              "description": "The card_hash of the card the person answered. With answer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "description": "The person's words, quoted (1 to 2000 characters). With card_hash and answer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "force": {
+              "description": "true forces hub canon to this project's head when local canon does not hold the hub tip. Canon only. Returns a card first.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "The question you asked the person. With evidence.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "remote": {
+              "description": "The share remote to push to, by its name. Default: the share remote, else the only remote.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "restore": {
+              "description": "The path of a dump to restore into the hub repo. Takes no views and no force. Returns a card first when the hub repo holds canon.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_ref": {
+              "description": "The chat session the person spoke in (default: mcp). With evidence.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "views": {
+              "description": "Views to push after canon: at most 256 names, each once. No view travels unless named.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         }
       },
@@ -32201,6 +32775,9 @@
       "records": 221
     },
     "fixture_digests": {
+      "sync-client-wire-v1.json": "7794 1611c42ea92491f7fb5280f9c5043758bc66e9dc9297b4c99001d6fdf213bc77",
+      "sync-client-wire-v2.json": "492422 b4f05b31ed8d4ea0628e4c2b35c621be448d68483ae0eab09d7c191456877a85",
+      "sync-client-wire-v3a.json": "45913 daa8ff3fbb04526f1374eb089de5d9b0f6fbf40873828f6426e614fa954c9ea5",
       "sync4-canon-history.bin": "5884 8d51365e1d9bd84bf9c00526e672d401298d0128cdf3590d1c09f50eb5f746e4",
       "sync4-canon-history.expect.json": "4641 19bd7fd90178c3883d3d9cd018577877a7aaa6eadfb6d1da99355a9693574e5c",
       "sync4-view-history.bin": "6699 0abb9333ec131aa4f87c78e0a549322d053c49048c0c7ab15dd309ec96f7dace",
