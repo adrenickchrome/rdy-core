@@ -192,7 +192,7 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         counterparts: &["wx29b_a_copied_tree_keeps_links_as_links"],
     },
     Exclusion {
-        file: "crates/rdy-engine/tests/config_edit.rs",
+        file: "crates/rdy-engine/tests/config/config_edit.rs",
         gate: Gate::Item,
         tests: &[
             "hsa2_new_directories_are_0700_or_not_made_at_all",
@@ -208,14 +208,14 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         ],
     },
     Exclusion {
-        file: "crates/rdy-engine/tests/hub_remotes.rs",
+        file: "crates/rdy-engine/tests/hub/hub_remotes.rs",
         gate: Gate::Item,
         tests: &["hsa6_remote_tests_pass_under_umask_002_and_022"],
         mechanism: "The umask of a child process started through sh.",
         counterparts: &["wx12d_shared_folders_take_settings_not_secrets"],
     },
     Exclusion {
-        file: "crates/rdy-engine/tests/kungfu_counts.rs",
+        file: "crates/rdy-engine/tests/config/kungfu_counts.rs",
         gate: Gate::Item,
         tests: &["kfu2_private_paths_and_replaced_projects_are_safe"],
         mechanism: "Permission modes and symbolic links.",
@@ -323,14 +323,14 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         counterparts: &["wx29b_a_reparse_point_of_no_link_is_untracked_and_kept"],
     },
     Exclusion {
-        file: "crates/rdy-store/tests/fileid.rs",
+        file: "crates/rdy-store/tests/format/fileid.rs",
         gate: Gate::Item,
         tests: &["ps2_open_locked_takes_its_own_lock_after_the_store_dir_is_renamed"],
         mechanism: "The Unix held-lock contract of a renamed store directory; Windows closes the loading store under the start lock instead.",
         counterparts: &["wx8b_start_lock_covers_close_rename_reopen"],
     },
     Exclusion {
-        file: "crates/rdy-store/tests/private_write.rs",
+        file: "crates/rdy-store/tests/format/private_write.rs",
         gate: Gate::Item,
         tests: &[
             "hsa2_private_bytes_are_private_before_write",

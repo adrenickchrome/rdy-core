@@ -1,0 +1,843 @@
+use crate::common;
+
+use rdy_engine::*;
+use rdy_model::*;
+use serde_json::json;
+
+fn agent() -> Session {
+    Session {
+        actor: "agent:designer".into(),
+        run: Some("run-1".into()),
+        role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
+    }
+}
+fn founder() -> Session {
+    Session {
+        actor: "human:founder".into(),
+        run: None,
+        role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
+    }
+}
+
+/// The issues the queue lists for version `pref` under `not_ready` (D-ME2HD: an approval
+/// refuses with exactly these).
+fn not_ready_issues(r: &Rdy, pref: &str) -> Vec<rdy_schema::Issue> {
+    let q = r
+        .read()
+        .pending(&pending::PendingQuery {
+            person: "human:founder".into(),
+            session_ref: None,
+            max_tokens: pending::CARD_MAX_TOKENS,
+        })
+        .unwrap();
+    q.not_ready
+        .into_iter()
+        .find(|n| n.r#ref == pref)
+        .unwrap_or_else(|| panic!("{pref} is not listed as not ready"))
+        .issues
+}
+
+/// Checks `e` is the refusal of a version `pref` that is not ready, with the queue's issues
+/// for it, whose codes are `codes`.
+fn assert_not_ready(r: &Rdy, e: &RdyError, pref: &str, codes: &[&str]) {
+    let issues = not_ready_issues(r, pref);
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e:?}");
+    assert_eq!(
+        e.message,
+        format!(
+            "{pref} is not ready: {} issue{}",
+            issues.len(),
+            if issues.len() == 1 { "" } else { "s" }
+        )
+    );
+    assert_eq!(e.issues, issues);
+    assert_eq!(
+        issues.iter().map(|i| i.code).collect::<Vec<_>>(),
+        codes,
+        "{issues:#?}"
+    );
+}
+
+/// O11 (RULING F1): a landing since `pref`'s assessment wrote a block of its reach, and its
+/// fresh readiness fails: `E_PROPOSAL_MOVED` with the fresh issues, exactly the queue's, and no
+/// fresh card.
+fn assert_moved_not_ready(r: &Rdy, e: &RdyError, pref: &str, codes: &[&str]) {
+    let issues = not_ready_issues(r, pref);
+    assert_eq!(e.code, E_PROPOSAL_MOVED, "{e:?}");
+    assert!(
+        e.message
+            .starts_with(&format!("proposal {pref} moved: landing "))
+            && e.message.ends_with(" after its assessment"),
+        "{e:?}"
+    );
+    assert_eq!(
+        e.fix,
+        "fix each issue and propose again: rdy_propose / rdy propose"
+    );
+    assert!(e.corrected.is_none(), "{e:?}");
+    assert_eq!(e.issues, issues);
+    assert_eq!(
+        issues.iter().map(|i| i.code).collect::<Vec<_>>(),
+        codes,
+        "{issues:#?}"
+    );
+}
+
+fn setup() -> (tempfile::TempDir, Rdy, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let res = r.write(&agent(), WriteRequest {
+        view: "work".into(),
+        ops: serde_json::from_value(json!([
+            {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Decisions", "doc_type": "decisions-log"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Decisions"}}
+        ])).unwrap(),
+        justification: None,
+        message: "skeleton".into(),
+    }).unwrap();
+    let section = res.created["$s"].clone();
+    (dir, r, section)
+}
+
+#[test]
+fn decide_then_land_accepts_and_freezes() {
+    let (_d, mut r, s) = setup();
+    let res = r
+        .decide(
+            &agent(),
+            "work",
+            DecisionInput {
+                parent: s.clone(),
+                statement: "Wallets don't move".into(),
+                authority_basis: Some("direct_ruling".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let did = BlockId::parse(&res.created["$decision"]).unwrap();
+    let work = Scope::View("work".into());
+    let d = r.read().block(&work, &did).unwrap();
+    assert_eq!(d.field_str("status"), Some("proposed"));
+    assert!(d.field_str("recorded_at").unwrap().ends_with('Z'));
+
+    let p = r
+        .propose(
+            &agent(),
+            "work",
+            "wallet ruling",
+            Some(common::TEST_SUMMARY),
+        )
+        .unwrap();
+    common::confirm_exceptions(&mut r, &founder(), &p);
+    assert_eq!(p.changes, 2);
+    assert_eq!(r.land(&agent(), &p.id).unwrap_err().code, "E_PERMISSION");
+    let landing = r.land(&founder(), &p.id).unwrap();
+
+    let canon = r.read().block(&Scope::Canon, &did).unwrap();
+    assert_eq!(canon.field_str("status"), Some("accepted"));
+    assert!(canon.field_str("decided_at").is_some());
+    let rec: LandingRecord = r.store().get(&landing.parse().unwrap()).unwrap();
+    assert_eq!(rec.approved_by.actor, "human:founder");
+
+    let e = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([{"op": "update", "id": did.to_string(), "fields": {"statement": "changed"}}])).unwrap(), justification: None, message: String::new() }).unwrap_err();
+    assert_eq!(e.code, "E_FROZEN");
+}
+
+#[test]
+fn supersede_links_to_the_old_decision() {
+    let (_d, mut r, s) = setup();
+    let first = r
+        .decide(
+            &agent(),
+            "work",
+            DecisionInput {
+                parent: s.clone(),
+                statement: "Wallets move with members".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let old = first.created["$decision"].clone();
+    let p = r
+        .propose(&agent(), "work", "one", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(&mut r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap();
+    let res = r
+        .supersede(
+            &agent(),
+            "work",
+            &old,
+            Some("moves with them".into()),
+            DecisionInput {
+                parent: s.clone(),
+                statement: "Wallets don't move".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let new = r
+        .read()
+        .block(
+            &Scope::View("work".into()),
+            &BlockId::parse(&res.created["$decision"]).unwrap(),
+        )
+        .unwrap();
+    let link = &new.links["supersedes"][0];
+    assert_eq!(link.target.to_string(), old);
+    assert_eq!(link.part.as_deref(), Some("moves with them"));
+    assert_eq!(
+        r.supersede(
+            &agent(),
+            "work",
+            &s,
+            None,
+            DecisionInput {
+                parent: s.clone(),
+                statement: "x".into(),
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .code,
+        "E_BAD_INPUT"
+    );
+}
+
+#[test]
+fn propose_rules() {
+    let (_d, mut r, s) = setup();
+    assert_eq!(
+        r.propose(&agent(), "empty", "nothing", None)
+            .unwrap_err()
+            .code,
+        "E_BAD_INPUT"
+    );
+    // land a term and a claim that references it
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "term", "id": "$t", "parent": s, "fields": {"name": "Ledger"}, "body": "Balances."},
+        {"op": "create", "type": "claim", "parent": s, "body": "Uses the {{$t}}."}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let p = r
+        .propose(&agent(), "work", "terms", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    // another view deletes the term while the claim still references it
+    r.write(
+        &agent(),
+        WriteRequest {
+            view: "cleanup".into(),
+            ops: serde_json::from_value(json!([{"op": "delete", "id": res.created["$t"]}]))
+                .unwrap(),
+            justification: None,
+            message: String::new(),
+        },
+    )
+    .unwrap();
+    let e = r
+        .propose(&agent(), "cleanup", "remove term", None)
+        .unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(e.issues.iter().any(|i| i.code == "E_DANGLING_REF"));
+}
+
+#[test]
+fn rfc3339_shape() {
+    let t = rfc3339_now();
+    assert_eq!(t.len(), 20);
+    assert!(t.starts_with("20") && t.ends_with('Z') && &t[10..11] == "T");
+}
+
+fn upd(
+    r: &mut Rdy,
+    view: &str,
+    id: &str,
+    fields: serde_json::Value,
+) -> Result<WriteResult, RdyError> {
+    r.write(
+        &agent(),
+        WriteRequest {
+            view: view.into(),
+            ops: serde_json::from_value(json!([{"op": "update", "id": id, "fields": fields}]))
+                .unwrap(),
+            justification: None,
+            message: String::new(),
+        },
+    )
+}
+
+#[test]
+fn land_refuses_when_view_edited_a_proposed_decision_after_propose() {
+    let (_d, mut r, s) = setup();
+    let res = r
+        .decide(
+            &agent(),
+            "work",
+            DecisionInput {
+                parent: s,
+                statement: "A".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let did = res.created["$decision"].clone();
+    let p = r
+        .propose(&agent(), "work", "p", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(&mut r, &founder(), &p);
+    upd(&mut r, "work", &did, json!({"statement": "A2"})).unwrap();
+    let head = r.store().canon_head().unwrap();
+    let n = r.store().view("work").unwrap().changes.len();
+    let e = r.land(&founder(), &p.id).unwrap_err();
+    assert_eq!(e.code, "E_STALE_BASE");
+    assert!(e.message.contains(&did));
+    assert!(e.fix.contains("propose again"));
+    assert_eq!(r.store().view("work").unwrap().changes.len(), n);
+    assert_eq!(
+        r.read()
+            .block(&Scope::View("work".into()), &BlockId::parse(&did).unwrap())
+            .unwrap()
+            .field_str("status"),
+        Some("proposed")
+    );
+    assert_eq!(r.store().canon_head().unwrap(), head);
+}
+
+#[test]
+fn revoke_links_and_requires_a_decision() {
+    let (_d, mut r, s) = setup();
+    let res = r
+        .decide(
+            &agent(),
+            "work",
+            DecisionInput {
+                parent: s.clone(),
+                statement: "A".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let did = res.created["$decision"].clone();
+    let p = r
+        .propose(&agent(), "work", "p", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(&mut r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap();
+    let rv = r
+        .revoke(&agent(), "work", &did, "no longer true", &s, None)
+        .unwrap();
+    let b = r
+        .read()
+        .block(
+            &Scope::View("work".into()),
+            &BlockId::parse(&rv.created["$decision"]).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(b.links["revokes"][0].target.to_string(), did);
+    assert_eq!(
+        b.field_str("statement"),
+        Some(format!("Revoke {did}: no longer true").as_str())
+    );
+    assert_eq!(
+        r.revoke(&agent(), "work", &s, "x", &s, None)
+            .unwrap_err()
+            .code,
+        "E_BAD_INPUT"
+    );
+}
+
+#[test]
+fn propose_marks_a_collision_with_a_landing_as_blocking() {
+    let (_d, mut r, s) = setup();
+    let p = r
+        .propose(&agent(), "work", "skeleton", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    upd(&mut r, "a", &s, json!({"title": "A"})).unwrap();
+    upd(&mut r, "b", &s, json!({"title": "B"})).unwrap();
+    let pb = r.propose(&agent(), "b", "b", Some("test summary")).unwrap();
+    r.land(&founder(), &pb.id).unwrap();
+    // gconf1: the landing rebased a and recorded the collision; propose reports it as blocking
+    // and the gate refuses the version until a resolves it
+    let pa = r.propose(&agent(), "a", "a", Some("test summary")).unwrap();
+    assert_eq!((pa.conflicts.len(), pa.blocking.len()), (1, 1));
+    // D-ME2HD: the conflict is a readiness issue of the refusal
+    let e = r.land(&founder(), &pa.id).unwrap_err();
+    assert_not_ready(&r, &e, &pa.r#ref, &[E_CONFLICT_UNRESOLVED]);
+}
+
+#[test]
+fn land_excludes_later_view_changes_and_stamps_the_approver() {
+    let (_d, mut r, s) = setup();
+    let res = r
+        .decide(
+            &agent(),
+            "work",
+            DecisionInput {
+                parent: s.clone(),
+                statement: "A".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let did = BlockId::parse(&res.created["$decision"]).unwrap();
+    let p = r
+        .propose(&agent(), "work", "p", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(&mut r, &founder(), &p);
+    let later = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([{"op": "create", "type": "claim", "id": "$c", "parent": s, "body": "later"}])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let cid = BlockId::parse(&later.created["$c"]).unwrap();
+    let landing = r.land(&founder(), &p.id).unwrap();
+    assert!(r.read().block(&Scope::Canon, &cid).is_err());
+    assert!(r.read().block(&Scope::View("work".into()), &cid).is_ok());
+    assert_eq!(
+        r.read()
+            .block(&Scope::Canon, &did)
+            .unwrap()
+            .field_str("status"),
+        Some("accepted")
+    );
+    let rec: LandingRecord = r.store().get(&landing.parse().unwrap()).unwrap();
+    let prop: Proposal = r.store().get(&rec.proposal).unwrap();
+    let last: Change = r.store().get(prop.changes.last().unwrap()).unwrap();
+    assert_eq!(last.provenance.actor, "human:founder");
+}
+
+#[test]
+fn readers_cannot_propose() {
+    let (_d, mut r, _s) = setup();
+    let reader = Session {
+        actor: "agent:r".into(),
+        run: None,
+        role: Role::Reader,
+        kind: rdy_engine::SessionKind::Human,
+    };
+    let e = r.propose(&reader, "work", "nope", None).unwrap_err();
+    assert_eq!(e.code, E_PERMISSION);
+}
+
+fn w(
+    r: &mut Rdy,
+    s: &Session,
+    view: &str,
+    ops: serde_json::Value,
+) -> Result<WriteResult, RdyError> {
+    r.write(
+        s,
+        WriteRequest {
+            view: view.into(),
+            ops: serde_json::from_value(ops).unwrap(),
+            justification: None,
+            message: String::new(),
+        },
+    )
+}
+
+/// Seeds canon with section S and term T, then: run-2 adds a claim under S referencing T,
+/// run-1 deletes T and S. Returns (dir, rdy, run-2 session).
+fn two_views() -> (tempfile::TempDir, Rdy, Session) {
+    let (d, mut r, s) = setup();
+    let t = w(&mut r, &agent(), "work", json!([{"op": "create", "type": "term", "id": "$t", "parent": s, "fields": {"name": "Ledger"}, "body": "Balances."}])).unwrap().created["$t"].clone();
+    let p = r
+        .propose(&agent(), "work", "seed", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let run2 = Session {
+        actor: "agent:designer".into(),
+        run: Some("run-2".into()),
+        role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
+    };
+    w(&mut r, &run2, "run-2", json!([{"op": "create", "type": "claim", "parent": s, "body": "Uses the {{" .to_string() + &t + "}}."}])).unwrap();
+    w(
+        &mut r,
+        &agent(),
+        "run-1",
+        json!([{"op": "delete", "id": t}, {"op": "delete", "id": s}]),
+    )
+    .unwrap();
+    (d, r, run2)
+}
+
+#[test]
+fn propose_refuses_orphans_and_dangling_refs_after_canon_moved() {
+    let (_d, mut r, run2) = two_views();
+    let p1 = r
+        .propose(&agent(), "run-1", "remove", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p1.id).unwrap();
+    let head = r.store().canon_head().unwrap();
+    let e = r.propose(&run2, "run-2", "add claim", None).unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_MISSING_PARENT"),
+        "{:?}",
+        e.issues
+    );
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_DANGLING_REF"),
+        "{:?}",
+        e.issues
+    );
+    assert_eq!(r.store().canon_head().unwrap(), head);
+}
+
+#[test]
+fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
+    let (_d, mut r, run2) = two_views();
+    let p2 = r
+        .propose(&run2, "run-2", "add claim", Some("test summary"))
+        .unwrap();
+    let p1 = r
+        .propose(&agent(), "run-1", "remove", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p1.id).unwrap();
+    let head = r.store().canon_head().unwrap();
+    // tgat1: the claim still cites the deleted term, a blocking tension; the gate's validation
+    // refuses the orphan too. D-ME2HD, O11: p1's landing wrote a block of p2's reach, so the
+    // freshness check fails, and both are issues of p2's fresh readiness, in the queue's order
+    let e = r.land(&founder(), &p2.id).unwrap_err();
+    assert_moved_not_ready(&r, &e, &p2.r#ref, &[E_BLOCKING_TENSION, E_VALIDATION]);
+    let blocking: Vec<String> = r
+        .read()
+        .tensions()
+        .unwrap()
+        .iter()
+        .filter(|t| t.severity == tensions::TensionSeverity::Blocking)
+        .map(|t| tensions::tension_label(&t.id))
+        .collect();
+    assert!(!blocking.is_empty());
+    for t in blocking {
+        r.dismiss_tension(&founder(), &t, "the validation is under test")
+            .unwrap();
+    }
+    // once a human dismisses the tension, the orphan alone refuses; the validation's first error
+    // names it
+    let e = r.land(&founder(), &p2.id).unwrap_err();
+    assert_moved_not_ready(&r, &e, &p2.r#ref, &[E_VALIDATION]);
+    let m = &e.issues[0].message;
+    assert!(
+        m.starts_with("c-")
+            && m.contains(" has parent s-")
+            && m.ends_with(", which does not exist"),
+        "{e:?}"
+    );
+    assert_eq!(r.store().canon_head().unwrap(), head);
+    let canon = r.read().materialized(&Scope::Canon).unwrap();
+    assert!(canon.iter().all(|b| b.block_type != "claim"));
+}
+
+#[test]
+fn land_with_a_hash_that_is_not_a_proposal_is_bad_input() {
+    let (_d, mut r, s) = setup();
+    let section = r
+        .read()
+        .block(&Scope::View("work".into()), &BlockId::parse(&s).unwrap())
+        .unwrap();
+    let e = r
+        .land(&founder(), &section.version_hash().to_string())
+        .unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+}
+
+fn land_work(r: &mut Rdy, title: &str) {
+    let p = r
+        .propose(&agent(), "work", title, Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p.id).unwrap();
+}
+
+#[test]
+fn propose_refuses_deleting_a_parent_that_gained_a_child_in_canon() {
+    let (_d, mut r, s) = setup();
+    land_work(&mut r, "seed");
+    let run2 = Session {
+        actor: "agent:designer".into(),
+        run: Some("run-2".into()),
+        role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
+    };
+    // run-1 deletes S while S is childless in its view
+    w(
+        &mut r,
+        &agent(),
+        "run-1",
+        json!([{"op": "delete", "id": s}]),
+    )
+    .unwrap();
+    // run-2 adds a claim under S and lands first
+    w(
+        &mut r,
+        &run2,
+        "run-2",
+        json!([{"op": "create", "type": "claim", "parent": s, "body": "A claim."}]),
+    )
+    .unwrap();
+    let p2 = r
+        .propose(&run2, "run-2", "add claim", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p2.id).unwrap();
+    let head = r.store().canon_head().unwrap();
+    let e = r.propose(&agent(), "run-1", "remove S", None).unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_MISSING_PARENT"),
+        "{:?}",
+        e.issues
+    );
+    assert_eq!(r.store().canon_head().unwrap(), head);
+}
+
+#[test]
+fn deleting_a_parent_that_gained_a_moved_child_in_canon_is_refused() {
+    let (_d, mut r, s) = setup();
+    let doc = r
+        .read()
+        .block(&Scope::View("work".into()), &BlockId::parse(&s).unwrap())
+        .unwrap()
+        .parent
+        .clone()
+        .unwrap()
+        .to_string();
+    let res = w(&mut r, &agent(), "work", json!([
+        {"op": "create", "type": "section", "id": "$s2", "parent": doc, "fields": {"title": "Other"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s2", "body": "Movable."}
+    ])).unwrap();
+    let c = res.created["$c"].clone();
+    land_work(&mut r, "seed");
+    let run2 = Session {
+        actor: "agent:designer".into(),
+        run: Some("run-2".into()),
+        role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
+    };
+    w(
+        &mut r,
+        &agent(),
+        "run-1",
+        json!([{"op": "delete", "id": s}]),
+    )
+    .unwrap();
+    w(
+        &mut r,
+        &run2,
+        "run-2",
+        json!([{"op": "move", "id": c, "parent": s}]),
+    )
+    .unwrap();
+    let p1 = r
+        .propose(&agent(), "run-1", "remove S", Some("test summary"))
+        .unwrap();
+    let p2 = r
+        .propose(&run2, "run-2", "move claim", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p2.id).unwrap();
+    let head = r.store().canon_head().unwrap();
+    // O12: p2's landing wrote no block of p1's reach, so freshness holds and the merge's final
+    // guard refuses; its validation error names the orphan, as the readiness issue does
+    let e = r.land(&founder(), &p1.id).unwrap_err();
+    assert_eq!(e.code, E_VALIDATION, "{e:?}");
+    assert_eq!(
+        e.message,
+        format!("{c} has parent {s}, which this proposal deletes"),
+        "{e:?}"
+    );
+    assert_eq!(
+        not_ready_issues(&r, &p1.r#ref)
+            .iter()
+            .map(|i| (i.code, i.message.as_str()))
+            .collect::<Vec<_>>(),
+        [(E_VALIDATION, e.message.as_str())],
+        "the queue lists the same error"
+    );
+    assert_eq!(r.store().canon_head().unwrap(), head);
+}
+
+#[test]
+fn recreating_a_deleted_block_under_its_old_id_is_not_a_dangling_ref() {
+    let (_d, mut r, s) = setup();
+    let t = w(&mut r, &agent(), "work", json!([
+        {"op": "create", "type": "term", "id": "$t", "parent": s, "fields": {"name": "Ledger"}, "body": "Balances."},
+        {"op": "create", "type": "claim", "parent": s, "body": "Uses the {{$t}}."}
+    ])).unwrap().created["$t"].clone();
+    land_work(&mut r, "seed");
+    // run-1 replaces the term: delete it, then create a new term under the same id
+    w(
+        &mut r,
+        &agent(),
+        "run-1",
+        json!([{"op": "delete", "id": t}]),
+    )
+    .unwrap();
+    w(&mut r, &agent(), "run-1", json!([{"op": "create", "type": "term", "id": t, "parent": s, "fields": {"name": "Ledger"}, "body": "Balances, recomputed."}])).unwrap();
+    let p = r
+        .propose(&agent(), "run-1", "replace term", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    assert_eq!(
+        r.read()
+            .block(&Scope::Canon, &BlockId::parse(&t).unwrap())
+            .unwrap()
+            .body,
+        "Balances, recomputed."
+    );
+}
+
+#[test]
+fn recreating_a_deleted_parent_and_child_under_their_old_ids_is_not_an_orphan() {
+    let (_d, mut r, s) = setup();
+    let doc = r
+        .read()
+        .block(&Scope::View("work".into()), &BlockId::parse(&s).unwrap())
+        .unwrap()
+        .parent
+        .clone()
+        .unwrap()
+        .to_string();
+    let res = w(&mut r, &agent(), "work", json!([
+        {"op": "create", "type": "section", "id": "$s2", "parent": doc, "fields": {"title": "Old"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s2", "body": "Kept."}
+    ])).unwrap();
+    let (s2, c) = (res.created["$s2"].clone(), res.created["$c"].clone());
+    land_work(&mut r, "seed");
+    w(
+        &mut r,
+        &agent(),
+        "run-1",
+        json!([{"op": "delete", "id": c}, {"op": "delete", "id": s2}]),
+    )
+    .unwrap();
+    w(&mut r, &agent(), "run-1", json!([
+        {"op": "create", "type": "section", "id": s2, "parent": doc, "fields": {"title": "New"}},
+        {"op": "create", "type": "claim", "id": c, "parent": s2, "body": "Kept, again."}
+    ])).unwrap();
+    let p = r
+        .propose(&agent(), "run-1", "rebuild section", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let claim = r
+        .read()
+        .block(&Scope::Canon, &BlockId::parse(&c).unwrap())
+        .unwrap();
+    assert_eq!(claim.parent.map(|p| p.to_string()), Some(s2));
+}
+
+#[test]
+fn the_gate_refuses_names_that_clash_after_another_landing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    w(
+        &mut r,
+        &agent(),
+        "a",
+        json!([{"op": "create", "type": "folder", "fields": {"name": "Wallets"}}]),
+    )
+    .unwrap();
+    w(
+        &mut r,
+        &agent(),
+        "b",
+        json!([{"op": "create", "type": "folder", "fields": {"name": "wallets"}}]),
+    )
+    .unwrap();
+    let p = r.propose(&agent(), "a", "a", Some("test summary")).unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let e = r.propose(&agent(), "b", "b", None).unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_PATH_CLASH"),
+        "{:?}",
+        e.issues
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_parent_cycle_made_by_two_views() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let res = w(
+        &mut r,
+        &agent(),
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$x", "fields": {"name": "x"}},
+            {"op": "create", "type": "folder", "id": "$y", "fields": {"name": "y"}}
+        ]),
+    )
+    .unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some("test summary"))
+        .unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let (x, y) = (res.created["$x"].clone(), res.created["$y"].clone());
+    w(
+        &mut r,
+        &agent(),
+        "a",
+        json!([{"op": "move", "id": x, "parent": y}]),
+    )
+    .unwrap();
+    w(
+        &mut r,
+        &agent(),
+        "b",
+        json!([{"op": "move", "id": y, "parent": x}]),
+    )
+    .unwrap();
+    let p = r.propose(&agent(), "a", "a", Some("test summary")).unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let e = r.propose(&agent(), "b", "b", None).unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_PARENT_CYCLE"),
+        "{:?}",
+        e.issues
+    );
+}
+
+/// Ops creating `n` nested folders named `{prefix}0/{prefix}1/…`, the first under `parent`.
+fn folder_chain(prefix: &str, n: usize, parent: Option<&str>) -> serde_json::Value {
+    json!((0..n)
+        .map(|i| {
+            let p = if i == 0 {
+                parent.map(String::from)
+            } else {
+                Some(format!("${prefix}{}", i - 1))
+            };
+            json!({"op": "create", "type": "folder", "id": format!("${prefix}{i}"), "parent": p, "fields": {"name": format!("{prefix}{i}")}})
+        })
+        .collect::<Vec<_>>())
+}
+
+#[test]
+fn the_gate_refuses_folders_nested_too_deep_by_two_views() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let mut seed = folder_chain("q", 16, None);
+    seed.as_array_mut()
+        .unwrap()
+        .push(json!({"op": "create", "type": "folder", "id": "$p", "fields": {"name": "p"}}));
+    let res = w(&mut r, &agent(), "work", seed).unwrap();
+    land_work(&mut r, "seed");
+    let (p, q15) = (res.created["$p"].clone(), res.created["$q15"].clone());
+    // a: 16 folders under p (depths 2..17); b: p under q15 (depth 17). Each alone is fine.
+    w(&mut r, &agent(), "a", folder_chain("c", 16, Some(&p))).unwrap();
+    w(
+        &mut r,
+        &agent(),
+        "b",
+        json!([{"op": "move", "id": p, "parent": q15}]),
+    )
+    .unwrap();
+    let pa = r.propose(&agent(), "a", "a", Some("test summary")).unwrap();
+    r.land(&founder(), &pa.id).unwrap();
+    let e = r.propose(&agent(), "b", "b", None).unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_TOO_DEEP"),
+        "{:?}",
+        e.issues
+    );
+}
