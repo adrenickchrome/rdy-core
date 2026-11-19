@@ -6,7 +6,7 @@
 //! proposes or lands anything.
 
 use super::*;
-use rdy_engine::hooks::{HOOK_DEADLINE, HOOK_KEYS, HookRequest, RunContext};
+use rdy_engine::hooks::{HOOK_KEYS, HookRequest, RunContext, hook_deadline};
 use rdy_engine::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -86,7 +86,7 @@ pub fn checked_hook_request(p: HookParams) -> Result<HookRequest, RdyError> {
     })
 }
 
-/// `rdy_hook`: one check, install or remove, under [`HOOK_DEADLINE`] from now. Any session may
+/// `rdy_hook`: one check, install or remove, under [`hook_deadline`] from now. Any session may
 /// check; install and remove need a session that can write, and a host that has local hooks
 /// (an embedding without one refuses with `E_BAD_INPUT`).
 pub fn rdy_hook(st: &mut McpState, p: HookParams) -> Result<Value, RdyError> {
@@ -106,6 +106,6 @@ pub fn rdy_hook(st: &mut McpState, p: HookParams) -> Result<Value, RdyError> {
             "start the session as a writer",
         ));
     }
-    let run = RunContext::new().with_deadline(Instant::now() + HOOK_DEADLINE);
+    let run = RunContext::new().with_deadline(Instant::now() + hook_deadline());
     rdy_engine::hooks::run(&*st.engine, &req, &run)
 }

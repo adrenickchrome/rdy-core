@@ -88,7 +88,7 @@ struct Hooked {
 
 impl Hooked {
     fn new() -> Hooked {
-        let w = World::new();
+        let w = World::new().with_long_hook_deadline();
         let project = w.project();
         let decision = seed_decision(project.path());
         let app = GitRepo::new();
@@ -131,11 +131,6 @@ impl Hooked {
     /// `rdy --json hook <op> --kind <kind> ...` as the world's human, through the daemon, with
     /// `form`'s own fields as the options (a check's through an input file).
     fn cli(&self, form: &Value) -> Value {
-        retry_on_deadline("cli", || self.cli_once(form))
-    }
-
-    /// One `cli` run, with no retry.
-    fn cli_once(&self, form: &Value) -> Value {
         let op = form["op"].as_str().unwrap();
         let kind = form["kind"].as_str().unwrap();
         let mut args: Vec<String> = ["--json", "hook", op, "--kind", kind]
@@ -178,33 +173,9 @@ impl Hooked {
     }
 }
 
-/// Runs `attempt` up to 3 times and returns the first result that is not a deadline miss.
-///
-/// The product gives every hook run a fixed 2 s deadline (`HOOK_DEADLINE` in
-/// `rdy-engine/src/hooks.rs`) and, past it, its designed fail-open answer: `checked` false with
-/// one `W_HOOK_UNAVAILABLE` warning whose reason is `deadline`. These tests run the real binary
-/// and Git, so a loaded host can pass the deadline (known issue 2240). This retry covers load
-/// only: it fires on exactly that answer and no other. Tests that assert an unavailable check
-/// on purpose call `rdy_hook` and `cli` directly and never use it.
-fn retry_on_deadline(helper: &str, mut attempt: impl FnMut() -> Value) -> Value {
-    let mut n = 1;
-    loop {
-        let v = attempt();
-        let missed = v["checked"] == false
-            && v["warnings"].as_array().is_some_and(|w| {
-                w.len() == 1 && w[0]["code"] == "W_HOOK_UNAVAILABLE" && w[0]["reason"] == "deadline"
-            });
-        if !missed || n == 3 {
-            return v;
-        }
-        n += 1;
-        eprintln!("{helper}: hook run passed the 2 s deadline under load; attempt {n} of 3");
-    }
-}
-
-/// `rdy_hook` over MCP with `form`, retried only on a deadline miss.
+/// `rdy_hook` over MCP with `form`.
 fn mcp_check(c: &mut McpClient, form: &Value) -> Value {
-    retry_on_deadline("mcp_check", || c.call("rdy_hook", form.clone()).ok())
+    c.call("rdy_hook", form.clone()).ok()
 }
 
 fn next() -> u64 {
@@ -296,7 +267,7 @@ fn m4a4_checks_and_installs_use_the_same_host() {
         [("W_HOOK_UNAVAILABLE".to_string(), vec![])],
         "{v}"
     );
-    assert_eq!(v, h.cli_once(&moved));
+    assert_eq!(v, h.cli(&moved));
 
     // a direct edit of a checked-out member warns; a code file does not
     let out = h.w.rdy(h.project.path(), &["checkout"]);
@@ -565,7 +536,7 @@ fn m4a4_kungfu_warns_without_blocking_hooks() {
     assert_eq!(p.response, kungfu::Response::Warn);
     let right = fixture_value("rdy_hook").expect("a value");
 
-    let w = World::new();
+    let w = World::new().with_long_hook_deadline();
     let pd = w.project();
     let env = w.env();
     let pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -807,7 +778,7 @@ async fn m4a4_http_and_stdio_keep_claims_and_projectless_scope() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     // stdio through the daemon, a native pipe on Windows: the same claims and the same reply
-    let w = World::new();
+    let w = World::new().with_long_hook_deadline();
     let pd = w.project();
     let mut served = w.mcp(pd.path());
     let (code, message, fix) = refusal(served.call("rdy_hook", outside_edit()));

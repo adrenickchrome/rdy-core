@@ -303,6 +303,16 @@ fn rdy_bin_in(exe: &std::path::Path) -> PathBuf {
     }
 }
 
+/// The hook deadline, in milliseconds, that the end-to-end hook tests give the real host. They
+/// run the binary, a worker and several Git processes, and a loaded machine (a Windows gate in
+/// parallel) can take longer than the product's 2 s. No test of these proves the deadline itself.
+pub const LONG_HOOK_DEADLINE_MS: &str = "60000";
+
+/// `cmd` with the long hook deadline of the end-to-end hook tests ([`LONG_HOOK_DEADLINE_MS`]).
+pub fn long_hook_deadline(cmd: &mut Command) -> &mut Command {
+    cmd.env(rdy_engine::hooks::TEST_DEADLINE_VAR, LONG_HOOK_DEADLINE_MS)
+}
+
 /// The `rdy` binary: `$RDY_BIN`, else the `rdy` of the profile this binary was built in: a test
 /// runs from `target/<profile>/deps/`, a qa binary (`qa-perf`) from `target/<profile>/`.
 pub fn rdy_bin() -> PathBuf {

@@ -21,8 +21,8 @@ use crate::instructions_cmd::discover;
 use clap::Args;
 use rdy_daemon::ErrorReply;
 use rdy_engine::hooks::{
-    HOOK_DEADLINE, HookHost, HookInstall, HookKind, HookRequest, HookWarning, RunContext,
-    Unavailable,
+    HookHost, HookInstall, HookKind, HookRequest, HookWarning, RunContext, Unavailable,
+    hook_deadline,
 };
 use rdy_engine::instructions::{PersonPlace, place_person};
 use rdy_engine::instructions_config::{PersonPath, PersonSource, resolve_person_from_env};
@@ -456,7 +456,7 @@ fn install(project: &Path, req: &Value) -> Result<HookInstall, RdyError> {
     };
     let host = rdy_daemon::hooks::LocalHooks::for_process(project)
         .map_err(|e| RdyError::new(E_IO, e.to_string(), "run rdy setup again"))?;
-    let ctx = RunContext::new().with_deadline(std::time::Instant::now() + HOOK_DEADLINE);
+    let ctx = RunContext::new().with_deadline(std::time::Instant::now() + hook_deadline());
     host.install(&target, &ctx)
 }
 

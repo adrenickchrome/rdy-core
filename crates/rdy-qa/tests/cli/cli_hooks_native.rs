@@ -30,12 +30,15 @@ const GIT_VARS: [&str; 4] = [
     "GIT_COMMON_DIR",
 ];
 
-/// `cmd` with no system Git configuration and the empty global configuration `global`.
+/// `cmd` with no system Git configuration, the empty global configuration `global` and the
+/// tests' long hook deadline.
 fn git_isolated<'a>(cmd: &'a mut Command, global: &Path) -> &'a mut Command {
     for v in GIT_VARS {
         cmd.env_remove(v);
     }
-    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+    // a hook this Git runs starts the real host: give it the tests' long deadline
+    rdy_qa::fixtures::long_hook_deadline(cmd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", global)
 }
 
@@ -76,7 +79,7 @@ impl Native {
             ),
         };
         rdy_qa::git_repo::require_git();
-        let w = World::new();
+        let w = World::new().with_long_hook_deadline();
         let tmp = short_tempdir();
         let base = std::fs::canonicalize(tmp.path()).unwrap();
         // Not under the canonical `base`: on Windows that is a `\\?\` path, which Git cannot read.

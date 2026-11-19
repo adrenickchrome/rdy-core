@@ -1,14 +1,14 @@
 //! The `hook` op (FW-HOOK, FW-L3): one `rdy_hook` request (`HookRequest::from_value`), run
 //! through the shared check or the engine's local hook host under one run context.
 use super::OpContext;
-use rdy_engine::hooks::{HOOK_DEADLINE, HookRequest, RunContext};
+use rdy_engine::hooks::{HookRequest, RunContext, hook_deadline};
 use rdy_engine::{E_PERMISSION, RdyError};
 use serde_json::Value;
 use std::time::Instant;
 
-/// The run context of a `hook` op with none of its own: [`HOOK_DEADLINE`] from now.
+/// The run context of a `hook` op with none of its own: [`hook_deadline`] from now.
 pub fn default_run() -> RunContext {
-    RunContext::new().with_deadline(Instant::now() + HOOK_DEADLINE)
+    RunContext::new().with_deadline(Instant::now() + hook_deadline())
 }
 
 /// Runs one hook request under `run`. Readers may check; installing and removing need a
