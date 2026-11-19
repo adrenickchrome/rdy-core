@@ -1586,7 +1586,7 @@ fn cp8_cursor_reuses_briefing_tail_and_digest_width() {
     bad(format!("plan9:1:{digest}:{sel}"));
     bad(format!("plan1:1:{digest}:view:{}", "w".repeat(4096)));
     // a briefing's cursor is still `<token>:<offsets>:<16 hex>:<scope>`, one offset for each
-    // page section: twelve since nb7 put `neighbors` before `base.blocks` (PAGE_SECTIONS)
+    // page section: thirteen since `vector_neighbors` follows `neighbors` (PAGE_SECTIONS)
     let st = r.read();
     let w = Scope::View("w".into());
     let b = st
@@ -1603,7 +1603,7 @@ fn cp8_cursor_reuses_briefing_tail_and_digest_width() {
     let cursor = b.next.clone().expect("a cut briefing");
     let parts: Vec<&str> = cursor.splitn(4, ':').collect();
     assert_eq!(parts[0].len(), 64);
-    assert_eq!(parts[1].split(',').count(), 12);
+    assert_eq!(parts[1].split(',').count(), 13);
     assert_eq!(
         parts[1].split(',').count(),
         rdy_engine::brief::PAGE_SECTIONS.len()

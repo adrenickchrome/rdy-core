@@ -2996,6 +2996,7 @@ fn cli_runtime() -> Value {
     cli_hook_probes(&mut seen);
     cli_markdown_probes(&mut seen, &env);
     cli_export_probes(&mut seen, &env);
+    cli_vector_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -4747,6 +4748,157 @@ fn mcp_hook_probes(seen: &mut Seen) {
     h.w.stop(h.project.path());
 }
 
+/// The project of the vector probes (D-Y1WEY, D-0ZPAP), landed, tagged `v1.0.0` and landed again: section One
+/// of doc `vec-alpha` holds two sources that share words and the link target `$t` with the claims
+/// of doc `vec-beta`, so their briefing lists rows with words and links from both sources, sorted
+/// together; doc `vec-many` holds 501 claims, so its briefing scores the first 500 and counts one
+/// skipped source. The project, the addresses of section One and of `vec-many`'s section, and a budget
+/// whose first page shows some vector rows and cuts the rest (`omitted.vector_neighbors`).
+fn vector_project() -> (tempfile::TempDir, String, String, usize) {
+    let (dir, mut r) = project();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$g", "fields": {"name": "vec-gamma", "title": "Gamma", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "prose", "id": "$t", "parent": "$g", "body": "The shared target."}),
+        json!({"op": "create", "type": "doc", "id": "$a", "fields": {"name": "vec-alpha", "title": "Alpha", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$sa", "parent": "$a", "fields": {"title": "One"}}),
+        json!({"op": "create", "type": "claim", "id": "$c1", "parent": "$sa", "body": "Zebras graze near the walrus colony.", "links": {"describes": [{"target": "$t"}]}}),
+        json!({"op": "create", "type": "claim", "id": "$c2", "parent": "$sa", "body": "Otters swim past the moose herd.", "links": {"describes": [{"target": "$t"}]}}),
+        json!({"op": "create", "type": "doc", "id": "$b", "fields": {"name": "vec-beta", "title": "Beta", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$sb", "parent": "$b", "fields": {"title": "Two"}}),
+        json!({"op": "create", "type": "claim", "id": "$t1", "parent": "$sb", "body": "Zebras graze by the walrus colony.", "links": {"describes": [{"target": "$t"}]}}),
+        json!({"op": "create", "type": "claim", "id": "$t2", "parent": "$sb", "body": "Otters swim by the moose herd.", "links": {"describes": [{"target": "$t"}]}}),
+        json!({"op": "create", "type": "claim", "id": "$t3", "parent": "$sb", "body": "The walrus colony and the moose herd."}),
+        json!({"op": "create", "type": "doc", "id": "$m", "fields": {"name": "vec-many", "title": "Many", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$sm", "parent": "$m", "fields": {"title": "Rows"}}),
+        json!({"op": "create", "type": "term", "id": "$e", "parent": "$sm", "fields": {"name": "Inventory"}, "body": "Holds the lots."}),
+    ];
+    // each describes the term, so no claim adds a coverage issue past the briefing's cap
+    for k in 0..501 {
+        ops.push(json!({"op": "create", "type": "claim", "parent": "$sm", "body": format!("Entry lot{k} holds."),
+            "links": {"describes": [{"target": "$e"}]}}));
+    }
+    let w = rdy_qa::fixtures::write(&mut r, "vec", Value::Array(ops)).expect("write the vectors");
+    rdy_qa::fixtures::land(&mut r, "vec").expect("land the vectors");
+    r.tag(&rdy_qa::fixtures::approver(), "v1.0.0", None, None)
+        .expect("tag the vectors");
+    // a later landing: the tag is a past landing, and a briefing there has no vector advice
+    rdy_qa::fixtures::write(
+        &mut r,
+        "later",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "vec-delta", "title": "Delta", "doc_type": "overview"}}]),
+    )
+    .expect("write later");
+    rdy_qa::fixtures::land(&mut r, "later").expect("land later");
+    let address = format!("{}#one", w.created["$a"]);
+    let cov = rdy_engine::brief::Coverage {
+        ids: vec![address.clone()],
+        path: None,
+    };
+    let full = r
+        .read()
+        .brief(&Scope::Canon, &cov, Some(1_000_000))
+        .expect("brief section One");
+    assert!(full.vector_neighbors.len() >= 4, "rows of both sources");
+    // the budgets whose first page shows some rows and cuts the rest; the middle one
+    let cuts: Vec<usize> = (1..4_000)
+        .filter(|max| {
+            let b = r
+                .read()
+                .brief(&Scope::Canon, &cov, Some(*max))
+                .expect("a page");
+            !b.vector_neighbors.is_empty() && b.omitted.contains_key("vector_neighbors")
+        })
+        .collect();
+    assert!(!cuts.is_empty(), "some budget cuts the vector rows");
+    let many = format!("{}#rows", w.created["$m"]);
+    r.close().expect("close");
+    std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").expect("the person");
+    (dir, address, many, cuts[cuts.len() / 2])
+}
+
+/// The vector probes of one surface: the rows of two sources with words and links, a cut first
+/// page and the rest, a source past the first 500, and a past landing with no rows. `brief` runs
+/// one briefing (target, scope, budget, cursor) and returns its JSON.
+fn vector_probes(
+    address: &str,
+    many: &str,
+    cut: usize,
+    brief: &mut dyn FnMut(&str, Option<&str>, Option<usize>, Option<&str>) -> Value,
+) {
+    let full = brief(address, None, None, None);
+    let rows = full["vector_neighbors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("vector rows: {full}"));
+    let fors: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|v| v["for"].as_str()).collect();
+    assert_eq!(fors.len(), 2, "rows of both sources: {full}");
+    assert!(
+        rows.iter()
+            .any(|v| !v["links"].as_array().unwrap().is_empty())
+    );
+    let scores: Vec<f64> = rows.iter().map(|v| v["score"].as_f64().unwrap()).collect();
+    assert!(
+        scores.windows(2).all(|w| w[0] >= w[1]),
+        "one order: {scores:?}"
+    );
+    assert!(full.get("vector_neighbors_skipped").is_none(), "{full}");
+    let first = brief(address, None, Some(cut), None);
+    assert!(
+        first["omitted"]["vector_neighbors"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        "{first}"
+    );
+    if let Some(next) = first["next"].as_str() {
+        brief(address, None, Some(cut), Some(next));
+    }
+    let skipped = brief(many, None, None, None);
+    assert_eq!(skipped["vector_neighbors_skipped"], json!(1), "{skipped}");
+    assert!(skipped.get("vector_neighbors").is_none(), "{skipped}");
+    // a past landing has no rows and no count (the command line has no such scope)
+    let old = brief(address, Some("tag:v1.0.0"), None, None);
+    if !old.is_null() {
+        assert!(old["base"]["token"].is_string(), "{old}");
+        assert!(old.get("vector_neighbors").is_none(), "{old}");
+        assert!(old.get("vector_neighbors_skipped").is_none(), "{old}");
+    }
+}
+
+fn mcp_vector_probes(seen: &mut Seen) {
+    let (dir, address, many, cut) = vector_project();
+    let mut c = isolated_mcp(dir.path());
+    let who = json!({"actor": "agent:vectors", "run": "vectors", "role": "writer"});
+    mcp_probe(seen, &mut c, "rdy_session", "rdy_session", who);
+    vector_probes(&address, &many, cut, &mut |target, scope, max, page| {
+        let args = match page {
+            Some(p) => json!({"page": p, "max_tokens": max}),
+            None => json!({"ids": [target], "scope": scope, "max_tokens": max}),
+        };
+        if scope.is_some() {
+            // checked, not noted: a past landing's briefing also leaves out its coverage, which
+            // would mark `coverage` optional in the shape of every briefing
+            return ok_of(&c.call("rdy_brief", args));
+        }
+        ok_of(&mcp_probe(seen, &mut c, "rdy_brief", "rdy_brief", args))
+    });
+}
+
+fn cli_vector_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let (dir, address, many, cut) = vector_project();
+    vector_probes(&address, &many, cut, &mut |target, scope, max, page| {
+        if scope.is_some() || page.is_some() {
+            // the command line briefs a block in canon, one page
+            return Value::Null;
+        }
+        let budget = max.map(|m| m.to_string());
+        let mut args = vec!["brief", target];
+        if let Some(b) = &budget {
+            args.extend(["--max-tokens", b]);
+        }
+        cli_probe(seen, dir.path(), env, "brief", &args)
+    });
+}
+
 fn mcp_row() -> Value {
     use rdy_qa::mcp::Reply;
     let rich = rich_project();
@@ -4757,6 +4909,7 @@ fn mcp_row() -> Value {
     mcp_links_probes(&mut seen);
     mcp_hook_probes(&mut seen);
     mcp_export_probes(&mut seen);
+    mcp_vector_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());

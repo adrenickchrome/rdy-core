@@ -260,6 +260,17 @@
                 "summary": "string"
               }
             ],
+            "docs?": [
+              {
+                "blocks": "number",
+                "dependents": "number",
+                "doc": "string",
+                "governs": "number",
+                "suspects": "number",
+                "title": "string",
+                "will_go_stale": "number"
+              }
+            ],
             "governs": [
               {
                 "blocks": [
@@ -294,9 +305,32 @@
                 "doc": "string"
               }
             ],
+            "next?": "string",
+            "omitted?": {
+              "base.blocks?": "number",
+              "neighbors?": "number",
+              "vector_neighbors?": "number"
+            },
             "recorded": "bool",
             "reminder": "string",
             "suspects": [],
+            "truncated?": "bool",
+            "vector_neighbors?": [
+              {
+                "block": "string",
+                "doc": "string",
+                "for": "string",
+                "links": [
+                  "string"
+                ],
+                "score": "number",
+                "summary": "string",
+                "words": [
+                  "string"
+                ]
+              }
+            ],
+            "vector_neighbors_skipped?": "number",
             "will_go_stale": [
               {
                 "block": "string",
@@ -21240,6 +21274,17 @@
               "summary": "string"
             }
           ],
+          "docs?": [
+            {
+              "blocks": "number",
+              "dependents": "number",
+              "doc": "string",
+              "governs": "number",
+              "suspects": "number",
+              "title": "string",
+              "will_go_stale": "number"
+            }
+          ],
           "governs": [
             {
               "blocks": [
@@ -21274,8 +21319,31 @@
               "doc": "string"
             }
           ],
+          "next?": "string",
+          "omitted?": {
+            "base.blocks?": "number",
+            "neighbors?": "number",
+            "vector_neighbors?": "number"
+          },
           "reminder": "string",
           "suspects": [],
+          "truncated?": "bool",
+          "vector_neighbors?": [
+            {
+              "block": "string",
+              "doc": "string",
+              "for": "string",
+              "links": [
+                "string"
+              ],
+              "score": "number",
+              "summary": "string",
+              "words": [
+                "string"
+              ]
+            }
+          ],
+          "vector_neighbors_skipped?": "number",
           "will_go_stale": [
             {
               "block": "string",

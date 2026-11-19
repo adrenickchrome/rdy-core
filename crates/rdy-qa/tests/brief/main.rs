@@ -23,4 +23,5 @@ mod brief_section;
 mod brief_supersede_literals;
 mod brief_supporting;
 mod brief_tensions;
+mod brief_vectors;
 mod brief_write;

@@ -63,6 +63,34 @@ fn neighbor_line(n: &Value) -> String {
     )
 }
 
+/// D-Y1WEY: one vector neighbor row: `<block> (vector neighbor of <for>, score <score>[; words
+/// <words>][; links <links>]; doc <doc>) <summary>`, each list only when it has an entry.
+fn vector_neighbor_line(n: &Value) -> String {
+    let list = |k: &str| {
+        let items: Vec<&str> = n[k]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if items.is_empty() {
+            String::new()
+        } else {
+            format!("; {k} {}", items.join(", "))
+        }
+    };
+    format!(
+        "{} (vector neighbor of {}, score {}{}{}; doc {}) {}",
+        s(n, "block"),
+        s(n, "for"),
+        n["score"],
+        list("words"),
+        list("links"),
+        s(n, "doc"),
+        s(n, "summary")
+    )
+}
+
 /// nb9 (t-F3KR2): the line a write reply's created-block briefing adds, `\nbriefing: <token>`;
 /// empty when the reply has none.
 pub fn created_briefing_text(reply: &Value) -> String {
@@ -400,6 +428,19 @@ pub fn header(briefing: &Value) -> String {
         .collect::<Vec<_>>();
     if !by_doc.is_empty() {
         section(&mut out, "neighbors by doc", by_doc.into_iter());
+    }
+    // D-Y1WEY: advice after the neighbors, only when there are rows or skipped sources (D-0ZPAP)
+    let mut vectors = list("vector_neighbors")
+        .map(vector_neighbor_line)
+        .collect::<Vec<_>>();
+    if let Some(n) = briefing["vector_neighbors_skipped"]
+        .as_u64()
+        .filter(|n| *n > 0)
+    {
+        vectors.push(format!("{n} source(s) not scored"));
+    }
+    if !vectors.is_empty() {
+        section(&mut out, "vector neighbors", vectors.into_iter());
     }
     // rf9: the findings the covered decisions depend on (the count the cap left out is in the
     // JSON as findings_omitted)
