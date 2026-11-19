@@ -31,6 +31,7 @@ mod daemon_site_profile_listeners;
 mod daemon_site_profile_routes;
 mod daemon_site_routes;
 mod daemon_site_versions;
+mod daemon_soak;
 mod daemon_stop_unix;
 mod daemon_stop_version;
 mod daemon_transport;

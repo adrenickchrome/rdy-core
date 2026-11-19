@@ -4052,6 +4052,13 @@ impl StoreReader {
         )
     }
 
+    /// The bytes the store's capped map cache holds (charged against its budget,
+    /// [`crate::snapshot::MAP_CACHE_BYTES`]). The deep-gate memory soak subtracts it from the
+    /// daemon's live memory.
+    pub fn map_cache_bytes(&self) -> usize {
+        self.shared.maps.stats().1
+    }
+
     /// The entries and bytes the store's map cache holds (a test hook).
     #[doc(hidden)]
     pub fn map_cache_stats_for_tests(&self) -> (usize, usize) {
