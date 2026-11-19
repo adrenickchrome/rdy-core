@@ -4748,12 +4748,13 @@ fn mcp_hook_probes(seen: &mut Seen) {
     h.w.stop(h.project.path());
 }
 
-/// The project of the vector probes (D-Y1WEY, D-0ZPAP), landed, tagged `v1.0.0` and landed again: section One
-/// of doc `vec-alpha` holds two sources that share words and the link target `$t` with the claims
-/// of doc `vec-beta`, so their briefing lists rows with words and links from both sources, sorted
-/// together; doc `vec-many` holds 501 claims, so its briefing scores the first 500 and counts one
-/// skipped source. The project, the addresses of section One and of `vec-many`'s section, and a budget
-/// whose first page shows some vector rows and cuts the rest (`omitted.vector_neighbors`).
+/// The project of the vector probes (D-Y1WEY, D-0ZPAP), landed, tagged `v1.0.0` and landed
+/// again. Section One of doc `vec-alpha` holds two sources that share words and the link target
+/// `$t` with the claims of doc `vec-beta`, so their briefing lists rows with words and links from
+/// both sources, sorted together. Doc `vec-many` holds 501 claims, so its briefing scores the
+/// first 500 and counts one skipped source. Returns the project, the addresses of section One and
+/// of `vec-many`'s section, and a budget whose first page shows some vector rows and cuts the
+/// rest (`omitted.vector_neighbors`).
 fn vector_project() -> (tempfile::TempDir, String, String, usize) {
     let (dir, mut r) = project();
     let mut ops = vec![
@@ -4877,7 +4878,9 @@ fn mcp_vector_probes(seen: &mut Seen) {
         if scope.is_some() {
             // checked, not noted: a past landing's briefing also leaves out its coverage, which
             // would mark `coverage` optional in the shape of every briefing
-            return ok_of(&c.call("rdy_brief", args));
+            let past = ok_of(&c.call("rdy_brief", args));
+            assert!(past.is_object(), "a past landing's briefing: {past}");
+            return past;
         }
         ok_of(&mcp_probe(seen, &mut c, "rdy_brief", "rdy_brief", args))
     });
