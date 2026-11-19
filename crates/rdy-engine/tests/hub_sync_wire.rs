@@ -361,7 +361,10 @@ fn fixture_v2_steps() {
         ]
     );
     // the cases the hub does not serve yet: six, each with its step, design and reason; the
-    // client pins none of them here (rdyhub d84d2d96 serves the tag cases)
+    // client pins none of them here (rdyhub d84d2d96 serves the tag cases). Skips that wait for
+    // fixture v3a: the write held as a landing request (i-B40VF, D-PGQZM) and the outcome
+    // `held` with `request_state` `open` and `closed` (i-6YB7Y); the client's clear on
+    // `closed` is pinned on the mock hub by scc8_pull_clears_held_only_on_applied_or_closed_request
     let not_served = f["not_served"].as_array().unwrap();
     let skipped: Vec<(&str, &str)> = not_served
         .iter()

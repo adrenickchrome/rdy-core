@@ -378,6 +378,23 @@ impl Hub {
         );
     }
 
+    /// Answers the lookup of `push` as held, landing request `number` version 1, with the
+    /// request's state now (`open`, `landed` or `closed`; rdyhub-design i-6YB7Y).
+    pub fn answer_held(&self, push: &str, number: u64, request_state: &str) {
+        self.outcomes.lock().unwrap().insert(
+            push.to_string(),
+            OutcomeReply {
+                outcome: LookupOutcome::Held {
+                    request: HubRequest { number, version: 1 },
+                    tip: None,
+                },
+                kind: Some("landings".into()),
+                view: None,
+                request_state: Some(request_state.into()),
+            },
+        );
+    }
+
     /// Serves the history of `read` to the pull steps.
     /// Serves pulls from `read`, a copy of the project: the hub repo is its repo.
     pub fn serve(&self, read: Arc<ReadState>) {

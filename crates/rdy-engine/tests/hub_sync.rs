@@ -1287,9 +1287,8 @@ fn scc8_held_head_suppresses_write_and_longer_chain_versions_request() {
 }
 
 /// D-H0BZN "Held": `held` clears when `applied` reaches its head, by a taken write or by a
-/// pull. `held` keeps the held push's id (D-PGQZM). The clear on a request that closed with no
-/// landing (the pull's lookup of that push reads `request_state` `closed`) waits for the held
-/// pins of the hub's fixture v3.
+/// pull. `held` keeps the held push's id (D-PGQZM), and a pull's outcome lookup of that push
+/// clears `held` when its `request_state` is `closed`: the request closed with no landing.
 #[test]
 fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
     // a taken write whose tip reaches the held head
@@ -1353,8 +1352,88 @@ fn scc8_pull_clears_held_only_on_applied_or_closed_request() {
     let c = canon_of(&e, "shared").unwrap();
     assert_eq!((c.applied, c.held), (Some(head2), None));
     let _ = head;
-    // v3 skip: "the request has closed with no landing" (D-PGQZM) needs the outcome's
-    // `request_state`, which fixture v2 does not serve
+
+    // D-PGQZM "Clear": a pull with `held` set asks the outcome lookup for `held.push` before
+    // any known or get. `open`, `landed` (hub canon still below the held head) and unknown keep
+    // `held`; `closed` (the request closed with no landing) clears it, and `applied` stays. The
+    // hub's held outcome is rdyhub-design i-6YB7Y; its fixture pin waits for fixture v3a.
+    for (request_state, kept) in [
+        (Some("open"), true),
+        (Some("landed"), true),
+        (None, true),
+        (Some("closed"), false),
+    ] {
+        let e = env(2);
+        let tip = e.landings[0];
+        let head = e.landings[1];
+        let hub = Hub::new().with_state(|s| s.canon = Some(tip));
+        hub.plan_write(
+            1,
+            WritePlan::Held {
+                number: 9,
+                version: 1,
+            },
+        );
+        let out = push(&e, &hub, None).unwrap();
+        let WriteEnd::Held {
+            push: held_push, ..
+        } = &out.canon
+        else {
+            panic!("{out:?}")
+        };
+        if let Some(rs) = request_state {
+            hub.answer_held(held_push, 9, rs);
+        }
+        let (_dir, hub_store) = copy_project(&e);
+        hub.serve(hub_store.read());
+        hub.clear();
+        Sync::new(&e, &hub).pull(PullRequest::default()).unwrap();
+        let steps = hub.steps();
+        assert_eq!(
+            steps[..3],
+            ["discovery", "state", "outcome"],
+            "{request_state:?}"
+        );
+        let lookups: Vec<Option<String>> = hub
+            .calls()
+            .into_iter()
+            .filter(|c| c.step == "outcome")
+            .map(|c| c.push)
+            .collect();
+        assert_eq!(lookups, [Some(held_push.clone())], "{request_state:?}");
+        let c = canon_of(&e, "shared").unwrap();
+        let want = kept.then(|| SyncHeld {
+            head,
+            request: 9,
+            push: held_push.clone(),
+        });
+        assert_eq!((c.applied, c.held), (Some(tip), want), "{request_state:?}");
+
+        // the next push: a kept request sends no write; a closed one sends the write again,
+        // under a new push id
+        hub.clear();
+        let out = push(&e, &hub, None).unwrap();
+        if kept {
+            assert!(
+                matches!(out.canon, WriteEnd::HeldOpen { request: 9, .. }),
+                "{out:?}"
+            );
+            assert!(hub.writes().is_empty());
+        } else {
+            let (p, base, pushed, _, _, _) = taken(&out);
+            assert_ne!(&p, held_push);
+            assert_eq!((base, pushed), (Some(tip), head));
+        }
+    }
+
+    // a pull with no held request asks no outcome lookup
+    let e = env(1);
+    let tip = e.landings[0];
+    let hub = Hub::new().with_state(|s| s.canon = Some(tip));
+    let (_dir, hub_store) = copy_project(&e);
+    hub.serve(hub_store.read());
+    Sync::new(&e, &hub).pull(PullRequest::default()).unwrap();
+    assert!(!hub.steps().contains(&"outcome"));
 }
 
 /// D-H0BZN "Lost reply", "Outcome lookup": a found `pending` is looked up before any known,

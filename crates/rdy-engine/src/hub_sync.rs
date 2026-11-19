@@ -33,7 +33,9 @@
 //! 9. **Pull.** For hub canon and each named view: the known pull pages from this store's
 //!    fetched tip or head (when the store holds it), the keys this store lacks fetched in
 //!    batches within the hub's limits, each streamed to a scratch file and checked, then Plan
-//!    A's fetch and replay.
+//!    A's fetch and replay. Before the fetch, a pull with a held request asks the outcome
+//!    lookup for the held push and clears `held` when the request closed with no landing
+//!    (D-PGQZM).
 //! 10. **Restore.** A dump goes to the hub through a temporary store (`crate::sync_restore`).
 //!
 //! A hub refusal keeps the hub's message, fix and request id. `E_HUB_TAG_TAKEN` takes core's
@@ -1416,6 +1418,7 @@ impl<'a> SyncService<'a> {
             }
         }
         let lookup = self.lookup(engine, t, &base_url, &state)?;
+        self.held_lookup(engine, t, &base_url)?;
         let hub = HubState {
             repo_id: state.repo_id,
             canon: state.canon,
@@ -1480,6 +1483,36 @@ impl<'a> SyncService<'a> {
             out.views = with_writer_result(engine, move |rdy| pull_views(rdy, &s, &req))?;
         }
         Ok(out)
+    }
+
+    /// A pull's lookup of the held push (D-PGQZM "Clear"): with `held` set for this hub repo,
+    /// the outcome lookup of `held.push`. A held outcome whose `request_state` is `closed` (the
+    /// request closed with no landing) clears `held`; `open`, `landed`, any other outcome and
+    /// `unknown` keep it, and the pull goes on. A refusal of the lookup stops the pull and keeps
+    /// `held`, as a refused lookup of `pending` does.
+    fn held_lookup(&self, engine: &dyn Engine, t: &Target, base_url: &str) -> Result<(), RdyError> {
+        let read = engine.read();
+        let Some(c) = read.reader().sync_canon(&t.name).map_err(store)? else {
+            return Ok(());
+        };
+        let Some(h) = &c.held else {
+            return Ok(());
+        };
+        if c.url != t.url || c.repo_id != read.repo_id()? {
+            // another hub repo's request: never looked up or cleared here
+            return Ok(());
+        }
+        let cx = self.context(t, &read, Some(base_url))?;
+        let reply = self.wire.outcome(&cx, &h.push)?;
+        drop(cx);
+        drop(read);
+        let closed = matches!(reply.outcome, LookupOutcome::Held { .. })
+            && reply.request_state.as_deref() == Some("closed");
+        if !closed {
+            return Ok(());
+        }
+        let step = SyncStep::Canon(SyncCanon { held: None, ..c });
+        write_steps(engine, &t.name, vec![step])
     }
 
     /// Clears the held request of `t` once `applied` reaches its head (D-H0BZN "Held").
