@@ -2,7 +2,7 @@
 use clap::Parser;
 use rdy_qa::gate_steps::{
     ChildOutput, GateStep, StageKind, Stages, build_steps, cargo, default_deadline,
-    discover_command, discovered, fail_tail, fmt_step, list_guarded, run_stage,
+    discover_command, discovered, fail_tail, fmt_step, list_guarded, run_bounded, run_stage,
 };
 use rdy_qa::perf::{self, Baseline, Measure};
 use rdy_qa::report::{self, Area, Gate, Report};
@@ -405,10 +405,14 @@ fn main() {
         }
         if binary == "release" {
             match rdy_qa::release_preflight::run(&root(), git(&["rev-parse", "--short", "HEAD"])) {
-                Ok(rev) => gate("release preflight", true, format!("revision {rev}")),
+                Ok(rev) => gates.push(Gate::ran(
+                    "release preflight",
+                    true,
+                    format!("revision {rev}"),
+                )),
                 Err(e) => {
                     eprintln!("release preflight refused: {e}");
-                    gate("release preflight", false, e);
+                    gates.push(Gate::ran("release preflight", false, e));
                     report::add_missing(&mut areas, binary);
                     continue;
                 }
