@@ -273,6 +273,13 @@ impl ReadState {
     ) -> Result<ResolvedRequest, RdyError> {
         let durable = crate::check::requests::durable_matches(self, &c.hex)?;
         if durable.is_empty() {
+            // p-80ED3: a contradiction request's case shows its pair's short request id; with
+            // no derived request of that id, it submits the same open contradiction request
+            if self.derived_matches(leases, &c.hex, now)?.is_empty()
+                && let Some(h) = crate::check::requests::durable_by_case_label(self, &c.hex)?
+            {
+                return Ok(ResolvedRequest::Check(Box::new(self.found_check(h)?)));
+            }
             require_reviewer(&c.session)?;
             return Ok(ResolvedRequest::Derived(self.find_request(leases, c, now)?));
         }
