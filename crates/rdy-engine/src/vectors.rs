@@ -936,7 +936,7 @@ mod tests {
         r.view_include(&writer(), "c", &[b1.change.clone(), b2.change.clone()])
             .unwrap();
         assert_all_carried(&r, "include");
-        r.view_exclude(&writer(), "c", &[b2.change.clone()], false)
+        r.view_exclude(&writer(), "c", std::slice::from_ref(&b2.change), false)
             .unwrap();
         assert_all_carried(&r, "exclude");
         // a corpus change that moves every idf: a new block of new words changes N alone

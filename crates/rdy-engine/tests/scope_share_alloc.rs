@@ -136,10 +136,10 @@ fn weight_cost(st: &ReadState, scope: &Scope, source: &str, query: &[&str]) -> i
             let d = Doc::Block(id);
             w.lexical(d).unwrap();
             w.link(d).unwrap();
-            let words = w
+            let words: Option<Vec<String>> = w
                 .counts(d)
                 .map(|c| c.iter().map(|(k, _)| k.to_string()).collect());
-            for word in words.unwrap_or_else(Vec::<String>::new) {
+            for word in words.unwrap_or_default() {
                 if w.word_is_seed(&word) {
                     for cand in lexicon.word_blocks_of(&word).into_iter().flatten() {
                         w.lexical_norm(Doc::Block(cand)).unwrap();
@@ -149,8 +149,8 @@ fn weight_cost(st: &ReadState, scope: &Scope, source: &str, query: &[&str]) -> i
             }
             for t in w
                 .targets(d)
-                .map(|t| t.iter().cloned().collect())
-                .unwrap_or_else(Vec::new)
+                .map(|t| t.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
             {
                 if w.target_is_seed(&t) {
                     for cand in lexicon.pointing_at(&t).into_iter().flatten() {
