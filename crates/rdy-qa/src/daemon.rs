@@ -701,11 +701,28 @@ impl Served {
         )
     }
 
-    fn with(
+    /// `new`, with the project made by `seed` (which inits it at the path it is given, with
+    /// the `rdy-standard` pack) instead of an empty one.
+    pub fn seeded(seed: impl FnOnce(&Path)) -> Served {
+        Served::with_seed(
+            short_tempdir(),
+            crate::fixtures::human_env("human:qa"),
+            seed,
+        )
+    }
+
+    fn with(dir: tempfile::TempDir, cfg_env: (tempfile::TempDir, Vec<(String, String)>)) -> Served {
+        Served::with_seed(dir, cfg_env, |p| {
+            drop(Rdy::init(p, "rdy-standard").expect("init the served project"))
+        })
+    }
+
+    fn with_seed(
         dir: tempfile::TempDir,
         (cfg, env): (tempfile::TempDir, Vec<(String, String)>),
+        seed: impl FnOnce(&Path),
     ) -> Served {
-        drop(Rdy::init(dir.path(), "rdy-standard").expect("init the served project"));
+        seed(dir.path());
         let mut file = OpenOptions::new()
             .append(true)
             .open(dir.path().join(".rdy.yaml"))
