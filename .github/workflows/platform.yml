@@ -1,9 +1,17 @@
 # Hosted platform runs. Advisory only: every job may fail without failing the workflow, and none is a
-# required check.
+# required check. A PR runs them only when it touches a platform path; every push to main runs them in full.
 name: platforms
 on:
   pull_request:
     branches: [main]
+    paths:
+      - "crates/rdy-store/src/pio*"
+      - "crates/rdy-store/src/pio/**"
+      - "crates/rdy-daemon/src/sys/**"
+      - "**/windows*"
+      - "**/windows/**"
+      - ".github/workflows/platform.yml"
+      - "scripts/release/**"
   push:
     branches: [main]
   workflow_dispatch:
