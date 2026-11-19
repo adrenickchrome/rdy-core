@@ -569,240 +569,162 @@ enum Reads {
     Landed,
 }
 
-/// The 37 production `landing_of` calls of b8b16064: (file, b8b16064 line, S line, line now,
-/// how it reads). S is the execution base b4fde86e.
-const READERS: [(&str, u32, u32, u32, Reads); 37] = [
-    ("crates/rdy-engine/src/gate.rs", 665, 665, 670, Reads::Canon),
-    ("crates/rdy-engine/src/gate.rs", 906, 906, 933, Reads::Canon),
+/// The 37 production `landing_of` calls of b8b16064: (file, enclosing fn, how it reads). A call
+/// is named by the fn it sits in, so an edit elsewhere in the file does not move it.
+const READERS: [(&str, &str, Reads); 37] = [
+    ("crates/rdy-engine/src/gate.rs", "landed_as", Reads::Canon),
+    ("crates/rdy-engine/src/gate.rs", "unresolved", Reads::Canon),
     (
         "crates/rdy-engine/src/gate.rs",
-        2695,
-        2695,
-        2740,
+        "propose_relayed",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/history.rs",
-        266,
-        266,
-        270,
+        "landing_id",
         Reads::History,
     ),
     (
         "crates/rdy-engine/src/pending/reaffirm.rs",
-        269,
-        269,
-        269,
+        "landing_of_version",
         Reads::History,
     ),
     (
         "crates/rdy-engine/src/pending/reaffirm.rs",
-        392,
-        392,
-        392,
+        "retirement_landing",
         Reads::History,
     ),
     (
         "crates/rdy-engine/src/pending/reaffirm.rs",
-        415,
-        415,
-        415,
+        "raised_by",
         Reads::History,
     ),
     (
         "crates/rdy-engine/src/plan/api.rs",
-        560,
-        560,
-        560,
+        "landed_in",
         Reads::History,
     ),
     (
         "crates/rdy-engine/src/read_state.rs",
-        489,
-        489,
-        489,
+        "inflight_set_of",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/rules/approval.rs",
-        501,
-        501,
-        501,
+        "rule_proposal",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/rules/approval.rs",
-        915,
-        915,
-        915,
+        "run_answer",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/rules/lifecycle.rs",
-        543,
-        543,
-        543,
+        "find",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/tensions/dismiss.rs",
-        111,
-        111,
-        111,
+        "canon_item_writers",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/tensions/index.rs",
-        1362,
-        1362,
-        1362,
+        "canon_side",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/views.rs",
-        243,
-        243,
-        243,
+        "conflict_infos",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/views.rs",
-        423,
-        423,
-        433,
+        "landed_through",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/views.rs",
-        670,
-        670,
-        680,
+        "include_closure",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/views.rs",
-        847,
-        847,
-        857,
+        "view_include",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/views/undo.rs",
-        122,
-        122,
-        122,
+        "landed_refusal",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/views/undo.rs",
-        135,
-        135,
-        135,
+        "landed_refusal",
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/views/undo.rs",
-        158,
-        158,
-        158,
+        "landed_refusal",
         Reads::Canon,
     ),
-    (
-        "crates/rdy-engine/src/views/undo.rs",
-        440,
-        440,
-        446,
-        Reads::Canon,
-    ),
+    ("crates/rdy-engine/src/views/undo.rs", "undo", Reads::Canon),
     (
         "crates/rdy-engine/src/write.rs",
-        1345,
-        1345,
-        1345,
+        "frozen_in_conflict_hinted",
         Reads::Canon,
     ),
     (
         "crates/rdy-qa/src/invariants.rs",
-        493,
-        491,
-        491,
+        "check_views_in",
         Reads::Canon,
     ),
     (
         "crates/rdy-store/src/check.rs",
-        135,
-        135,
-        140,
+        "check_objects",
         Reads::Landed,
     ),
-    ("crates/rdy-store/src/land.rs", 438, 438, 438, Reads::Canon),
-    ("crates/rdy-store/src/land.rs", 642, 664, 664, Reads::Canon),
+    ("crates/rdy-store/src/land.rs", "land_frames", Reads::Canon),
+    ("crates/rdy-store/src/land.rs", "land_frames", Reads::Canon),
+    ("crates/rdy-store/src/plan.rs", "landed", Reads::History),
+    ("crates/rdy-store/src/plan.rs", "landed", Reads::History),
     (
         "crates/rdy-store/src/plan.rs",
-        925,
-        925,
-        926,
+        "landing_here",
         Reads::History,
     ),
+    ("crates/rdy-store/src/store.rs", "producer", Reads::Canon),
     (
-        "crates/rdy-store/src/plan.rs",
-        1229,
-        1229,
-        1234,
-        Reads::History,
-    ),
-    (
-        "crates/rdy-store/src/plan.rs",
-        1264,
-        1264,
-        1263,
+        "crates/rdy-store/src/store.rs",
+        "producer_at",
         Reads::History,
     ),
     (
         "crates/rdy-store/src/store.rs",
-        4222,
-        4426,
-        4514,
-        Reads::Canon,
-    ),
-    (
-        "crates/rdy-store/src/store.rs",
-        4372,
-        4576,
-        4664,
+        "producer_before",
         Reads::History,
     ),
     (
         "crates/rdy-store/src/store.rs",
-        4406,
-        4610,
-        4698,
-        Reads::History,
-    ),
-    (
-        "crates/rdy-store/src/store.rs",
-        4412,
-        4616,
-        4704,
+        "producer_before",
         Reads::History,
     ),
     (
         "crates/rdy-store/src/stream_source.rs",
-        635,
-        687,
-        712,
+        "landing_here",
         Reads::History,
     ),
-    ("crates/rdy-store/src/view.rs", 445, 445, 445, Reads::Canon),
-    ("crates/rdy-store/src/view.rs", 731, 731, 1128, Reads::Canon),
+    ("crates/rdy-store/src/view.rs", "landing_of", Reads::Canon),
+    ("crates/rdy-store/src/view.rs", "rebase_onto", Reads::Canon),
 ];
 
 /// The production `landing_of` calls added after b8b16064, which read current canon too: the
 /// gate fix after Task 1b (D-TVC38, D-08SPN: `through_replay` in `landed_as`), and Task 4's
 /// re-chained view onto a current base, which drops its landed changes (`view_rebase_rechained`).
-const ADDED: [(&str, u32); 2] = [
-    ("crates/rdy-engine/src/gate.rs", 2714),
-    ("crates/rdy-store/src/view.rs", 1415),
+const ADDED: [(&str, &str); 2] = [
+    ("crates/rdy-engine/src/gate.rs", "propose_relayed"),
+    ("crates/rdy-store/src/view.rs", "view_rebase_rechained"),
 ];
 
 fn workspace() -> std::path::PathBuf {
@@ -811,17 +733,42 @@ fn workspace() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// The production lines of `src` that call `landing_of`: no definition and no comment.
-fn landing_of_calls(file: &str) -> Vec<u32> {
+/// The name of the fn that a `fn` line declares, if it is one.
+fn fn_name(line: &str) -> Option<String> {
+    let mut t = line.trim_start();
+    if let Some(r) = t.strip_prefix("pub") {
+        t = match r.strip_prefix('(') {
+            Some(r) => r.split_once(')')?.1.trim_start(),
+            None => r.trim_start(),
+        };
+    }
+    for kw in ["async ", "const ", "unsafe "] {
+        t = t.strip_prefix(kw).unwrap_or(t);
+    }
+    let r = t.strip_prefix("fn ")?;
+    let n: String = r
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!n.is_empty()).then_some(n)
+}
+
+/// The enclosing fn of each production line of `file` that holds `call`: no definition and no
+/// comment.
+fn calls_in(file: &str, call: &str) -> Vec<String> {
     let text = std::fs::read_to_string(workspace().join(file)).unwrap();
-    text.lines()
-        .enumerate()
-        .filter(|(_, l)| {
-            let t = l.trim_start();
-            t.contains("landing_of(") && !t.starts_with("//") && !t.contains("fn landing_of")
-        })
-        .map(|(i, _)| i as u32 + 1)
-        .collect()
+    let mut cur = String::new();
+    let mut out = vec![];
+    for l in text.lines() {
+        if let Some(n) = fn_name(l) {
+            cur = n;
+        }
+        let t = l.trim_start();
+        if t.contains(call) && !t.starts_with("//") && fn_name(l).is_none() {
+            out.push(cur.clone());
+        }
+    }
+    out
 }
 
 /// D-QCE8M reader audit (Task 3b): every b8b16064 `landing_of` reader is accounted for. The
@@ -831,35 +778,25 @@ fn landing_of_calls(file: &str) -> Vec<u32> {
 /// exists.
 #[test]
 fn scc3_landing_dependencies_use_current_canon_membership() {
-    // the audit table against the source: each call is where the table says, of its kind
-    for (file, b8, s, now, reads) in READERS {
-        let text = std::fs::read_to_string(workspace().join(file)).unwrap();
-        let line = text.lines().nth(now as usize - 1).unwrap_or("");
+    // the audit table against the source: each reader sits in the fn the table names, of its kind
+    for (file, name, reads) in READERS {
         let want = match reads {
             Reads::Canon => "landing_of(",
             Reads::History => "first_carrier(",
             Reads::Landed => "check_landed(",
         };
+        let listed = READERS
+            .iter()
+            .filter(|r| r.0 == file && r.1 == name && r.2 == reads)
+            .count();
+        let there = calls_in(file, want).iter().filter(|n| *n == name).count();
         assert!(
-            line.contains(want),
-            "{file}:{b8} (S {s}) reads by {reads:?}: line {now} is {line:?}"
-        );
-    }
-    for (file, now) in ADDED {
-        let text = std::fs::read_to_string(workspace().join(file)).unwrap();
-        assert!(
-            text.lines()
-                .nth(now as usize - 1)
-                .unwrap()
-                .contains("landing_of("),
-            "{file}:{now} is not a landing_of reader"
+            there >= listed,
+            "{file}: fn {name} reads by {reads:?} and holds {there} of {listed} `{want}` calls"
         );
     }
     // no unlisted production reader of current canon
-    let mut files: Vec<&str> = READERS.iter().map(|r| r.0).collect();
-    files.sort();
-    files.dedup();
-    let mut found: Vec<(String, u32)> = vec![];
+    let mut found: Vec<(String, String)> = vec![];
     for dir in [
         "crates/rdy-engine/src",
         "crates/rdy-store/src",
@@ -880,7 +817,7 @@ fn scc3_landing_dependencies_use_current_canon_membership() {
                         .map(|c| c.as_os_str().to_string_lossy().into_owned())
                         .collect::<Vec<_>>()
                         .join("/");
-                    for n in landing_of_calls(&rel) {
+                    for n in calls_in(&rel, "landing_of(") {
                         found.push((rel.clone(), n));
                     }
                 }
@@ -888,11 +825,11 @@ fn scc3_landing_dependencies_use_current_canon_membership() {
         }
     }
     found.sort();
-    let mut want: Vec<(String, u32)> = READERS
+    let mut want: Vec<(String, String)> = READERS
         .iter()
-        .filter(|r| r.4 == Reads::Canon)
-        .map(|r| (r.0.to_string(), r.3))
-        .chain(ADDED.iter().map(|(f, n)| (f.to_string(), *n)))
+        .filter(|r| r.2 == Reads::Canon)
+        .map(|r| (r.0.to_string(), r.1.to_string()))
+        .chain(ADDED.iter().map(|(f, n)| (f.to_string(), n.to_string())))
         .collect();
     want.sort();
     assert_eq!(
