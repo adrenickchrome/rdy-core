@@ -6,8 +6,7 @@
 //! recorded remove their items (O23).
 use rdy_engine::coverage::confidence_of;
 use rdy_engine::pending::{
-    APPROVE_REASON_BESIDE, CARD_MAX_TOKENS, ExceptionKind, Item, ItemKind, Pending, Recommended,
-    card_hash, render,
+    CARD_MAX_TOKENS, ExceptionKind, Item, ItemKind, Pending, Recommended, card_hash, render,
 };
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::{
@@ -130,7 +129,18 @@ fn di5_a_ready_proposal_is_one_batch_card() {
             "Base",
             "Exceptions",
             "Policy",
+            "Recommendation",
         ]
+    );
+    // D-3N83P: the not-recommended decision beside this batch, and its reviewer's tension, are
+    // the causes; the live fact names the decision first
+    assert!(
+        fact(i, "Recommendation").starts_with(&format!(
+            "none: {} the proposer recommends reject; ",
+            b.not_recommended
+        )),
+        "{}",
+        fact(i, "Recommendation")
     );
     let opts: Vec<(&str, &str)> = i
         .options
@@ -146,12 +156,8 @@ fn di5_a_ready_proposal_is_one_batch_card() {
             ("later", "Later")
         ]
     );
-    // D-D8FAB: the approve reason is computed (decisions stand beside this batch), never the summary
-    assert_eq!(
-        i.options[0].recommended.as_ref().map(Recommended::reason),
-        Some(APPROVE_REASON_BESIDE)
-    );
-    assert!(i.options[1..].iter().all(|o| o.recommended.is_none()));
+    // D-3N83P (refining D-D8FAB): while a cause holds, no option is recommended
+    assert!(i.options.iter().all(|o| o.recommended.is_none()));
     let said: Vec<String> = i.options.iter().map(|o| o.consequences.join(" ")).collect();
     assert_eq!(
         said,
