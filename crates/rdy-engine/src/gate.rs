@@ -3291,10 +3291,12 @@ impl Rdy {
         // the fresh record assesses the version on the canon it was computed on, so the next
         // approval's freshness reads the landings after it
         a.base = st.canon_head();
-        // TASK-982 C1: the fresh card shown is the stored card, then the computed Imported fact,
-        // then (D-JQD5X, O13) the live verdict lines
+        // TASK-982 C1: the fresh card shown is the stored card, then (D-3N83P) the live
+        // Recommendation, the computed Imported fact, then (D-JQD5X, O13) the live verdict lines
         let changes = changes_of(st, &p.changes)?;
         let prospective = prospective_canon(st, &changes)?;
+        card.facts
+            .extend(crate::pending::queue::recommendation_fact(st, pref, p)?);
         card.facts
             .extend(crate::pending::queue::imported_fact(st, p, &prospective)?);
         crate::pending::queue::show_verdicts(st, pref, p, &mut card)?;

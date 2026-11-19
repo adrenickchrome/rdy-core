@@ -400,6 +400,34 @@ pub(crate) fn durable_matches(st: &ReadState, hex: &str) -> Result<Vec<Hash>, Rd
     Ok(out)
 }
 
+/// p-80ED3: the one open contradiction request whose case, rebuilt now, names the request id
+/// `hex` (the case of a contradiction is its pair's case, whose `request` is the pair's short
+/// id); none when no such request, or more than one, is open. A request with a verdict, or whose
+/// case changed, is left out: those are stale.
+pub(crate) fn durable_by_case_label(st: &ReadState, hex: &str) -> Result<Option<Hash>, RdyError> {
+    let answers = Answers::read(st)?;
+    let mut found = vec![];
+    for_each_request(st, |h, r| {
+        if r.check != AgentCheck::Contradiction.spec().name || !answers.of(&h, &r).is_empty() {
+            return Ok(true);
+        }
+        if let Rebuilt::Built(c) = rebuild_now(st, &r)?
+            && c.hash == r.case_hash
+            && c.case["request"]
+                .as_str()
+                .and_then(|l| l.strip_prefix("rq-"))
+                .is_some_and(|l| l.starts_with(hex))
+        {
+            found.push(h);
+        }
+        Ok(true)
+    })?;
+    Ok(match found.as_slice() {
+        [h] => Some(*h),
+        _ => None,
+    })
+}
+
 /// The verdicts that answer requests: Check reviews by the request they name, and pair reviews
 /// by the case hash they bind (a contradiction request's settlement is its pair's review).
 #[derive(Default)]

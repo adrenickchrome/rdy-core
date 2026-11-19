@@ -943,26 +943,32 @@ fn di7_all_recommended_records_each_item_on_its_own() {
         .answer_all_recommended(&agent(), PERSON, &refs[..2], &hashes[..2], relay.clone())
         .unwrap();
     assert_eq!(done.len(), 2);
-    // the rest, then the batch: the not-recommended decision is rejected, so the batch is not
-    // ready; the call stops there and reports what it did
+    // the rest, then the batch: while the not-recommended decision has no confirm answer, the
+    // batch card recommends no option (D-3N83P), so a list that names it is refused as a whole
+    // and answers nothing (D-91DEW)
     let mut rest = refs[2..].to_vec();
     rest.push(b.r#ref.clone());
     let mut rest_hashes = hashes[2..].to_vec();
     rest_hashes.push(item(&q, &b.r#ref).card_hash);
     let e = r
-        .answer_all_recommended(&agent(), PERSON, &rest, &rest_hashes, relay)
+        .answer_all_recommended(&agent(), PERSON, &rest, &rest_hashes, relay.clone())
         .unwrap_err();
-    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e}");
-    let corrected = e.corrected.as_ref().expect("what was done");
-    let reported: Vec<&str> = corrected["done"]
-        .as_array()
-        .expect("done")
-        .iter()
-        .map(|d| d["ref"].as_str().unwrap())
-        .collect();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert_eq!(answers(&r).len(), 2, "nothing more was answered");
+    // the rest alone: the not-recommended decision is rejected, so the batch is not ready
+    let rest_done = r
+        .answer_all_recommended(&agent(), PERSON, &refs[2..], &hashes[2..], relay)
+        .unwrap();
     assert_eq!(
-        reported,
+        rest_done
+            .iter()
+            .map(|d| d.r#ref.as_str())
+            .collect::<Vec<_>>(),
         refs[2..].iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert!(
+        pending(&r).items.iter().all(|i| i.r#ref != b.r#ref),
+        "the batch left the queue"
     );
     // each item has its own answer: its recommended option, its own card hash, the same words
     let mut ids = std::collections::BTreeSet::new();

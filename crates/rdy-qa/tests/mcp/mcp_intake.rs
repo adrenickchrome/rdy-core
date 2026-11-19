@@ -251,7 +251,9 @@ fn di12_rdy_answer_relays_a_batch_approval() {
         .unwrap_err();
         assert_eq!(e.code, "E_BAD_INPUT", "{kind}: {e:?}");
     }
-    // the approval lands, as the person, relayed by this session
+    // the approval lands, as the person, relayed by this session, on the card shown now: the
+    // confirm answers cleared the proposer's cause from its Recommendation fact (D-3N83P)
+    let v = pending_json(&mut st, json!({}));
     let info = relay(&mut st, &v, &b.r#ref, "approve").unwrap();
     assert_eq!(info["act"], "approve", "{info}");
     assert_eq!(info["assurance"], "relayed", "{info}");
@@ -626,7 +628,22 @@ fn recommended_ids(v: &Value, kind: &str) -> Vec<Vec<String>> {
 fn sdc3_an_approve_card_marks_one_option_with_a_reason() {
     let (_d, mut st, _b, _q) = every_kind();
     let v = pending_json(&mut st, json!({"max_tokens": 20000}));
-    assert_eq!(recommended_ids(&v, "approve"), vec![vec!["approve"]], "{v}");
+    // D-3N83P: this batch has a not-recommended decision and a reviewer's tension, so its card
+    // recommends no option and says why
+    assert_eq!(
+        recommended_ids(&v, "approve"),
+        vec![Vec::<String>::new()],
+        "{v}"
+    );
+    let batch = &of_kind(&v, "approve")[0];
+    let facts = batch["facts"].as_array().unwrap();
+    assert!(
+        facts
+            .iter()
+            .any(|f| f["name"] == "Recommendation"
+                && f["value"].as_str().unwrap().starts_with("none: ")),
+        "{batch}"
+    );
 }
 
 #[test]
@@ -713,15 +730,18 @@ fn sdc3_a_question_block_keeps_recommended_as_option_text() {
 
 #[test]
 fn sdc3_the_approve_reason_is_computed_never_the_summary() {
-    // decisions stand beside this batch: it lands after each has a confirm answer
+    // D-3N83P: this batch's not-recommended decision and reviewer's tension leave it with no
+    // recommended option, whatever its summary says
     let (_d, mut st, b, _q) = every_kind();
     let v = pending_json(&mut st, json!({"max_tokens": 20000}));
     let batch = item_of(&v, &b.r#ref);
-    assert_eq!(
-        recommended_of(&batch)[0]["reason"],
-        "its checks pass, and it lands after you confirm each decision beside it"
+    assert!(recommended_of(&batch).is_empty(), "{batch}");
+    let text = batch["card"].as_str().unwrap();
+    assert!(!text.contains("Why recommended:"), "{text}");
+    assert!(
+        !text.contains(&format!("Why recommended: {BATCH_SUMMARY}")),
+        "{text}"
     );
-    assert_ne!(recommended_of(&batch)[0]["reason"], BATCH_SUMMARY);
     // nothing stands beside this one
     let (d, r, made) = ready_and_not_ready();
     person_is_qa(d.path());
@@ -743,14 +763,21 @@ fn sdc3_the_card_prints_recommended_and_the_reason() {
     let (_d, mut st, b, _q) = every_kind();
     let v = pending_json(&mut st, json!({"max_tokens": 20000}));
     let card = |i: &Value| i["card"].as_str().unwrap().to_string();
-    // the approve card: the word beside the option, the computed reason under it
+    // the approve card of this batch recommends nothing (D-3N83P): no word beside any option,
+    // no reason under it, and the Recommendation fact says why
     let batch = card(&item_of(&v, &b.r#ref));
     let label = format!("Approve {} and confirm {}", b.r#ref, b.member);
-    let pad = " ".repeat(47usize.saturating_sub(label.chars().count()).max(2));
     let want = format!(
-        "  1. {label}{pad}recommended\n     Lands the proposal in canon.\n     Why recommended: its checks pass, and it lands after you\n     confirm each decision beside it\n  2. Reject\n"
+        "  1. {label}\n     Lands the proposal in canon.\n  2. Reject\n     Returns the proposal to its view. Canon does not change.\n  3. Later\n"
     );
     assert!(batch.contains(&want), "{batch}");
+    assert!(
+        batch.contains(&format!(
+            "  Recommendation  none: {} the proposer recommends reject; ",
+            b.not_recommended
+        )),
+        "{batch}"
+    );
     // a confirm card that recommends reject
     let rejected = of_kind(&v, "confirm")
         .into_iter()

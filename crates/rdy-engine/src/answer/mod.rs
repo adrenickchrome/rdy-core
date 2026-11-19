@@ -419,8 +419,9 @@ impl Rdy {
                 "answer it on its own",
             ));
         }
-        // D-91DEW: an approve card that shows a concern or fail verdict no person accepted has
-        // no recommended option either, so a list that names it is refused as a whole too
+        // D-91DEW, D-3N83P: an approve card that shows a concern or fail verdict no person
+        // accepted, or a Recommendation cause, has no recommended option either, so a list that
+        // names it is refused as a whole too
         if let Some(r) = open_hold_ref(&st, refs)? {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -534,7 +535,7 @@ fn removal_ref<'a>(st: &ReadState, refs: &'a [String]) -> Result<Option<&'a str>
 
 /// The first of `refs` that names the latest version of a proposal whose approve card shows a
 /// concern or fail check verdict that no person accepted (D-91DEW,
-/// [`crate::check::verdicts::open_hold`]). It reads only; a ref that does not resolve, or names
+/// [`crate::check::verdicts::open_hold`]), or a `Recommendation` cause (D-3N83P). It reads only; a ref that does not resolve, or names
 /// a version that is not the latest, is left to its own answer, in its turn.
 fn open_hold_ref<'a>(st: &ReadState, refs: &'a [String]) -> Result<Option<&'a str>, RdyError> {
     use crate::check::verdicts::{matching_verdicts, open_hold};
@@ -554,6 +555,13 @@ fn open_hold_ref<'a>(st: &ReadState, refs: &'a [String]) -> Result<Option<&'a st
         }
         let verdicts = matching_verdicts(st, &pref, &p)?;
         if open_hold(st, &pref, &verdicts)? {
+            return Ok(Some(r));
+        }
+        // D-3N83P: an approve card with a Recommendation cause recommends no option either
+        if matches!(
+            crate::pending::queue::recommendation_fact(st, &pref, &p),
+            Ok(Some(_))
+        ) {
             return Ok(Some(r));
         }
     }
