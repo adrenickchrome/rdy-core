@@ -38,3 +38,4 @@ mod gate_signing;
 mod gate_sync_replay;
 mod gate_tensions;
 mod gate_withdrawn;
+mod stop_early;

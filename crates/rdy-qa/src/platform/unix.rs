@@ -115,6 +115,48 @@ impl ProcessGroup {
         }
         first
     }
+
+    /// Asks every member that still runs to stop (SIGTERM to its process group), waits up to
+    /// `grace` for the groups to empty, then ends what is left ([`Self::kill`], SIGKILL). Only
+    /// the groups this value started are signalled.
+    pub fn stop(&self, grace: Duration) -> io::Result<()> {
+        let leaders = self
+            .leaders
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        for pid in &leaders {
+            // a group that is already empty refuses the signal, which is fine
+            let _ = signal_group(*pid, "TERM");
+        }
+        let until = Instant::now() + grace;
+        while Instant::now() < until
+            && leaders
+                .iter()
+                .any(|pid| signal_group(*pid, "0").is_ok_and(|alive| alive))
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.kill()
+    }
+}
+
+/// Sends `sig` (a `kill -s` name, or `0` to probe) to the process group `pid` leads; whether a
+/// member received it. PID 0 and a PID outside the signed range are refused.
+fn signal_group(pid: u32, sig: &str) -> io::Result<bool> {
+    if pid == 0 || i32::try_from(pid).is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{pid} is not a process group this process started"),
+        ));
+    }
+    Ok(Command::new("kill")
+        .args(["-s", sig, "--", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?
+        .success())
 }
 
 /// Where [`tcp_listen_ports`] reads: `proc` (the kernel's tables), or `lsof` where the host has
@@ -1387,6 +1429,42 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn tgs2_stop_sends_term_then_kill_after_the_grace() {
+        // a child that obeys TERM ends at once
+        let group = ProcessGroup::new().expect("group");
+        let mut child = group
+            .spawn(Command::new("sleep").arg("30"))
+            .expect("spawn sleep");
+        let start = Instant::now();
+        group.stop(Duration::from_secs(10)).expect("stop");
+        let status = child.wait().expect("reap");
+        assert_eq!(status.signal(), Some(15), "{status:?}");
+        assert!(start.elapsed() < Duration::from_secs(5));
+        // a child that ignores TERM is killed once the grace has passed
+        let group = ProcessGroup::new().expect("group");
+        let mut child = group
+            .spawn(
+                shell_script("trap '' TERM; echo ready; while :; do sleep 1; done")
+                    .stdout(Stdio::piped()),
+            )
+            .expect("spawn the shell");
+        // the shell says `ready` once its trap is set
+        let mut ready = [0u8; 6];
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_exact(&mut ready)
+            .expect("read ready");
+        assert_eq!(&ready, b"ready\n");
+        let start = Instant::now();
+        group.stop(Duration::from_millis(500)).expect("stop");
+        let status = child.wait().expect("reap");
+        assert_eq!(status.signal(), Some(9), "{status:?}");
+        assert!(start.elapsed() >= Duration::from_millis(500));
+    }
 
     #[test]
     fn ps9_short_tmp_root_is_tmp() {
