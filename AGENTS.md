@@ -74,6 +74,13 @@ Do not add a dependency that points the other way.
 
 ## Tests
 
+- Run the focused tests first. These two commands verify most changes:
+  - One engine test target: `cargo test -p rdy-engine --test disclosure_review_total`.
+  - One rdy-qa test, after `cargo build --release -p rdy-cli`: `cargo test -p rdy-qa --release --test daemon ls5_a_proposal_version_holds_still_and_its_latest_follows`.
+- `cargo qa --focus <crate|area>[::<filter>]` does the same with only the builds it needs. It builds the release CLI for an rdy-qa area and never for a crate. It runs no fmt, clippy, workspace tests or perf.
+  - `cargo qa --focus rdy-engine::disclosure_review_total` runs that test target alone, because the first filter part names a file in `tests/`.
+  - `cargo qa --focus daemon::ls5` runs the daemon area tests whose names contain `ls5`.
+  - A run that matches no test fails. The last line is the command that runs the same selection again.
 - Each rdy-qa area is one test binary, in `crates/rdy-qa/tests/<area>/`.
 - Run one area with `cargo test -p rdy-qa --release --test <area> <filter>`.
 - Build the release binary first with `cargo build --release -p rdy-cli`. `cargo qa` does this for you.
@@ -87,7 +94,7 @@ Do not add a dependency that points the other way.
 - The gate also takes `--only <area>`, `--skip-perf` and `--rebaseline`.
 - Timing belongs in perf ops. Never assert time in a correctness test.
 - Change a perf baseline only on the bench, with `--rebaseline`, after two runs that agree within 10%.
-- CI (`.github/workflows/ci.yml`) runs the fast gate on `main`. It is a cheap check and not the merge authority.
+- CI (`.github/workflows/ci.yml`) runs the fast gate on each pull request to `main` and on each push to `main`. It is a cheap check and not the merge authority.
 
 ## Shared engine modules
 

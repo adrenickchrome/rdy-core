@@ -285,6 +285,12 @@ impl ProcessGroup {
     pub fn kill(&self) -> io::Result<()> {
         self.job.terminate()
     }
+
+    /// Ends every process in the job. Windows has no TERM that a whole process tree can be
+    /// sent, so the job ends at once and `grace` is not used; Unix asks first.
+    pub fn stop(&self, _grace: Duration) -> io::Result<()> {
+        self.job.terminate()
+    }
 }
 
 /// Where [`tcp_listen_ports`] and [`tcp_listener_pids`] read: the TCP listener tables of
