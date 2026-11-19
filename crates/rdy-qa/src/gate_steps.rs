@@ -808,6 +808,8 @@ pub fn python_ci_step(
     }
     let mut tests = Command::new("python3");
     tests.args(["-m", "unittest", "discover", "-s", "tests/ci"]);
+    // no __pycache__ in the checkout: the report marks a tree with untracked files dirty
+    tests.env("PYTHONDONTWRITEBYTECODE", "1");
     let (ok, out) = run("python ci tests", tests, deadline);
     if ok {
         return Ok(Gate::ran(PYTHON_CI_GATE, true, String::new()));
