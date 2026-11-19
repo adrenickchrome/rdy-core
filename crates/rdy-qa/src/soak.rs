@@ -1,24 +1,37 @@
-//! The deep gate's memory soak check. The soak lands one change at a time on one daemon and takes
-//! a [`Sample`] after each landing. The check fails when:
+//! The deep gate's memory soak check. The soak lands one change at a time on one daemon serving a
+//! project of realistic size and takes a [`Sample`] after each landing. The check fails when:
 //!
 //! - (a) the daemon's anonymous resident memory (`RssAnon`) goes over [`RSS_ANON_LIMIT`] at any
 //!   sample;
-//! - (b) the daemon's live memory, less the bytes its capped caches say they hold, grows after
-//!   landing [`SETTLE_LANDINGS`]. A capped cache may fill up to its cap: that is not growth.
+//! - (b) the daemon's live memory, less the bytes its capped caches say they hold ("net"), grows
+//!   after landing [`SETTLE_LANDINGS`] by more than a fraction of what it was then. A capped cache
+//!   may fill up to its cap: that is not growth.
 //!
-//! "Grows" means the median net bytes of the last [`TAIL_SAMPLES`] samples is more than
-//! [`GROWTH_SLACK`] over the net bytes at landing [`SETTLE_LANDINGS`]. The slack is a fixed value
-//! by judgement: a leak of one scope's build per landing passes it within a few landings, and
-//! the project's own index growth over a soak stays well under it.
+//! "Grows" in (b): the median net of the last [`TAIL_SAMPLES`] samples is more than
+//! [`GROWTH_DIVISOR`]th of the net at landing [`SETTLE_LANDINGS`] over it ([`growth_allowed`]).
+//! The net at that landing is mostly canon's build, so the bound scales with the project: a
+//! leak that keeps one copy of the project per landing passes it within a few landings, while
+//! what a soak's landings add (a small doc each, and their history) stays well under it.
+//!
+//! A growth check is only as sharp as the project is large, so the check also fails when the net
+//! at landing [`SETTLE_LANDINGS`] is under [`MIN_SETTLED_NET`]: the soak's project is too small.
 
 /// The most anonymous resident memory the daemon may hold at any sample (800 MiB).
 pub const RSS_ANON_LIMIT: u64 = 800 * 1024 * 1024;
 /// The landings before the growth check starts: start-up caches fill in these.
 pub const SETTLE_LANDINGS: u64 = 5;
-/// How far the net bytes may rise over the settled value before it counts as growth (32 MiB).
-pub const GROWTH_SLACK: u64 = 32 * 1024 * 1024;
+/// The net may rise by this fraction (1/4) of its settled value before it counts as growth.
+pub const GROWTH_DIVISOR: u64 = 4;
+/// The least net at landing [`SETTLE_LANDINGS`] for which the growth check can tell a leak from
+/// noise (16 MiB): a smaller project's copies are lost in the allocator's own variation.
+pub const MIN_SETTLED_NET: u64 = 16 * 1024 * 1024;
 /// The samples at the end whose median is compared with the settled value.
 pub const TAIL_SAMPLES: usize = 5;
+
+/// How far the net may rise over `settled`, its value at landing [`SETTLE_LANDINGS`].
+pub fn growth_allowed(settled: u64) -> u64 {
+    settled / GROWTH_DIVISOR
+}
 
 /// One reading of the daemon, taken after landing `landing`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +81,12 @@ pub fn check(samples: &[Sample]) -> Result<(), String> {
             after.len(),
             base.landing
         )),
+        Some(base) if base.net() < MIN_SETTLED_NET => failed.push(format!(
+            "net {} at landing {} is under {}: the project is too small for the growth check",
+            mib(base.net()),
+            base.landing,
+            mib(MIN_SETTLED_NET)
+        )),
         Some(base) => {
             let mut tail: Vec<u64> = after[after.len() - TAIL_SAMPLES..]
                 .iter()
@@ -75,16 +94,17 @@ pub fn check(samples: &[Sample]) -> Result<(), String> {
                 .collect();
             tail.sort_unstable();
             let end = tail[TAIL_SAMPLES / 2];
-            if end > base.net().saturating_add(GROWTH_SLACK) {
+            let allowed = growth_allowed(base.net());
+            if end > base.net().saturating_add(allowed) {
                 let last = after[after.len() - 1];
                 failed.push(format!(
                     "live memory less capped caches grew from {} at landing {} to {} at landing {} \
-                     (median of the last {TAIL_SAMPLES}), over the {} slack",
+                     (median of the last {TAIL_SAMPLES}), more than the {} (1/{GROWTH_DIVISOR}) allowed",
                     mib(base.net()),
                     base.landing,
                     mib(end),
                     last.landing,
-                    mib(GROWTH_SLACK)
+                    mib(allowed)
                 ));
             }
         }
@@ -143,8 +163,9 @@ mod tests {
 
     #[test]
     fn soak1_growth_after_landing_5_with_no_cache_growth_fails() {
-        // 1 MiB a landing of live memory, the cache flat
-        let s = series(60, |l| (500 * MB, 300 * MB + l * MB, 8 * MB));
+        // 3 MiB a landing of live memory, the cache flat: over 40 landings that is 105 MiB on a
+        // settled 307 MiB, more than a quarter
+        let s = series(40, |l| (500 * MB, 300 * MB + 3 * l * MB, 8 * MB));
         let e = check(&s).unwrap_err();
         assert!(e.contains("grew") && e.contains("landing 5"), "{e}");
         assert!(!e.contains("RssAnon"), "{e}");
@@ -161,6 +182,25 @@ mod tests {
         });
         assert_eq!(check(&s), Ok(()));
         assert_eq!(s.last().unwrap().cache, CAP, "the cache reached its cap");
+    }
+
+    #[test]
+    fn soak1_a_leaked_project_copy_per_landing_fails_and_fair_growth_passes() {
+        // a 40 MiB canon; the old engine kept one copy of it per landing
+        let leak = series(40, |l| (300 * MB, 60 * MB + l * 40 * MB, 0));
+        let e = check(&leak).unwrap_err();
+        assert!(e.contains("grew"), "{e}");
+        // the fixed engine: each landing adds a small doc and its history (64 KiB)
+        let fair = series(40, |l| (300 * MB, 60 * MB + l * 64 * 1024, 0));
+        assert_eq!(check(&fair), Ok(()));
+    }
+
+    #[test]
+    fn soak1_a_project_too_small_to_show_a_leak_fails() {
+        // the first bench run: about 1.3 MiB of net at landing 5
+        let s = series(40, |l| (5 * MB, MB + l * 45 * 1024, 0));
+        let e = check(&s).unwrap_err();
+        assert!(e.contains("too small"), "{e}");
     }
 
     #[test]

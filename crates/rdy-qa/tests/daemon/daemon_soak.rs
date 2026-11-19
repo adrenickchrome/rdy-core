@@ -1,8 +1,10 @@
-//! The deep gate's memory soak: one served daemon takes a run of landings, and after each one the
-//! harness reads the daemon's `RssAnon` and the memory report of `rdy status --json` (the
-//! allocator's live bytes and the bytes the capped caches hold). `rdy_qa::soak::check` then
-//! applies the 800 MiB limit and the no-growth rule after landing 5. Deep gate only; the
-//! readings are Linux ones, so other platforms skip with a line that says so.
+//! The deep gate's memory soak: one served daemon, on a project of about 20,000 blocks, takes a
+//! run of landings. Each landing comes from a view of its own, so a closed view or an old landing
+//! that kept its own copy of the project would show as growth. After each landing the harness
+//! reads the daemon's `RssAnon` and the memory report of `rdy status --json` (the allocator's
+//! live bytes and the bytes the capped caches hold). `rdy_qa::soak::check` then applies the
+//! 800 MiB limit and the relative growth rule after landing 5. Deep gate only; the readings are
+//! Linux ones, so other platforms skip with a line that says so.
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::deep;
 use rdy_qa::platform;
@@ -13,6 +15,17 @@ use std::io::Write;
 const NAME: &str = "soak1_daemon_memory_stays_bounded_over_landings";
 /// The landings of one soak; `RDY_QA_SOAK_LANDINGS` sets another count.
 const LANDINGS: u64 = 40;
+/// The seeded project: 20 folders of 10 docs, each with 97 claims (about 20,000 blocks), landed
+/// on canon before the daemon starts.
+const FOLDERS: usize = 20;
+const DOCS_PER_FOLDER: usize = 10;
+const CLAIMS_PER_DOC: usize = 97;
+
+fn seed(project: &std::path::Path) {
+    rdy_engine::testkit::generate_tree(project, FOLDERS, DOCS_PER_FOLDER, CLAIMS_PER_DOC);
+    let mut r = rdy_engine::Rdy::open(project).expect("open the seeded project");
+    rdy_qa::fixtures::land_with_a_tie(&mut r, "work");
+}
 
 fn landings() -> u64 {
     std::env::var("RDY_QA_SOAK_LANDINGS")
@@ -35,10 +48,15 @@ fn ok(s: &Served, args: &[&str]) -> serde_json::Value {
     v
 }
 
-/// Lands one new doc through the human's CLI: write, propose, approve.
+/// Lands one new doc through the human's CLI, from a view of its own: write, propose, approve.
 fn land(s: &Served, n: u64) {
     let (name, title) = (format!("soak-{n}"), format!("Soak {n}"));
-    ok(s, &["--json", "new", "doc", &name, "--title", &title]);
+    ok(
+        s,
+        &[
+            "--json", "new", "doc", &name, "--title", &title, "--view", &name,
+        ],
+    );
     let p = ok(
         s,
         &[
@@ -46,6 +64,8 @@ fn land(s: &Served, n: u64) {
             "propose",
             "--title",
             &title,
+            "--view",
+            &name,
             "--summary",
             "Adds one doc.",
         ],
@@ -69,7 +89,7 @@ fn soak1_daemon_memory_stays_bounded_over_landings() {
         );
         return;
     }
-    let s = Served::new();
+    let s = Served::seeded(seed);
     // the served status carries the daemon's memory report on every platform
     let first = ok(&s, &["--json", "status"]);
     assert!(
