@@ -32,6 +32,9 @@ fn race1_eight_clients_against_a_cold_project_start_one_daemon_and_all_reach_it(
         "1",
         &[("RDY_DAEMON_PROGRESS_MS", "300")],
     );
+    // the eight clients stay connected through the count below: a session is in the daemon's
+    // table before its ready reply, so the count is exact while they are open, and a closed
+    // client's session ends later on the daemon's side
     let pids: Vec<u64> = rt().block_on(async {
         let mut tasks = vec![];
         for _ in 0..8 {
@@ -44,13 +47,22 @@ fn race1_eight_clients_against_a_cold_project_start_one_daemon_and_all_reach_it(
                     .as_u64()
                     .unwrap();
                 c.ctl("count", json!({})).await.unwrap();
-                pid
+                (pid, c)
             }));
         }
         let mut out = vec![];
+        let mut open = vec![];
         for t in tasks {
-            out.push(t.await.unwrap());
+            let (pid, c) = t.await.unwrap();
+            out.push(pid);
+            open.push(c);
         }
+        let mut c = connect_or_start(&run, client(&run, "1", dir.path(), spawn.clone()))
+            .await
+            .unwrap();
+        assert_eq!(c.ctl("ping", json!({})).await.unwrap()["sessions"], 9);
+        c.ctl("stop", json!({})).await.unwrap();
+        drop(open);
         out
     });
     assert_eq!(count.load(Ordering::SeqCst), 1, "one spawn");
@@ -58,13 +70,6 @@ fn race1_eight_clients_against_a_cold_project_start_one_daemon_and_all_reach_it(
         pids.iter().all(|p| *p == pids[0]) && pids[0] != u64::from(std::process::id()),
         "{pids:?}"
     );
-    rt().block_on(async {
-        let mut c = connect_or_start(&run, client(&run, "1", dir.path(), spawn.clone()))
-            .await
-            .unwrap();
-        assert_eq!(c.ctl("ping", json!({})).await.unwrap()["sessions"], 1);
-        c.ctl("stop", json!({})).await.unwrap();
-    });
     wait_endpoint_gone(&run);
 }
 
