@@ -70,7 +70,17 @@ fn soak1_daemon_memory_stays_bounded_over_landings() {
         return;
     }
     let s = Served::new();
-    ok(&s, &["--json", "status"]);
+    // the served status carries the daemon's memory report on every platform
+    let first = ok(&s, &["--json", "status"]);
+    assert!(
+        first["memory"]["capped_cache_bytes"].is_u64(),
+        "the served status has no memory report: {first}"
+    );
+    assert_eq!(
+        first["memory"]["live_bytes"].is_u64(),
+        cfg!(all(target_os = "linux", target_env = "gnu")),
+        "{first}"
+    );
     let pid = s.daemon_pid().expect("a served daemon");
     if platform::rss_anon_bytes(pid).is_none() {
         not_here("RssAnon is read from /proc/<pid>/status, on Linux only");

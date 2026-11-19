@@ -222,13 +222,8 @@ fn ctl2_status_reports_views_owners_seq_open_report_and_quarantine() {
     let v = dispatch(&cx(&e, &s, d.path()), "status", json!({"log_bytes": true})).unwrap();
     assert!(v["log_bytes"].as_u64().unwrap() > 0, "{v}");
     assert_eq!(v["removed_bytes"], 0);
-    // the memory report: what the capped caches hold, and live bytes where glibc counts them
-    assert!(v["memory"]["capped_cache_bytes"].is_u64(), "{v}");
-    assert_eq!(
-        v["memory"]["live_bytes"].is_u64(),
-        rdy_daemon::sys::malloc_live_bytes().is_some(),
-        "{v}"
-    );
+    // the memory report is the daemon's: a run with no daemon leaves it out
+    assert!(v.get("memory").is_none(), "{v}");
     let rows = v["by_kind"].as_array().unwrap();
     assert!(!rows.is_empty(), "{v}");
     assert_eq!(

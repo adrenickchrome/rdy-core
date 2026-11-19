@@ -216,12 +216,15 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
         if let (Some(into), Value::Object(from)) = (v.as_object_mut(), bytes) {
             into.extend(from);
         }
-        // the memory report (deep-gate soak): the allocator's live bytes (Linux with glibc,
-        // else null) and the bytes the capped caches say they hold
-        v["memory"] = json!({
-            "live_bytes": crate::sys::malloc_live_bytes(),
-            "capped_cache_bytes": st.reader().map_cache_bytes(),
-        });
+        // the daemon's memory report (deep-gate soak): the allocator's live bytes (Linux with
+        // glibc, else null) and the bytes the capped caches say they hold. A run with no daemon
+        // has no long-lived process to report on, so it leaves it out.
+        if cx.engine.daemon_identity().is_some() {
+            v["memory"] = json!({
+                "live_bytes": crate::sys::malloc_live_bytes(),
+                "capped_cache_bytes": st.reader().map_cache_bytes(),
+            });
+        }
     }
     Ok(v)
 }
