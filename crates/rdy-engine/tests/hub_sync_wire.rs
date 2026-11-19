@@ -1,7 +1,7 @@
 //! scc8 (D-H0BZN, D-N8PR2, D-4XHPH): the sync wire's steps against rdyhub's frozen wire
 //! fixtures. Fixture v1 covers discovery, state (the publish-upload form, no views), known (push
 //! form) and put; fixture v2 adds state with named views, known's pull form, get, write and the
-//! outcome lookup. Every test drives the real HTTPS wire against loopback TLS fixtures with
+//! outcome lookup; fixture v3a adds the held write reply and the held outcomes. Every test drives the real HTTPS wire against loopback TLS fixtures with
 //! generated CAs; the exchange-level pins run the sync service over the fake hub of
 //! `support/sync_env.rs`. Each fixture is a byte copy of the hub's file; its SHA-256 is pinned.
 mod common;
@@ -19,9 +19,9 @@ use rdy_engine::hub_publish_wire::{
 };
 use rdy_engine::hub_sync::{PullRequest, check_minimum};
 use rdy_engine::hub_sync_wire::{
-    GateSettings, GetRequest, HttpSyncWire, KnownPull, LookupOutcome, MAX_STATE_VIEWS, PackReason,
-    ProposeGate, SETTINGS_MEMBERS, SyncStateRequest, SyncWire, WRITE_REQUEST_BYTES, WriteFailure,
-    WriteKind, WriteOutcome, WriteRequest as SyncWrite, WriteTag, decode_settings,
+    GateSettings, GetRequest, HttpSyncWire, HubRequest, KnownPull, LookupOutcome, MAX_STATE_VIEWS,
+    PackReason, ProposeGate, SETTINGS_MEMBERS, SyncStateRequest, SyncWire, WRITE_REQUEST_BYTES,
+    WriteFailure, WriteKind, WriteOutcome, WriteRequest as SyncWrite, WriteTag, decode_settings,
 };
 use rdy_engine::hub_types::{Origin, OriginFence, RequestClaim, Secret};
 use rdy_engine::render_inputs::RenderInputs;
@@ -45,6 +45,9 @@ const FIXTURE: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wi
 const FIXTURE_SHA256: &str = "18ade8e2c1a301d780270f20fe49fc116110a6aa512baf624d768ef5ba39711f";
 const FIXTURE_V2: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v2.json");
 const FIXTURE_V2_SHA256: &str = "ddc3e17a39425ba7af5a7a4be8531fa89e484b2ff82cc4f4b12d8d37418e33e7";
+/// rdyhub's fixture v3a (972e7867): the held write reply and the held outcomes.
+const FIXTURE_V3A: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v3a.json");
+const FIXTURE_V3A_SHA256: &str = "101179344b2a81b71878dbaf05864ceeaaed652b1978707fcf2bfd96f0b3b188";
 const PUSH: &str = "0123456789abcdefghjkmnpqrs";
 const REPO_PATH: &str = "/acme/docs";
 
@@ -361,10 +364,8 @@ fn fixture_v2_steps() {
         ]
     );
     // the cases the hub does not serve yet: six, each with its step, design and reason; the
-    // client pins none of them here (rdyhub d84d2d96 serves the tag cases). Skips that wait for
-    // fixture v3a: the write held as a landing request (i-B40VF, D-PGQZM) and the outcome
-    // `held` with `request_state` `open` and `closed` (i-6YB7Y); the client's clear on
-    // `closed` is pinned on the mock hub by scc8_pull_clears_held_only_on_applied_or_closed_request
+    // client pins none of them here (rdyhub d84d2d96 serves the tag cases). Fixture v3a serves
+    // the two held cases (scc8_wire_fixture_v3a_held_write_and_outcome)
     let not_served = f["not_served"].as_array().unwrap();
     let skipped: Vec<(&str, &str)> = not_served
         .iter()
@@ -2061,4 +2062,114 @@ fn scc8_state_canon_reads_object_key_and_hex_forms() {
         assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL, "{canon}");
     }
     assert_eq!(s.finish(), 0);
+}
+
+/// Fixture v3a (rdyhub 972e7867; D-PGQZM, D-H67EN): the held forms. Step 0, the write held as a
+/// new landing request (i-B40VF): the client sends the fixture's body (its gate values aside)
+/// and reads `held` with the request and the unchanged hub tip. Steps 1 and 2, the outcome of a
+/// held push (i-6YB7Y): `held` with its request, kind and tip, and `request_state` `open` or
+/// `closed`. Each decoded outcome then drives a pull over the fake hub: `open` keeps `held`,
+/// `closed` (the request closed with no landing) clears it. The dump step stays not served.
+#[test]
+fn scc8_wire_fixture_v3a_held_write_and_outcome() {
+    assert_eq!(sha256(FIXTURE_V3A), FIXTURE_V3A_SHA256);
+    let f: Value = serde_json::from_slice(FIXTURE_V3A).unwrap();
+    assert_eq!(f["fixture"], "sync-client-wire");
+    assert_eq!(f["version"], "3a");
+    assert_eq!(f["media_type"], SYNC_MEDIA_TYPE);
+    let st: Vec<Value> = f["steps"].as_array().unwrap().clone();
+    let named: Vec<&str> = st.iter().map(|s| s["step"].as_str().unwrap()).collect();
+    assert_eq!(named, ["write", "outcome", "outcome"]);
+    let not_served: Vec<&str> = f["not_served"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["step"].as_str().unwrap())
+        .collect();
+    assert_eq!(not_served, ["dump"]);
+
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+
+    // 0: the held write reply
+    let w = &st[0];
+    let b = &w["request"]["body"];
+    let (r, req) = served(&mut s, reply_of(w), || hub.wire.write(&cx, &write_of(b)));
+    matches_request(&req, w);
+    let sent: Value = serde_json::from_slice(&req.body).unwrap();
+    assert_eq!(without(&sent, "gate"), without(b, "gate"));
+    assert_eq!(object_keys(&sent["gate"]), object_keys(&b["gate"]));
+    let rep = &w["reply"]["body"];
+    let got = r.unwrap();
+    assert_eq!(
+        (got.outcome, got.tip, got.request, got.min_rdy_raised),
+        (
+            WriteOutcome::Held,
+            Some(key_of(&rep["tip"])),
+            Some(HubRequest {
+                number: 1,
+                version: 1
+            }),
+            false
+        )
+    );
+    assert_eq!(got.tip, Some(key_of(&b["expected"])), "the hub tip stays");
+
+    // 1, 2: the held outcomes, open and closed with no landing
+    let mut replies = Vec::new();
+    for (i, number, state) in [(1, 1, "open"), (2, 2, "closed")] {
+        let o = &st[i];
+        let push = o["request"]["body"]["push"].as_str().unwrap();
+        let (r, req) = served(&mut s, reply_of(o), || hub.wire.outcome(&cx, push));
+        matches_request(&req, o);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&req.body).unwrap(),
+            o["request"]["body"]
+        );
+        let got = r.unwrap();
+        assert_eq!(
+            got.outcome,
+            LookupOutcome::Held {
+                request: HubRequest { number, version: 1 },
+                tip: Some(key_of(&o["reply"]["body"]["tip"])),
+            },
+            "step {i}"
+        );
+        assert_eq!(got.kind.as_deref(), Some("landings"));
+        assert_eq!(got.view, None);
+        assert_eq!(got.request_state.as_deref(), Some(state));
+        replies.push((state, got));
+    }
+    assert_eq!(s.finish(), 0);
+
+    // each decoded outcome, as the fake hub's answer for a held push: open keeps held, closed
+    // clears it; applied stays at the hub tip
+    for (state, reply) in replies {
+        let e = fake_env(2);
+        let tip = e.landings[0];
+        let fake = sync_env::Hub::new().with_state(|x| x.canon = Some(tip));
+        fake.plan_write(
+            1,
+            sync_env::WritePlan::Held {
+                number: 9,
+                version: 1,
+            },
+        );
+        sync_env::push(&e, &fake, None).unwrap();
+        let held = sync_env::canon_of(&e, "shared").unwrap().held.unwrap();
+        fake.outcomes
+            .lock()
+            .unwrap()
+            .insert(held.push.clone(), reply);
+        let (_dir, hub_store) = sync_env::copy_project(&e);
+        fake.serve(hub_store.read());
+        let pulled = sync_env::Sync::new(&e, &fake)
+            .pull(PullRequest::default())
+            .unwrap();
+        assert!(pulled.warnings.is_empty());
+        let c = sync_env::canon_of(&e, "shared").unwrap();
+        let want = (state == "open").then_some(held);
+        assert_eq!((c.applied, c.held), (Some(tip), want), "{state}");
+    }
 }

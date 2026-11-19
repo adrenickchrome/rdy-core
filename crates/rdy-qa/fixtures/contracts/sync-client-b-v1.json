@@ -32709,6 +32709,7 @@
     "fixture_digests": {
       "sync-client-wire-v1.json": "7794 043ca470d8cc650e9b5dcac1ad9c8df00ccf89751c97b362c6871e684f379930",
       "sync-client-wire-v2.json": "370054 dfabfbe32be6f16acd0cb2c5291d2ecba14c9590794633fbdb89d3ef3baa6be1",
+      "sync-client-wire-v3a.json": "34732 b024f9433a2fd491b4f2733e36f6c2240d306780f40d9619a88b7cbcd2ad480c",
       "sync4-canon-history.bin": "5884 8d51365e1d9bd84bf9c00526e672d401298d0128cdf3590d1c09f50eb5f746e4",
       "sync4-canon-history.expect.json": "4641 19bd7fd90178c3883d3d9cd018577877a7aaa6eadfb6d1da99355a9693574e5c",
       "sync4-view-history.bin": "6699 0abb9333ec131aa4f87c78e0a549322d053c49048c0c7ab15dd309ec96f7dace",

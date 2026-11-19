@@ -72,6 +72,10 @@ const SCC8_CHANGES: &[(&str, &str)] = &[
         "added /sync/fixture_digests/sync-client-wire-v2.json",
         "rdyhub's frozen sync wire fixture v2, a byte copy (Task 8a2); v1 stays beside it",
     ),
+    (
+        "added /sync/fixture_digests/sync-client-wire-v3a.json",
+        "rdyhub's frozen sync wire fixture v3a, a byte copy: the held write and held outcomes (D-PGQZM)",
+    ),
 ];
 
 /// The members Task 9a adds to [`CURRENT`] (D-47HVF, D-2VM48): the chat tools, the command
@@ -609,6 +613,7 @@ fn scc10_contract_delta_is_exactly_the_owned_leaves() {
 /// pin moves, and then only these digests and the `rdy` strings change.
 const WIRE_V1_SHA: &str = "18ade8e2c1a301d780270f20fe49fc116110a6aa512baf624d768ef5ba39711f";
 const WIRE_V2_SHA: &str = "ddc3e17a39425ba7af5a7a4be8531fa89e484b2ff82cc4f4b12d8d37418e33e7";
+const WIRE_V3A_SHA: &str = "101179344b2a81b71878dbaf05864ceeaaed652b1978707fcf2bfd96f0b3b188";
 
 /// The contract fixtures before this plan, each with the sha256 of the bytes its release shipped.
 const EARLIER: &[(&str, &str)] = &[
@@ -690,7 +695,7 @@ fn sync_fixture(name: &str) -> Vec<u8> {
     std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
-/// scc10: every earlier contract fixture, `sync-client-v1.json` included, and both wire fixtures
+/// scc10: every earlier contract fixture, `sync-client-v1.json` included, and the wire fixtures
 /// and the released stream expect files keep their bytes; the contracts folder holds these and
 /// the successor alone, and the successor's wire digests name the wire files as they stand.
 #[test]
@@ -700,6 +705,10 @@ fn scc10_predecessor_fixtures_keep_their_bytes() {
     }
     assert_eq!(sha(&sync_fixture("sync-client-wire-v1.json")), WIRE_V1_SHA);
     assert_eq!(sha(&sync_fixture("sync-client-wire-v2.json")), WIRE_V2_SHA);
+    assert_eq!(
+        sha(&sync_fixture("sync-client-wire-v3a.json")),
+        WIRE_V3A_SHA
+    );
     for (name, want) in STREAM_EXPECTS {
         assert_eq!(&sha(&sync_fixture(name)), want, "{name} is frozen");
     }
@@ -723,6 +732,10 @@ fn scc10_predecessor_fixtures_keep_their_bytes() {
         (
             "sync-client-wire-v2.json",
             sync_fixture("sync-client-wire-v2.json"),
+        ),
+        (
+            "sync-client-wire-v3a.json",
+            sync_fixture("sync-client-wire-v3a.json"),
         ),
     ] {
         assert_eq!(
