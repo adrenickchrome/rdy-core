@@ -403,6 +403,17 @@ fn main() {
             report::add_missing(&mut areas, binary);
             continue;
         }
+        if binary == "release" {
+            match rdy_qa::release_preflight::run(&root(), git(&["rev-parse", "--short", "HEAD"])) {
+                Ok(rev) => gate("release preflight", true, format!("revision {rev}")),
+                Err(e) => {
+                    eprintln!("release preflight refused: {e}");
+                    gate("release preflight", false, e);
+                    report::add_missing(&mut areas, binary);
+                    continue;
+                }
+            }
+        }
         let mut c = with_require_all(
             cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]),
             &args,
@@ -500,7 +511,11 @@ fn main() {
     }
     let pass = report::overall(&gates, &areas, perf_ok);
     let rep = Report {
-        revision: git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into()),
+        revision: rdy_qa::release_preflight::recorded_revision(
+            git(&["rev-parse", "--short", "HEAD"]).as_deref(),
+            std::env::var("RDY_QA_SOURCE_REVISION").ok().as_deref(),
+        )
+        .unwrap_or_else(|| "unknown".into()),
         dirty,
         machine,
         mode,
