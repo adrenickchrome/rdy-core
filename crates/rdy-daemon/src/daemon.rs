@@ -1379,14 +1379,15 @@ impl Conn {
                     version: self.version.clone(),
                 };
                 // before the reply: the client spawns a successor as soon as it reads it, and the
-                // successor's run files must not be removed by `run`'s cleanup afterwards
+                // successor's run files must not be removed by `run`'s cleanup afterwards; and the
+                // reason, so a stop that comes once the client has read the reply finds it set
                 self.files.remove(&self.run);
+                let _ = self.reason.set(ExitReason::VersionReplaced);
                 close_after_reply(stream, &reply).await;
                 log(&format!(
                     "a client of version {} arrived with no sessions; exiting to be replaced",
                     hello.version
                 ));
-                let _ = self.reason.set(ExitReason::VersionReplaced);
                 self.info.stop.send_replace(true);
             } else {
                 let error = ErrorReply::new(
