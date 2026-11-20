@@ -8,14 +8,20 @@
 //! `proposal:P-<id>@<n>`; none is a default but `canon`. A full landing hash (`landing:` and 64
 //! lowercase hex) reads any landing that D-Y32MN's reach finds from the snapshot's captured
 //! refs: canon, a tag, a held chain or a replaced mark, and a met landing's `rebased_from`. A
-//! shorter landing id matches among canon's chain, as `rdy_read` matches it. A cut reply carries `truncated` and
-//! `omitted` and no `next`: a host narrows the read instead of paging it.
+//! shorter landing id matches among canon's chain, as `rdy_read` matches it. In a holder,
+//! `view:<name>@<op>` (the op's 64 lowercase hex digits) reads a pushed view at that op of the
+//! chain of its captured head, with the base and the included set at that op (D-00ZG2); a
+//! project keeps refusing every view scope, because its views have owners and sessions. A cut
+//! reply carries `truncated` and `omitted` and no `next`: a host narrows the read instead of
+//! paging it.
 
 use crate::store::Snapshot;
 use rdy_engine::search::{SearchFilters, SearchQuery};
 use rdy_engine::tool_reads::{self, check_tokens};
-use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, RdyError, Scope, is_proposal_ref};
+use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, RdyError, ReadState, Scope, is_proposal_ref};
 use rdy_model::Hash;
+use rdy_store::StoreError;
+use rdy_store::holder::StoreMode;
 use serde_json::{Value, json};
 
 /// The scope `rdy_read` and `rdy_search` take when none is given.
@@ -27,7 +33,8 @@ pub struct ReadRequest {
     /// A block id, key or path; `<doc>#<heading-slug>`; `id@version`; or `P-<id>@<n>` for a
     /// proposal version.
     pub id: String,
-    /// `canon` (the default), `tag:<version>`, `landing:<id>` or `proposal:P-<id>@<n>`.
+    /// `canon` (the default), `tag:<version>`, `landing:<id>` or `proposal:P-<id>@<n>`; in a
+    /// holder also `view:<name>@<op>`.
     pub scope: Option<String>,
     /// `compact` (the default), `markdown` or `yaml`.
     pub format: Option<String>,
@@ -44,7 +51,8 @@ pub struct SearchRequest {
     pub query: String,
     pub regex: bool,
     pub ignore_case: bool,
-    /// `canon` (the default), `tag:<version>`, `landing:<id>` or `proposal:P-<id>@<n>`.
+    /// `canon` (the default), `tag:<version>`, `landing:<id>` or `proposal:P-<id>@<n>`; in a
+    /// holder also `view:<name>@<op>`.
     pub scope: Option<String>,
     pub max_tokens: Option<usize>,
     pub filters: SearchFilters,
@@ -59,14 +67,20 @@ fn refuse(what: String, fix: &str) -> RdyError {
 }
 
 /// The scope text a host may name; a view name, `view:<name>` and `inflight` belong to a session.
-fn check_scope(scope: &Option<String>) -> Result<(), RdyError> {
+/// A holder's pushed view at an op (`view:<name>@<op>`) belongs to none: `holder` says whether
+/// the store is one.
+fn check_scope(
+    scope: &Option<String>,
+    holder: impl FnOnce() -> Result<bool, RdyError>,
+) -> Result<(), RdyError> {
     let Some(text) = scope else {
         return Ok(());
     };
     let ok = text == DEFAULT_SCOPE
         || ["tag:", "landing:", "proposal:"]
             .iter()
-            .any(|p| text.starts_with(p));
+            .any(|p| text.starts_with(p))
+        || (view_op(scope).is_some() && holder()?);
     if ok {
         return Ok(());
     }
@@ -80,6 +94,14 @@ fn check_scope(scope: &Option<String>) -> Result<(), RdyError> {
 fn full_landing(scope: &Option<String>) -> Option<Hash> {
     // a hash parses from exactly 64 lowercase hex digits
     scope.as_deref()?.strip_prefix("landing:")?.parse().ok()
+}
+
+/// The view and the op a `view:<name>@<64 lowercase hex>` scope names; None for every other
+/// scope text.
+fn view_op(scope: &Option<String>) -> Option<(&str, Hash)> {
+    let (name, op) = scope.as_deref()?.strip_prefix("view:")?.rsplit_once('@')?;
+    // a hash parses from exactly 64 lowercase hex digits
+    Some((name, op.parse().ok()?))
 }
 
 fn check_page(page: &Option<String>) -> Result<(), RdyError> {
@@ -109,7 +131,59 @@ pub(crate) fn unreached(hash: Hash) -> RdyError {
     )
 }
 
+/// `E_NOT_FOUND`: an op that the chain of view `name`'s captured head does not hold.
+fn no_view_op(name: &str, op: Hash) -> RdyError {
+    RdyError::new(
+        E_NOT_FOUND,
+        format!("view {name:?} has no op {op} in its chain"),
+        "name a head op of this view; read its heads with view_heads",
+    )
+}
+
+/// What a read of a scope text reads: the engine's resolution of the text, a scope the snapshot
+/// resolved, or a pushed view's own state at an op, read as that view.
+enum Target {
+    Engine,
+    At(Scope),
+    View(Box<ReadState>, Scope),
+}
+
 impl Snapshot {
+    /// Whether the snapshot's store is a holder.
+    fn is_holder(&self) -> Result<bool, RdyError> {
+        Ok(self.read_state().reader().mode()? == StoreMode::Holder)
+    }
+
+    /// The state of pushed view `name` at `op` (D-00ZG2): `op` must lie in the chain of the
+    /// view's captured head, so a later push is never reached; else `E_NOT_FOUND`.
+    fn view_state(&self, name: &str, op: Hash) -> Result<ReadState, RdyError> {
+        let read = self.read_state();
+        read.ensure_current_epoch()?;
+        let Some(captured) = self.captured_views().get(name) else {
+            return Err(no_view_op(name, op));
+        };
+        let head = match read.reader().view_head_at(name, &captured.head, &op) {
+            Ok(head) => head,
+            Err(StoreError::NotFound(x)) if x == op => return Err(no_view_op(name, op)),
+            Err(e) => return Err(e.into()),
+        };
+        let state = read.pushed_view_state(name, head)?;
+        read.ensure_current_epoch()?;
+        Ok(state)
+    }
+
+    /// What a read of `scope` reads (see [`Target`]). The scope text has passed `check_scope`.
+    fn target(&self, scope: &Option<String>) -> Result<Target, RdyError> {
+        if let Some(s) = self.reached_scope(scope)? {
+            return Ok(Target::At(s));
+        }
+        if let Some((name, op)) = view_op(scope) {
+            let state = self.view_state(name, op)?;
+            return Ok(Target::View(Box::new(state), Scope::View(name.to_string())));
+        }
+        Ok(Target::Engine)
+    }
+
     /// The scope of a full landing hash: `Scope::At` the landing when D-Y32MN's reach finds it
     /// from the captured refs, else `E_NOT_FOUND`. None for every other scope text, which the
     /// engine resolves as it does for `rdy_read`.
@@ -127,7 +201,7 @@ impl Snapshot {
     pub fn read(&self, req: ReadRequest) -> Result<Value, RdyError> {
         check_tokens(req.max_tokens)?;
         check_page(&req.page)?;
-        check_scope(&req.scope)?;
+        check_scope(&req.scope, || self.is_holder())?;
         let state = self.read_state();
         if is_proposal_ref(&req.id) {
             if req.pattern.is_some() {
@@ -144,15 +218,26 @@ impl Snapshot {
             );
         }
         let format = req.format.clone().unwrap_or_else(|| "compact".into());
-        let read = match self.reached_scope(&req.scope)? {
-            Some(scope) => tool_reads::read_entries_at(
+        let read = match self.target(&req.scope)? {
+            Target::At(scope) => tool_reads::read_entries_at(
                 state,
                 &req.id,
                 &scope,
                 &format,
                 req.pattern.as_deref(),
             )?,
-            None => tool_reads::read_entries(
+            Target::View(view, scope) => {
+                let read = tool_reads::read_entries_at(
+                    &view,
+                    &req.id,
+                    &scope,
+                    &format,
+                    req.pattern.as_deref(),
+                )?;
+                state.ensure_current_epoch()?;
+                read
+            }
+            Target::Engine => tool_reads::read_entries(
                 state,
                 &req.id,
                 DEFAULT_SCOPE,
@@ -182,14 +267,18 @@ impl Snapshot {
                 "omit brief",
             ));
         }
-        check_scope(&req.scope)?;
+        check_scope(&req.scope, || self.is_holder())?;
         let state = self.read_state();
-        let scope: Scope = match self.reached_scope(&req.scope)? {
-            Some(scope) => scope,
-            None => tool_reads::scope_of(DEFAULT_SCOPE, state, &req.scope)?,
+        let (view, scope): (Option<Box<ReadState>>, Scope) = match self.target(&req.scope)? {
+            Target::At(scope) => (None, scope),
+            Target::View(view, scope) => (Some(view), scope),
+            Target::Engine => (
+                None,
+                tool_reads::scope_of(DEFAULT_SCOPE, state, &req.scope)?,
+            ),
         };
         let reply = tool_reads::search_reply(
-            state,
+            view.as_deref().unwrap_or(state),
             &scope,
             &SearchQuery {
                 text: req.query,
@@ -201,6 +290,9 @@ impl Snapshot {
             req.max_tokens,
             None,
         )?;
+        if view.is_some() {
+            state.ensure_current_epoch()?;
+        }
         Ok(without_next(reply))
     }
 }
