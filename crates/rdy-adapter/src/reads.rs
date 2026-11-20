@@ -22,6 +22,7 @@ use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, RdyError, ReadState, Scope, is_propos
 use rdy_model::Hash;
 use rdy_store::StoreError;
 use rdy_store::holder::StoreMode;
+use rdy_store::view::ViewHead;
 use serde_json::{Value, json};
 
 /// The scope `rdy_read` and `rdy_search` take when none is given.
@@ -99,7 +100,12 @@ fn full_landing(scope: &Option<String>) -> Option<Hash> {
 /// The view and the op a `view:<name>@<64 lowercase hex>` scope names; None for every other
 /// scope text.
 fn view_op(scope: &Option<String>) -> Option<(&str, Hash)> {
-    let (name, op) = scope.as_deref()?.strip_prefix("view:")?.rsplit_once('@')?;
+    view_op_of(scope.as_deref()?)
+}
+
+/// The view and the op that the scope text `text` names as `view:<name>@<64 lowercase hex>`.
+pub(crate) fn view_op_of(text: &str) -> Option<(&str, Hash)> {
+    let (name, op) = text.strip_prefix("view:")?.rsplit_once('@')?;
     // a hash parses from exactly 64 lowercase hex digits
     Some((name, op.parse().ok()?))
 }
@@ -157,7 +163,7 @@ pub(crate) struct Resolved {
 
 impl Snapshot {
     /// Whether the snapshot's store is a holder.
-    fn is_holder(&self) -> Result<bool, RdyError> {
+    pub(crate) fn is_holder(&self) -> Result<bool, RdyError> {
         Ok(self.read_state().reader().mode()? == StoreMode::Holder)
     }
 
@@ -166,17 +172,27 @@ impl Snapshot {
     fn view_state(&self, name: &str, op: Hash) -> Result<ReadState, RdyError> {
         let read = self.read_state();
         read.ensure_current_epoch()?;
-        let Some(captured) = self.captured_views().get(name) else {
-            return Err(no_view_op(name, op));
-        };
-        let head = match read.reader().view_head_at(name, &captured.head, &op) {
-            Ok(head) => head,
-            Err(StoreError::NotFound(x)) if x == op => return Err(no_view_op(name, op)),
-            Err(e) => return Err(e.into()),
-        };
+        let head = self.view_head_at_op(name, op)?;
         let state = read.pushed_view_state(name, head)?;
         read.ensure_current_epoch()?;
         Ok(state)
+    }
+
+    /// The head of pushed view `name` at `op`, an op of the chain of the view's captured head;
+    /// else `E_NOT_FOUND`.
+    pub(crate) fn view_head_at_op(&self, name: &str, op: Hash) -> Result<ViewHead, RdyError> {
+        let Some(captured) = self.captured_views().get(name) else {
+            return Err(no_view_op(name, op));
+        };
+        match self
+            .read_state()
+            .reader()
+            .view_head_at(name, &captured.head, &op)
+        {
+            Ok(head) => Ok(head),
+            Err(StoreError::NotFound(x)) if x == op => Err(no_view_op(name, op)),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// What a read of `scope` reads (see [`Target`]). The scope text has passed `check_scope`.

@@ -227,6 +227,34 @@ pub fn seed(h: &StoreHandle, w: &World) {
     );
 }
 
+/// Moves view `draft` of the hub `h` to the head the view history at `path` pushes.
+pub fn set_draft(h: &StoreHandle, w: &World, path: &std::path::Path, from: Option<Hash>, to: Hash) {
+    let s = h.snapshot().unwrap();
+    let c = check(&s, &[path]).unwrap();
+    let set = CanonMove::SetViewHead {
+        name: "draft".into(),
+        root: w.draft_root,
+    };
+    assert_eq!(h.move_canon(&c, set, from).unwrap(), moved(to));
+}
+
+/// The hub of `w` seeded with `p1`, view `draft` pushed at `d1`, canon extended to `p2` and
+/// `draft` moved on to `d2`.
+pub fn pushed_draft(w: &World) -> StoreHandle {
+    let h = w.holder("hub");
+    seed(&h, w);
+    set_draft(&h, w, &w.v1, None, w.d1);
+    let s = h.snapshot().unwrap();
+    let c2 = check(&s, &[&w.e2]).unwrap();
+    assert_eq!(
+        h.move_canon(&c2, CanonMove::Extend, Some(w.p1)).unwrap(),
+        moved(w.p2)
+    );
+    drop((s, c2));
+    set_draft(&h, w, &w.v2, Some(w.d1), w.d2);
+    h
+}
+
 // ---------------------------------------------------------------------------------------------
 // a clean replay
 

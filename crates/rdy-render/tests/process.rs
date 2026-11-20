@@ -1001,16 +1001,38 @@ fn cra5_scope_request_refusals_write_no_byte() {
             "add scope, or omit against",
         ),
     );
-    // a scope or an against that is not landing:<64 hex digits>
+    // a scope that is not landing:<64 hex digits> or view:<name>@<64 hex digits> (D-V9RF5), and
+    // an against that is not landing:<64 hex digits>: against stays a landing
     let short = format!("landing:{}", &l2.to_string()[..63]);
-    for text in ["landing:abc", "tag:1.0.0", "canon", short.as_str()] {
-        let want = format!("render request scope {text:?} is not landing:<64 hex digits>");
-        let fix = "name the landing by its full hash";
+    let short_op = format!("view:draft@{}", &l2.to_string()[..63]);
+    let view = format!("view:draft@{l2}");
+    for text in [
+        "landing:abc",
+        "tag:1.0.0",
+        "canon",
+        short.as_str(),
+        "view:draft",
+        short_op.as_str(),
+    ] {
+        let want = format!(
+            "render request scope {text:?} is not landing:<64 hex digits> or view:<name>@<64 hex digits>"
+        );
+        let fix = "name the landing or the view head by its full hash";
         assert_refusal(
             &refused(&scoped(&request(Some(text), None, "site"), &[&s2])),
             E_BAD_INPUT,
             (&want, fix),
         );
+    }
+    for text in [
+        "landing:abc",
+        "tag:1.0.0",
+        "canon",
+        short.as_str(),
+        view.as_str(),
+    ] {
+        let want = format!("render request scope {text:?} is not landing:<64 hex digits>");
+        let fix = "name the landing by its full hash";
         assert_refusal(
             &refused(&scoped(
                 &request(Some(&at(&l2)), Some(text), "site"),
@@ -1034,6 +1056,17 @@ fn cra5_scope_request_refusals_write_no_byte() {
     let (m, f) = wrong(1, &p.tag, &l2);
     assert_refusal(
         &refused(&scoped(&alone, &[&p.stream()])),
+        E_BAD_INPUT,
+        (&m, f),
+    );
+    // a view scope's stream must be a view history rooted at the op
+    let op = Hash::of(b"op");
+    let (m, f) = wrong(1, &l2, &op);
+    assert_refusal(
+        &refused(&scoped(
+            &request(Some(&format!("view:draft@{op}")), None, "site"),
+            &[&s2],
+        )),
         E_BAD_INPUT,
         (&m, f),
     );
