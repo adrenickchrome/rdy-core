@@ -150,11 +150,6 @@ fn prepare_within(
         Some(b) => selected_in(st, b, &profile)?,
         None => None,
     };
-    // the decisions whose references either side drops (D-7M0YF)
-    let old_dropped = old
-        .as_ref()
-        .map(|o| o.references.dropped_decisions.clone())
-        .unwrap_or_default();
 
     // the old and new figures together, bounded before any of their bytes is read; then the
     // current side's bytes, with no output gate (D-CWC91). A review target bounds each figure
@@ -174,23 +169,10 @@ fn prepare_within(
         None => selection::load_inspection_assets(&source, &resolved)?,
     };
     let mut removed = publication::removed_blobs(&source, &resolved)?;
-    let old_removed = match &old {
-        Some(o) => publication::removed_blobs(&source, o)?,
-        None => BTreeMap::new(),
-    };
-    let old_status = old
-        .as_ref()
-        .map(|o| publication::display_status(&o.as_built))
-        .unwrap_or_default();
-    let old_m: Arc<Materialized> = match old {
-        Some(o) => {
-            FigureBlobs::selected(BTreeMap::new(), old_removed.clone()).project(Arc::new(o.m))
-        }
-        None => Arc::new(Materialized::default()),
-    };
+    let old = OldSide::of(&source, old)?;
     // an old side's removed figure reads as the notice on its removed line
-    for (blob, request) in old_removed {
-        removed.entry(blob).or_insert(request);
+    for (blob, request) in &old.removed {
+        removed.entry(*blob).or_insert(*request);
     }
     let blobs = match measured {
         Some(lens) => FigureBlobs::measured(lens, removed),
@@ -215,7 +197,7 @@ fn prepare_within(
     prepared.diagram_cache = Some(st.reader().diagram_cache());
     let mut dropped = BTreeSet::new();
     if let Some(p) = prepared.profile.as_mut() {
-        p.dropped_decisions.extend(old_dropped);
+        p.dropped_decisions.extend(old.dropped.iter().cloned());
         dropped = p.dropped_decisions.clone();
     }
     let title = prepared.site_name.clone();
@@ -226,38 +208,14 @@ fn prepare_within(
     // the review against the selected base
     let mut hist = History::empty();
     if reviewing {
-        let listed = review::between_prepared(&old_m, &m, &old_status, &prepared.status);
-        let reviewed = prepare::reviewed_of(st, &scope, listed.changed_blocks())?;
-        if let Some(r) = &reviewed {
-            let old_site = Site::for_profile(&old_m, &pack, &title, &dropped);
-            let diff = base.as_ref().map(|_| diff_states(&old_m, &m));
-            let sides = Sides {
-                from: &old_m,
-                to: &m,
-                text: &site,
-                from_text: Some(&old_site),
-            };
-            let (s, inline) = changes::summary(
-                &site,
-                CHANGES_PAGE,
-                &listed,
-                diff.as_ref(),
-                &sides,
-                &changes::Of::Review(r.kind),
-            );
-            if !summary_page_taken(&m, CHANGES_PAGE) {
-                hist.changes = Some(s);
-            }
-            // only a page with review marks shows an edited block's diff
-            if base.is_some() {
-                hist.inline_diffs = inline;
-            }
-        }
-        hist.review_marks = base.is_some();
-        hist.listed = Some(listed);
-        hist.reviewed = reviewed;
-        // removed lines and removed rows read their words through the old selected side
-        hist.old = Some(Arc::clone(&old_m));
+        hist = review_history(
+            &site,
+            &old,
+            (&m, &prepared.status),
+            (&pack, &title, &dropped),
+            base.is_some(),
+            |blocks| prepare::reviewed_of(st, &scope, blocks),
+        )?;
     }
 
     // the neutral chip: canon's selected history since its tag, for a route that is not a tag.
@@ -437,6 +395,101 @@ pub(crate) fn read_scope(st: &ReadState, scope: &ScopeRef) -> Result<Scope, RdyE
         ScopeRef::Tag(name) => st.resolve_scope(&format!("tag:{name}")),
         ScopeRef::Versions => Err(invalid_target()),
     }
+}
+
+/// The old side of a review (D-CWC91, D-AJ7T2): a profile's selected state in the review base
+/// with each figure whose blob lost content read as removed, its status words, the figure blobs
+/// a removal masks there, and the decisions whose references it drops (D-7M0YF). No asset byte
+/// is read.
+pub(crate) struct OldSide {
+    pub m: Arc<Materialized>,
+    pub status: BTreeMap<BlockId, BlockStatus>,
+    pub removed: BTreeMap<Hash, Hash>,
+    pub dropped: BTreeSet<BlockId>,
+}
+
+impl OldSide {
+    /// The old side of `old` read through `source`; the empty side when the base holds no
+    /// selection.
+    pub(crate) fn of(
+        source: &dyn selection::PublicationSource,
+        old: Option<Resolved>,
+    ) -> Result<OldSide, RdyError> {
+        let Some(o) = old else {
+            return Ok(OldSide {
+                m: Arc::new(Materialized::default()),
+                status: BTreeMap::new(),
+                removed: BTreeMap::new(),
+                dropped: BTreeSet::new(),
+            });
+        };
+        let removed = publication::removed_blobs(source, &o)?;
+        let status = publication::display_status(&o.as_built);
+        let dropped = o.references.dropped_decisions.clone();
+        let m = FigureBlobs::selected(BTreeMap::new(), removed.clone()).project(Arc::new(o.m));
+        Ok(OldSide {
+            m,
+            status,
+            removed,
+            dropped,
+        })
+    }
+}
+
+/// The review step of a profile's pages (D-CWC91, D-AJ7T2): the selected state `to` (with its
+/// status words) against `old`, read on `site`, the site of `to` with `words` (the pack, the
+/// title and the dropped decisions). `based` says whether a scope names the old side: only then
+/// do the pages carry review marks and each edited block's word diff. `reviewed` names the
+/// reviewed view or proposal from the count of changed blocks; with one, the change summary is
+/// kept unless a doc owns its page. Removed lines and removed rows read their words through the
+/// old side.
+pub(crate) fn review_history(
+    site: &Site,
+    old: &OldSide,
+    to: (&Arc<Materialized>, &BTreeMap<BlockId, BlockStatus>),
+    words: (&rdy_schema::Pack, &str, &BTreeSet<BlockId>),
+    based: bool,
+    reviewed: impl FnOnce(u32) -> Result<Option<version::Reviewed>, RdyError>,
+) -> Result<History, RdyError> {
+    let (m, status) = to;
+    let (pack, title, dropped) = words;
+    let mut hist = History::empty();
+    let listed = review::between_prepared(&old.m, m, &old.status, status);
+    let reviewed = reviewed(listed.changed_blocks())?;
+    if reviewed.is_some() || based {
+        let old_site = Site::for_profile(&old.m, pack, title, dropped);
+        let diff = based.then(|| diff_states(&old.m, m));
+        let sides = Sides {
+            from: &old.m,
+            to: m,
+            text: site,
+            from_text: Some(&old_site),
+        };
+        // the summary's words name the reviewed kind; with none, only the word diffs are kept
+        let kind = reviewed
+            .as_ref()
+            .map_or(version::ReviewedKind::View, |r| r.kind);
+        let (s, inline) = changes::summary(
+            site,
+            CHANGES_PAGE,
+            &listed,
+            diff.as_ref(),
+            &sides,
+            &changes::Of::Review(kind),
+        );
+        if reviewed.is_some() && !summary_page_taken(m, CHANGES_PAGE) {
+            hist.changes = Some(s);
+        }
+        // only a page with review marks shows an edited block's diff
+        if based {
+            hist.inline_diffs = inline;
+        }
+    }
+    hist.review_marks = based;
+    hist.listed = Some(listed);
+    hist.reviewed = reviewed;
+    hist.old = Some(Arc::clone(&old.m));
+    Ok(hist)
 }
 
 /// `profile` resolved in `scope`: the same profile id in that state's own revision (None when the
