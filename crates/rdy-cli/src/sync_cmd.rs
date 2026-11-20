@@ -72,7 +72,7 @@ pub(crate) struct PullArgs {
     /// Take hub canon with no replay (a card comes first); with --view, take only those views.
     #[arg(long)]
     take: bool,
-    /// Stop the replay at its first conflict. Not with --take and no --view.
+    /// Replay none of your unpushed landings: canon takes the hub tip and they go into a new view pull-<n>. Not with --take and no --view.
     #[arg(long)]
     strict: bool,
     /// Fetch the hub dump with this id (the id the hub's dump job gave) to --out instead of pulling. Takes only --out and one of --remote or --url.
