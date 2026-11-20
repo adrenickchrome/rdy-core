@@ -336,6 +336,29 @@ fn cra1_adapter_names(
         rdy_engine::tool_reads::read_entries_at(state, "id", scope, "compact", None);
 }
 
+/// crb1: the compare and the diff of two scopes (D-2QX9W), by their exact names. This function
+/// is never called: it compiles only while each name has the receiver, the arguments and the
+/// result listed, and each type is re-exported from the module and the crate root.
+#[allow(dead_code)]
+fn crb1_adapter_names(snap: &Snapshot) {
+    let _: Result<rdy_adapter::Compare, RdyError> = snap.compare("canon", "canon");
+    let _: Result<rdy_adapter::Diff, RdyError> = snap.diff("canon", "canon");
+    let _: Option<(
+        rdy_adapter::compare::Compare,
+        rdy_adapter::compare::CompareEntry,
+        rdy_adapter::compare::Diff,
+        rdy_adapter::compare::DiffChange,
+        rdy_adapter::compare::DiffEntry,
+        rdy_adapter::compare::DiffCounts,
+    )> = None;
+    let _: Option<(
+        rdy_adapter::CompareEntry,
+        rdy_adapter::DiffChange,
+        rdy_adapter::DiffEntry,
+        rdy_adapter::DiffCounts,
+    )> = None;
+}
+
 /// cra3: the place of each landing (D-H1SHC), by its exact names. This function is never called:
 /// it compiles only while each name has the receiver, the arguments and the result listed.
 #[allow(dead_code)]

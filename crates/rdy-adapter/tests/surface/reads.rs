@@ -233,3 +233,102 @@ fn rpl38_adapter_refuses_session_bound_inputs() {
     assert!(read(Some("canon"), None).is_ok());
     assert!(read(Some("tag:1.0.0"), None).is_ok());
 }
+
+// ---------------------------------------------------------------------------------------------
+// crb1: compare and diff of two scopes are the engine's, and refuse what read refuses (D-2QX9W)
+
+/// The scope pairs `(from, to)` of the compare cases: canon's one landing by a short id, the
+/// tag and the landed proposal version.
+fn crb1_pairs(state: &ReadState, proposal: &str) -> Vec<(String, String)> {
+    let l1 = state.canon_head().unwrap().to_string();
+    vec![
+        (format!("landing:{}", &l1[..12]), "canon".into()),
+        ("canon".into(), "tag:1.0.0".into()),
+        (format!("proposal:{proposal}"), "canon".into()),
+    ]
+}
+
+fn crb1_scope(state: &ReadState, text: &str) -> rdy_engine::Scope {
+    tool_reads::scope_of("canon", state, &Some(text.to_string())).unwrap()
+}
+
+#[test]
+fn crb1_compare_equals_the_engine_compare() {
+    let (f, (pairs, wants)) = fixture(|state, _, proposal| {
+        let pairs = crb1_pairs(state, proposal);
+        let wants: Vec<rdy_adapter::Compare> = pairs
+            .iter()
+            .map(|(from, to)| {
+                state
+                    .compare(&crb1_scope(state, to), &crb1_scope(state, from))
+                    .unwrap()
+            })
+            .collect();
+        (pairs, wants)
+    });
+    let snap = snapshot(&f);
+    for ((from, to), want) in pairs.iter().zip(wants) {
+        let got = snap.compare(from, to).unwrap();
+        assert_eq!(got, want, "{from} {to}");
+    }
+}
+
+#[test]
+fn crb1_diff_equals_the_engine_diff() {
+    let (f, (pairs, wants)) = fixture(|state, _, proposal| {
+        let pairs = crb1_pairs(state, proposal);
+        let wants: Vec<rdy_adapter::Diff> = pairs
+            .iter()
+            .map(|(from, to)| {
+                state
+                    .diff(&crb1_scope(state, from), &crb1_scope(state, to))
+                    .unwrap()
+            })
+            .collect();
+        (pairs, wants)
+    });
+    let snap = snapshot(&f);
+    for ((from, to), want) in pairs.iter().zip(wants) {
+        let got = snap.diff(from, to).unwrap();
+        assert_eq!(got, want, "{from} {to}");
+    }
+}
+
+#[test]
+fn crb1_compare_refuses_what_read_refuses() {
+    let (f, ()) = fixture(|_, _, _| ());
+    let snap = snapshot(&f);
+    let key = |e: rdy_adapter::RdyError| (e.code, e.message, e.fix);
+    let read = |scope: &str| {
+        key(snap
+            .read(ReadRequest {
+                id: f.doc.clone(),
+                scope: Some(scope.into()),
+                ..Default::default()
+            })
+            .unwrap_err())
+    };
+    let none = rdy_adapter::Hash::of(b"none");
+    let unreached = format!("landing:{none}");
+    for scope in ["work", "view:work", "inflight", unreached.as_str()] {
+        let want = read(scope);
+        assert_eq!(
+            key(snap.compare(scope, "canon").unwrap_err()),
+            want,
+            "{scope}"
+        );
+        assert_eq!(
+            key(snap.compare("canon", scope).unwrap_err()),
+            want,
+            "{scope}"
+        );
+        assert_eq!(key(snap.diff(scope, "canon").unwrap_err()), want, "{scope}");
+        assert_eq!(key(snap.diff("canon", scope).unwrap_err()), want, "{scope}");
+    }
+    let (code, message, _) = key(snap.compare(&unreached, "canon").unwrap_err());
+    assert_eq!(code, "E_NOT_FOUND");
+    assert_eq!(
+        message,
+        format!("landing {none} is not reached from canon, a tag, a held chain or a replaced mark")
+    );
+}
