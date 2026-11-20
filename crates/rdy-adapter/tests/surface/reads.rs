@@ -268,7 +268,7 @@ fn crb1_compare_equals_the_engine_compare() {
     });
     let snap = snapshot(&f);
     for ((from, to), want) in pairs.iter().zip(wants) {
-        let got = snap.compare(from, to).unwrap();
+        let got = snap.compare(Some(from.as_str()), to).unwrap();
         assert_eq!(got, want, "{from} {to}");
     }
 }
@@ -289,7 +289,7 @@ fn crb1_diff_equals_the_engine_diff() {
     });
     let snap = snapshot(&f);
     for ((from, to), want) in pairs.iter().zip(wants) {
-        let got = snap.diff(from, to).unwrap();
+        let got = snap.diff(Some(from.as_str()), to).unwrap();
         assert_eq!(got, want, "{from} {to}");
     }
 }
@@ -313,22 +313,200 @@ fn crb1_compare_refuses_what_read_refuses() {
     for scope in ["work", "view:work", "inflight", unreached.as_str()] {
         let want = read(scope);
         assert_eq!(
-            key(snap.compare(scope, "canon").unwrap_err()),
+            key(snap.compare(Some(scope), "canon").unwrap_err()),
             want,
             "{scope}"
         );
         assert_eq!(
-            key(snap.compare("canon", scope).unwrap_err()),
+            key(snap.compare(Some("canon"), scope).unwrap_err()),
             want,
             "{scope}"
         );
-        assert_eq!(key(snap.diff(scope, "canon").unwrap_err()), want, "{scope}");
-        assert_eq!(key(snap.diff("canon", scope).unwrap_err()), want, "{scope}");
+        assert_eq!(
+            key(snap.diff(Some(scope), "canon").unwrap_err()),
+            want,
+            "{scope}"
+        );
+        assert_eq!(
+            key(snap.diff(Some("canon"), scope).unwrap_err()),
+            want,
+            "{scope}"
+        );
     }
-    let (code, message, _) = key(snap.compare(&unreached, "canon").unwrap_err());
+    let (code, message, _) = key(snap.compare(Some(unreached.as_str()), "canon").unwrap_err());
     assert_eq!(code, "E_NOT_FOUND");
     assert_eq!(
         message,
         format!("landing {none} is not reached from canon, a tag, a held chain or a replaced mark")
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// crb5: the compare page is rdy_diff's body, and every page carries the whole diff's counts
+
+/// The names of the crb5 project: the doc, landing L1 (the doc and 40 claims, tagged 1.0.0) and
+/// the proposal version that landed L2 (each of the 40 claims updated).
+struct Crb5Names {
+    doc: String,
+    l1: String,
+    proposal: String,
+}
+
+/// A project with two landings: L1 writes a doc with 40 claims and is tagged `v1.0.0`, L2
+/// updates every claim. `expect` runs on the engine state before the project closes.
+fn crb5_fixture<T>(
+    expect: impl FnOnce(&Arc<ReadState>, &Crb5Names) -> T,
+) -> (tempfile::TempDir, T) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let write = |r: &mut Rdy, ops: Vec<Value>| {
+        r.write(
+            &session(Role::Writer),
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(Value::Array(ops)).unwrap(),
+                justification: None,
+                message: "crb5".into(),
+            },
+        )
+        .unwrap()
+    };
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Identity", "doc_type": "page"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Terms"}}),
+    ];
+    for i in 0..40 {
+        ops.push(json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("Claim {i} says ledger text. {}", "x".repeat(200))}));
+    }
+    let w = write(&mut r, ops);
+    let doc = w.created["$doc"].clone();
+    let p = r
+        .propose(&session(Role::Writer), "work", "T", Some("test summary"))
+        .unwrap();
+    r.land(&session(Role::Approver), &p.id).unwrap();
+    r.tag(&session(Role::Approver), "v1.0.0", None, None)
+        .unwrap();
+    let l1 = r.read().canon_head().unwrap().to_string();
+    let ops = (0..40)
+        .map(|i| json!({"op": "update", "id": w.created[&format!("$c{i}")], "body": format!("Claim {i} says new ledger text. {}", "y".repeat(200))}))
+        .collect();
+    write(&mut r, ops);
+    let p = r
+        .propose(&session(Role::Writer), "work", "T2", Some("test summary"))
+        .unwrap();
+    let proposal = p.r#ref.clone();
+    r.land(&session(Role::Approver), &p.id).unwrap();
+    let names = Crb5Names { doc, l1, proposal };
+    let expected = {
+        let state = r.read();
+        expect(&state, &names)
+    };
+    r.close().unwrap();
+    (dir, expected)
+}
+
+fn crb5_query(from: &str, to: &str, max_tokens: usize) -> rdy_adapter::compare::DiffQuery {
+    rdy_adapter::compare::DiffQuery {
+        from: Some(from.into()),
+        to: to.into(),
+        doc: None,
+        detail: false,
+        max_tokens: Some(max_tokens),
+        page: None,
+    }
+}
+
+#[test]
+fn crb5_diff_reply_equals_rdy_diff() {
+    use rdy_engine::diff_request::DiffRequest;
+    let (dir, (queries, wants)) = crb5_fixture(|state, n| {
+        let short = format!("landing:{}", &n.l1[..12]);
+        let proposal = format!("proposal:{}", n.proposal);
+        // (from, to, doc, detail, max_tokens): whole, rooted with detail, cut with detail, cut
+        let cases: [(&str, &str, Option<&str>, bool, usize); 4] = [
+            (&short, "canon", None, false, 100_000),
+            ("tag:1.0.0", "canon", Some(&n.doc), true, 100_000),
+            ("tag:1.0.0", &proposal, None, true, 2_000),
+            ("canon", "tag:1.0.0", None, false, 300),
+        ];
+        let mut queries = vec![];
+        let mut wants = vec![];
+        for (from, to, doc, detail, max) in cases {
+            let req = DiffRequest {
+                from: from.into(),
+                to: Some(to.into()),
+                doc: doc.map(str::to_string),
+                detail,
+            };
+            let reply = state.diff_page(&req, None, None, max).unwrap();
+            wants.push(serde_json::to_value(reply).unwrap());
+            queries.push(rdy_adapter::compare::DiffQuery {
+                doc: doc.map(str::to_string),
+                detail,
+                ..crb5_query(from, to, max)
+            });
+        }
+        (queries, wants)
+    });
+    let snap = StoreHandle::open(dir.path()).unwrap().snapshot().unwrap();
+    for (q, want) in queries.iter().zip(wants) {
+        let got = snap.diff_reply(q).unwrap();
+        // a cursor is a token of the two states and an offset: it names no tool, so the two
+        // cursors are equal as text
+        assert_eq!(got, want, "{q:?}");
+    }
+    // the cut cases are cut, so a cursor was compared
+    assert_eq!(
+        snap.diff_reply(&queries[3]).unwrap()["truncated"],
+        json!(true)
+    );
+}
+
+/// The pages of `query` from its first, following `next` until it is absent.
+fn crb5_pages(snap: &rdy_adapter::Snapshot, query: &rdy_adapter::compare::DiffQuery) -> Vec<Value> {
+    let mut pages = vec![snap.diff_reply(query).unwrap()];
+    while let Some(next) = pages.last().unwrap().get("next").and_then(Value::as_str) {
+        let q = rdy_adapter::compare::DiffQuery {
+            page: Some(next.to_string()),
+            ..query.clone()
+        };
+        pages.push(snap.diff_reply(&q).unwrap());
+        assert!(pages.len() <= 41, "the pages never end");
+    }
+    pages
+}
+
+#[test]
+fn crb5_counts_are_the_whole_diff_on_every_page() {
+    let (dir, ()) = crb5_fixture(|_, _| ());
+    let snap = StoreHandle::open(dir.path()).unwrap().snapshot().unwrap();
+    let whole = snap
+        .diff_reply(&crb5_query("tag:1.0.0", "canon", 100_000))
+        .unwrap();
+    assert_eq!(
+        whole["counts"],
+        json!({"added": 0, "removed": 0, "updated": 40, "moved": 0})
+    );
+    assert!(whole.get("truncated").is_none(), "{whole:#}");
+    let pages = crb5_pages(&snap, &crb5_query("tag:1.0.0", "canon", 300));
+    assert!(pages.len() > 1, "{pages:#?}");
+    assert_eq!(pages[0]["truncated"], json!(true));
+    for page in &pages {
+        assert_eq!(page["counts"], whole["counts"], "{page:#}");
+    }
+}
+
+#[test]
+fn crb5_pages_join_to_the_whole_diff() {
+    let (dir, ()) = crb5_fixture(|_, _| ());
+    let snap = StoreHandle::open(dir.path()).unwrap().snapshot().unwrap();
+    let whole = snap
+        .diff_reply(&crb5_query("tag:1.0.0", "canon", 100_000))
+        .unwrap();
+    let pages = crb5_pages(&snap, &crb5_query("tag:1.0.0", "canon", 300));
+    let joined: Vec<Value> = pages
+        .iter()
+        .flat_map(|p| p["entries"].as_array().unwrap().clone())
+        .collect();
+    assert_eq!(Value::Array(joined), whole["entries"]);
 }

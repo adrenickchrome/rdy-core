@@ -9,8 +9,9 @@
 //! tag; the renderer itself is core's (`rdy-render`). A store upgrade is an explicit
 //! call (`maintenance::upgrade`): no open upgrades a store (D-WWAK7). `sync` checks a push into
 //! a holder and makes the hub's canon and view moves; `landing_check` checks a stored landing
-//! with the inputs the hub passes. `compare` compares and diffs any two scopes a snapshot reads;
-//! `version_tests` tests whether a chain of landings merges onto a landing's state.
+//! with the inputs the hub passes. `compare` compares and diffs any two scopes a snapshot reads,
+//! and pages the diff as `rdy_diff` does; `version_tests` tests whether a chain of landings merges
+//! onto a landing's state.
 //! No product behaviour is promised stable across pins.
 
 pub mod capabilities;
@@ -35,7 +36,7 @@ pub mod take;
 mod value;
 pub mod version_tests;
 
-pub use compare::{Compare, CompareEntry, Diff, DiffChange, DiffCounts, DiffEntry};
+pub use compare::{Compare, CompareEntry, Diff, DiffChange, DiffCounts, DiffEntry, DiffQuery};
 pub use follower::Follower;
 pub use foreign_removal::{ForeignRemovalTaken, RemovalTaken};
 pub use link_take::{DeliverySource, DeliveryTaken, LinkRevoked, LinkSource};
