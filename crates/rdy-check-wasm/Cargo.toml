@@ -1,0 +1,12 @@
+[package]
+name = "rdy-check-wasm"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+wasmi = { version = "=2.0.2", default-features = false, features = ["std", "validate"] }
+
+[lints]
+workspace = true
