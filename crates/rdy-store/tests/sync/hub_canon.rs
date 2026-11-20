@@ -741,3 +741,79 @@ fn scc1_move_chain_refusal_reasons_are_exact() {
     let _ = r1;
     let _ = l2;
 }
+
+#[test]
+fn cra9_hold_with_no_tip_on_an_empty_canon_keeps_the_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = Src::new(dir.path(), "src");
+    let (l1, r1) = src.land(None, "b-00001", "one");
+    let (l2, r2) = src.land(Some(l1), "b-00002", "two");
+    let mut h = holder(dir.path(), "h");
+    // a chain that does not reach its first landing is refused as a seed is, with nothing written:
+    // a stored landing whose prev the holder does not hold
+    h.write(r1.clone()).unwrap();
+    let orphan = {
+        let rec = landing_record(
+            src.s.reader().landing(&l1).unwrap().proposal,
+            Some(Hash([9; 32])),
+            src.s.reader().landing(&l1).unwrap().state,
+            &[],
+        );
+        h.put(kinds::LANDING, &rec).unwrap()
+    };
+    let before = state(&h);
+    assert_eq!(
+        refused(mv(&mut h, vec![], orphan, CanonMove::Hold, None)),
+        SEED_REASON
+    );
+    assert_eq!(state(&h), before);
+    // the pushed chain from its first landing: only held/<last landing> is written
+    assert_eq!(
+        mv(&mut h, cat(&[&r1, &r2]), l2, CanonMove::Hold, None).unwrap(),
+        Moved::Moved { tip: l2 }
+    );
+    assert_eq!(h.canon_head().unwrap(), None);
+    assert_eq!(h.reader().get_ref(&held_ref(&l2)).unwrap(), Some(vec![]));
+    assert_eq!(h.reader().get_ref(CANON_REF).unwrap(), None);
+    assert!(has_hub(&h));
+    h.check_holder().unwrap();
+}
+
+#[test]
+fn cra9_hold_with_no_tip_on_a_canon_with_a_tip_is_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = Src::new(dir.path(), "src");
+    let (l1, r1) = src.land(None, "b-00001", "one");
+    let (l2, r2) = src.land(Some(l1), "b-00002", "two");
+    let mut h = holder(dir.path(), "h");
+    mv(&mut h, r1, l1, CanonMove::Seed, None).unwrap();
+    // the compare fails as a stale tip does: nothing written, canon's tip returned
+    let before = state(&h);
+    assert_eq!(
+        mv(&mut h, r2, l2, CanonMove::Hold, None).unwrap(),
+        Moved::Behind { tip: Some(l1) }
+    );
+    assert_eq!(state(&h), before);
+    assert_eq!(h.reader().get_ref(&held_ref(&l2)).unwrap(), None);
+}
+
+#[test]
+fn cra9_seed_from_the_stored_held_head_lands_it_into_the_empty_canon() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = Src::new(dir.path(), "src");
+    let (l1, r1) = src.land(None, "b-00001", "one");
+    let (l2, r2) = src.land(Some(l1), "b-00002", "two");
+    let mut h = holder(dir.path(), "h");
+    mv(&mut h, cat(&[&r1, &r2]), l2, CanonMove::Hold, None).unwrap();
+    // a stored source: no records, the held head the holder stores
+    assert_eq!(
+        mv(&mut h, vec![], l2, CanonMove::Seed, None).unwrap(),
+        Moved::Moved { tip: l2 }
+    );
+    assert_eq!(h.canon_head().unwrap(), Some(l2));
+    assert_eq!(h.reader().get_ref(&held_ref(&l2)).unwrap(), Some(vec![]));
+    h.check_holder().unwrap();
+    let index = h.index_dump_for_tests().unwrap();
+    h.reindex().unwrap();
+    assert_eq!(h.index_dump_for_tests().unwrap(), index);
+}

@@ -32,8 +32,9 @@
 //! - **Seed:** `canon` is absent. The head's chain reaches its first landing.
 //! - **Extend:** `canon` is the expected tip `T`, and the head's chain holds `T`.
 //! - **Force:** `canon` is `T`, and the head's chain does not hold `T`. Writes `replaced/T`.
-//! - **Hold:** `canon` is `T`, and the head's chain holds a landing of canon. Writes only
-//!   `held/<head>`.
+//! - **Hold:** `canon` is `T`, and the head's chain holds a landing of canon; or `canon` is
+//!   absent, expected as none, and the head's chain reaches its first landing (as a seed's
+//!   does), so a later seed of the stored head lands it. Writes only `held/<head>`.
 //! - **Set view head:** `view/<name>` is the expected head, or absent. The pushed chain of view
 //!   `<name>` holds that head, and its root is the hub view's root.
 //!
@@ -1360,6 +1361,8 @@ fn plan_move(
     let current = reader.canon_head()?;
     let compare = match mv {
         CanonMove::Seed => current.is_none() && expected.is_none(),
+        // a hold also takes an empty canon, expected as none
+        CanonMove::Hold => current == expected,
         _ => current.is_some() && current == expected,
     };
     if !compare {
@@ -1409,7 +1412,14 @@ fn plan_move(
             }
             Ok(Ok((vec![(held_ref(&head), vec![])], vec![])))
         }
-        _ => unreachable!("the compare holds a tip for every move but seed"),
+        (CanonMove::Hold, None) => {
+            // an empty canon: the chain a later seed lands, so it reaches its first landing
+            if !complete {
+                return Err(refused(SEED_REASON));
+            }
+            Ok(Ok((vec![(held_ref(&head), vec![])], vec![])))
+        }
+        _ => unreachable!("the compare holds a tip for every move but seed and hold"),
     }
 }
 
