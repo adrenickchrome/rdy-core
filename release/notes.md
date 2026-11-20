@@ -1,6 +1,6 @@
 **Your intent, ready for anyone who needs it.** rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents. Before an agent writes, rdy shows it what governs the change and what depends on it. After the write, rdy shows what the change affected. Nothing joins the accepted design until a person approves it.
 
-In this release, the live site renders review pages on request. A view or a proposal version no longer builds whole: rdy renders only the page that a reader opens, and after a landing it renders again only the open review pages. On our test project, the daemon held less memory with review pages open, and an open review page came back sooner after a landing. Approval cards now name the decisions found by text. rdy 0.54.0 opens a 0.53.0 project as it is. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
+In this release, rdy shares a project through a hub. `rdy push` sends canon, and the views that you name, to a hub repo. `rdy pull` brings them back, `rdy clone` makes a project from a hub repo's URL, and `rdy pull --dump` fetches a dump that the hub made. An approve card now recommends nothing while a decision or a review speaks against the proposal. rdy 0.55.0 opens a 0.54.0 project as it is. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
 
 ## What you get
 
@@ -13,9 +13,10 @@ In this release, the live site renders review pages on request. A view or a prop
 - **It catches drift.** When a decision changes, rdy marks every page that rests on it. It also flags a page that states a different number for a recorded value.
 - **Linked projects.** Cite the decisions and instructions that another project delivers through rdyhub. Your project keeps the version it cites until a person adopts a newer one.
 - **Bring your Markdown.** Import a folder of Markdown files as docs. A preview shows what maps, and what does not, before anything is written.
+- **Share through a hub.** Push canon and views to a hub repo, pull them back, and clone a project from its hub URL.
 - **A live docs site.** `rdy site` gives you a local site that refreshes as changes land.
 - **A README from your docs.** Export one doc as one Markdown file, with its images in a folder beside it.
-- **Local and private.** Everything runs on your machine: no account, no hosted service, no model inside rdy.
+- **Local and private.** Everything runs on your machine: no account, no hosted service, no model inside rdy. Only a push, pull or clone that you run talks to a hub.
 
 ## Install
 
@@ -38,26 +39,26 @@ To install from the archive instead:
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.54.0/rdy-0.54.0-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.54.0-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.54.0-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.55.0/rdy-0.55.0-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.55.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.55.0-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.54.0/rdy-0.54.0-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.54.0-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.54.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.55.0/rdy-0.55.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.55.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.55.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
 **Windows (x86_64), in PowerShell:**
 
 ```powershell
-Invoke-WebRequest -OutFile rdy-0.54.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.54.0/rdy-0.54.0-x86_64-pc-windows-msvc.tar.gz
-tar.exe -xzf rdy-0.54.0-x86_64-pc-windows-msvc.tar.gz
+Invoke-WebRequest -OutFile rdy-0.55.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.55.0/rdy-0.55.0-x86_64-pc-windows-msvc.tar.gz
+tar.exe -xzf rdy-0.55.0-x86_64-pc-windows-msvc.tar.gz
 New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Move-Item -Force rdy-0.54.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
+Move-Item -Force rdy-0.55.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
 ```
 
 On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile. On Windows, add `$HOME\.local\bin` to your PATH. Then check:
@@ -66,13 +67,13 @@ On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HO
 rdy --version
 ```
 
-It prints `rdy 0.54.0`.
+It prints `rdy 0.55.0`.
 
 On macOS, if you downloaded the archive in a browser instead of with curl, macOS may block the binary. Run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
 
 ## Release key
 
-This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0, 0.48.0, 0.49.0, 0.50.0, 0.51.0, 0.52.0 and 0.53.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.54.0:
+This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0, 0.48.0, 0.49.0, 0.50.0, 0.51.0, 0.52.0, 0.53.0 and 0.54.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.55.0:
 
 ```text
 rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8
@@ -80,7 +81,7 @@ rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUy
 
 Fingerprint: `SHA256:Tj8hfra0U07asaeSZkt1b5e1HGJ+w8vMzLrn+G6/+/M`.
 
-Compare this line and fingerprint with the ones in the README at v0.54.0. Use the key only when both match.
+Compare this line and fingerprint with the ones in the README at v0.55.0. Use the key only when both match.
 
 ## Try it: your first project
 
@@ -120,13 +121,13 @@ Compare this line and fingerprint with the ones in the README at v0.54.0. Use th
 
    > Start an rdy session in your own view, then read its overview. Help me design retention for an AI support assistant. Our intent is to keep only the customer data we need, for as short a time as we can, and be able to explain the choices. Start with a decision to delete raw conversations after 30 days and keep anonymised metrics for 2 years. Create the storage docs and link them to the decision. Propose the first design for my approval.
 
-   The agent first loads its rules with `rdy_instructions`. The rules give a `kungfu` value for each tool that they cover, and the agent passes that value on each call to the tool. A call without it still runs, with the warning `W_KUNGFU`. A write to content whose `lifecycle` is `stable` must cite a brief token, in the write's `brief`. A write to draft content needs none, so the first writes in a new project need no brief. `rdy_brief` takes block ids or a path, and gives its token in `base.token`. Without ids or a path, `rdy_brief` refuses with `E_BAD_INPUT`. When `rdy_decide` or `rdy_write` creates blocks, its result also gives a token for those blocks, in `briefing.token`.
+   The agent first loads its rules with `rdy_instructions`. Each ruleset has its own `kungfu` value and names the tools it covers. The agent passes each tool the value of the ruleset that covers it. A call without the value, or with an old one, still runs, with the warning `W_KUNGFU`. A write to content whose `lifecycle` is `stable` must cite a brief token, in the write's `brief`. A write to draft content needs none, so the first writes in a new project need no brief. `rdy_brief` takes block ids or a path, and gives its token in `base.token`. Without ids or a path, `rdy_brief` refuses with `E_BAD_INPUT`. When `rdy_decide` or `rdy_write` creates blocks, its result also gives a token for those blocks, in `briefing.token`.
 
    A doc type can ask for sections: a doc with `doc_type: overview` needs Summary and Goals. Until the doc has them, a write gives the warning `W_SKELETON_MISSING`, and the agent adds them. It is a warning, not a refusal.
 
-   A write is `rdy_write {ops: [...]}`. Each op gives `op`, such as `create` or `update`, with the block's `type`, `id`, `parent`, `fields`, `body` and `links`. A doc's `title` and `doc_type` go in `fields`. A link reads `"links": {"decided_by": [{"target": "D-<id>"}]}`.
+   A write is `rdy_write {ops: [...]}`. Each op gives `op`, such as `create` or `update`, with the block's `type`, `id`, `parent`, `fields`, `body` and `links`. This example uses four block types: `folder`, `doc`, `section` and `prose`. A section's `title` goes in `fields`, and its parent is the doc. `implements` is not a link: it is a field of the write, next to `ops`, and names the decisions that the whole write carries out. A doc's `title` and `doc_type` go in `fields`. A link reads `"links": {"decided_by": [{"target": "D-<id>"}]}`.
 
-   A doc holds no text of its own: its opening paragraph is a prose block inside it. So a doc takes no `description`, and a folder takes one in `fields`. To link a doc to the decision, the agent puts `decided_by` on a block inside the doc. A folder and a doc in it can go in one `rdy_write`: the agent gives the new folder an id such as `$storage`, and uses that name as the doc's `parent`. The agent records a decision with `rdy_decide`, which takes the decision's text as `statement`.
+   A doc holds no text of its own: its opening paragraph is a prose block inside it. So a doc takes no `description`, and a folder takes one in `fields`. To link a doc to the decision, the agent puts `decided_by` on a block inside the doc. A folder and a doc in it can go in one `rdy_write`: the agent gives the new folder an `id` that starts with `$`, such as `$storage`, and uses that name as the doc's `parent`. The agent records a decision with `rdy_decide`, which takes the decision's text as `statement`.
 
 5. **Review and approve it yourself.**
 
@@ -144,38 +145,47 @@ Compare this line and fingerprint with the ones in the README at v0.54.0. Use th
 
    Open the link. The home page links to the folders, and each folder's page links to its docs. Each page's address ends in `.html`. Now ask your agent: “For EU customers, raw conversations must be deleted after 7 days. Keep the 30-day rule elsewhere and the 2-year metrics window.” The agent briefs on the decision and its connected docs, follows the consequences, and brings you the proposal to approve.
 
-   A decision gets a card of its own only in some cases. For example, it supersedes or revokes a live decision, it is `one_way`, or no content applies it yet. If the agent refines the first decision and applies the new one in the docs, you get one card. `rdy_decide` takes the decisions that a new one refines as a list, in `refines`. Before it proposes, the agent answers each open item of the change plan with `rdy_plan {answers: [{item, act, reason}]}`. A `confirm` item takes `act: "confirm"`. An update of the block does not close the item. The answer closes it.
+   A decision gets a card of its own only in some cases. For example, it supersedes or revokes a live decision, it is `one_way`, or no content applies it yet. If the agent refines the first decision and applies the new one in the docs, you get one card. `rdy_decide` takes the decisions that a new one refines as a list, in `refines`. Before it proposes, the agent answers each open item of the change plan with `rdy_plan {answers: [{item, act, reason}]}`. A `confirm` item takes `act: "confirm"`. An update of the block does not close the item. The answer closes it. The agent first updates the blocks whose text the new decision changes. Then it answers each `confirm` item, also for a block that it did not change.
 
    If `rdy pending` shows more than one card, answer each one, or tell your agent your answers. `rdy approve` names any card that it waits for.
 
    New content shows a **Planned** label. A new decision starts planned, so the content that cites it does too. Set `built` on the decision when the work ships.
 
-   On a remote machine, the link is on `127.0.0.1`. Open an SSH tunnel to its port first, for example `ssh -L <port>:127.0.0.1:<port> <host>`.
+   On a remote machine, the link is on `127.0.0.1`. Open an SSH tunnel to the port in the link first, for example `ssh -L <port>:127.0.0.1:<port> <host>`.
 
-   The site keeps running after `rdy site` exits. To stop it, close your agent's session first: quit the agent, or end the `rdy mcp` process that your client started. Then run `rdy serve --stop` in the project folder. An `rdy mcp` that is still open logs `E_DAEMON_GONE`. `rdy serve --stop` prints `stopped`, or `no daemon running` when none was running. Your meta project has its own daemon, which starts at the agent's first `rdy_instructions` call. Stop it with `rdy serve --stop --project <path>`. Use the path that `rdy setup` printed when it created the project. By default, the path is `.rdy/meta` in your home folder, such as `~/.rdy/meta`.
+   The site keeps running after `rdy site` exits. To stop it, close your agent's session first: quit the agent, or end the `rdy mcp` process that your client started. `rdy mcp` ends when its standard input closes. Then run `rdy serve --stop` in the project folder. An `rdy mcp` that is still open logs `E_DAEMON_GONE`. `rdy serve --stop` prints `stopped`, or `no daemon running` when none was running. Your meta project has its own daemon, which starts at the agent's first `rdy_instructions` call. Stop it with `rdy serve --stop --project <path>`. Use the path that `rdy setup` printed when it created the project. By default, the path is `.rdy/meta` in your home folder, such as `~/.rdy/meta`.
 
-## What changed since 0.53.0
+## What changed since 0.54.0
+
+### New features
+
+- **Push and pull.** `rdy push` and `rdy_push` send local canon, and the views that you name, to the hub repo of a share remote. `rdy pull` and `rdy_pull` bring hub canon and the named views back. Both need the writer role, and a sign-in on this machine as for `rdy publish`. Without `--remote`, rdy uses the share remote, else the only remote. Name at most 256 views with `--view`, each one time. Both run in the daemon: with `--no-daemon`, they refuse with `E_BAD_INPUT`.
+- **When hub canon moved on.** When local canon does not hold the hub tip, a push refuses with the new code `E_DIVERGED`. Pull, then push again. A pull replays your local landings on hub canon. When a landing conflicts with hub canon or fails the gate, the replay stops there. Canon keeps the landings replayed so far. The rest go into a new view `pull-<n>` that you own. Resolve that view, then push again. With `--strict`, the pull replays none of your landings: canon takes the hub tip, and your unpushed landings go into a new view `pull-<n>`.
+- **Moves that need your answer.** A forced push, a restore into a hub repo that holds canon, and a take of hub canon (`rdy pull --take` with no `--view`) can remove landings. Each one first shows a card, and writes nothing. On a terminal, the CLI shows the card and asks you to confirm. An agent shows you the card and relays your answer. `--take` with `--view` takes only those views, with no card.
+- **Held pushes.** A hub can hold a push for review in a request. The push then reports `held` and the request number. A later pull asks the hub for the outcome, and clears the hold when the request is closed. When the hub refuses that lookup, the pull goes on, keeps the hold and warns `W_UPSTREAM_HELD_LOOKUP`.
+- **Tags and restore.** A push sends each tag with its render inputs. When the hub repo already has a tag with that name, the hub refuses that write. The push reply shows the write as refused, with `E_TAG_EXISTS` and the hub's words. `rdy push --restore <dump>` sends a dump to a hub repo, and tells you which tags it sent without render inputs.
+- **Clone by URL.** `rdy clone <https-url> [dir]` and `rdy_clone {url}` make a project from a hub repo. The project gets hub canon, its tags, the hub's pack and gate settings, and one share remote named `hub`. The target folder must not exist, or must be empty. The clone writes no token, and takes no views: pull the views that you need after the clone. When your user config holds a share remote, the clone refuses with `E_REMOTE_EXISTS`. When the hub repo holds gate settings for another pack, the hub sends no pack. The clone then uses rdy's default pack and warns `W_UPSTREAM_PACK_MISMATCH`. `--fork` with a URL is refused.
+- **Fetch a hub dump.** `rdy pull --dump <id> --out <file>` and `rdy_pull {dump, out}` download a dump that the hub's dump job made. rdy checks it as `rdy load` does, and writes it to a new file only when it is whole. With `--url <url>` in place of a remote, you need no project. The fetch uses this machine's sign-in for that hub. Compare the `digest` in the reply with the one that the hub shows. Then run `rdy push --restore <file>`, or `rdy load <file> <dir>` for a copy.
+- **Sync state.** `rdy status` shows `sync <remote>:` lines for each remote that has sync state. `rdy status --json` and `rdy_overview` add `sync` and `uncovered_warnings`. With a daemon, `rdy status --json` also adds `memory`, with `live_bytes` and `capped_cache_bytes`. `live_bytes` is `null` except on Linux with glibc.
+- **A write that may have reached the hub.** On `E_UPSTREAM_UNCERTAIN`, do not send the write again yourself. Run push or pull again: rdy finds the outcome of the earlier push before it writes again. `E_LOCKED` tells you that another push or pull with that remote is running.
 
 ### Changes
 
-- **Review pages render on request.** On the live site, a review target is a view, a proposal version, or a profile route under one. The daemon prepares a review target once and renders only the page that a request names. The search index, `llms.txt` and `llms-full.txt` are pages of their own. After a landing, the daemon renders again only the review pages that are open. The other pages render at their next request. Canon and tags still build whole. This change is not meant to change `rdy render` or a publication.
-- **Review links still check the whole target.** A review link from `rdy site` or `rdy_site` runs all the render checks of the target once, also for pages that nobody opened. So the link still carries every warning. The daemon logs each warning once. When rdy drops a whole review target to make room, a later check can log its warnings again, once per check.
-- **One memory cap for the site.** Canon's builds and every review target's pages count in one memory cap of 256 MiB. When the cap is full, rdy drops review pages first, the least recently used first. Then it drops the shared parts of review targets that keep no page. The cap counts what the site keeps. It does not limit the daemon's process memory.
-- **File limits of review targets.** A review of a view or a proposal version has no limit on its number of files, as in rdy 0.53.0. A review through a publication profile keeps the limit of 32,000 files, and refuses a larger target with `E_LIMIT`. It no longer has the limit of 2 GiB for the whole target. Each page keeps the limit of 2 GiB for one file.
-- **Cards name the decisions found by text.** The Related decisions fact on an approve card and on a decision's confirm card now names the decisions found by text, after the link rows. A text row reads `<for> <relation> <decision> [<status>] via text: <summary>`. The fact names at most 10 text rows. Past 10, the value ends `; and <n> more found by text`. The counts at the start of the value do not change.
-- **A confirm card's `card_hash` moves once.** The text rows and their summaries are now part of the card. So a confirm card with text rows gets a new `card_hash` after you move to rdy 0.54.0. It moves again when the summary of a decision found by text changes. An approve card that rdy already stored keeps its text and its `card_hash`. Read the card again before you relay an answer to it.
-- **You do nothing to move.** rdy 0.54.0 opens a store made by rdy 0.53.0 as it is, with no upgrade step and no dump and load. Store format 19, dump format 4 and the store features stay.
+- **Approve cards recommend nothing over an objection.** While a confirm card beside a proposal recommends Reject and has no answer, or an open tension from a reviewer touches one of its blocks, the approve card recommends no option. Approve keeps its place, with no reason line. A new `Recommendation` fact, after Policy, names each cause, such as `none: D-<id> the proposer recommends reject`. When the causes clear, the usual reason comes back. A list of recommended answers that names such a card is refused as a whole. The proposal's readiness does not change. A card that now shows the `Recommendation` fact gets a new `card_hash`. Read the card again before you relay an answer to it.
+- **`rdy clone` of a URL.** In rdy 0.54.0, `rdy clone` refused every source that is a URL. Now an `https://` source clones that hub repo. Any other URL is refused as `rdy remote add` refuses a URL that is not HTTPS.
+- **You do nothing to move.** rdy 0.55.0 opens a store made by rdy 0.54.0 as it is, with no upgrade step and no dump and load. Store format 19, dump format 4 and the store features stay.
 
 ### Fixes
 
-- **An open review page after a landing.** In rdy 0.53.0, the daemon built each open review target whole after each landing, before it answered. Now it renders only the open pages. On one Linux test project with 606 landings, measured on one machine, an open review page came back 3 to 14 seconds after a landing, against 19 to 221 seconds in rdy 0.53.0. A review page that was not yet rendered opened in under 1.1 seconds.
-- **Daemon memory with review pages open.** On the same project, with canon and 2 to 9 review pages open, the idle daemon held 730 to 917 MB, against 1.05 to 1.25 GB in rdy 0.53.0. From the third open review page on, its memory did not grow. These are measurements on one project and one machine, not limits.
-- **About the rdy 0.53.0 figures.** They come from a test build made before the 0.53.0 release, on a copy of the project with 590 landings. That build may not have the smaller site of rdy 0.53.0's shorter "Why?" trail. So part of the memory gap can come from that change, and the comparison is not exact.
+- **Reopen after a shutdown.** When the daemon shuts down, it now stops its notifier and its site worker and waits for them. Before, opening the store right after `rdy serve --stop` or a daemon exit could fail with `E_HELD_BY_READER`.
+- **Daemon memory over many landings.** A scope that is not canon, such as an old landing, a proposal version, or a view on an older base, now shares canon's blocks, graph and lexicon, and reads only the blocks that differ. Before, each such scope held about as much memory as canon. A closed view drops its build. On Linux with glibc, the daemon gives free memory back to the system after each landing.
+- **The snapshot cache counts real bytes.** The store's snapshot map cache charged about 30% less than its maps held, so it could hold more than its budget of 64 MiB. Now it keeps a compact copy of each map and charges its measured bytes. The budget stays 64 MiB.
+- **Measured.** In one soak test on a Linux test project of about 20,000 blocks, on one machine, the daemon's live memory, less what its capped caches hold, grew 16 MB from landing 10 to landing 40. This is a measurement, not a limit.
 
 ### Project and build
 
-- **rdy-adapter.** rdy-adapter adds the reads that rdyhub needs to check a push. They change nothing in a project that rdy runs.
-- **Dependencies.** No crate is new to the build, and `Cargo.lock` does not change. rdy-render's tests now use rdy-engine's test support.
+- **rdy-adapter.** rdy-adapter adds the reads that rdyhub needs: store features, carried sources and pages of history. They change nothing in a project that rdy runs.
+- **Dependencies.** No crate is new to the build. `Cargo.lock` gains two lines under rdy-adapter: `rcgen` and `rustls`. The lock already held both. Only rdy-adapter's tests use them.
 
 ## Feedback
 
@@ -220,12 +230,22 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
   - `rdy_trace` can show no premises for a decision that has a `depends_on` link.
   - `rdy_view create` with a bare landing hash as `base` gives a fix about forking a view. Write the base as `landing:<hash>`.
 - A content removal keeps the upgrade backup that a pending upgrade completion names, so that backup can still hold the removed text until the completion ends. Only a removal that finishes at an open after a crash can meet this.
+- Sync with a hub:
+  - A forced push, a restore and a take of hub canon read the state again after you confirm the card. If canon moves between the card and the run, the move can remove landings that the card did not name.
+  - A push of a fork alone treats its source project as absent from the hub, also when the hub has it.
+  - After local history moves on, a push that resumes an upload can send a different batch from its first try, and the hub can refuse it.
+  - A restore can use a held hub tip as its history base when that tip descends from the dump's canon. The hub then refuses the restore.
+  - `rdy clone <url>` with no target folder, run in an empty current folder, replaces that folder. Give a target folder.
+  - When the project description that a push sent holds a newline or a tab, `rdy clone <url>` of that hub repo fails with `E_BAD_INPUT`. A new push does not fix it.
+  - A clone refuses a hub pack whose custom parent pack this rdy does not have, with `E_BAD_INPUT`.
+  - When the last flush of the folder fails after the clone is in place, the clone returns `E_IO` but leaves the project there.
+  - The help of `rdy pull --strict` and the description of `rdy_pull` say that `strict` stops at the first conflict. It replays none of your landings, as "New features" says.
+  - A pull reply does not list the warnings about removals that a publication does not cover. `rdy status` and `rdy_overview` show them in `uncovered_warnings`.
 - Snapshot deltas and the daemon:
   - An upgrade that rdy refuses, for example on a snapshot whose bytes are not canonical, keeps its backup. Every later open to write then refuses with `E_UPGRADE_BACKUP`. Move the backup folder aside, then open the project again. Readers still open the project. The refusal of the upgrade gives the fix "run rdy fsck", which does not help in this case.
   - The upgrade, and the load of a dump without the feature, keep all new snapshot deltas in memory. A very long history of very large projects, such as 2,500 landings of 100,000 blocks each, can run out of memory. Nothing is written in that case.
   - `rdy fsck` accepts a snapshot delta that sets a block version that the store does not hold, when no removal took that version.
   - `rdy fsck`, dump and load accept snapshot delta bytes that are not canonical. A take refuses them.
-  - The snapshot cache can hold more than its budget of 64 MiB. One test held about 97 MB.
   - A removal report over a long history can be slow: it folds shared history again for each landing.
 - Publication review:
   - A first check's `included.rows` give no `path`, `digest` or `redacted`, although an added doc row gives them.
@@ -273,8 +293,8 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
 
 rdy is licensed MIT OR Apache-2.0. The binaries also contain two libraries under the [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/): `imbl` 7.0.2 and `imbl-sized-chunks` 0.2.0. This release attaches the exact source code of each, as its crates.io crate file. Each SHA-256 matches rdy's `Cargo.lock` at this release:
 
-- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.54.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
-- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.54.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
+- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.55.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
+- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.55.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
 
 Each archive's `THIRD-PARTY-NOTICES.txt` gives the license of every library in the binary.
 
@@ -333,11 +353,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.54.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.54.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.54.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.54.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.54.0/bin/rdy' &&
-'/path/to/rdy-0.54.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.55.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.55.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.55.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.55.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.55.0/bin/rdy' &&
+'/path/to/rdy-0.55.0/bin/rdy' '--version'
 ```
 
 On Linux amd64:
@@ -347,11 +367,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.54.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.54.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.54.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.54.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.54.0/bin/rdy' &&
-'/path/to/rdy-0.54.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.55.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.55.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.55.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.55.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.55.0/bin/rdy' &&
+'/path/to/rdy-0.55.0/bin/rdy' '--version'
 ```
 
 On Windows amd64, in PowerShell:
@@ -364,16 +384,16 @@ $s = [IO.File]::Open('C:\path\to\download\release-allowed-signers', [IO.FileMode
 & 'cmd.exe' '/d' '/c' 'ssh-keygen.exe -Y verify -f release-allowed-signers -I rdy-release -n rdy-release-v1 -s SHA256SUMS.sig < SHA256SUMS'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 $n = 0; foreach ($line in [IO.File]::ReadAllLines('C:\path\to\download\SHA256SUMS')) { $want = $line.Substring(0, 64); $name = $line.Substring(66); $file = [IO.Path]::Combine('C:\path\to\download', $name); if (Test-Path -LiteralPath $file) { $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower(); if ($got -cne $want) { throw ($name + ': FAILED') }; [Console]::Out.Write($name + ': OK' + [char]10); $n++ } }; if ($n -eq 0) { throw 'no archive was checked' }
-foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.54.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
-& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.54.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
+foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.55.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
+& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.55.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
-[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.54.0\bin')
-[IO.File]::Copy('C:\path\to\unpack\rdy-0.54.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.54.0\bin\rdy.exe')
-& 'C:\path\to\rdy-0.54.0\bin\rdy.exe' '--version'
+[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.55.0\bin')
+[IO.File]::Copy('C:\path\to\unpack\rdy-0.55.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.55.0\bin\rdy.exe')
+& 'C:\path\to\rdy-0.55.0\bin\rdy.exe' '--version'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 }
 # Add the version's bin directory to PATH in this session:
-# $env:Path = 'C:\path\to\rdy-0.54.0\bin;' + $env:Path
+# $env:Path = 'C:\path\to\rdy-0.55.0\bin;' + $env:Path
 # rdy needs SSH_AUTH_SOCK, even when ssh works without it. Set it to the agent pipe:
 # $env:SSH_AUTH_SOCK = '\\.\pipe\openssh-ssh-agent'
 ```
@@ -387,16 +407,16 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.54.0-aarch64-apple-darwin.tar.gz' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.54.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.54.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.54.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.54.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.54.0/bin/rdy' &&
-'/path/to/rdy-0.54.0/bin/rdy' '--version'
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.55.0-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.55.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.55.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.55.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.55.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.55.0/bin/rdy' &&
+'/path/to/rdy-0.55.0/bin/rdy' '--version'
 ```
 
 Add the version's bin directory to PATH in this shell.
-Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.54.0`:
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.55.0`:
 
 ```sh
 export PATH="<version-prefix>/bin:$PATH"
