@@ -1,6 +1,6 @@
 //! D-Y1WEY, D-0ZPAP: a briefing lists vector neighbors after its neighbors. The rows of every
 //! source sort together; they are advice and change no token, coverage, consequence, suspect or
-//! plan item. The first 500 covered content blocks in reading order are scored; the rest, and the
+//! plan item. The first 20 covered content blocks in reading order are scored; the rest, and the
 //! ones a work guard stops, count in `vector_neighbors_skipped`. The rows page like neighbors,
 //! their order vouches for a page and their scores do not, and a past landing or a proposal
 //! version has none.
@@ -316,24 +316,24 @@ fn wide(r: &mut Rdy) -> Vec<String> {
 }
 
 #[test]
-fn vxs3_first_500_sources_and_guard_counts_are_explicit() {
-    // 506 covered claims: the first 500 in reading order (every claim of s-0000P, then the first
-    // 247 of s-0000Q) are scored, the last six count as skipped. Id order would pick others.
+fn vxs3_first_20_sources_and_guard_counts_are_explicit() {
+    // 26 covered claims: the first 20 in reading order (every claim of s-0000P, then the first
+    // 7 of s-0000Q) are scored, the last six count as skipped. Id order would pick others.
     let (_d, mut r) = project();
-    let claims = pairs(&mut r, 506);
+    let claims = pairs(&mut r, 26);
     let path = Coverage {
         ids: vec![],
         path: Some("many".into()),
     };
     let b = r.read().brief(&work(), &path, Some(usize::MAX)).unwrap();
-    assert_eq!(b.covers, 509);
+    assert_eq!(b.covers, 29);
     assert_eq!(b.vector_neighbors_skipped, 6);
     let reading: Vec<&String> = claims
         .iter()
         .step_by(2)
         .chain(claims.iter().skip(1).step_by(2))
         .collect();
-    let scored: BTreeSet<&str> = reading[..500].iter().map(|s| s.as_str()).collect();
+    let scored: BTreeSet<&str> = reading[..20].iter().map(|s| s.as_str()).collect();
     let fors: BTreeSet<&str> = b
         .vector_neighbors
         .iter()
@@ -342,7 +342,7 @@ fn vxs3_first_500_sources_and_guard_counts_are_explicit() {
     assert_eq!(fors, scored);
     assert_eq!(
         b.vector_neighbors.len(),
-        500,
+        20,
         "one row for each scored source"
     );
     for v in &b.vector_neighbors {
@@ -354,17 +354,17 @@ fn vxs3_first_500_sources_and_guard_counts_are_explicit() {
         );
     }
     // the skipped sources are the last six of s-0000Q, never the first ones by id
-    for k in [495, 497, 499, 501, 503, 505] {
+    for k in [15, 17, 19, 21, 23, 25] {
         assert!(!fors.contains(claims[k].as_str()), "{k}");
     }
-    for k in [0, 1, 2, 504] {
+    for k in [0, 1, 2, 24] {
         assert!(fors.contains(claims[k].as_str()), "{k}");
     }
     assert_eq!(json_of(&b)["vector_neighbors_skipped"], json!(6));
 
     // the section work guard: each source charges 64 seeds of 100 postings each (6,400), so the
-    // first 312 sources fit the 2,000,000 posting incidences of a briefing and the next 188 of
-    // the first 500 are stopped. 100 more are past the first 500: 288 skipped in all.
+    // first 20 sources (128,000) fit the 2,000,000 posting incidences of a briefing and none is
+    // stopped. The other 580 are past the first 20 and count as skipped.
     let (_d, mut r) = project();
     let claims = wide(&mut r);
     let path = Coverage {
@@ -372,16 +372,16 @@ fn vxs3_first_500_sources_and_guard_counts_are_explicit() {
         path: Some("wide".into()),
     };
     let b = r.read().brief(&work(), &path, Some(usize::MAX)).unwrap();
-    assert_eq!(b.vector_neighbors_skipped, 188 + 100);
+    assert_eq!(b.vector_neighbors_skipped, 580);
     let fors: BTreeSet<&str> = b
         .vector_neighbors
         .iter()
         .map(|v| v.r#for.as_str())
         .collect();
-    let complete: BTreeSet<&str> = claims[..312].iter().map(|s| s.as_str()).collect();
+    let complete: BTreeSet<&str> = claims[..20].iter().map(|s| s.as_str()).collect();
     assert_eq!(fors, complete, "the complete sources, in reading order");
     // a complete source keeps its ten best rows; the 89 more it found count nowhere
-    assert_eq!(b.vector_neighbors.len(), 312 * 10);
+    assert_eq!(b.vector_neighbors.len(), 20 * 10);
     for c in &complete {
         let n = b.vector_neighbors.iter().filter(|v| v.r#for == *c).count();
         assert_eq!(n, 10, "{c}");

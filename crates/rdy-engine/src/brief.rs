@@ -899,13 +899,13 @@ pub struct Briefing {
     pub neighbors: Vec<crate::neighbors::Neighbor>,
     /// nb7: the neighbor rows of the whole briefing per doc.
     pub neighbors_by_doc: Vec<NeighborDocCount>,
-    /// D-Y1WEY: the vector neighbors of the first 500 covered content blocks in reading order,
+    /// D-Y1WEY: the vector neighbors of the first 20 covered content blocks in reading order,
     /// the rows of every source sorted together. Left out when empty, at a past landing and in a
     /// proposal version.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub vector_neighbors: Vec<VectorNeighbor>,
     /// D-0ZPAP: how many covered content blocks got no vector rows computed: those past the
-    /// first 500, and those a work guard stopped. A source with no seed word or target, and rows
+    /// first 20, and those a work guard stopped. A source with no seed word or target, and rows
     /// past a source's ten, count nowhere. Left out when zero.
     #[serde(skip_serializing_if = "is_zero")]
     pub vector_neighbors_skipped: usize,
@@ -2181,7 +2181,7 @@ impl ReadState {
 
     /// D-Y1WEY, D-0ZPAP: the vector neighbor rows of `ids` in `scope` (`m` and `g`), with each
     /// row's summary from `summary_of`, and the count of sources whose rows were not computed.
-    /// The sources are the covered content blocks in reading order; the first 500 are scored
+    /// The sources are the covered content blocks in reading order; the first 20 are scored
     /// against the scope's weights. A past landing and a proposal version have no rows and build
     /// no weights.
     fn brief_vectors(

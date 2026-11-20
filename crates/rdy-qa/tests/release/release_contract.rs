@@ -4756,7 +4756,7 @@ fn mcp_hook_probes(seen: &mut Seen) {
 /// again. Section One of doc `vec-alpha` holds two sources that share words and the link target
 /// `$t` with the claims of doc `vec-beta`, so their briefing lists rows with words and links from
 /// both sources, sorted together. Doc `vec-many` holds 501 claims, so its briefing scores the
-/// first 500 and counts one skipped source. Returns the project, the addresses of section One and
+/// first 20 and counts 481 skipped sources. Returns the project, the addresses of section One and
 /// of `vec-many`'s section, and a budget whose first page shows some vector rows and cuts the
 /// rest (`omitted.vector_neighbors`).
 fn vector_project() -> (tempfile::TempDir, String, String, usize) {
@@ -4825,7 +4825,7 @@ fn vector_project() -> (tempfile::TempDir, String, String, usize) {
 type BriefCall<'a> = dyn FnMut(&str, Option<&str>, Option<usize>, Option<&str>) -> Value + 'a;
 
 /// The vector probes of one surface: the rows of two sources with words and links, a cut first
-/// page and the rest, a source past the first 500, and a past landing with no rows. `brief` runs
+/// page and the rest, a source past the first 20, and a past landing with no rows. `brief` runs
 /// one briefing (target, scope, budget, cursor) and returns its JSON.
 fn vector_probes(address: &str, many: &str, cut: usize, brief: &mut BriefCall<'_>) {
     let full = brief(address, None, None, None);
@@ -4856,7 +4856,7 @@ fn vector_probes(address: &str, many: &str, cut: usize, brief: &mut BriefCall<'_
         brief(address, None, Some(cut), Some(next));
     }
     let skipped = brief(many, None, None, None);
-    assert_eq!(skipped["vector_neighbors_skipped"], json!(1), "{skipped}");
+    assert_eq!(skipped["vector_neighbors_skipped"], json!(481), "{skipped}");
     assert!(skipped.get("vector_neighbors").is_none(), "{skipped}");
     // a past landing has no rows and no count (the command line has no such scope)
     let old = brief(address, Some("tag:v1.0.0"), None, None);

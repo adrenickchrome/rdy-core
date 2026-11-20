@@ -39,11 +39,11 @@ pub struct AdviceCut {
 }
 
 impl AdviceCut {
-    /// A briefing: score at least 0.25, ten rows per source, the first 500 sources.
+    /// A briefing: score at least 0.25, ten rows per source, the first 20 sources.
     pub const BRIEFING: AdviceCut = AdviceCut {
         floor: 0.25,
         per_source: 10,
-        max_sources: 500,
+        max_sources: 20,
     };
 
     /// A write receipt: score at least 0.25, three rows per source, the first ten sources.
@@ -904,9 +904,26 @@ mod tests {
             assert_eq!(a.rows.len(), 10, "ninety-nine neighbors, ten kept");
         }
         assert_eq!(seeded, 87);
-        // the whole section: sums, and nothing near a guard
+        // a briefing scores the first 20 sources (ten of them seeded) and skips the other 77
+        let mut cut = VectorBudget::briefing();
+        let a = vector_neighbors_in(&m, &g, pack, &w, &sources, AdviceCut::BRIEFING, &mut cut);
+        assert_eq!(
+            cut.used(),
+            BudgetUse {
+                postings: 1_000,
+                candidates: 1_000,
+                pairs: 990,
+                products: 4_050,
+            }
+        );
+        assert_eq!((a.skipped, a.rows.len()), (77, 100));
+        // the whole section, with no source cut: sums, and nothing near a guard
+        let whole = AdviceCut {
+            max_sources: sources.len(),
+            ..AdviceCut::BRIEFING
+        };
         let mut budget = VectorBudget::briefing();
-        let a = vector_neighbors_in(&m, &g, pack, &w, &sources, AdviceCut::BRIEFING, &mut budget);
+        let a = vector_neighbors_in(&m, &g, pack, &w, &sources, whole, &mut budget);
         let used = budget.used();
         assert_eq!(
             used,
@@ -1396,7 +1413,7 @@ mod tests {
                 AdviceCut::BRIEFING.max_sources,
                 AdviceCut::WRITE.max_sources
             ),
-            (500, 10)
+            (20, 10)
         );
         assert_eq!(
             (AdviceCut::BRIEFING.floor, AdviceCut::WRITE.floor),
@@ -1428,6 +1445,36 @@ mod tests {
             vec!["alpha", "beta", "phrase", "seed", "shared"]
         );
         assert!(adv.rows[0].links.is_empty());
+    }
+
+    /// A briefing scores the first 20 eligible sources: the 21st gets no rows and counts once in
+    /// the skipped sources.
+    #[test]
+    fn vxs2_briefing_scores_the_first_20_sources() {
+        let mut p = Proj::new();
+        let da = p.doc("alpha");
+        let mut sources = vec![];
+        let mut partners = vec![];
+        for i in 0..21 {
+            sources.push(p.alone(&da, &format!("w{i} x{i}")));
+            partners.push(p.alone(&da, &format!("w{i} x{i}")));
+        }
+        let world = World::new(&p.blocks);
+        let (adv, _) = world.advice(&sources, AdviceCut::BRIEFING);
+        assert_eq!(adv.skipped, 1, "the 21st source is skipped");
+        let scored: BTreeSet<usize> = adv.rows.iter().map(|r| r.source_index).collect();
+        assert_eq!(scored, (0..20).collect::<BTreeSet<usize>>());
+        assert!(adv.rows.iter().all(|r| r.source != sources[20]));
+        for (s, n) in sources.iter().zip(&partners).take(20) {
+            assert!(
+                adv.rows.iter().any(|r| r.source == *s && r.block == *n),
+                "{s} keeps its partner"
+            );
+        }
+        // the 21st source alone has rows: only the cut leaves them out
+        let (one, _) = world.advice(std::slice::from_ref(&sources[20]), AdviceCut::BRIEFING);
+        assert_eq!(one.skipped, 0);
+        assert!(one.rows.iter().any(|r| r.block == partners[20]));
     }
 
     // ---- guards ----
