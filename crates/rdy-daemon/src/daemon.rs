@@ -51,7 +51,7 @@ pub(crate) fn log(text: &str) {
 }
 
 /// The live [`LogCapture`]s: each one's expected texts and the lines it took.
-type Captures = Vec<(u64, Vec<String>, Vec<String>)>;
+type Captures = Vec<(u64, Vec<String>, Vec<String>, Option<std::thread::ThreadId>)>;
 
 static CAPTURES: Mutex<Captures> = Mutex::new(Vec::new());
 /// How many [`LogCapture`]s are live, so a daemon with none never takes the lock.
@@ -66,7 +66,11 @@ fn captured(text: &str) -> bool {
     let Ok(mut all) = CAPTURES.lock() else {
         return false;
     };
-    for (_, expected, lines) in all.iter_mut() {
+    let here = std::thread::current().id();
+    for (_, expected, lines, only) in all.iter_mut() {
+        if only.is_some_and(|t| t != here) {
+            continue;
+        }
         if expected.iter().any(|e| text.contains(e.as_str())) {
             lines.push(text.to_string());
             return true;
@@ -80,13 +84,25 @@ fn captured(text: &str) -> bool {
 /// and every unexpected line stays visible.
 #[doc(hidden)]
 pub fn capture_log_for_tests(expected: &[&str]) -> LogCapture {
+    capture(expected, None)
+}
+
+/// [`capture_log_for_tests`] for the lines the calling thread logs: a test whose expected text
+/// can also come from another test's identical bind (the same derived port range) asserts only
+/// its own.
+#[doc(hidden)]
+pub fn capture_thread_log_for_tests(expected: &[&str]) -> LogCapture {
+    capture(expected, Some(std::thread::current().id()))
+}
+
+fn capture(expected: &[&str], only: Option<std::thread::ThreadId>) -> LogCapture {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = NEXT.fetch_add(1, Ordering::SeqCst);
     let expected = expected.iter().map(|e| e.to_string()).collect();
     CAPTURES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push((id, expected, vec![]));
+        .push((id, expected, vec![], only));
     CAPTURING.fetch_add(1, Ordering::SeqCst);
     LogCapture { id }
 }
@@ -102,8 +118,8 @@ impl LogCapture {
     pub fn lines(&self) -> Vec<String> {
         let all = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
         all.iter()
-            .find(|(id, _, _)| *id == self.id)
-            .map(|(_, _, lines)| lines.clone())
+            .find(|(id, ..)| *id == self.id)
+            .map(|(_, _, lines, _)| lines.clone())
             .unwrap_or_default()
     }
 }
@@ -111,7 +127,7 @@ impl LogCapture {
 impl Drop for LogCapture {
     fn drop(&mut self) {
         let mut all = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
-        all.retain(|(id, _, _)| *id != self.id);
+        all.retain(|(id, ..)| *id != self.id);
         CAPTURING.fetch_sub(1, Ordering::SeqCst);
     }
 }
