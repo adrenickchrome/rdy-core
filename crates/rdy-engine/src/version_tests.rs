@@ -3,14 +3,18 @@
 //! version pair of two request versions (D-G8T2W) is at the end: [`version_pair`].
 //!
 //! Each landing's own changes merge onto the running state, which starts as `onto`'s snapshot
-//! (the empty state for none) and becomes each clean merge's state. Deletions read as of `onto`
-//! (`merge_onto`'s `at`). The test stops at the first landing with any conflict and names every
-//! conflicting block of that landing and its kind (`StoreReader::merge_conflicts`). It reads
-//! records only and writes nothing. The caller checks the inputs.
+//! (the empty state for none) and becomes each clean merge's state. Its deletes are those of the
+//! landings merged so far, else those of `onto`'s own chain
+//! ([`crate::landing_check::ChainDeletes`]): never a later landing of the chain, a landing
+//! outside `onto`'s chain or current canon's landed rows. The test stops at the first landing
+//! with any conflict and names every conflicting block of that landing and its kind
+//! (`StoreReader::merge_conflicts`). It reads records only and writes nothing. The caller checks
+//! the inputs.
 
 use crate::ReadState;
 use crate::error::RdyError;
 use crate::history_facts::{self, MAX_LANDINGS, walk_heads};
+use crate::landing_check::ChainDeletes;
 use rdy_model::{BlockId, Hash};
 use rdy_store::{MergeConflict, kinds};
 use serde::Serialize;
@@ -38,6 +42,7 @@ pub fn rebase_test(
 ) -> Result<RebaseTest, RdyError> {
     let reader = st.reader();
     let mut state = reader.state_of(onto)?;
+    let mut deletes = ChainDeletes::new(onto);
     for &landing in chain {
         let record = reader.landing(&landing)?;
         let changes = record
@@ -45,10 +50,12 @@ pub fn rebase_test(
             .iter()
             .map(|c| reader.change(c))
             .collect::<Result<Vec<_>, _>>()?;
-        let (merged, conflicts) = reader.merge_conflicts(onto, &state, &changes)?;
+        let given = deletes.of_changes(st, &state, &changes)?;
+        let (merged, conflicts) = reader.merge_conflicts_given(&state, &changes, &given)?;
         if !conflicts.is_empty() {
             return Ok(RebaseTest::Conflict { landing, conflicts });
         }
+        deletes = deletes.after(&state, &merged.state, &changes);
         state = merged.state;
     }
     Ok(RebaseTest::Clean)

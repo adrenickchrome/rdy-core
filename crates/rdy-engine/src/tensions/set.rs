@@ -1311,8 +1311,8 @@ impl ReadState {
             return at.to_vec();
         }
         match self
-            .canon_snapshot()
-            .and_then(|canon| Ok(self.reader().merge_checked(&canon, read)?))
+            .merge_checked_on_canon(read)
+            .and_then(|merged| Ok(merged?))
         {
             Ok((_, at)) => {
                 self.memo.order.put(ids, Arc::new(at.clone()));

@@ -117,6 +117,7 @@ pub mod reflects;
 pub mod related;
 pub mod render_inputs;
 pub mod render_source;
+pub mod replay_test;
 pub mod repo;
 pub mod rule_types;
 pub mod rules;

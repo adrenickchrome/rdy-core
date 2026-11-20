@@ -858,7 +858,7 @@ pub(crate) fn blocking_conflicts(
 ) -> Result<Vec<Conflict>, RdyError> {
     let reader = st.reader();
     let base = st.effective_base(view);
-    let state = reader.state_of(base)?;
+    let state = st.state_at(base)?;
     let cs = changes_of(st, changes)?;
     let touched: BTreeSet<BlockId> = cs
         .iter()
@@ -874,7 +874,7 @@ pub(crate) fn blocking_conflicts(
             is_replay: c.links.replayed_from.is_some(),
         })
         .collect();
-    let deleters = reader.merge_deleters(base.as_ref(), &state, &touched)?;
+    let deleters = st.merge_deleters(base, &state, &touched)?;
     // the merge asks for the producer of each touched block's base version only: read them
     // first, so a damaged index entry fails the check instead of reading as "no producer",
     // which would settle the base's side of a conflict (msw2)
@@ -1874,13 +1874,12 @@ pub(crate) fn prospective(
     let applied = match st.memo.order.get(&ids) {
         Some(at) => at,
         None => {
-            let (_, applied) = st
-                .reader()
-                .merge_checked(&*st.canon_snapshot()?, changes)
-                .map_err(|e| match approving {
-                    Some(view) => approver_stale(e, view),
-                    None => e.into(),
-                })?;
+            let (_, applied) =
+                st.merge_checked_on_canon(changes)?
+                    .map_err(|e| match approving {
+                        Some(view) => approver_stale(e, view),
+                        None => e.into(),
+                    })?;
             let at = Arc::new(applied);
             st.memo.order.put(ids.clone(), Arc::clone(&at));
             at

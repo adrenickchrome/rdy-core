@@ -33,6 +33,15 @@ pub struct MergeConflict {
     pub kind: ConflictKind,
 }
 
+/// Where a merge reads the deletes of a block its base lacks: as of a stored landing
+/// (`deleters_at`), or from a map its caller gives (a state built in memory, which no stored
+/// landing records).
+#[derive(Clone, Copy)]
+enum Deletions<'a> {
+    AsOf(Option<Hash>),
+    Given(&'a HashMap<BlockId, Hash>),
+}
+
 /// Whether `a` and `b` are two versions of one block that differ only by their order key (a
 /// redacted projection never does: its read identity is its own).
 fn differs_only_in_order(a: &Block, b: &Block) -> bool {
@@ -403,13 +412,28 @@ impl StoreReader {
         base: &StateSnapshot,
         changes: &[Change],
     ) -> Result<Merged, StoreError> {
-        Ok(self.merge_onto_indexed(at, base, changes)?.0)
+        Ok(self
+            .merge_onto_indexed(Deletions::AsOf(at), base, changes)?
+            .0)
+    }
+
+    /// [`StoreReader::merge_onto`] onto a `base` that no stored landing may record: a block `base`
+    /// lacks reads as removed by the change `deleters` names for it, none when it names none.
+    pub fn merge_onto_given(
+        &self,
+        base: &StateSnapshot,
+        changes: &[Change],
+        deleters: &HashMap<BlockId, Hash>,
+    ) -> Result<Merged, StoreError> {
+        Ok(self
+            .merge_onto_indexed(Deletions::Given(deleters), base, changes)?
+            .0)
     }
 
     /// `merge_onto`, with each applied change's position in `changes` (see `merge_indexed`).
     fn merge_onto_indexed(
         &self,
-        at: Option<Hash>,
+        deletions: Deletions<'_>,
         base: &StateSnapshot,
         changes: &[Change],
     ) -> Result<(Merged, Vec<usize>), StoreError> {
@@ -422,13 +446,16 @@ impl StoreReader {
                 is_replay: c.links.replayed_from.is_some(),
             })
             .collect();
-        let deleters = self.merge_deleters(
-            at.as_ref(),
-            base,
-            changes
-                .iter()
-                .flat_map(|c| c.ops.iter().map(|op| op.block_id())),
-        )?;
+        let deleters = match deletions {
+            Deletions::AsOf(at) => self.merge_deleters(
+                at.as_ref(),
+                base,
+                changes
+                    .iter()
+                    .flat_map(|c| c.ops.iter().map(|op| op.block_id())),
+            )?,
+            Deletions::Given(given) => given.clone(),
+        };
         // the producer of each base version an op touches, read before the merge, so a read
         // error fails the merge: read as "no producer", it would settle canon's side
         let mut producers: HashMap<Hash, Option<Hash>> = HashMap::new();
@@ -502,27 +529,22 @@ impl StoreReader {
         changes: &[Change],
         adoption: Option<&PinAdoption>,
     ) -> Result<(Merged, Vec<usize>), StoreError> {
-        let (merged, at, conflicts) =
-            self.merge_conflicts_with(self.canon_head()?, canon, changes, adoption, true)?;
-        let Some(first) = conflicts.first() else {
-            return Ok((merged, at));
-        };
-        let block = first.block.clone();
-        Err(match first.kind {
-            ConflictKind::StaleBase => StoreError::StaleBase {
-                expected: merged
-                    .conflicts
-                    .iter()
-                    .find(|c| c.block == block)
-                    .and_then(|c| c.base)
-                    .expect("a stale base conflict has a base"),
-                actual: canon.blocks.get(&block).copied(),
-                id: block,
-            },
-            ConflictKind::DeletedSince => StoreError::DeletedSince(block),
-            ConflictKind::AlreadyExists => StoreError::AlreadyExists(block),
-            ConflictKind::Frozen => StoreError::Frozen(block),
-        })
+        let deletions = Deletions::AsOf(self.canon_head()?);
+        let found = self.merge_conflicts_with(deletions, canon, changes, adoption, true)?;
+        first_refusal(canon, found)
+    }
+
+    /// [`StoreReader::merge_checked`] onto a `canon` that no stored landing may record, with the
+    /// deletes `deleters` names (as [`StoreReader::merge_onto_given`] reads them).
+    pub fn merge_checked_given(
+        &self,
+        canon: &StateSnapshot,
+        changes: &[Change],
+        deleters: &HashMap<BlockId, Hash>,
+    ) -> Result<(Merged, Vec<usize>), StoreError> {
+        let deletions = Deletions::Given(deleters);
+        let found = self.merge_conflicts_with(deletions, canon, changes, None, true)?;
+        first_refusal(canon, found)
     }
 
     /// Every conflict of merging `changes` onto `base`, the state of landing `at`, with its kind
@@ -537,7 +559,23 @@ impl StoreReader {
         base: &StateSnapshot,
         changes: &[Change],
     ) -> Result<(Merged, Vec<MergeConflict>), StoreError> {
-        let (merged, _, conflicts) = self.merge_conflicts_with(at, base, changes, None, false)?;
+        let deletions = Deletions::AsOf(at);
+        let (merged, _, conflicts) =
+            self.merge_conflicts_with(deletions, base, changes, None, false)?;
+        Ok((merged, conflicts))
+    }
+
+    /// [`StoreReader::merge_conflicts`] onto a `base` that no stored landing may record, with the
+    /// deletes `deleters` names (as [`StoreReader::merge_onto_given`] reads them).
+    pub fn merge_conflicts_given(
+        &self,
+        base: &StateSnapshot,
+        changes: &[Change],
+        deleters: &HashMap<BlockId, Hash>,
+    ) -> Result<(Merged, Vec<MergeConflict>), StoreError> {
+        let deletions = Deletions::Given(deleters);
+        let (merged, _, conflicts) =
+            self.merge_conflicts_with(deletions, base, changes, None, false)?;
         Ok((merged, conflicts))
     }
 
@@ -546,13 +584,13 @@ impl StoreReader {
     /// than it needs (`merge_checked_with`).
     fn merge_conflicts_with(
         &self,
-        at: Option<Hash>,
+        deletions: Deletions<'_>,
         base: &StateSnapshot,
         changes: &[Change],
         adoption: Option<&PinAdoption>,
         first_only: bool,
     ) -> Result<(Merged, Vec<usize>, Vec<MergeConflict>), StoreError> {
-        let (merged, order) = self.merge_onto_indexed(at, base, changes)?;
+        let (merged, order) = self.merge_onto_indexed(deletions, base, changes)?;
         let mut out: Vec<MergeConflict> = merged
             .conflicts
             .iter()
@@ -2013,4 +2051,32 @@ impl StoreReader {
     pub fn first_briefed_change(&self) -> Result<Option<crate::segment::Location>, StoreError> {
         self.index().first_briefed_change()
     }
+}
+
+/// The refusal of `merge_checked` from a merge's first conflict (block order) onto `canon`, else
+/// the merge and each applied change's position.
+fn first_refusal(
+    canon: &StateSnapshot,
+    found: (Merged, Vec<usize>, Vec<MergeConflict>),
+) -> Result<(Merged, Vec<usize>), StoreError> {
+    let (merged, at, conflicts) = found;
+    let Some(first) = conflicts.first() else {
+        return Ok((merged, at));
+    };
+    let block = first.block.clone();
+    Err(match first.kind {
+        ConflictKind::StaleBase => StoreError::StaleBase {
+            expected: merged
+                .conflicts
+                .iter()
+                .find(|c| c.block == block)
+                .and_then(|c| c.base)
+                .expect("a stale base conflict has a base"),
+            actual: canon.blocks.get(&block).copied(),
+            id: block,
+        },
+        ConflictKind::DeletedSince => StoreError::DeletedSince(block),
+        ConflictKind::AlreadyExists => StoreError::AlreadyExists(block),
+        ConflictKind::Frozen => StoreError::Frozen(block),
+    })
 }

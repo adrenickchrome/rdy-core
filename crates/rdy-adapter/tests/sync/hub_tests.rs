@@ -1,4 +1,5 @@
-//! crb3: the rebase test of a chain of landings onto a landing's state (D-2QX9W, D-N0NVF), and
+//! crb3: the rebase test of a chain of landings onto a landing's state (D-2QX9W, D-N0NVF),
+//! crb4: the replay test of a chain, with each replayed landing's gate result, and
 //! crb6: the version pair of the carry-over (D-G8T2W), in a holder, from the snapshot's captured
 //! refs only, with no write.
 
@@ -9,7 +10,8 @@ use crate::hub_world::{
 use rdy_adapter::stream::StreamPurpose;
 use rdy_adapter::sync::CanonMove;
 use rdy_adapter::{
-    ConflictKind, Hash, MergeConflict, RebaseTest, StoreHandle, VersionChain, VersionTests,
+    ConflictKind, Hash, LandingCheck, MergeConflict, RebaseTest, ReplayTest, StoreHandle,
+    VersionChain, VersionTests,
 };
 use rdy_engine::Rdy;
 use serde_json::json;
@@ -121,7 +123,8 @@ fn crb3_conflict_names_every_block_of_the_stopping_landing() {
 }
 
 /// A held chain on `p1`, written in Q: `q2` writes the "Held" doc, `q4` updates its prose, `q5`
-/// deletes the prose of "Canon" and `q6` re-creates that prose under its own id.
+/// deletes the prose of "Canon", `q6` re-creates that prose under its own id and `q7` deletes the
+/// prose of "Held".
 struct Chain {
     w: World,
     hub: StoreHandle,
@@ -129,6 +132,7 @@ struct Chain {
     q4: Hash,
     q5: Hash,
     q6: Hash,
+    q7: Hash,
     held_prose: String,
     canon_prose: String,
 }
@@ -166,12 +170,14 @@ fn chain() -> Chain {
                 "body": "The hub keeps one canon, again."}]),
     );
     let q6 = land(&mut q, "w6");
+    write_in(&mut q, "w7", json!([{"op": "delete", "id": held_prose}]));
+    let q7 = land(&mut q, "w7");
     q.close().unwrap();
-    let eq = w.dir.path().join("eq6.rdysync");
-    export(&qd, StreamPurpose::CanonHistory, q6, Some(w.p1), &eq);
+    let eq = w.dir.path().join("eq7.rdysync");
+    export(&qd, StreamPurpose::CanonHistory, q7, Some(w.p1), &eq);
     let hub = w.holder("hub");
     seed(&hub, &w);
-    move_file(&hub, &eq, CanonMove::Hold, Some(w.p1), q6);
+    move_file(&hub, &eq, CanonMove::Hold, Some(w.p1), q7);
     let q2 = w.q2;
     Chain {
         w,
@@ -180,6 +186,7 @@ fn chain() -> Chain {
         q4,
         q5,
         q6,
+        q7,
         held_prose,
         canon_prose,
     }
@@ -214,6 +221,11 @@ fn crb3_a_later_landing_merges_onto_the_earlier_ones() {
     );
     assert_eq!(
         snap.rebase_test(&[c.q2, c.q4, c.q5, c.q6], &onto).unwrap(),
+        RebaseTest::Clean
+    );
+    // a create and then a delete of the same block
+    assert_eq!(
+        snap.rebase_test(&[c.q2, c.q4, c.q7], &onto).unwrap(),
         RebaseTest::Clean
     );
     assert_eq!(
@@ -542,6 +554,78 @@ fn crb6_no_write() {
     let h = StoreHandle::open_holder(&root).unwrap();
     let snap = h.snapshot().unwrap();
     snap.compare_versions(&version(None, &[w.q2]), &version(Some(w.p2), &[w.q2]))
+        .unwrap();
+    drop(snap);
+    h.close().unwrap();
+    assert_eq!(log_and_refs(&root), before);
+}
+
+/// The gate inputs of project P of world `w`, captured through an adapter handle.
+fn inputs_of_p(w: &World) -> rdy_adapter::landing_check::CheckInputs {
+    let p = StoreHandle::open(&w.p()).unwrap();
+    let inputs = p.snapshot().unwrap().capture_gate_inputs().unwrap();
+    p.close().unwrap();
+    inputs
+}
+
+#[test]
+fn crb4_a_held_chain_replays_onto_canon_in_a_holder() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = world();
+    let inputs = inputs_of_p(&w);
+    let h = w.holder("hub");
+    seed(&h, &w);
+    move_file(&h, &w.e2, CanonMove::Extend, Some(w.p1), w.p2);
+    move_file(&h, &w.eq, CanonMove::Hold, Some(w.p2), w.q2);
+    let snap = h.snapshot().unwrap();
+    let test: ReplayTest = snap.replay_test(&[w.q2], "canon", &inputs).unwrap();
+    assert_eq!(test.stop, None, "{test:#?}");
+    assert_eq!(test.replayed.len(), 1, "{test:#?}");
+    assert_eq!(test.replayed[0].source, w.q2);
+    let check: &LandingCheck = &test.replayed[0].check;
+    assert!(check.pass, "{check:#?}");
+    // the inputs are checked as the landing check checks them, and the chain as the rebase
+    // test checks it
+    let bad = rdy_adapter::landing_check::CheckInputs {
+        coverage_target: 101,
+        ..inputs.clone()
+    };
+    let e = snap.replay_test(&[w.q2], "canon", &bad).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e:#?}");
+    let e = snap
+        .replay_test(&[w.q2, w.q2], "canon", &inputs)
+        .unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e:#?}");
+    let e = snap.replay_test(&[w.q2], "draft", &inputs).unwrap_err();
+    assert_eq!(
+        e.message, "onto \"draft\" is not a landing's state",
+        "{e:#?}"
+    );
+    // the empty chain replays nothing
+    assert_eq!(
+        snap.replay_test(&[], "canon", &inputs).unwrap(),
+        ReplayTest {
+            replayed: vec![],
+            stop: None,
+        }
+    );
+    drop(snap);
+    h.close().unwrap();
+}
+
+#[test]
+fn crb4_no_write() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let c = chain();
+    let inputs = inputs_of_p(&c.w);
+    let root = c.w.dir.path().join("hub");
+    c.hub.close().unwrap();
+    let before = log_and_refs(&root);
+    let h = StoreHandle::open_holder(&root).unwrap();
+    let snap = h.snapshot().unwrap();
+    snap.replay_test(&[c.q2, c.q4, c.q5, c.q6], "canon", &inputs)
+        .unwrap();
+    snap.replay_test(&[c.q4], &landing(&c.w.p1), &inputs)
         .unwrap();
     drop(snap);
     h.close().unwrap();

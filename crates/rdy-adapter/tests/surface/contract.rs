@@ -419,6 +419,38 @@ fn crb6_adapter_names(snap: &Snapshot, base: Option<Hash>, chain: Vec<Hash>) {
     };
 }
 
+/// crb4: the replay test (D-2QX9W), by its exact names. This function is never called: it
+/// compiles only while each name has the receiver, the arguments and the result listed.
+#[allow(dead_code)]
+fn crb4_adapter_names(
+    snap: &Snapshot,
+    chain: &[Hash],
+    inputs: &rdy_adapter::landing_check::CheckInputs,
+) {
+    use rdy_adapter::replay_test::{ReplayStop, ReplayStopCause, ReplayTest, ReplayedCheck};
+    let _: Result<rdy_adapter::ReplayTest, RdyError> = snap.replay_test(chain, "canon", inputs);
+    let test = ReplayTest {
+        replayed: vec![],
+        stop: None,
+    };
+    let _: Vec<ReplayedCheck> = test.replayed;
+    let _: Option<ReplayStop> = test.stop;
+    let _: Option<(
+        rdy_adapter::ReplayStop,
+        rdy_adapter::ReplayedCheck,
+        rdy_adapter::LandingCheck,
+    )> = None;
+    let _ = matches!(
+        ReplayStopCause::Conflict,
+        ReplayStopCause::Conflict
+            | ReplayStopCause::Gate
+            | ReplayStopCause::Policy
+            | ReplayStopCause::Removal
+            | ReplayStopCause::UpToDate
+    );
+    let _: rdy_adapter::ReplayStopCause = ReplayStopCause::Gate;
+}
+
 /// cra3: the place of each landing (D-H1SHC), by its exact names. This function is never called:
 /// it compiles only while each name has the receiver, the arguments and the result listed.
 #[allow(dead_code)]

@@ -4569,6 +4569,54 @@ impl StoreReader {
         Ok(!self.index().deleter_rows(blocks)?.is_empty())
     }
 
+    /// For each of `blocks` that a landing of a chain removed, the change that removed it most
+    /// recently on that chain: of the deletes of it that landings of the chain carry, those of
+    /// the landing nearest the chain's head whose state lacks the block while the state before it
+    /// held it (of one landing's, the smallest hash). `position` gives each landing of the chain
+    /// its distance from the head (0 for the head). Unlike [`StoreReader::deleters_at`], it reads
+    /// no landed row and no log position: only the chain's own landings count, whatever canon is
+    /// now and whatever the log holds after them. None for a block no landing of the chain
+    /// removed.
+    pub fn deleters_on_chain<'a>(
+        &self,
+        blocks: impl IntoIterator<Item = &'a BlockId>,
+        position: &HashMap<Hash, usize>,
+    ) -> Result<HashMap<BlockId, Hash>, StoreError> {
+        let mut out = HashMap::new();
+        let mut states: HashMap<Option<Hash>, StateSnapshot> = HashMap::new();
+        for block in blocks {
+            if out.contains_key(block) {
+                continue;
+            }
+            // the landings of the chain that carry a delete of `block`, nearest the head first
+            let mut landings: BTreeMap<usize, (Hash, Vec<Hash>)> = BTreeMap::new();
+            for c in self.index().deleters(block)? {
+                for l in self.index().carriers(&c)? {
+                    if let Some(&at) = position.get(&l) {
+                        landings.entry(at).or_insert((l, vec![])).1.push(c);
+                    }
+                }
+            }
+            for (l, deletes) in landings.into_values() {
+                let rec = self.landing(&l)?;
+                let gone = !self
+                    .state_cached(&mut states, Some(l))?
+                    .blocks
+                    .contains_key(block);
+                if gone
+                    && self
+                        .state_cached(&mut states, rec.prev)?
+                        .blocks
+                        .contains_key(block)
+                {
+                    out.insert(block.clone(), *deletes.iter().min().expect("one delete"));
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// `deleters_at` for one block.
     pub fn deleter_at(
         &self,

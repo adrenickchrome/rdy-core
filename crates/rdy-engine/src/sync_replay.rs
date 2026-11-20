@@ -24,9 +24,10 @@
 //! fields D-NME32 fixes (`rdy_store::Store::prepare_replay_landing`), one new ASSESSMENT of L's
 //! approved version at L′'s base, and a copy of each of L's signatures with the same statement
 //! and signature bytes (D-8ZEHP): no key and no agent is needed. Each L′ passes the gate again
-//! at its base: the explicit candidate evaluator ([`crate::landing_check::check_landing`]) on
-//! the base and the source changes, whose ops, authors and tokens the new changes copy. A
-//! policy landing needs the policy that accepts it there, which L′ names.
+//! at its base: the explicit candidate evaluator ([`crate::landing_check::check_landing_over`])
+//! on the base and the source changes, whose ops, authors and tokens the new changes copy. A
+//! policy landing needs the policy that accepts it there, which L′ names. The steps before the
+//! write ([`judge`]) write nothing; the replay test ([`crate::replay_test`]) runs them too.
 //!
 //! The replay stops at the first landing L that:
 //!
@@ -53,15 +54,15 @@
 //! it: the store keeps only the fetched records and the sync state of the fetch, and the store
 //! takes no other write until it opens again.
 use crate::error::{E_BAD_INPUT, E_NOT_FOUND, RdyError};
-use crate::landing_check::{CheckInputs, LandingCheck, check_landing};
+use crate::landing_check::{CheckInputs, LandingCheck, PrevState, check_landing_over};
 use crate::read_state::ReadState;
 use crate::readiness::Candidate;
 use crate::readiness::assessment::assess_wire;
 use crate::sync_fetch::HubState;
 use crate::views::owner_of;
 use crate::{Rdy, Scope, Session};
-use rdy_model::assessment::{AssessedPolicy, PolicyRef, PolicyVerdict};
-use rdy_model::{Assurance, Change, ChangeLinks, Hash, LandingRecord, Proposal};
+use rdy_model::assessment::{AssessedPolicy, AssessmentV2, PolicyRef, PolicyVerdict};
+use rdy_model::{Assurance, Change, ChangeLinks, Hash, LandingRecord, Proposal, StateSnapshot};
 use rdy_store::StoreReader;
 use rdy_store::hub_canon::{Replaced, ReplacedKind, replaced_ref};
 use rdy_store::sync_state::SyncCanon;
@@ -414,53 +415,97 @@ thread_local! {
     static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
-/// Replays landing `source` onto canon now (the open batch's), or tells why it stops.
-fn replay_one(
-    rdy: &mut Rdy,
+/// The removal requests that stop landing `l`'s replay (D-HVZC9, D-FNRXT): those its `checks`
+/// name, else those that removed content a change of it holds. Empty when it replays.
+pub(crate) fn removal_requests(
+    reader: &StoreReader,
+    l: &LandingRecord,
+) -> Result<Vec<Hash>, RdyError> {
+    if !l.checks.is_empty() {
+        return Ok(l.checks.clone());
+    }
+    crate::sync_redaction::removed_in(reader, l)
+}
+
+/// What the judging steps of one landing's replay found, before any write: the steps a pull
+/// runs and the replay test runs ([`crate::replay_test`]). `C` is what the caller's merge names
+/// of a conflict.
+pub(crate) enum Judged<C> {
+    /// The landing names a removal request, or a change of it holds removed content: the
+    /// removal requests ([`removal_requests`]).
+    Removal(Vec<Hash>),
+    /// A new change conflicts with the state the landing replays onto.
+    Conflict(C),
+    /// The new landing fails the gate at its base (`pass` is false), or readiness gives no
+    /// assessment of it.
+    Gate(LandingCheck),
+    /// A policy landing that no live policy at its base accepts.
+    Policy(LandingCheck),
+    /// The landing replays.
+    Replays(Box<Judgement>),
+}
+
+/// What a landing that replays gives: the new changes, the state they merge to, the gate's
+/// check at the base, the fresh assessment of the approved version at the base and the policy
+/// that accepts it.
+pub(crate) struct Judgement {
+    pub(crate) changes: Vec<Change>,
+    pub(crate) state: StateSnapshot,
+    pub(crate) check: LandingCheck,
+    pub(crate) assessment: AssessmentV2,
+    pub(crate) policy: Option<PolicyRef>,
+}
+
+/// The judging steps of the replay of landing `source` (its record `l`) onto `prev`, oldest
+/// first, writing nothing: the removal stop; the new changes ([`replayed_changes`], deps through
+/// `new_of`); `merge`, the caller's merge of them onto `prev` (the new state, or what it names
+/// of a conflict); the gate at the base, the shared evaluator on `prev` and the source changes,
+/// whose ops, authors and tokens the new changes copy; the accepting policy of a policy
+/// landing; and the fresh assessment of the approved version at the base.
+pub(crate) fn judge<C>(
     st: &ReadState,
     inputs: &CheckInputs,
     source: &Hash,
+    l: &LandingRecord,
     new_of: &HashMap<Hash, Hash>,
-) -> Result<Step, RdyError> {
+    prev: &PrevState,
+    merge: impl FnOnce(&[Change]) -> Result<Result<StateSnapshot, C>, RdyError>,
+) -> Result<Judged<C>, RdyError> {
     let reader = st.reader();
-    let l = reader.landing(source)?;
-    if !l.checks.is_empty() || !crate::sync_redaction::removed_in(reader, &l)?.is_empty() {
-        return Ok(Step::Stopped(StopReason::Removal, None));
+    let removals = removal_requests(reader, l)?;
+    if !removals.is_empty() {
+        return Ok(Judged::Removal(removals));
     }
-    // 1. the new changes and the merge onto canon now
-    let changes = replayed_changes(reader, source, &l, new_of)?;
-    let state = match rdy.store.replay_merge(&changes)? {
-        ReplayMerge::Clean(state) => state,
-        ReplayMerge::Conflict(message) => {
-            return Ok(Step::Stopped(StopReason::Conflict, Some(message)));
-        }
+    // 1. the new changes and the merge onto the base
+    let changes = replayed_changes(reader, source, l, new_of)?;
+    let state = match merge(&changes)? {
+        Ok(state) => state,
+        Err(conflict) => return Ok(Judged::Conflict(conflict)),
     };
     // 2. the gate at the new base: the shared evaluator on the base and the source changes
-    let prev = rdy.store.canon_head()?;
     let candidate_landing = LandingRecord {
-        prev,
+        prev: prev.at,
         read_identity: None,
         ..l.clone()
     };
-    let check = check_landing(st, &candidate_landing, inputs)?;
+    let check = check_landing_over(st, prev, &candidate_landing, inputs)?;
     if !check.pass {
-        let codes: Vec<&str> = check.rows.iter().map(|i| i.code).collect();
-        return Ok(Step::Stopped(StopReason::Gate, Some(codes.join(", "))));
+        return Ok(Judged::Gate(check));
     }
     // 3. the fresh assessment of the approved version at the base, and the accepting policy
     let version = l.approved_version.unwrap_or(l.proposal);
     let pref = crate::gate::version_ref(st, &version)?;
     let stored = reader.proposal(&version)?;
     let proposal = Proposal {
-        canon_at: prev,
+        canon_at: prev.at,
         changes: l.changes.clone(),
         ..stored
     };
-    let cst = st.candidate_state(prev, &proposal.view, &l.changes, inputs);
+    let cst = st.candidate_state_over(prev, &proposal.view, &l.changes, inputs)?;
     let policy = if l.assurance == Assurance::Policy || l.policy.is_some() {
-        match accepting_policy(&cst, &l, &check)? {
+        match accepting_policy(&cst, l, &check)? {
             Some(p) => Some(p),
-            None => return Ok(Step::Stopped(StopReason::Policy, None)),
+            None => return Ok(Judged::Policy(check)),
         }
     } else {
         None
@@ -468,18 +513,57 @@ fn replay_one(
     let c = Candidate::stored(&cst, pref, proposal)?;
     let (_, wire) = assess_wire(&cst, &c, &inputs.gate_config())?;
     let Some(mut assessment) = wire else {
-        return Ok(Step::Stopped(StopReason::Gate, None));
+        return Ok(Judged::Gate(check));
     };
-    assessment.base = prev;
+    assessment.base = prev.at;
+    Ok(Judged::Replays(Box::new(Judgement {
+        changes,
+        state,
+        check,
+        assessment,
+        policy,
+    })))
+}
+
+/// Replays landing `source` onto canon now (the open batch's), or tells why it stops: the
+/// judging steps ([`judge`]) with the store's merge onto canon now, then the write.
+fn replay_one(
+    rdy: &mut Rdy,
+    st: &ReadState,
+    inputs: &CheckInputs,
+    source: &Hash,
+    new_of: &HashMap<Hash, Hash>,
+) -> Result<Step, RdyError> {
+    let l = st.reader().landing(source)?;
+    let prev = PrevState::stored(st, rdy.store.canon_head()?)?;
+    let merge = |changes: &[Change]| {
+        Ok(match rdy.store.replay_merge(changes)? {
+            ReplayMerge::Clean(state) => Ok(state),
+            ReplayMerge::Conflict(message) => Err(message),
+        })
+    };
+    let judged = match judge(st, inputs, source, &l, new_of, &prev, merge)? {
+        Judged::Removal(_) => return Ok(Step::Stopped(StopReason::Removal, None)),
+        Judged::Conflict(message) => {
+            return Ok(Step::Stopped(StopReason::Conflict, Some(message)));
+        }
+        Judged::Gate(check) => {
+            let codes: Vec<&str> = check.rows.iter().map(|i| i.code).collect();
+            let detail = (!check.pass).then(|| codes.join(", "));
+            return Ok(Step::Stopped(StopReason::Gate, detail));
+        }
+        Judged::Policy(_) => return Ok(Step::Stopped(StopReason::Policy, None)),
+        Judged::Replays(j) => *j,
+    };
     // 4. the new landing, into the open batch
     let prepared = rdy.store.prepare_replay_landing(
         ReplayLanding {
             source: *source,
-            changes: changes.clone(),
-            assessment,
-            policy,
+            changes: judged.changes,
+            assessment: judged.assessment,
+            policy: judged.policy,
         },
-        state,
+        judged.state,
     )?;
     let ids: Vec<(Hash, Hash)> = l
         .changes
@@ -765,12 +849,7 @@ fn not_replayed(
     detail: Option<String>,
 ) -> Result<NotReplayed, RdyError> {
     let removals = if reason == StopReason::Removal {
-        let rec = reader.landing(l)?;
-        if rec.checks.is_empty() {
-            strings(&crate::sync_redaction::removed_in(reader, &rec)?)
-        } else {
-            strings(&rec.checks)
-        }
+        strings(&removal_requests(reader, &reader.landing(l)?)?)
     } else {
         vec![]
     };
