@@ -36,6 +36,8 @@ crates/rdy-qa/fixtures/pattern-matching/blobs/* -text
 crates/**/*.ttf binary
 crates/**/*.woff2 binary
 crates/**/*.jpg binary
+# Check-module fixtures are WebAssembly binaries.
+crates/**/*.wasm -text
 
 # Each area test binary lists its test files; two branches that add tests merge both lines.
 crates/rdy-qa/tests/*/main.rs merge=union

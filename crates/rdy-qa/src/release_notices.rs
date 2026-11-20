@@ -441,8 +441,53 @@ struct Override {
 }
 
 /// The checked-in license texts. An override that no package uses fails, so an upgrade cannot
-/// keep an old text. rmcp 3.9.0 ships its own LICENSE file, so no package needs an override now.
-const OVERRIDES: [Override; 0] = [];
+/// keep an old text. The interpreter's packages ship no license file: each override names the
+/// package's exact declared expression and the license file at the commit its
+/// `.cargo_vcs_info.json` records, and its text file under `fixtures/notices/` holds the complete
+/// upstream texts of that commit, each under a heading with its file name and URL.
+const OVERRIDES: [Override; 5] = [
+    Override {
+        name: "wasmi",
+        version: "2.0.2",
+        license: "MIT/Apache-2.0",
+        url: WASMI_LICENSE_URL,
+        text: WASMI_LICENSE_TEXT,
+    },
+    Override {
+        name: "wasmi_core",
+        version: "2.0.2",
+        license: "MIT/Apache-2.0",
+        url: WASMI_LICENSE_URL,
+        text: WASMI_LICENSE_TEXT,
+    },
+    Override {
+        name: "wasmi_ir",
+        version: "2.0.2",
+        license: "MIT/Apache-2.0",
+        url: WASMI_LICENSE_URL,
+        text: WASMI_LICENSE_TEXT,
+    },
+    Override {
+        name: "wasmi_collections",
+        version: "2.0.2",
+        license: "MIT/Apache-2.0",
+        url: WASMI_LICENSE_URL,
+        text: WASMI_LICENSE_TEXT,
+    },
+    Override {
+        name: "wasmparser",
+        version: "0.228.0",
+        license: "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+        url: "https://raw.githubusercontent.com/bytecodealliance/wasm-tools/e66235859a6ec0502bf6f9dcc358953eda4cafcc/LICENSE-Apache-2.0_WITH_LLVM-exception",
+        text: include_bytes!("../fixtures/notices/wasmparser-0.228.0.txt"),
+    },
+];
+
+/// The license file of wasmi 2.0.2 and its sibling packages, at their package commit.
+const WASMI_LICENSE_URL: &str = "https://raw.githubusercontent.com/wasmi-labs/wasmi/05d2de3057c323a3f807ef23eb19e0c2ab58d2a8/LICENSE-MIT";
+
+/// wasmi's MIT text, then its Apache text, from that commit.
+const WASMI_LICENSE_TEXT: &[u8] = include_bytes!("../fixtures/notices/wasmi-2.0.2.txt");
 
 /// Whether the declared `expression` is MPL-2.0 only: at least one requirement, and every
 /// requirement MPL-2.0 (with or without `+`) with no exception. Strict SPDX, with `/` read as
@@ -1458,7 +1503,7 @@ mod tests {
     use crate::release_install::{MANIFEST_FILE, SIGNATURE_FILE, archive_name};
 
     /// The crates.io packages the Windows release binary links (measured).
-    const WINDOWS_CRATES: usize = 195;
+    const WINDOWS_CRATES: usize = 201;
 
     #[cfg(unix)]
     mod unix_tests;
@@ -1731,8 +1776,10 @@ mod tests {
             let names: BTreeSet<&str> = crates.iter().map(|c| c.name.as_str()).collect();
             // measured with rmcp 3.9.0 and its HTTP server feature, plus the daemon's hyper
             // bridge (hyper, hyper-util, atomic-waker, httpdate), plus the Markdown parser
-            // (pulldown-cmark, unicase): macOS 196, Linux 195
-            let linked = if target == TARGETS[0] { 196 } else { 195 };
+            // (pulldown-cmark, unicase), plus the check-module interpreter (wasmi, wasmi_core,
+            // wasmi_ir, wasmi_collections, wasmparser, libm; and spin, which Linux already
+            // links): macOS 203, Linux 201
+            let linked = if target == TARGETS[0] { 203 } else { 201 };
             assert_eq!(crates.len(), linked, "{target}: linked crates.io packages");
             for absent in [
                 // build-only and proc-macro (or proc-macro-only) packages
@@ -1941,8 +1988,42 @@ mod tests {
         package_dir(&alpha, "src", &[("LICENSE", b"nested\n")]);
         let mpl = package_dir(dir.path(), "mplpkg-2.0.0", &[("LICENSE", b"MPL text\n")]);
         let rmcp = package_dir(dir.path(), "rmcp-3.5.0", &[("README.md", b"rmcp\n")]);
-        // The shipped table is empty (rmcp 3.9.0 carries its own LICENSE), so the mechanism is
-        // pinned with an override of the test's own.
+        // The shipped table holds exactly the interpreter's five packages, which ship no license
+        // file: each exact name, version, declared expression and pinned upstream URL, and the
+        // SHA-256 of its checked-in text.
+        const WASMI_URL: &str = "https://raw.githubusercontent.com/wasmi-labs/wasmi/05d2de3057c323a3f807ef23eb19e0c2ab58d2a8/LICENSE-MIT";
+        const WASMI_SHA: &str = "7c5ee14cdd14f6a1129edd823885fe654dc2a2af2e1c30af170f4ef83e85151f";
+        let shipped: Vec<(&str, &str, &str, &str, String)> = OVERRIDES
+            .iter()
+            .map(|o| (o.name, o.version, o.license, o.url, sha256_hex(o.text)))
+            .collect();
+        let wasmi = |name| {
+            (
+                name,
+                "2.0.2",
+                "MIT/Apache-2.0",
+                WASMI_URL,
+                WASMI_SHA.to_string(),
+            )
+        };
+        assert_eq!(
+            shipped,
+            [
+                wasmi("wasmi"),
+                wasmi("wasmi_core"),
+                wasmi("wasmi_ir"),
+                wasmi("wasmi_collections"),
+                (
+                    "wasmparser",
+                    "0.228.0",
+                    "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+                    "https://raw.githubusercontent.com/bytecodealliance/wasm-tools/e66235859a6ec0502bf6f9dcc358953eda4cafcc/LICENSE-Apache-2.0_WITH_LLVM-exception",
+                    "b57be417cd903697297f1f9d00a029126f92f960bcb7623f0953ce43905066e9".to_string(),
+                ),
+            ],
+            "the shipped overrides are exactly the interpreter's five packages"
+        );
+        // The mechanism itself is pinned with an override of the test's own.
         const TEST_URL: &str = "https://example.test/rmcp/LICENSE";
         const TEST_TEXT: &[u8] = b"override license text\n";
         let overrides = [Override {
@@ -1952,7 +2033,6 @@ mod tests {
             url: TEST_URL,
             text: TEST_TEXT,
         }];
-        assert!(OVERRIDES.is_empty(), "no shipped crate needs an override");
         let crates = [
             krate("rmcp", "3.5.0", "Apache-2.0", &rmcp),
             krate("alpha", "1.0.0", "MIT OR Apache-2.0", &alpha),

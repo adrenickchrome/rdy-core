@@ -107,6 +107,7 @@ fn pre1_workspace_license_covers_every_crate() {
     got.sort();
     let want: Vec<(String, Option<String>)> = [
         "rdy-adapter",
+        "rdy-check-wasm",
         "rdy-cli",
         "rdy-daemon",
         "rdy-diagram",
@@ -122,7 +123,7 @@ fn pre1_workspace_license_covers_every_crate() {
     .iter()
     .map(|n| (n.to_string(), Some("MIT OR Apache-2.0".to_string())))
     .collect();
-    assert_eq!(got, want, "all twelve crates are MIT OR Apache-2.0");
+    assert_eq!(got, want, "all thirteen crates are MIT OR Apache-2.0");
 
     for name in ["LICENSE-MIT", "LICENSE-APACHE"] {
         let m = fs::symlink_metadata(root().join(name)).expect(name);
