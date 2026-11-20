@@ -9,6 +9,7 @@ mod hub_compare;
 mod hub_contract;
 mod hub_renders;
 mod hub_scopes;
+mod hub_tests;
 mod hub_world;
 mod link_export;
 mod link_take;
