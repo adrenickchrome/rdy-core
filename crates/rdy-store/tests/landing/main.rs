@@ -10,6 +10,7 @@ mod inbox;
 mod land;
 mod landed;
 mod merge;
+mod merge_conflicts;
 mod merge_store;
 mod plan;
 mod policy_landing;
