@@ -7,6 +7,7 @@ use rdy_engine::landing_check::{CheckInputs, check_landing};
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::replay_test::{ReplayStopCause, ReplayTest, replay_test};
 use rdy_engine::sync_replay::{PlanKind, PullOutcome, StopReason, plan};
+use rdy_engine::version_tests::{RebaseTest, rebase_test};
 use rdy_engine::{Rdy, Scope, pin_clock};
 use rdy_model::{BlockId, Hash};
 use rdy_qa::fixtures::{land, write, writer};
@@ -164,6 +165,38 @@ fn crb4_replay_test_equals_the_real_pull() {
     assert_eq!(tested(&test), vec![l1, l2]);
     assert!(test.replayed.iter().all(|r| r.check.pass), "{test:#?}");
     assert_eq!(test.stop, None);
+
+    // (e) a landing creates a claim and a later one deletes it; the hub lands apart, so its
+    // tip is logged after both: the deletion is no delete of the hub's state, and both replay
+    let mut s = synced("advisory");
+    let sec = s.section.clone();
+    let w = put_j(
+        &mut s.local,
+        "a1",
+        json!([{"op": "create", "type": "claim", "id": "$c", "parent": sec, "body": "C holds.", "fields": {"ok": true}}]),
+        j_typo(),
+    );
+    let l1 = h(&land(&mut s.local, "a1").unwrap());
+    let c = w.created["$c"].clone();
+    put_j(
+        &mut s.local,
+        "a2",
+        json!([{"op": "delete", "id": c}]),
+        j_typo(),
+    );
+    let l2 = h(&land(&mut s.local, "a2").unwrap());
+    land_apart(&mut s.hub, "h1");
+    let tip = s.fetch();
+    let (_, test) = fetched_test(&s, tip, None);
+    let rebase = rebase_test(&s.local.read(), &[l1, l2], Some(tip)).unwrap();
+    let out = s.second_batch(tip, false);
+    assert!(out.not_replayed.is_empty(), "{out:#?}");
+    assert_eq!(tested(&test), pulled(&out));
+    assert_eq!(tested(&test), vec![l1, l2]);
+    assert!(test.replayed.iter().all(|r| r.check.pass), "{test:#?}");
+    assert_eq!(test.stop, None);
+    // the rebase test of the same chain onto the same tip merges too
+    assert_eq!(rebase, RebaseTest::Clean);
 }
 
 #[test]

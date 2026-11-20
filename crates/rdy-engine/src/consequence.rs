@@ -2062,8 +2062,9 @@ impl ReadState {
             self.lexicon(&Scope::Canon)?;
             let reader = self.reader();
             // a conflict the version carries: it has no consequences until it is resolved. Canon's
-            // state is the one this state reads (built in memory for a replay test's candidate)
-            let (_, applied) = match reader.merge_checked(&*self.canon_snapshot()?, &changes) {
+            // state and deletes are the ones this state reads (built in memory for a replay
+            // test's candidate)
+            let (_, applied) = match self.merge_checked_on_canon(&changes)? {
                 Ok(merged) => merged,
                 Err(StoreError::StaleBase { id, .. }) => {
                     return Err(RdyError::new(

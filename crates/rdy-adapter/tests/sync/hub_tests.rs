@@ -120,7 +120,8 @@ fn crb3_conflict_names_every_block_of_the_stopping_landing() {
 }
 
 /// A held chain on `p1`, written in Q: `q2` writes the "Held" doc, `q4` updates its prose, `q5`
-/// deletes the prose of "Canon" and `q6` re-creates that prose under its own id.
+/// deletes the prose of "Canon", `q6` re-creates that prose under its own id and `q7` deletes the
+/// prose of "Held".
 struct Chain {
     w: World,
     hub: StoreHandle,
@@ -128,6 +129,7 @@ struct Chain {
     q4: Hash,
     q5: Hash,
     q6: Hash,
+    q7: Hash,
     held_prose: String,
     canon_prose: String,
 }
@@ -165,12 +167,14 @@ fn chain() -> Chain {
                 "body": "The hub keeps one canon, again."}]),
     );
     let q6 = land(&mut q, "w6");
+    write_in(&mut q, "w7", json!([{"op": "delete", "id": held_prose}]));
+    let q7 = land(&mut q, "w7");
     q.close().unwrap();
-    let eq = w.dir.path().join("eq6.rdysync");
-    export(&qd, StreamPurpose::CanonHistory, q6, Some(w.p1), &eq);
+    let eq = w.dir.path().join("eq7.rdysync");
+    export(&qd, StreamPurpose::CanonHistory, q7, Some(w.p1), &eq);
     let hub = w.holder("hub");
     seed(&hub, &w);
-    move_file(&hub, &eq, CanonMove::Hold, Some(w.p1), q6);
+    move_file(&hub, &eq, CanonMove::Hold, Some(w.p1), q7);
     let q2 = w.q2;
     Chain {
         w,
@@ -179,6 +183,7 @@ fn chain() -> Chain {
         q4,
         q5,
         q6,
+        q7,
         held_prose,
         canon_prose,
     }
@@ -213,6 +218,11 @@ fn crb3_a_later_landing_merges_onto_the_earlier_ones() {
     );
     assert_eq!(
         snap.rebase_test(&[c.q2, c.q4, c.q5, c.q6], &onto).unwrap(),
+        RebaseTest::Clean
+    );
+    // a create and then a delete of the same block
+    assert_eq!(
+        snap.rebase_test(&[c.q2, c.q4, c.q7], &onto).unwrap(),
         RebaseTest::Clean
     );
     assert_eq!(

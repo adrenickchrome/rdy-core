@@ -100,6 +100,9 @@ pub(crate) struct Built {
     /// Canon's store state (each block's version at canon's head), memoised for the gate's
     /// merges onto canon (a proposal and its landing read it on one canon); never carried.
     pub(crate) snapshot: OnceLock<Arc<rdy_model::StateSnapshot>>,
+    /// The deletes of a canon built in memory ([`ReadState::candidate_state_over`]); unset for
+    /// every stored landing's state, whose deletes read as of it.
+    pub(crate) deletes: OnceLock<Arc<crate::landing_check::ChainDeletes>>,
 }
 
 impl Built {
@@ -116,6 +119,7 @@ impl Built {
             tension_index: OnceLock::new(),
             tension_canon: OnceLock::new(),
             snapshot: OnceLock::new(),
+            deletes: OnceLock::new(),
         }
     }
 
@@ -1155,6 +1159,9 @@ impl ReadState {
             Arc::new(vec![]),
         );
         let _ = canon.snapshot.set(Arc::clone(&prev.state));
+        if let Some(d) = &prev.deletes {
+            let _ = canon.deletes.set(Arc::clone(d));
+        }
         let canon = Arc::new(canon);
         let mut entry = Entry::new(None, prev.at, None, Arc::new(vec![]));
         entry.seed_shared(Arc::clone(&canon));
@@ -1167,7 +1174,13 @@ impl ReadState {
                 .iter()
                 .map(|c| st.reader.change(c))
                 .collect::<Result<Vec<Change>, _>>()?;
-            let merged = st.reader.merge_onto(prev.at, &prev.state, &list)?;
+            let merged = match &prev.deletes {
+                Some(d) => {
+                    let given = d.of_changes(&st, &prev.state, &list)?;
+                    st.reader.merge_onto_given(&prev.state, &list, &given)?
+                }
+                None => st.reader.merge_onto(prev.at, &prev.state, &list)?,
+            };
             let by_id: HashMap<Hash, Change> = old.included.iter().copied().zip(list).collect();
             let mut entry = Entry::new(
                 old.name.clone(),
@@ -1280,6 +1293,63 @@ impl ReadState {
             return self.canon_snapshot();
         }
         Ok(Arc::new(self.reader.state_of(base)?))
+    }
+
+    /// The deletes of an explicit candidate's canon built in memory, if it has them.
+    fn built_deletes(&self) -> Option<Arc<crate::landing_check::ChainDeletes>> {
+        if !self.explicit_base {
+            return None;
+        }
+        self.canon.built_ok()?.deletes.get().cloned()
+    }
+
+    /// The deletes a merge onto `state`, the state of landing `base`, reads for the blocks of
+    /// `blocks` that `state` lacks: those of an explicit candidate's canon built in memory when
+    /// `base` is its head ([`crate::landing_check::ChainDeletes`]), else `merge_deleters`'s as
+    /// of `base`.
+    pub(crate) fn merge_deleters<'a>(
+        &self,
+        base: Option<Hash>,
+        state: &rdy_model::StateSnapshot,
+        blocks: impl IntoIterator<Item = &'a BlockId>,
+    ) -> Result<HashMap<BlockId, Hash>, RdyError> {
+        match self.built_deletes() {
+            Some(d) if base == self.canon_head => d.deleters(self, state, blocks),
+            _ => Ok(self.reader.merge_deleters(base.as_ref(), state, blocks)?),
+        }
+    }
+
+    /// `deleters_at` of one block as of landing `head`, as [`ReadState::merge_deleters`] reads
+    /// it.
+    pub(crate) fn deleter_at(
+        &self,
+        block: &BlockId,
+        head: Option<Hash>,
+    ) -> Result<Option<Hash>, RdyError> {
+        match self.built_deletes() {
+            Some(d) if head == self.canon_head => {
+                let canon = self.canon_snapshot()?;
+                Ok(d.deleters(self, &canon, [block])?.remove(block))
+            }
+            _ => Ok(self.reader.deleter_at(block, head.as_ref())?),
+        }
+    }
+
+    /// `merge_checked` of `changes` onto canon's state, with the deletes this state reads
+    /// ([`ReadState::merge_deleters`]). The outer error is a read of those deletes; the inner
+    /// one is the merge's refusal.
+    pub(crate) fn merge_checked_on_canon(
+        &self,
+        changes: &[Change],
+    ) -> Result<Result<(Merged, Vec<usize>), rdy_store::StoreError>, RdyError> {
+        let canon = self.canon_snapshot()?;
+        Ok(match self.built_deletes() {
+            Some(d) => {
+                let given = d.of_changes(self, &canon, changes)?;
+                self.reader.merge_checked_given(&canon, changes, &given)
+            }
+            None => self.reader.merge_checked(&canon, changes),
+        })
     }
 
     pub(crate) fn built(&self, scope: &Scope) -> Result<Arc<Built>, RdyError> {

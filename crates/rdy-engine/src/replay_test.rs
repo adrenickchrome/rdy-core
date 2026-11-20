@@ -9,16 +9,19 @@
 //! ([`crate::landing_check::check_landing_over`], with `prev` that state and L's source changes,
 //! as a pull checks a candidate); and the accepting policy of a policy landing. The running state
 //! starts as `onto`'s snapshot (the empty state for none) and becomes each replayed landing's
-//! merged state. It is built in memory: no landing is stored for it, so deletions read as of
-//! `onto` (`merge_onto`'s `at`). With `require_up_to_date` set, the test stops at the first
-//! landing before any step, as a pull under `reviews.require_up_to_date` does.
+//! merged state. It is built in memory: no landing is stored for it, so the merge and the gate
+//! read its deletes from [`ChainDeletes`]: those of the landings replayed so far, else those of
+//! `onto`'s own chain. A later landing of the chain, a landing outside `onto`'s chain and current
+//! canon's landed rows never count, as they never count for the state a pull replays onto. With
+//! `require_up_to_date` set, the test stops at the first landing before any step, as a pull
+//! under `reviews.require_up_to_date` does.
 //!
 //! It reads records only and writes nothing: no change, landing, assessment or ref. A stop on
 //! removed content names the removal requests and carries no text. The caller checks the inputs.
 
 use crate::ReadState;
 use crate::error::RdyError;
-use crate::landing_check::{CheckInputs, LandingCheck, PrevState};
+use crate::landing_check::{ChainDeletes, CheckInputs, LandingCheck, PrevState};
 use crate::sync_replay::{Judged, judge};
 use rdy_model::{Change, Hash};
 use rdy_store::MergeConflict;
@@ -98,12 +101,17 @@ pub fn replay_test(
         return Ok(out);
     }
     let reader = st.reader();
-    let mut prev = PrevState::stored(st, onto)?;
+    let mut deletes = Arc::new(ChainDeletes::new(onto));
+    let mut prev = PrevState {
+        deletes: Some(Arc::clone(&deletes)),
+        ..PrevState::stored(st, onto)?
+    };
     let mut new_of: HashMap<Hash, Hash> = HashMap::new();
     for source in chain {
         let l = reader.landing(source)?;
         let merge = |changes: &[Change]| {
-            let (merged, conflicts) = reader.merge_conflicts(prev.at, &prev.state, changes)?;
+            let given = deletes.of_changes(st, &prev.state, changes)?;
+            let (merged, conflicts) = reader.merge_conflicts_given(&prev.state, changes, &given)?;
             Ok(if conflicts.is_empty() {
                 Ok(merged.state)
             } else {
@@ -152,9 +160,11 @@ pub fn replay_test(
             source: *source,
             check: judged.check,
         });
+        deletes = Arc::new(deletes.after(&prev.state, &judged.state, &judged.changes));
         prev = PrevState {
             at: onto,
             state: Arc::new(judged.state),
+            deletes: Some(Arc::clone(&deletes)),
         };
     }
     Ok(out)

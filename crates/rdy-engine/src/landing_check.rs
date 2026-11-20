@@ -26,11 +26,12 @@ use crate::error::{E_BAD_INPUT, RdyError};
 use crate::readiness::assessment::{GateConfig, config_digest, pack_digest};
 use crate::readiness::{Candidate, assess};
 use rdy_model::assessment::AssessedPolicy;
-use rdy_model::{Hash, LandingRecord, Proposal, StateSnapshot};
+use rdy_model::{BlockId, Change, Hash, LandingRecord, Op, Proposal, StateSnapshot};
 use rdy_schema::{Issue, Pack};
 use serde::Serialize;
 use std::cell::Cell;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, OnceLock};
 
 /// What the caller passes (D-0WWYR): the effective pack in full and the gate settings readiness
 /// reads. `require_up_to_date` enters only the config digest that `assessment_matches` compares:
@@ -130,13 +131,15 @@ pub struct LandingCheck {
 }
 
 /// The `prev` a landing is checked on: its state, and `at`, the last stored landing under it.
-/// For a stored `prev`, `state` is that landing's own state. A state built in memory (a replay
-/// test's merge onto a stored landing, D-2QX9W) keeps the stored landing it was built on: the
-/// candidate's deletions read as of it (`merge_onto`'s `at`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// For a stored `prev`, `state` is that landing's own state, and its deletes read as of `at`.
+/// A state built in memory (a replay or rebase test's merge onto a stored landing, D-2QX9W)
+/// keeps the stored landing it was built on, and reads its deletes from [`ChainDeletes`].
+#[derive(Clone, Debug)]
 pub struct PrevState {
     pub at: Option<Hash>,
     pub state: Arc<StateSnapshot>,
+    /// The deletes of a state built in memory; none for a stored landing's state.
+    pub(crate) deletes: Option<Arc<ChainDeletes>>,
 }
 
 impl PrevState {
@@ -145,7 +148,131 @@ impl PrevState {
         Ok(PrevState {
             at,
             state: Arc::new(st.reader().state_of(at)?),
+            deletes: None,
         })
+    }
+}
+
+/// The chain of a stored landing `onto`, each landing with its distance from `onto`, read once.
+#[derive(Debug)]
+pub(crate) struct OntoChain {
+    onto: Option<Hash>,
+    positions: OnceLock<Result<Arc<HashMap<Hash, usize>>, RdyError>>,
+}
+
+impl OntoChain {
+    pub(crate) fn new(onto: Option<Hash>) -> Arc<OntoChain> {
+        Arc::new(OntoChain {
+            onto,
+            positions: OnceLock::new(),
+        })
+    }
+
+    fn positions(&self, st: &ReadState) -> Result<Arc<HashMap<Hash, usize>>, RdyError> {
+        self.positions
+            .get_or_init(|| {
+                let chain = match self.onto {
+                    Some(h) => crate::history_facts::walk(st, h)?,
+                    None => vec![],
+                };
+                Ok(Arc::new(chain.into_iter().zip(0..).collect()))
+            })
+            .clone()
+    }
+}
+
+/// Which change removed a block, as a state built in memory on the stored landing `onto` reads
+/// it (D-2QX9W, D-N0NVF): a landing of the tested chain merged so far that removed it, the
+/// latest first; else a landing of `onto`'s own chain (`StoreReader::deleters_on_chain`). A
+/// landing outside `onto`'s chain, a later landing of the tested chain and current canon's
+/// landed rows never count, so a test reads the deletes that its simulated replay has.
+#[derive(Clone, Debug)]
+pub(crate) struct ChainDeletes {
+    onto: Arc<OntoChain>,
+    /// The change of the tested chain that removed each block, latest landing first.
+    chain: HashMap<BlockId, Hash>,
+}
+
+impl ChainDeletes {
+    /// The deletes of `onto`'s state, before any landing of the tested chain.
+    pub(crate) fn new(onto: Option<Hash>) -> ChainDeletes {
+        ChainDeletes {
+            onto: OntoChain::new(onto),
+            chain: HashMap::new(),
+        }
+    }
+
+    /// These deletes after one landing of the tested chain merged `changes` from state `before`
+    /// to state `after`: each block `before` held and `after` lacks was removed by the smallest
+    /// of `changes` that deletes it, as a landing's deletes are read.
+    pub(crate) fn after(
+        &self,
+        before: &StateSnapshot,
+        after: &StateSnapshot,
+        changes: &[Change],
+    ) -> ChainDeletes {
+        let mut next = self.clone();
+        let mut removed: HashMap<BlockId, Hash> = HashMap::new();
+        for c in changes {
+            let id = c.id();
+            for op in &c.ops {
+                let b = op.block_id();
+                if matches!(op, Op::Delete { .. })
+                    && before.blocks.contains_key(b)
+                    && !after.blocks.contains_key(b)
+                {
+                    let e = removed.entry(b.clone()).or_insert(id);
+                    *e = (*e).min(id);
+                }
+            }
+        }
+        next.chain.extend(removed);
+        next
+    }
+
+    /// The change that removed each of `blocks` that `base` lacks (see the type's docs).
+    pub(crate) fn deleters<'a>(
+        &self,
+        st: &ReadState,
+        base: &StateSnapshot,
+        blocks: impl IntoIterator<Item = &'a BlockId>,
+    ) -> Result<HashMap<BlockId, Hash>, RdyError> {
+        let mut out = HashMap::new();
+        let mut rest: BTreeSet<&BlockId> = BTreeSet::new();
+        for b in blocks {
+            if base.blocks.contains_key(b) {
+                continue;
+            }
+            match self.chain.get(b) {
+                Some(c) => {
+                    out.insert(b.clone(), *c);
+                }
+                None => {
+                    rest.insert(b);
+                }
+            }
+        }
+        let reader = st.reader();
+        if rest.is_empty() || !reader.ever_deleted(rest.iter().copied())? {
+            return Ok(out);
+        }
+        let positions = self.onto.positions(st)?;
+        out.extend(reader.deleters_on_chain(rest.iter().copied(), &positions)?);
+        Ok(out)
+    }
+
+    /// The deletes `deleters` gives for the blocks `changes` write.
+    pub(crate) fn of_changes(
+        &self,
+        st: &ReadState,
+        base: &StateSnapshot,
+        changes: &[Change],
+    ) -> Result<HashMap<BlockId, Hash>, RdyError> {
+        self.deleters(
+            st,
+            base,
+            changes.iter().flat_map(|c| c.ops.iter().map(Op::block_id)),
+        )
     }
 }
 
