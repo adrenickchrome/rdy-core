@@ -16,6 +16,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+/// The kind of one merge conflict (D-2QX9W): the words `merge_checked`'s refusals name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictKind {
+    StaleBase,
+    DeletedSince,
+    AlreadyExists,
+    Frozen,
+}
+
+/// One conflicting block of a merge and its kind (`StoreReader::merge_conflicts`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MergeConflict {
+    pub block: BlockId,
+    pub kind: ConflictKind,
+}
+
 /// Whether `a` and `b` are two versions of one block that differ only by their order key (a
 /// redacted projection never does: its read identity is its own).
 fn differs_only_in_order(a: &Block, b: &Block) -> bool {
@@ -485,36 +502,102 @@ impl StoreReader {
         changes: &[Change],
         adoption: Option<&PinAdoption>,
     ) -> Result<(Merged, Vec<usize>), StoreError> {
-        let (merged, at) = self.merge_onto_indexed(self.canon_head()?, canon, changes)?;
-        if let Some(c) = merged.conflicts.first() {
-            return Err(match c.base {
-                Some(base) => StoreError::StaleBase {
-                    id: c.block.clone(),
-                    expected: base,
-                    actual: canon.blocks.get(&c.block).copied(),
+        let (merged, at, conflicts) =
+            self.merge_conflicts_with(self.canon_head()?, canon, changes, adoption, true)?;
+        let Some(first) = conflicts.first() else {
+            return Ok((merged, at));
+        };
+        let block = first.block.clone();
+        Err(match first.kind {
+            ConflictKind::StaleBase => StoreError::StaleBase {
+                expected: merged
+                    .conflicts
+                    .iter()
+                    .find(|c| c.block == block)
+                    .and_then(|c| c.base)
+                    .expect("a stale base conflict has a base"),
+                actual: canon.blocks.get(&block).copied(),
+                id: block,
+            },
+            ConflictKind::DeletedSince => StoreError::DeletedSince(block),
+            ConflictKind::AlreadyExists => StoreError::AlreadyExists(block),
+            ConflictKind::Frozen => StoreError::Frozen(block),
+        })
+    }
+
+    /// Every conflict of merging `changes` onto `base`, the state of landing `at`, with its kind
+    /// (D-2QX9W): first the merge's conflicts in their order, each as `merge_checked` names its
+    /// first (`StaleBase` when it has a base, `DeletedSince` when `base` lacks the block and a
+    /// side is a delete, else `AlreadyExists`); then each op of an applied change, in applied
+    /// order, whose base is a frozen decision, as `Frozen`. One entry per block: a block already
+    /// named keeps its first kind.
+    pub fn merge_conflicts(
+        &self,
+        at: Option<Hash>,
+        base: &StateSnapshot,
+        changes: &[Change],
+    ) -> Result<(Merged, Vec<MergeConflict>), StoreError> {
+        let (merged, _, conflicts) = self.merge_conflicts_with(at, base, changes, None, false)?;
+        Ok((merged, conflicts))
+    }
+
+    /// `merge_conflicts` with each applied change's position, an adopt answer's `adoption` for
+    /// the frozen step, and `first_only`: stop at the first entry, so a refusal reads no more
+    /// than it needs (`merge_checked_with`).
+    fn merge_conflicts_with(
+        &self,
+        at: Option<Hash>,
+        base: &StateSnapshot,
+        changes: &[Change],
+        adoption: Option<&PinAdoption>,
+        first_only: bool,
+    ) -> Result<(Merged, Vec<usize>, Vec<MergeConflict>), StoreError> {
+        let (merged, order) = self.merge_onto_indexed(at, base, changes)?;
+        let mut out: Vec<MergeConflict> = merged
+            .conflicts
+            .iter()
+            .map(|c| MergeConflict {
+                block: c.block.clone(),
+                kind: match c.base {
+                    Some(_) => ConflictKind::StaleBase,
+                    None if !base.blocks.contains_key(&c.block)
+                        && c.sides.iter().any(|s| s.version.is_none()) =>
+                    {
+                        ConflictKind::DeletedSince
+                    }
+                    None => ConflictKind::AlreadyExists,
                 },
-                None if !canon.blocks.contains_key(&c.block)
-                    && c.sides.iter().any(|s| s.version.is_none()) =>
-                {
-                    StoreError::DeletedSince(c.block.clone())
-                }
-                None => StoreError::AlreadyExists(c.block.clone()),
-            });
+            })
+            .collect();
+        if first_only && !out.is_empty() {
+            out.truncate(1);
+            return Ok((merged, order, out));
         }
-        for &i in &at {
+        let mut named: BTreeSet<BlockId> = out.iter().map(|c| c.block.clone()).collect();
+        for &i in &order {
             for op in &changes[i].ops {
+                if named.contains(op.block_id()) {
+                    continue;
+                }
                 let new = match op {
                     Op::Update { block, .. } => Some(block),
                     _ => None,
                 };
-                if let Some(base) = op.base()
-                    && frozen_for(self, &self.get_block(&base)?, new, adoption)
+                if let Some(b) = op.base()
+                    && frozen_for(self, &self.get_block(&b)?, new, adoption)
                 {
-                    return Err(StoreError::Frozen(op.block_id().clone()));
+                    named.insert(op.block_id().clone());
+                    out.push(MergeConflict {
+                        block: op.block_id().clone(),
+                        kind: ConflictKind::Frozen,
+                    });
+                    if first_only {
+                        return Ok((merged, order, out));
+                    }
                 }
             }
         }
-        Ok((merged, at))
+        Ok((merged, order, out))
     }
 
     pub fn landings(&self) -> Result<Vec<(Hash, LandingRecord)>, StoreError> {

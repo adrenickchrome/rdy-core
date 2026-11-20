@@ -94,6 +94,7 @@ pub use store::{
 };
 mod state;
 pub use state::{
-    AdoptProposeRequest, OrderOnlyEdits, PinAdoption, PreparedTag, ViewRecord, apply_op,
+    AdoptProposeRequest, ConflictKind, MergeConflict, OrderOnlyEdits, PinAdoption, PreparedTag,
+    ViewRecord, apply_op,
 };
 pub use view::{Owner, Rechained, ResolvedOp, ViewHead, ViewOp, ViewOpKind, ViewReferrer};
