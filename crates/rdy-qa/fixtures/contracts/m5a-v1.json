@@ -13053,6 +13053,33 @@
             },
             {
               "action": "set",
+              "id": "dump",
+              "long": "dump",
+              "num_args": "1",
+              "value_names": [
+                "ID"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "out",
+              "long": "out",
+              "num_args": "1",
+              "value_names": [
+                "FILE"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "url",
+              "long": "url",
+              "num_args": "1",
+              "value_names": [
+                "URL"
+              ]
+            },
+            {
+              "action": "set",
               "id": "card_hash",
               "long": "card-hash",
               "num_args": "1",
@@ -28264,8 +28291,22 @@
                 "null"
               ]
             },
+            "dump": {
+              "description": "The id of a dump that the hub's dump job gave (1 to 256 printable ASCII bytes): fetch that dump to out instead of pulling. Takes only out and one of remote or url.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "evidence": {
               "description": "The person's words, quoted (1 to 2000 characters). With card_hash and answer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "out": {
+              "description": "The new file a dump fetch writes (relative to the project root). Only with dump.",
               "type": [
                 "string",
                 "null"
@@ -28303,6 +28344,13 @@
               "description": "true takes hub canon with no replay (a card first); with views it takes only those views and canon pulls as usual.",
               "type": [
                 "boolean",
+                "null"
+              ]
+            },
+            "url": {
+              "description": "The HTTPS URL of the hub repo a dump fetch reads, in place of remote. Only with dump.",
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -32778,6 +32826,7 @@
       "sync-client-wire-v1.json": "7794 1611c42ea92491f7fb5280f9c5043758bc66e9dc9297b4c99001d6fdf213bc77",
       "sync-client-wire-v2.json": "492422 b4f05b31ed8d4ea0628e4c2b35c621be448d68483ae0eab09d7c191456877a85",
       "sync-client-wire-v3a.json": "45913 daa8ff3fbb04526f1374eb089de5d9b0f6fbf40873828f6426e614fa954c9ea5",
+      "sync-client-wire-v5.json": "17925 ea42701656fe0c0c09d067d4b3b0659b4f8390ff1014203c7739036b9b153b26",
       "sync4-canon-history.bin": "5884 8d51365e1d9bd84bf9c00526e672d401298d0128cdf3590d1c09f50eb5f746e4",
       "sync4-canon-history.expect.json": "4641 19bd7fd90178c3883d3d9cd018577877a7aaa6eadfb6d1da99355a9693574e5c",
       "sync4-view-history.bin": "6699 0abb9333ec131aa4f87c78e0a549322d053c49048c0c7ab15dd309ec96f7dace",

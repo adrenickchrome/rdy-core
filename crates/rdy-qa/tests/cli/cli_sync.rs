@@ -966,3 +966,214 @@ fn scc8_cli_held_lookup_refusal_warns_and_the_pull_goes_on() {
     );
     assert!(out.contains(&want), "{out}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The fetch of a hub dump (D-7CDEQ)
+// ---------------------------------------------------------------------------------------------
+
+const DUMP_ID: &str = "dmp_01J9";
+const DUMP_NEXT: &str = "rdy push --restore <file>, or rdy load <file> <dir> for a copy";
+
+/// A kit whose hub serves a dump of the kit's own project as [`DUMP_ID`], with the project's
+/// repo id in its state step; and that dump's `rdy dump` reply.
+fn dump_kit() -> (Kit, Value) {
+    let k = kit(&["a", "b"]);
+    let src = k.proj.path().join("src.rdydump");
+    let made = cli_ok(&k, &["dump", "--out", src.to_str().unwrap()]);
+    k.hub.dump(DUMP_ID, std::fs::read(&src).unwrap());
+    std::fs::remove_file(&src).unwrap();
+    // the daemon holds the store: the repo id comes from the dump's reply
+    k.hub
+        .set_canon(None, made["repo_id"].as_str().map(str::to_string));
+    (k, made)
+}
+
+fn dump_words(v: &Value) -> (String, String, String) {
+    (
+        v["code"].as_str().unwrap_or_default().into(),
+        v["message"].as_str().unwrap_or_default().into(),
+        v["fix"].as_str().unwrap_or_default().into(),
+    )
+}
+
+/// A refusal's code, message and fix.
+type Refusal = (String, String, String);
+
+/// scc9: the closed inputs of `rdy pull --dump`, each with D-7CDEQ's exact words, before any
+/// request: `--out` or `--url` without `--dump`, `--dump` without `--out`, `--dump` with any
+/// other pull flag (the relay flags too), and `--remote` with `--url`. A dump id of 1 or 256
+/// bytes passes; 0 and 257 bytes, a byte outside ASCII and a control byte are refused.
+#[test]
+fn scc9_dump_inputs_and_cli_refusals_are_exact() {
+    let (k, _) = dump_kit();
+    let url = hub_url(&k);
+    let bad = |m: &str, f: &str| ("E_BAD_INPUT".to_string(), m.to_string(), f.to_string());
+    let only = bad(
+        "a dump fetch takes only out and remote or url",
+        "run the dump fetch on its own",
+    );
+    let cases: Vec<(Vec<&str>, Refusal)> = vec![
+        (
+            vec!["pull", "--out", "f.rdydump"],
+            bad("out goes only with dump", "add --dump <id>, or remove out"),
+        ),
+        (
+            vec!["pull", "--url", &url],
+            bad("url goes only with dump", "add --dump <id>, or remove url"),
+        ),
+        (
+            vec!["pull", "--dump", DUMP_ID],
+            bad("a dump fetch needs out", "add --out <file>"),
+        ),
+        (
+            vec!["pull", "--dump", DUMP_ID, "--out", "f", "--take"],
+            only.clone(),
+        ),
+        (
+            vec!["pull", "--dump", DUMP_ID, "--out", "f", "--strict"],
+            only.clone(),
+        ),
+        (
+            vec!["pull", "--dump", DUMP_ID, "--out", "f", "--view", "main"],
+            only.clone(),
+        ),
+        (
+            vec!["pull", "--dump", DUMP_ID, "--out", "f", "--card-hash", "x"],
+            only.clone(),
+        ),
+        (
+            vec![
+                "pull", "--dump", DUMP_ID, "--out", "f", "--remote", "origin", "--url", &url,
+            ],
+            bad("name remote or url, not both", "keep one of them"),
+        ),
+    ];
+    let id_refusal = bad(
+        "the dump id is not 1 to 256 bytes of printable ASCII",
+        "pass the id that the hub's dump job gave",
+    );
+    let long = "x".repeat(257);
+    let mut all = cases;
+    for id in ["", long.as_str(), "d\u{e9}", "a\tb"] {
+        all.push((
+            vec!["pull", "--dump", id, "--out", "f.rdydump"],
+            id_refusal.clone(),
+        ));
+    }
+    for (args, want) in &all {
+        assert_eq!(dump_words(&cli_err(&k, args)), *want, "{args:?}");
+    }
+    assert!(k.hub.requests().is_empty(), "no refusal reaches the hub");
+    // 1 and 256 bytes pass the checks: the hub refuses the ids it never made
+    for id in ["x".to_string(), "x".repeat(256)] {
+        let e = cli_err(&k, &["pull", "--dump", &id, "--out", "n.rdydump"]);
+        assert_eq!(e["code"], "E_HUB_NOT_FOUND", "{e}");
+        assert_eq!(
+            e["message"],
+            format!("no dump {id} of yours in acme/docs"),
+            "{e}"
+        );
+    }
+    assert!(!k.proj.path().join("n.rdydump").exists());
+}
+
+/// scc9: the fetch by the default remote and by `--url` in a project go through the daemon, and
+/// by `--url` outside every project in this process; each runs discovery, state and dump with
+/// the machine's sign-in, and needs no project role. The project's store and sync state do not
+/// move.
+#[test]
+fn scc9_dump_remote_and_url_use_sign_in_without_project_role() {
+    let (k, made) = dump_kit();
+    let before = cli_ok(&k, &["status"]);
+    let url = hub_url(&k);
+    let outside = tempfile::tempdir().unwrap();
+    let runs: Vec<(&str, Vec<String>)> = vec![
+        (
+            "remote",
+            vec![
+                "pull".into(),
+                "--dump".into(),
+                DUMP_ID.into(),
+                "--out".into(),
+                "r.rdydump".into(),
+            ],
+        ),
+        (
+            "url in a project",
+            vec![
+                "pull".into(),
+                "--dump".into(),
+                DUMP_ID.into(),
+                "--out".into(),
+                "u.rdydump".into(),
+                "--url".into(),
+                url.clone(),
+            ],
+        ),
+    ];
+    for (case, args) in runs {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let n = k.hub.requests().len();
+        let v = cli_ok(&k, &args);
+        assert_eq!(v["digest"], made["digest"], "{case}: {v}");
+        let routes: Vec<String> = k.hub.routes()[n..].to_vec();
+        assert_eq!(routes, ["discovery", "state", "dump"], "{case}");
+        for r in &k.hub.requests()[n..] {
+            assert!(
+                r.headers
+                    .iter()
+                    .any(|(h, v)| h == "authorization" && v == &format!("Bearer {ACCESS}")),
+                "{case}: the machine's sign-in"
+            );
+        }
+    }
+    // outside every project: in this process, with the user config's trust and sign-in
+    let n = k.hub.requests().len();
+    let o = command_in(
+        outside.path(),
+        &k.home,
+        &[
+            "--json",
+            "pull",
+            "--dump",
+            DUMP_ID,
+            "--out",
+            "o.rdydump",
+            "--url",
+            &url,
+        ],
+    )
+    .output()
+    .unwrap();
+    let (ok, v) = parsed(&o);
+    assert!(ok, "{v}");
+    assert_eq!(v["digest"], made["digest"]);
+    assert!(outside.path().join("o.rdydump").is_file());
+    assert_eq!(k.hub.routes()[n..], ["discovery", "state", "dump"]);
+    assert!(!outside.path().join(".rdy").exists(), "no project is made");
+    // the store and its sync state did not move
+    let after = cli_ok(&k, &["status"]);
+    assert_eq!(before["sync"], after["sync"]);
+    assert!(k.hub.of("/write").is_empty());
+}
+
+/// scc9: the reply names the checked file as `rdy dump` names it (out, size, dump format, kind,
+/// repo id, trailer digest) and the next step, exactly; the text says the same.
+#[test]
+fn scc9_dump_reply_names_checked_file_and_next() {
+    let (k, made) = dump_kit();
+    let out = k.proj.path().join("fetched.rdydump");
+    let v = cli_ok(
+        &k,
+        &["pull", "--dump", DUMP_ID, "--out", out.to_str().unwrap()],
+    );
+    for m in ["bytes", "dump_format", "kind", "repo_id", "digest"] {
+        assert_eq!(v[m], made[m], "{m}: {v}");
+    }
+    assert_eq!(v["out"], out.display().to_string());
+    assert_eq!(v["next"], DUMP_NEXT);
+    let t = cli_text(&k, &["pull", "--dump", DUMP_ID, "--out", "again.rdydump"]);
+    assert!(t.contains(&format!("next: {DUMP_NEXT}")), "{t}");
+    assert!(t.contains(made["digest"].as_str().unwrap()), "{t}");
+    assert!(t.contains(made["repo_id"].as_str().unwrap()), "{t}");
+}

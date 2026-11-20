@@ -13,6 +13,9 @@
 //!   first (`status: confirmation_required`, with `card`, `card_hash` and the preview), and
 //!   writes nothing. The agent shows it, then calls again with the person's answer, their
 //!   quoted words and the card's `card_hash`. A card that changed since is `E_ITEM_MOVED`.
+//! - **Dump fetch.** `rdy_pull {dump, out, remote?, url?}` fetches a hub dump to a new file
+//!   (D-7CDEQ, `rdy_engine::sync_dump`). Its closed inputs come first ([`check_dump_inputs`]);
+//!   it needs no project role, because it writes no store, ref or sync state.
 //! - **Roles.** Push, pull and a view take need the writer role ([`require_writer`]). An agent
 //!   never answers a card as the person: the relay check refuses an answer without a relayed
 //!   quote.
@@ -181,6 +184,16 @@ pub struct PullInputs {
     pub take: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strict: bool,
+    /// The id of a hub dump to fetch (D-7CDEQ); with it the call takes only `out` and one of
+    /// `remote` or `url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dump: Option<String>,
+    /// The new file a dump fetch writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out: Option<String>,
+    /// The HTTPS URL of the hub repo a dump fetch reads, in place of a remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,9 +220,37 @@ impl PullInputs {
             session_ref: self.session_ref.clone(),
         }
     }
-    /// Checks the inputs that need no hub: a take without views takes no strict; the relay
-    /// inputs go only with take; their pairing; and the view names.
+    /// The names of the inputs this call gave: each set option, each true bool and each
+    /// non-empty list.
+    pub fn given(&self) -> Vec<&'static str> {
+        [
+            ("remote", self.remote.is_some()),
+            ("views", !self.views.is_empty()),
+            ("take", self.take),
+            ("strict", self.strict),
+            ("dump", self.dump.is_some()),
+            ("out", self.out.is_some()),
+            ("url", self.url.is_some()),
+            ("card_hash", self.card_hash.is_some()),
+            ("answer", self.answer.is_some()),
+            ("relayed_by", self.relayed_by.is_some()),
+            ("evidence", self.evidence.is_some()),
+            ("question", self.question.is_some()),
+            ("session_ref", self.session_ref.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(k, given)| given.then_some(k))
+        .collect()
+    }
+
+    /// Checks the inputs that need no hub: the closed inputs of a dump fetch and its id
+    /// (D-7CDEQ); else a take without views takes no strict; the relay inputs go only with take;
+    /// their pairing; and the view names.
     pub fn check(&self) -> Result<(), RdyError> {
+        check_dump_inputs(&self.given())?;
+        if let Some(id) = &self.dump {
+            return rdy_engine::sync_dump::check_dump_id(id);
+        }
         if self.take && self.strict && self.views.is_empty() {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -230,6 +271,48 @@ impl PullInputs {
     pub fn to_args(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
+}
+
+/// The closed inputs of a dump fetch (D-7CDEQ), from `given`, the names of every pull input a
+/// call gave (a false bool or an empty list counts as given). With `dump`, the call takes only
+/// `out` and one of `remote` or `url`; without it, `out` and `url` are refused.
+pub fn check_dump_inputs(given: &[&str]) -> Result<(), RdyError> {
+    let has = |k: &str| given.contains(&k);
+    if !has("dump") {
+        return match ["out", "url"].into_iter().find(|k| has(k)) {
+            Some(k) => Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{k} goes only with dump"),
+                format!("add --dump <id>, or remove {k}"),
+            )),
+            None => Ok(()),
+        };
+    }
+    if given
+        .iter()
+        .any(|k| !matches!(*k, "dump" | "out" | "remote" | "url"))
+    {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "a dump fetch takes only out and remote or url",
+            "run the dump fetch on its own",
+        ));
+    }
+    if !has("out") {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "a dump fetch needs out",
+            "add --out <file>",
+        ));
+    }
+    if has("remote") && has("url") {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "name remote or url, not both",
+            "keep one of them",
+        ));
+    }
+    Ok(())
 }
 
 /// The writer role guard of push, pull and a view take: a reader is refused before anything is
@@ -279,6 +362,12 @@ pub struct PullParams {
     pub take: Option<bool>,
     /// true stops a replay at its first conflict. Not with take and no views.
     pub strict: Option<bool>,
+    /// The id of a dump that the hub's dump job gave (1 to 256 printable ASCII bytes): fetch that dump to out instead of pulling. Takes only out and one of remote or url.
+    pub dump: Option<String>,
+    /// The new file a dump fetch writes (relative to the project root). Only with dump.
+    pub out: Option<String>,
+    /// The HTTPS URL of the hub repo a dump fetch reads, in place of remote. Only with dump.
+    pub url: Option<String>,
     /// The card_hash of the card the person answered. With answer.
     pub card_hash: Option<String>,
     /// The person's answer to the card: confirm or cancel. With card_hash.
@@ -289,6 +378,30 @@ pub struct PullParams {
     pub question: Option<String>,
     /// The chat session the person spoke in (default: mcp). With evidence.
     pub session_ref: Option<String>,
+}
+
+impl PullParams {
+    /// The names of the inputs the call gave, a false bool or an empty list included: a dump
+    /// fetch refuses each of them but its own (D-7CDEQ).
+    fn given(&self) -> Vec<&'static str> {
+        [
+            ("remote", self.remote.is_some()),
+            ("views", self.views.is_some()),
+            ("take", self.take.is_some()),
+            ("strict", self.strict.is_some()),
+            ("dump", self.dump.is_some()),
+            ("out", self.out.is_some()),
+            ("url", self.url.is_some()),
+            ("card_hash", self.card_hash.is_some()),
+            ("answer", self.answer.is_some()),
+            ("evidence", self.evidence.is_some()),
+            ("question", self.question.is_some()),
+            ("session_ref", self.session_ref.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(k, given)| given.then_some(k))
+        .collect()
+    }
 }
 
 impl From<PushParams> for PushInputs {
@@ -315,6 +428,9 @@ impl From<PullParams> for PullInputs {
             views: p.views.unwrap_or_default(),
             take: p.take.unwrap_or(false),
             strict: p.strict.unwrap_or(false),
+            dump: p.dump,
+            out: p.out,
+            url: p.url,
             card_hash: p.card_hash,
             answer: p.answer,
             relayed_by: None,
@@ -356,11 +472,15 @@ pub fn rdy_push(st: &mut McpState, p: PushParams) -> Result<Value, RdyError> {
 }
 
 /// `rdy_pull`: a pull of hub canon and the named views from the share remote. A take of hub
-/// canon returns the person's card first.
+/// canon returns the person's card first. With `dump` it fetches that hub dump instead, with no
+/// project role (D-7CDEQ).
 pub fn rdy_pull(st: &mut McpState, p: PullParams) -> Result<Value, RdyError> {
     let s = session(st)?;
-    require_writer(&s, "pull")?;
+    check_dump_inputs(&p.given())?;
     let inputs = PullInputs::from(p);
+    if inputs.dump.is_none() {
+        require_writer(&s, "pull")?;
+    }
     inputs.check()?;
     let person = person_for(st, inputs.card_hash.is_some())?;
     st.engine.sync(

@@ -231,8 +231,8 @@ use rdy_engine::hub_publish::{PublishRenderer, RenderedUpload};
 use rdy_engine::hub_publish_wire::{Discovery, ObjectPut, PublishState, UploadContext};
 use rdy_engine::hub_sync::{PullOutcome, PullRequest, PushOutcome, PushRequest, SyncService};
 use rdy_engine::hub_sync_wire::{
-    GetRequest, HubRequest, KnownPage, KnownPull, LookupOutcome, OutcomeReply, SyncState,
-    SyncStateRequest, SyncWire, WriteFailure, WriteKind, WriteOutcome, WriteReply,
+    DumpRequest, GetRequest, HubRequest, KnownPage, KnownPull, LookupOutcome, OutcomeReply,
+    SyncState, SyncStateRequest, SyncWire, WriteFailure, WriteKind, WriteOutcome, WriteReply,
     WriteRequest as SyncWrite,
 };
 use rdy_engine::render_inputs::{DisagreementInput, RenderInputs};
@@ -305,6 +305,11 @@ pub struct Hub {
     pub gets: Mutex<Vec<GetRequest>>,
     /// A get reply served once in place of the store's batch.
     pub get_bytes: Mutex<Option<Vec<u8>>>,
+    /// The dump files the dump step serves, by id (D-7CDEQ); an id with none is refused as
+    /// wire fixture v5 refuses it.
+    pub dumps: Mutex<BTreeMap<String, Vec<u8>>>,
+    /// The id of each dump step, in order.
+    pub dump_ids: Mutex<Vec<String>>,
 }
 
 pub fn base_state() -> PublishState {
@@ -350,6 +355,8 @@ impl Hub {
             pulls: Mutex::default(),
             gets: Mutex::default(),
             get_bytes: Mutex::default(),
+            dumps: Mutex::default(),
+            dump_ids: Mutex::default(),
         }
     }
 
@@ -521,6 +528,16 @@ pub fn hub_not_found() -> RdyError {
     )
 }
 
+/// Wire fixture v5's refusal of a dump that does not exist, is not ready or another account
+/// started, as the publish mapping gives it.
+pub fn dump_not_found(id: &str) -> RdyError {
+    RdyError::new(
+        "E_HUB_NOT_FOUND",
+        format!("no dump {id} of yours in acme/docs"),
+        "start a dump with dumps.create, then wait for it to succeed",
+    )
+}
+
 impl SyncWire for Hub {
     fn discovery(&self, cx: &UploadContext, remote: &str) -> Result<Discovery, RdyError> {
         self.enter("discovery", cx, None, Some(remote))?;
@@ -640,6 +657,23 @@ impl SyncWire for Hub {
         let keys: Vec<ObjectKey> = all[start..].iter().take(size).copied().collect();
         let next = (start + keys.len() < all.len()).then(|| *keys.last().unwrap());
         Ok(KnownPage { keys, next })
+    }
+
+    fn dump(
+        &self,
+        cx: &UploadContext,
+        request: &DumpRequest,
+        sink: &mut dyn std::io::Write,
+        limit: u64,
+    ) -> Result<u64, RdyError> {
+        self.enter("dump", cx, None, None)?;
+        self.dump_ids.lock().unwrap().push(request.dump.clone());
+        let bytes = self.dumps.lock().unwrap().get(&request.dump).cloned();
+        let bytes = bytes.ok_or_else(|| dump_not_found(&request.dump))?;
+        assert!(bytes.len() as u64 <= limit);
+        sink.write_all(&bytes)
+            .map_err(|e| RdyError::new("E_IO", e.to_string(), "check the disk"))?;
+        Ok(bytes.len() as u64)
     }
 
     fn get(

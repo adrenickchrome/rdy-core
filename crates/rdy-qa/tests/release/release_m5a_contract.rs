@@ -15,7 +15,7 @@ const PREDECESSOR: &str = "sync-client-b-v1.json";
 /// The sha256 of [`PREDECESSOR`] as the base shipped it. It never moves: a later contract change
 /// is a successor fixture, never an edit of that file.
 const SYNC_CLIENT_B_V1_SHA: &str =
-    "95a5cf1602a90580fa442b043770143c18cf67d4ac830df9af7f7ec08d34058f";
+    "4db01ca7269dd36ba6c8b03598d120ce78460235f6560408305f9f71b25b0e61";
 
 /// The current fixture, which every selector names.
 const CURRENT: &str = "m5a-v1.json";

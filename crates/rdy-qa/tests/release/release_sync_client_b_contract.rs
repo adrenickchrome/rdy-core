@@ -3,7 +3,8 @@
 //! `sync-client-v1.json`, which is frozen from here on. Task 8a1 adds only the sync wire's
 //! fixture digest and the exchange's error values: the code `E_DIVERGED` and the texts of
 //! `SYNC_DIVERGED`, `SYNC_REMOTE_MODE` and `SYNC_MIN_RDY`. Task 8a2 adds wire fixture v2's
-//! digest and the texts of `SYNC_UNCERTAIN`. Every other member is the predecessor's.
+//! digest and the texts of `SYNC_UNCERTAIN`. The dump fetch adds wire fixture v5's digest
+//! (D-7CDEQ). Every other member is the predecessor's.
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -29,7 +30,8 @@ const SELECTORS: [&str; 3] = [
     "crates/rdy-qa/tests/cli/cli_rules.rs",
 ];
 
-/// The members Tasks 8a1 and 8a2 add to [`CURRENT`], each with the reason it moves.
+/// The members Tasks 8a1 and 8a2 and the dump fetch add to [`CURRENT`], each with the reason it
+/// moves.
 const SCC8_CHANGES: &[(&str, &str)] = &[
     (
         "added /errors_warnings/codes/E_DIVERGED",
@@ -78,6 +80,10 @@ const SCC8_CHANGES: &[(&str, &str)] = &[
     (
         "added /sync/fixture_digests/sync-client-wire-v3a.json",
         "rdyhub's frozen sync wire fixture v3a, a byte copy: the held write and held outcomes (D-PGQZM)",
+    ),
+    (
+        "added /sync/fixture_digests/sync-client-wire-v5.json",
+        "rdyhub's frozen sync wire fixture v5, a byte copy: the dump step and the restore (D-7CDEQ)",
     ),
 ];
 
@@ -617,6 +623,7 @@ fn scc10_contract_delta_is_exactly_the_owned_leaves() {
 const WIRE_V1_SHA: &str = "60771d5b857135696a355fab2ec388b4aa59a6755549cd041b0b57023a372c95";
 const WIRE_V2_SHA: &str = "15a6c243840c2fa58428a2b6d821d87c57466a14de70a423eb7af1477e30c3d8";
 const WIRE_V3A_SHA: &str = "4fce80edaadbab7df7dc82c2346d82ab413af223c2df74100f89d5bbb9ebe565";
+const WIRE_V5_SHA: &str = "304f53c1f29be0d5228c62763d1a208cc1b2a3f82f6435c6af3edf44a6c75df7";
 
 /// The contract fixtures before this plan, each with the sha256 of the bytes its release shipped.
 const EARLIER: &[(&str, &str)] = &[
@@ -712,6 +719,7 @@ fn scc10_predecessor_fixtures_keep_their_bytes() {
         sha(&sync_fixture("sync-client-wire-v3a.json")),
         WIRE_V3A_SHA
     );
+    assert_eq!(sha(&sync_fixture("sync-client-wire-v5.json")), WIRE_V5_SHA);
     for (name, want) in STREAM_EXPECTS {
         assert_eq!(&sha(&sync_fixture(name)), want, "{name} is frozen");
     }
@@ -743,6 +751,10 @@ fn scc10_predecessor_fixtures_keep_their_bytes() {
         (
             "sync-client-wire-v3a.json",
             sync_fixture("sync-client-wire-v3a.json"),
+        ),
+        (
+            "sync-client-wire-v5.json",
+            sync_fixture("sync-client-wire-v5.json"),
         ),
     ] {
         assert_eq!(
@@ -783,8 +795,8 @@ fn probed(files: &[&str], needle: &str) -> bool {
 
 /// scc10: each new tool, command, flag, parameter and refusal row of this plan has a runtime
 /// probe: a test that runs it through the real binary. The probes are text-checked here, so a
-/// surface a later task adds without a probe fails this test. The dump-fetch forms wait for the
-/// dump task (their probes join then).
+/// surface a later task adds without a probe fails this test. The dump-fetch forms (`--dump`,
+/// `--out`, `--url`; `dump`, `out`, `url`) are probed by the dump tests of the same files.
 #[test]
 fn scc10_every_new_surface_has_a_runtime_probe() {
     let now = keyed(&read(CURRENT));
