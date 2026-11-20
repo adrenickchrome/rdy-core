@@ -405,6 +405,20 @@ fn crb5_adapter_names(snap: &Snapshot, state: &rdy_engine::ReadState) {
     );
 }
 
+/// crb6: the version pair of the carry-over (D-G8T2W), by its exact names. This function is never
+/// called: it compiles only while the name has the receiver, the arguments and the result listed,
+/// and each type is re-exported from the module and the crate root.
+#[allow(dead_code)]
+fn crb6_adapter_names(snap: &Snapshot, base: Option<Hash>, chain: Vec<Hash>) {
+    let old = rdy_adapter::VersionChain { base, chain };
+    let new: rdy_adapter::version_tests::VersionChain = old.clone();
+    let t: Result<rdy_adapter::VersionTests, RdyError> = snap.compare_versions(&old, &new);
+    let _: Option<rdy_adapter::version_tests::VersionTests> = t.ok();
+    let _ = |t: rdy_adapter::VersionTests| -> (bool, bool) {
+        (t.replays_one_for_one, t.base_moves_write_request_blocks)
+    };
+}
+
 /// cra3: the place of each landing (D-H1SHC), by its exact names. This function is never called:
 /// it compiles only while each name has the receiver, the arguments and the result listed.
 #[allow(dead_code)]

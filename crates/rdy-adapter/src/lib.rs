@@ -11,7 +11,7 @@
 //! a holder and makes the hub's canon and view moves; `landing_check` checks a stored landing
 //! with the inputs the hub passes. `compare` compares and diffs any two scopes a snapshot reads,
 //! and pages the diff as `rdy_diff` does; `version_tests` tests whether a chain of landings merges
-//! onto a landing's state.
+//! onto a landing's state, and whether an approval carries from one request version to the next.
 //! No product behaviour is promised stable across pins.
 
 pub mod capabilities;
@@ -67,4 +67,4 @@ pub use sync::{
 };
 pub use take::{StorePosition, TakeOutcome, UploadTarget};
 pub use value::{encode_block, hash_bytes};
-pub use version_tests::{ConflictKind, MergeConflict, RebaseTest};
+pub use version_tests::{ConflictKind, MergeConflict, RebaseTest, VersionChain, VersionTests};
