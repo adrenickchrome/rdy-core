@@ -4,7 +4,8 @@
 //! list has one place (D-H1SHC): in canon's chain, reached off it, or not stored.
 
 use crate::hub_world::{
-    AT, check, doc, land, moved, project, replayed, repo_of, seed, session, tag, world, write_in,
+    AT, check, doc, land, moved, project, pushed_draft, replayed, repo_of, seed, session,
+    set_draft, tag, world, write_in,
 };
 use rdy_adapter::history::LandingPlace;
 use rdy_adapter::sync::CanonMove;
@@ -416,40 +417,6 @@ fn cra3_a_removal_since_the_snapshot_is_refused() {
 
 fn view_at(name: &str, op: &Hash) -> String {
     format!("view:{name}@{op}")
-}
-
-/// Moves view `draft` of the hub `h` to the head the view history at `path` pushes.
-fn set_draft(
-    h: &StoreHandle,
-    w: &crate::hub_world::World,
-    path: &std::path::Path,
-    from: Option<Hash>,
-    to: Hash,
-) {
-    let s = h.snapshot().unwrap();
-    let c = check(&s, &[path]).unwrap();
-    let set = CanonMove::SetViewHead {
-        name: "draft".into(),
-        root: w.draft_root,
-    };
-    assert_eq!(h.move_canon(&c, set, from).unwrap(), moved(to));
-}
-
-/// The hub of `w` seeded with `p1`, view `draft` pushed at `d1`, canon extended to `p2` and
-/// `draft` moved on to `d2`.
-fn pushed_draft(w: &crate::hub_world::World) -> StoreHandle {
-    let h = w.holder("hub");
-    seed(&h, w);
-    set_draft(&h, w, &w.v1, None, w.d1);
-    let s = h.snapshot().unwrap();
-    let c2 = check(&s, &[&w.e2]).unwrap();
-    assert_eq!(
-        h.move_canon(&c2, CanonMove::Extend, Some(w.p1)).unwrap(),
-        moved(w.p2)
-    );
-    drop((s, c2));
-    set_draft(&h, w, &w.v2, Some(w.d1), w.d2);
-    h
 }
 
 /// The keys of the complete history of `purpose` at `root` that `snap` writes, nothing known.

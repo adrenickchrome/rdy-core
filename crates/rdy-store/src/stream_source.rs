@@ -32,7 +32,9 @@ use crate::plan::Place as PlanPlace;
 use crate::segment::HEADER;
 use crate::stream_error::{LIMIT_GRAPH_EDGES, LIMIT_OBJECT_RECORDS, Reason, StreamError};
 use crate::sync_proof::{self, ObjectSource, PortableRemoval, RemovalObject};
-use crate::sync_stream::{MAX_EDGES, MAX_RECORDS, StreamHeader, StreamRecord, check_batch_with};
+use crate::sync_stream::{
+    MAX_EDGES, MAX_RECORDS, StreamHeader, StreamPurpose, StreamRecord, check_batch_with,
+};
 use crate::take_batch::UploadFacts;
 use rdy_model::redaction::{Redaction, RedactionApply, RedactionResidue};
 use rdy_model::signature::Signature;
@@ -1414,12 +1416,25 @@ impl<R: Read + Seek> CheckedStream<R, RootedFacts> {
     /// [`RootedError::Root`] with the root the header names, before any object record is read.
     /// Then every check of [`CheckedStream::open`], with the landing as the closure's root.
     pub fn open_rooted(input: R, landing: Hash) -> Result<Self, RootedError> {
+        Self::open_history(input, StreamPurpose::CanonHistory, landing)
+    }
+
+    /// [`CheckedStream::open_rooted`] of a view history stream rooted at the view op `op`, with
+    /// nothing known (D-V9RF5): the header must be a `view_history` header whose root is `op`,
+    /// else [`RootedError::Root`] with the root the header names, before any object record is
+    /// read. Then every check of [`CheckedStream::open`], with the op as the closure's root.
+    pub fn open_view_rooted(input: R, op: Hash) -> Result<Self, RootedError> {
+        Self::open_history(input, StreamPurpose::ViewHistory, op)
+    }
+
+    /// The history stream of `purpose` rooted at `root` (see [`CheckedStream::open_rooted`]).
+    fn open_history(input: R, purpose: StreamPurpose, root: Hash) -> Result<Self, RootedError> {
         let want = ObjectKey {
-            kind: kinds::LANDING,
-            hash: landing,
+            kind: purpose.root_kind(),
+            hash: root,
         };
         let opened = open_checked(input, false, |h: &StreamHeader| {
-            if h.purpose == crate::sync_stream::StreamPurpose::CanonHistory && h.root() == want {
+            if h.purpose == purpose && h.root() == want {
                 Ok(())
             } else {
                 Err(RootedError::Root(h.root()))
@@ -1438,6 +1453,40 @@ impl<R: Read + Seek> CheckedStream<R, RootedFacts> {
         &self,
     ) -> Result<(StateSnapshot, BTreeMap<BlockId, Block>), StreamError> {
         self.materialize_at(self.facts.root.hash)
+    }
+
+    /// Whether the stream holds block version `version`: a record of the batch, present or
+    /// dropped.
+    pub fn holds_version(&self, version: &Hash) -> bool {
+        let key = ObjectKey {
+            kind: kinds::BLOCK,
+            hash: *version,
+        };
+        self.facts.objects.binary_search(&key).is_ok()
+    }
+
+    /// The state of landing `base`'s snapshot (an empty state for none) with each row of `rows`
+    /// applied: a version sets its block's version, none removes the block (D-V9RF5). Each
+    /// block reads as [`CheckedStream::materialize_tag`] reads a tag's; a version of another
+    /// block is E_BAD_RECORD.
+    pub fn materialize_rows(
+        &self,
+        base: Option<Hash>,
+        rows: &BTreeMap<BlockId, Option<Hash>>,
+    ) -> Result<(StateSnapshot, BTreeMap<BlockId, Block>), StreamError> {
+        let mut snapshot = match base {
+            Some(landing) => self.landing_snapshot(landing)?.0,
+            None => StateSnapshot::default(),
+        };
+        for (id, version) in rows {
+            match version {
+                Some(v) => snapshot.blocks.insert(id.clone(), *v),
+                None => snapshot.blocks.remove(id),
+            };
+        }
+        let state = snapshot.id();
+        let blocks = self.blocks_of(&snapshot, state)?;
+        Ok((snapshot, blocks))
     }
 }
 
@@ -1594,6 +1643,14 @@ impl<R: Read + Seek, F> CheckedStream<R, F> {
         &self,
         landing: Hash,
     ) -> Result<(StateSnapshot, BTreeMap<BlockId, Block>), StreamError> {
+        let (snapshot, state) = self.landing_snapshot(landing)?;
+        let blocks = self.blocks_of(&snapshot, state)?;
+        Ok((snapshot, blocks))
+    }
+
+    /// The snapshot of landing `landing` of the stream, with its state hash: the held
+    /// SNAPSHOT, or the fold of the stream's deltas (`crate::snapshot`).
+    fn landing_snapshot(&self, landing: Hash) -> Result<(StateSnapshot, Hash), StreamError> {
         let landing_key = ObjectKey {
             kind: kinds::LANDING,
             hash: landing,
@@ -1601,11 +1658,6 @@ impl<R: Read + Seek, F> CheckedStream<R, F> {
         let landing: LandingRecord = self
             .typed(landing_key)?
             .ok_or_else(|| StreamError::unresolved(0, 0, landing_key))?;
-        let snapshot_key = ObjectKey {
-            kind: kinds::SNAPSHOT,
-            hash: landing.state,
-        };
-        // the held SNAPSHOT, or the fold of the stream's deltas (`crate::snapshot`)
         let mut records: &CheckedStream<R, F> = self;
         let snapshot = crate::snapshot::read_landing_snapshot(
             &mut crate::snapshot::RecordSnapshots::new(&mut records),
@@ -1613,6 +1665,20 @@ impl<R: Read + Seek, F> CheckedStream<R, F> {
             &landing_key.hash,
             &landing,
         )?;
+        Ok((snapshot, landing.state))
+    }
+
+    /// Each block of `snapshot` (state `state`) by id, as a read sees it: a removed version as
+    /// its stub, one no residue describes left out.
+    fn blocks_of(
+        &self,
+        snapshot: &StateSnapshot,
+        state: Hash,
+    ) -> Result<BTreeMap<BlockId, Block>, StreamError> {
+        let snapshot_key = ObjectKey {
+            kind: kinds::SNAPSHOT,
+            hash: state,
+        };
         let mut blocks: BTreeMap<BlockId, Block> = BTreeMap::new();
         for (id, version) in &snapshot.blocks {
             let Some(block) = self.block(*version)? else {
@@ -1622,8 +1688,8 @@ impl<R: Read + Seek, F> CheckedStream<R, F> {
                 return Err(StreamError {
                     code: "E_BAD_RECORD",
                     message: format!(
-                        "snapshot {}: block {id} names version {version}, which is a version of {}",
-                        landing.state, block.id
+                        "snapshot {state}: block {id} names version {version}, which is a version of {}",
+                        block.id
                     ),
                     fix: "upload the history as its source project exported it".into(),
                     record: None,
@@ -1633,7 +1699,7 @@ impl<R: Read + Seek, F> CheckedStream<R, F> {
             }
             blocks.insert(id.clone(), block);
         }
-        Ok((snapshot, blocks))
+        Ok(blocks)
     }
 
     /// Block version `version` as a read sees it: its record, or for a removed version the stub

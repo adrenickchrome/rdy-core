@@ -33,6 +33,14 @@
 //! nothing known, for a scope render request (D-CST6K): its header must name that landing as
 //! its root, the closure is the landing's, step 4 has no name to check, the chain rules hold on
 //! the landing's chain, and the state and the redaction marker are the landing's own.
+//!
+//! [`RenderSource::open_view`] reads one view history stream rooted at a view op, with nothing
+//! known (D-V9RF5): its header must name that op as its root, the closure is the op's, the
+//! chain rules hold on the chain of the view's base at the op, and the view at the op (its base
+//! and included changes) is read from the stream's op chain. The source does not merge: its
+//! state is the base landing's snapshot with each row of the caller's state list applied
+//! ([`ViewStream::into_source`]), and its redaction marker reads the base landing's chain and
+//! the included changes ([`view_is_redacted`]).
 //! A removed blob yields its removal request, never stale bytes; a present blob's bytes are read
 //! from the scratch file only when a caller asks for them, checked chunk by chunk.
 use crate::Materialized;
@@ -53,6 +61,7 @@ use rdy_model::{
 use rdy_schema::Pack;
 use rdy_store::check_holder;
 use rdy_store::format::StoreFeatures;
+use rdy_store::hub_canon::{ViewAtOp, view_at_op};
 use rdy_store::kinds::{self, BlobManifest};
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::snapshot::{
@@ -65,9 +74,10 @@ use rdy_store::sync_proof::ObjectSource;
 pub use rdy_store::sync_stream::MAX_STREAM_BYTES;
 use rdy_store::sync_stream::StreamRecord;
 use rdy_store::take_batch::{UploadFacts, UploadTarget, check_input_bounds};
+use rdy_store::view::ViewOp;
 use rdy_store::{StoreError, StoreReader};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -160,6 +170,142 @@ impl RenderSource<RootedFacts> {
             tag_redacted,
         })
     }
+}
+
+/// One checked view history stream rooted at a view op (D-V9RF5), before its state list
+/// applies: the view at the op, as the stream's op chain gives it, and the blocks that its
+/// included changes touch.
+pub struct ViewStream {
+    stream: CheckedStream<Box<dyn ScratchFile>, RootedFacts>,
+    view: ViewAtOp,
+    touched: BTreeSet<BlockId>,
+    inputs: RenderInputs,
+}
+
+impl std::fmt::Debug for ViewStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewStream")
+            .field("view", &self.view)
+            .field("touched", &self.touched.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RenderSource<RootedFacts> {
+    /// The view history stream `input`, rooted at the view op `op` with nothing known, to be
+    /// rendered with `inputs`, through one anonymous temporary file: the checks of
+    /// [`RenderSource::read_rooted`], with the op as the root. A stream whose header is not a
+    /// view history rooted at `op` is `wrong_root` of the root its header names, before any
+    /// object record is checked. The chain rules hold on the chain of the view's base at the op;
+    /// each included change is read to find the blocks it touches.
+    pub fn open_view(
+        mut input: impl Read,
+        inputs: RenderInputs,
+        op: Hash,
+        wrong_root: impl FnOnce(Hash) -> RdyError,
+    ) -> Result<ViewStream, RdyError> {
+        validate_inputs(&inputs)?;
+        let mut file: Box<dyn ScratchFile> =
+            Box::new(tempfile::tempfile().map_err(|_| scratch_error())?);
+        copy(&mut input, &mut *file)?;
+        let stream = match CheckedStream::open_view_rooted(file, op) {
+            Ok(s) => s,
+            Err(RootedError::Root(found)) => return Err(wrong_root(found.hash)),
+            Err(RootedError::Stream(e)) => return Err(from_stream(e)),
+        };
+        // the take's step 7: a change that keeps removed content readable needs its approval
+        if let Some(h) = stream.uncovered_change() {
+            return Err(crate::stream_take::uncovered_change(h));
+        }
+        let view = stream_view_at(&stream, op)?;
+        // a record read again from the scratch file that fails is the scratch error
+        check_view_snapshots(&mut &stream, stream.facts(), view.base).map_err(scratch_io)?;
+        let mut touched: BTreeSet<BlockId> = BTreeSet::new();
+        let mut history = StreamHistory(&stream);
+        for c in &view.included {
+            for op in &history.change(*c)?.ops {
+                touched.insert(op.block_id().clone());
+            }
+        }
+        Ok(ViewStream {
+            stream,
+            view,
+            touched,
+            inputs,
+        })
+    }
+}
+
+impl ViewStream {
+    /// The name of the view whose op roots the stream.
+    pub fn name(&self) -> &str {
+        &self.view.name
+    }
+
+    /// The view's base landing at the op; None for a view with no base.
+    pub fn base(&self) -> Option<Hash> {
+        self.view.base
+    }
+
+    /// The blocks that the changes the view includes at the op touch, in id order.
+    pub fn touched(&self) -> &BTreeSet<BlockId> {
+        &self.touched
+    }
+
+    /// Whether the stream holds block version `version`.
+    pub fn holds_version(&self, version: &Hash) -> bool {
+        self.stream.holds_version(version)
+    }
+
+    /// The source of the view's state at the op: the base landing's snapshot with each row of
+    /// `rows` applied (a version sets its block, none removes it), with no merge (D-V9RF5). The
+    /// caller has checked the rows against [`ViewStream::touched`] and
+    /// [`ViewStream::holds_version`]. The redaction marker reads the base landing's chain and the
+    /// included changes ([`view_is_redacted`]).
+    pub fn into_source(
+        self,
+        rows: &BTreeMap<BlockId, Option<Hash>>,
+    ) -> Result<RenderSource<RootedFacts>, RdyError> {
+        let (snapshot, blocks) = self
+            .stream
+            .materialize_rows(self.view.base, rows)
+            .map_err(from_stream)?;
+        let tag_redacted = view_is_redacted(
+            &mut StreamHistory(&self.stream),
+            self.view.base,
+            &self.view.included,
+            &self.inputs.pack,
+        )?;
+        Ok(RenderSource {
+            stream: self.stream,
+            materialized: Materialized::build(snapshot, blocks),
+            inputs: self.inputs,
+            tag_redacted,
+        })
+    }
+}
+
+/// The view at op `op` of a checked view history stream, read from the stream's ops alone
+/// ([`view_at_op`]).
+fn stream_view_at<R: Read + Seek, F>(
+    stream: &CheckedStream<R, F>,
+    op: Hash,
+) -> Result<ViewAtOp, RdyError> {
+    let mut failed: Option<StreamError> = None;
+    let found = view_at_op(&op, &mut |h| {
+        let key = ObjectKey {
+            kind: kinds::VIEW_OP,
+            hash: *h,
+        };
+        stream.typed::<ViewOp>(key).map_err(|e| {
+            failed = Some(e);
+            StoreError::NotFound(*h)
+        })
+    });
+    if let Some(e) = failed {
+        return Err(from_stream(e));
+    }
+    found.map_err(RdyError::from)
 }
 
 impl RenderSource {
@@ -425,41 +571,77 @@ pub fn tag_is_redacted(
     let mut blobs: HashSet<Hash> = HashSet::new();
     for (_, rec) in &chain {
         for c in &rec.changes {
-            if source.removed(kinds::CHANGE, *c)? {
+            if change_is_redacted(source, *c, pack, &mut blobs)? {
                 return Ok(true);
             }
-            let change = source.change(*c)?;
-            for op in &change.ops {
-                let (Op::Create { block } | Op::Update { block, .. }) = op else {
-                    continue;
-                };
-                if source.removed(kinds::BLOCK, block.version_hash())? {
+        }
+    }
+    Ok(false)
+}
+
+/// The redaction marker of a pushed view at an op (D-V9RF5): [`tag_is_redacted`] of the view's
+/// base landing `base` (none for a view with no base), or a change of `included` that the same
+/// rule marks. False only after the base's chain and every included change are read.
+pub fn view_is_redacted(
+    source: &mut dyn TagHistorySource,
+    base: Option<Hash>,
+    included: &[Hash],
+    pack: &Pack,
+) -> Result<bool, RdyError> {
+    if let Some(base) = base
+        && tag_is_redacted(source, base, pack)?
+    {
+        return Ok(true);
+    }
+    let mut blobs: HashSet<Hash> = HashSet::new();
+    for c in included {
+        if change_is_redacted(source, *c, pack, &mut blobs)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether change `c` marks its history redacted ([`tag_is_redacted`]'s rule for one change):
+/// `blobs` holds the blobs already read, each read once.
+fn change_is_redacted(
+    source: &mut dyn TagHistorySource,
+    c: Hash,
+    pack: &Pack,
+    blobs: &mut HashSet<Hash>,
+) -> Result<bool, RdyError> {
+    if source.removed(kinds::CHANGE, c)? {
+        return Ok(true);
+    }
+    let change = source.change(c)?;
+    for op in &change.ops {
+        let (Op::Create { block } | Op::Update { block, .. }) = op else {
+            continue;
+        };
+        if source.removed(kinds::BLOCK, block.version_hash())? {
+            return Ok(true);
+        }
+        // only an asset's `blob` and `dark_blob` fields name a blob; on any other type they
+        // are plain text
+        if !pack.is_asset(&block.block_type) {
+            continue;
+        }
+        for field in rdy_schema::ASSET_BLOB_FIELDS {
+            let Some(h) = block.field_str(field).and_then(|s| s.parse::<Hash>().ok()) else {
+                continue;
+            };
+            if !blobs.insert(h) {
+                continue;
+            }
+            if source.removed(kinds::BLOB_MANIFEST, h)? {
+                return Ok(true);
+            }
+            let Some(m) = source.manifest(h)? else {
+                continue;
+            };
+            for chunk in &m.chunks {
+                if source.removed(kinds::BLOB_CHUNK, *chunk)? {
                     return Ok(true);
-                }
-                // only an asset's `blob` and `dark_blob` fields name a blob; on any other type
-                // they are plain text
-                if !pack.is_asset(&block.block_type) {
-                    continue;
-                }
-                for field in rdy_schema::ASSET_BLOB_FIELDS {
-                    let Some(h) = block.field_str(field).and_then(|s| s.parse::<Hash>().ok())
-                    else {
-                        continue;
-                    };
-                    if !blobs.insert(h) {
-                        continue;
-                    }
-                    if source.removed(kinds::BLOB_MANIFEST, h)? {
-                        return Ok(true);
-                    }
-                    let Some(m) = source.manifest(h)? else {
-                        continue;
-                    };
-                    for chunk in &m.chunks {
-                        if source.removed(kinds::BLOB_CHUNK, *chunk)? {
-                            return Ok(true);
-                        }
-                    }
                 }
             }
         }
@@ -642,7 +824,7 @@ pub(crate) fn check_snapshots(
         objects: &facts.objects,
         relay_answers: &facts.relay_answers,
         features: &facts.features,
-        head: facts.root.landing,
+        head: Some(facts.root.landing),
         refname: format!("{}{}", rdy_store::holder::TAG_REF, facts.root.name),
     };
     check_all(held, source, &facts, keep)
@@ -659,21 +841,40 @@ fn check_rooted_snapshots(
         objects: &facts.objects,
         relay_answers: &facts.relay_answers,
         features: &facts.features,
-        head: facts.root.hash,
+        head: Some(facts.root.hash),
         refname: format!("landing:{}", facts.root.hash),
+    };
+    check_all(&NothingHeld, source, &facts, None).map(|_| ())
+}
+
+/// [`check_snapshots`] of a view history stream rooted at a view op, with nothing held: the
+/// chain rules hold on the chain of the view's base `base` at the op, named `landing:<hash>` in
+/// their refusals; a view with no base has no chain to check.
+fn check_view_snapshots(
+    source: &mut dyn ObjectSource,
+    facts: &RootedFacts,
+    base: Option<Hash>,
+) -> Result<(), RdyError> {
+    let facts = Checks {
+        repo_id: facts.repo_id,
+        objects: &facts.objects,
+        relay_answers: &facts.relay_answers,
+        features: &facts.features,
+        head: base,
+        refname: base.map(|b| format!("landing:{b}")).unwrap_or_default(),
     };
     check_all(&NothingHeld, source, &facts, None).map(|_| ())
 }
 
 /// What the structural and snapshot checks read of the records to check: the repo, every key
 /// (sorted), the relay answers, the header's features, and the one chain whose rules hold (its
-/// head landing, and the name its refusals give it).
+/// head landing, none for no chain, and the name its refusals give it).
 struct Checks<'a> {
     repo_id: RepoId,
     objects: &'a [ObjectKey],
     relay_answers: &'a BTreeMap<Hash, Hash>,
     features: &'a StoreFeatures,
-    head: Hash,
+    head: Option<Hash>,
     refname: String,
 }
 
@@ -911,11 +1112,14 @@ fn check_landing_rules(
         )
         .map_err(|e| e.into_rdy(*key))?;
     }
+    let Some(head_hash) = facts.head else {
+        return Ok(());
+    };
     let head = ObjectKey {
         kind: kinds::LANDING,
-        hash: facts.head,
+        hash: head_hash,
     };
-    let chain = check_holder::tag_chain_with(&facts.head, &mut |h| {
+    let chain = check_holder::tag_chain_with(&head_hash, &mut |h| {
         let key = ObjectKey {
             kind: kinds::LANDING,
             hash: *h,
