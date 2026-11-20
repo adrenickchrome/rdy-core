@@ -14,6 +14,7 @@ rdy-model = { path = "crates/rdy-model" }
 rdy-schema = { path = "crates/rdy-schema" }
 rdy-store = { path = "crates/rdy-store" }
 rdy-graph = { path = "crates/rdy-graph" }
+rdy-check-wasm = { path = "crates/rdy-check-wasm" }
 rdy-engine = { path = "crates/rdy-engine" }
 rdy-render = { path = "crates/rdy-render" }
 rdy-mcp = { path = "crates/rdy-mcp" }
@@ -74,6 +75,9 @@ time = { version = "=0.3.55", features = ["parsing", "formatting"] }
 log = "=0.4.34"
 # Diagrams: Mermaid source drawn as SVG, behind rdy-diagram alone (D-FY4VF, D-KAGB2).
 mmdflux = { version = "=2.6.1", default-features = false }
+# Check modules: the WebAssembly interpreter, behind rdy-check-wasm alone. No default features:
+# no text-format parser, no SIMD and no 64-bit memories; validation for eager compilation.
+wasmi = { version = "=2.0.2", default-features = false, features = ["std", "validate"] }
 # QA release notices: Cargo.lock parsing.
 toml = { version = "=0.9.8", default-features = false, features = ["parse", "serde", "std"] }
 # QA release notices: SPDX license expressions.

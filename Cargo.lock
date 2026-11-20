@@ -2221,6 +2221,7 @@ dependencies = [
  "proptest",
  "pulldown-cmark",
  "rcgen",
+ "rdy-check-wasm",
  "rdy-engine",
  "rdy-graph",
  "rdy-model",
