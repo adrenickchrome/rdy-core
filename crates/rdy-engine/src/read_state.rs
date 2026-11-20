@@ -680,7 +680,9 @@ pub struct ReadState {
     /// Whether `canon_head` is the caller's explicit base rather than the store's canon. True
     /// only for an explicit candidate's state ([`ReadState::candidate_state`]): its base, even
     /// none (a first landing's `prev`), is an input of the check, so a holder's refusal of canon
-    /// reads does not apply to it. Every other state, published or held, keeps that refusal.
+    /// reads does not apply to it. A pushed view's state at an op
+    /// ([`ReadState::pushed_view_state`]) is one: its base is the view's base at that op. Every
+    /// other state, published or held, keeps that refusal.
     pub(crate) explicit_base: bool,
     /// The site's name and description, parsed from `.rdy.yaml` by a full publish.
     pub(crate) name: Arc<str>,
@@ -1131,6 +1133,31 @@ impl ReadState {
             detectors: self.detectors,
             error: self.error.clone(),
         }
+    }
+
+    /// The state of a pushed view at one op of its chain (D-00ZG2): canon at `head.base`, and one
+    /// view `name` with `head` and the changes its chain includes at `head.head`. It is
+    /// [`ReadState::candidate_state`] with this state's pack and gate settings and the view's own
+    /// head in place of a candidate's, so it reads with `Scope::View(name)` and is never
+    /// published. A view at an op that includes nothing reads its base.
+    pub fn pushed_view_state(&self, name: &str, head: ViewHead) -> Result<ReadState, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let included = self.reader.included_at(name, &head)?;
+        let inputs = crate::landing_check::CheckInputs::of_state(self);
+        let mut st = self.candidate_state(head.base, name, &included, &inputs);
+        let base = head.base;
+        st.views.insert(
+            name.to_string(),
+            Arc::new(Entry::new(
+                Some(name.to_string()),
+                base,
+                Some(head),
+                included,
+            )),
+        );
+        Ok(st)
     }
 
     /// Whether reads may look at files: the project's config and the user's (a linked

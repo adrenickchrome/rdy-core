@@ -410,3 +410,183 @@ fn cra3_a_removal_since_the_snapshot_is_refused() {
     );
     h.close().unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------
+// a pushed view at an op of its chain (D-00ZG2)
+
+fn view_at(name: &str, op: &Hash) -> String {
+    format!("view:{name}@{op}")
+}
+
+/// Moves view `draft` of the hub `h` to the head the view history at `path` pushes.
+fn set_draft(
+    h: &StoreHandle,
+    w: &crate::hub_world::World,
+    path: &std::path::Path,
+    from: Option<Hash>,
+    to: Hash,
+) {
+    let s = h.snapshot().unwrap();
+    let c = check(&s, &[path]).unwrap();
+    let set = CanonMove::SetViewHead {
+        name: "draft".into(),
+        root: w.draft_root,
+    };
+    assert_eq!(h.move_canon(&c, set, from).unwrap(), moved(to));
+}
+
+/// The hub of `w` seeded with `p1`, view `draft` pushed at `d1`, canon extended to `p2` and
+/// `draft` moved on to `d2`.
+fn pushed_draft(w: &crate::hub_world::World) -> StoreHandle {
+    let h = w.holder("hub");
+    seed(&h, w);
+    set_draft(&h, w, &w.v1, None, w.d1);
+    let s = h.snapshot().unwrap();
+    let c2 = check(&s, &[&w.e2]).unwrap();
+    assert_eq!(
+        h.move_canon(&c2, CanonMove::Extend, Some(w.p1)).unwrap(),
+        moved(w.p2)
+    );
+    drop((s, c2));
+    set_draft(&h, w, &w.v2, Some(w.d1), w.d2);
+    h
+}
+
+/// The keys of the complete history of `purpose` at `root` that `snap` writes, nothing known.
+fn history_keys(
+    snap: &Snapshot,
+    purpose: rdy_adapter::stream::StreamPurpose,
+    root: Hash,
+) -> BTreeSet<rdy_adapter::stream::ObjectKey> {
+    let report = snap
+        .write_history(purpose, root, None, &BTreeSet::new(), std::io::sink())
+        .unwrap();
+    report.keys.into_iter().collect()
+}
+
+/// Traced fact: a complete view history with nothing known holds the whole canon history of
+/// the view's base at its head, so a view stream alone carries the base's state.
+#[test]
+fn cra6_view_history_holds_its_base_history() {
+    use rdy_adapter::stream::StreamPurpose;
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = world();
+    let h = pushed_draft(&w);
+    let snap = h.snapshot().unwrap();
+    let head = snap.view_head("draft").unwrap().unwrap();
+    assert_eq!(head.head, w.d2);
+    for (op, base) in [(w.d1, Some(w.p1)), (w.d2, head.base)] {
+        let base = base.expect("the draft view has a base");
+        let view = history_keys(&snap, StreamPurpose::ViewHistory, op);
+        let canon = history_keys(&snap, StreamPurpose::CanonHistory, base);
+        let missing: Vec<_> = canon.difference(&view).collect();
+        assert!(missing.is_empty(), "op {op}: base {base} lacks {missing:?}");
+    }
+}
+
+/// Traced fact: a holder's state builds a pushed view, at its head and at an earlier op.
+#[test]
+fn cra6_view_search_reads_the_named_head() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = world();
+    let h = pushed_draft(&w);
+    let snap = h.snapshot().unwrap();
+    let at_d2 = search(&snap, "More work in flight", &view_at("draft", &w.d2)).unwrap();
+    let (id, path) = first_match(&at_d2);
+    assert!(path == "draft-two", "{at_d2:#}");
+    let at_d1 = search(&snap, "More work in flight", &view_at("draft", &w.d1)).unwrap();
+    assert!(at_d1["matches"].as_array().unwrap().is_empty(), "{at_d1:#}");
+    // the first head holds the first draft and canon at its base
+    let first = search(&snap, "Work in flight", &view_at("draft", &w.d1)).unwrap();
+    let (_, path) = first_match(&first);
+    assert!(path == "draft", "{first:#}");
+    let canon = search(&snap, "one canon", &view_at("draft", &w.d1)).unwrap();
+    let (_, path) = first_match(&canon);
+    assert!(path == "canon", "{canon:#}");
+    // a read at the named head
+    let read = snap
+        .read(ReadRequest {
+            id: id.clone(),
+            scope: Some(view_at("draft", &w.d2)),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        read.to_string().contains("More work in flight."),
+        "{read:#}"
+    );
+    let e = snap
+        .read(ReadRequest {
+            id,
+            scope: Some(view_at("draft", &w.d1)),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(e.code, "E_UNKNOWN_BLOCK", "{e:#?}");
+    drop(snap);
+    h.close().unwrap();
+}
+
+#[test]
+fn cra6_head_outside_the_view_chain_is_not_found() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = world();
+    let h = w.holder("hub");
+    seed(&h, &w);
+    set_draft(&h, &w, &w.v1, None, w.d1);
+    let s1 = h.snapshot().unwrap();
+    let none = Hash::of(b"none");
+    let fix = "name a head op of this view; read its heads with view_heads";
+    // a landing, an unknown hash, and an op a later push adds
+    for op in [w.p1, none, w.d2] {
+        let want = format!("view \"draft\" has no op {op} in its chain");
+        let e = search(&s1, "flight", &view_at("draft", &op)).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            ("E_NOT_FOUND", want.as_str(), fix),
+            "{op}"
+        );
+        let e = s1
+            .read(ReadRequest {
+                id: "x".into(),
+                scope: Some(view_at("draft", &op)),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert_eq!((e.code, e.message), ("E_NOT_FOUND", want));
+    }
+    // a view the snapshot lacks has no op at all
+    let e = search(&s1, "flight", &view_at("other", &w.d1)).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (
+            "E_NOT_FOUND",
+            format!("view \"other\" has no op {} in its chain", w.d1).as_str()
+        )
+    );
+}
+
+#[test]
+fn cra6_project_view_scope_is_still_refused() {
+    let w = world();
+    let h = StoreHandle::open(&w.p()).unwrap();
+    let snap = h.snapshot().unwrap();
+    let scope = view_at("draft", &w.d2);
+    let want = format!("scope {scope:?} names a view: a view belongs to a session");
+    let fix = "use canon, tag:<version>, landing:<id> or proposal:P-<id>@<n>";
+    let e = search(&snap, "flight", &scope).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        ("E_BAD_INPUT", want.as_str(), fix)
+    );
+    let e = snap
+        .read(ReadRequest {
+            id: "x".into(),
+            scope: Some(scope),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!((e.code, e.message), ("E_BAD_INPUT", want));
+    drop(snap);
+    h.close().unwrap();
+}
