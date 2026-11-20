@@ -12,7 +12,11 @@
 //! The landing may be one the store holds, or a captured record whose changes and proposal the
 //! state's reader holds (a store's reader, or a reader over a checked quarantine). It runs the
 //! one readiness implementation ([`crate::readiness::assess`]) on the candidate's state
-//! (`ReadState::candidate_state`); no rule is copied here.
+//! (`ReadState::candidate_state_over`); no rule is copied here.
+//!
+//! [`check_landing_over`] runs the same check on a `prev` state built in memory, with no stored
+//! landing for it (D-2QX9W Gate result: a pull's replay, or a replay test). [`check_landing`] is
+//! that check on the landing's own stored `prev`.
 //!
 //! Who approved, and the signatures, are out of scope.
 
@@ -22,9 +26,11 @@ use crate::error::{E_BAD_INPUT, RdyError};
 use crate::readiness::assessment::{GateConfig, config_digest, pack_digest};
 use crate::readiness::{Candidate, assess};
 use rdy_model::assessment::AssessedPolicy;
-use rdy_model::{Hash, LandingRecord, Proposal};
+use rdy_model::{Hash, LandingRecord, Proposal, StateSnapshot};
 use rdy_schema::{Issue, Pack};
+use serde::Serialize;
 use std::cell::Cell;
+use std::sync::Arc;
 
 /// What the caller passes (D-0WWYR): the effective pack in full and the gate settings readiness
 /// reads. `require_up_to_date` enters only the config digest that `assessment_matches` compares:
@@ -109,7 +115,7 @@ impl CheckInputs {
 }
 
 /// What [`check_landing`] found.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct LandingCheck {
     /// True exactly when `rows` is empty.
     pub pass: bool,
@@ -123,10 +129,45 @@ pub struct LandingCheck {
     pub assessment_matches: bool,
 }
 
-/// The check of `landing` on `st` (see the module docs). `st`'s reader holds the landing's
-/// changes, its approved version and every record readiness reads.
+/// The `prev` a landing is checked on: its state, and `at`, the last stored landing under it.
+/// For a stored `prev`, `state` is that landing's own state. A state built in memory (a replay
+/// test's merge onto a stored landing, D-2QX9W) keeps the stored landing it was built on: the
+/// candidate's deletions read as of it (`merge_onto`'s `at`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrevState {
+    pub at: Option<Hash>,
+    pub state: Arc<StateSnapshot>,
+}
+
+impl PrevState {
+    /// The state of stored landing `at` (the empty state for none).
+    pub fn stored(st: &ReadState, at: Option<Hash>) -> Result<PrevState, RdyError> {
+        Ok(PrevState {
+            at,
+            state: Arc::new(st.reader().state_of(at)?),
+        })
+    }
+}
+
+/// The check of `landing` on `st` (see the module docs), on the landing's own stored `prev`.
+/// `st`'s reader holds the landing's changes, its approved version and every record readiness
+/// reads.
 pub fn check_landing(
     st: &ReadState,
+    landing: &LandingRecord,
+    inputs: &CheckInputs,
+) -> Result<LandingCheck, RdyError> {
+    let prev = PrevState::stored(st, landing.prev)?;
+    check_landing_over(st, &prev, landing, inputs)
+}
+
+/// The check of `landing` on the `prev` state `prev`, which may be built in memory (D-2QX9W
+/// Gate result): the candidate is `prev.state` plus the landing's changes, as one view
+/// (`ReadState::candidate_state_over`). The landing's own `prev` is not read. Everything else is
+/// [`check_landing`]'s.
+pub fn check_landing_over(
+    st: &ReadState,
+    prev: &PrevState,
     landing: &LandingRecord,
     inputs: &CheckInputs,
 ) -> Result<LandingCheck, RdyError> {
@@ -135,11 +176,11 @@ pub fn check_landing(
     let pref = crate::gate::version_ref(st, &version)?;
     let stored = st.reader().proposal(&version)?;
     let candidate = Proposal {
-        canon_at: landing.prev,
+        canon_at: prev.at,
         changes: landing.changes.clone(),
         ..stored
     };
-    let cst = st.candidate_state(landing.prev, &candidate.view, &landing.changes, inputs);
+    let cst = st.candidate_state_over(prev, &candidate.view, &landing.changes, inputs)?;
     let gate = inputs.gate_config();
     let c = Candidate::stored(&cst, pref, candidate)?;
     let readiness = assess(&cst, &c, &gate)?.readiness;
@@ -171,11 +212,11 @@ fn stored_assessment(
 }
 
 thread_local! {
-    /// This thread's runs of [`check_landing`].
+    /// This thread's runs of [`check_landing_over`] (every [`check_landing`] runs it once).
     static LANDING_CHECKS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Tests only (as `readiness_calls_for_tests`): this thread's runs of [`check_landing`].
+/// Tests only (as `readiness_calls_for_tests`): this thread's runs of [`check_landing_over`].
 #[doc(hidden)]
 pub fn landing_checks_for_tests() -> u64 {
     LANDING_CHECKS.with(Cell::get)

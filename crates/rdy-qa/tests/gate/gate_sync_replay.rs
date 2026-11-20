@@ -4,6 +4,7 @@
 //! same rows, in the same order, and the same policy verdict as the project's one readiness. It
 //! reads no view and judges no freshness. Normal approval keeps its stored-assessment freshness
 //! path and never runs the evaluator.
+use crate::gate_sync_world::{land_apart, land_claim, pack, switch_pack, synced};
 use rdy_engine::landing_check::{
     CheckInputs, LandingCheck, check_landing, landing_checks_for_tests,
 };
@@ -19,37 +20,6 @@ use rdy_qa::tensions::{ag, j_typo, put_j, upd};
 use rdy_store::kinds;
 use rdy_store::segment::Location;
 use serde_json::json;
-
-/// A pack with one rule on claims, `ok-claims`, of `severity`.
-fn pack(severity: &str) -> String {
-    format!(
-        "\
-name: scc3
-version: \"1\"
-extends: rdy-standard
-block_types:
-  claim:
-    prefix: c
-    traits: [normative, describes]
-    body: required
-    fields:
-      ok: {{ kind: bool }}
-rules:
-  - name: ok-claims
-    select: type = claim
-    require: fields.ok = true
-    severity: {severity}
-    message: ok-claims message
-    fix: ok-claims fix
-"
-    )
-}
-
-/// Points the project at `pack(severity)` and reloads it.
-fn switch_pack(dir: &std::path::Path, r: &mut Rdy, severity: &str) {
-    use_pack(dir, "scc3", &pack(severity), "");
-    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
-}
 
 fn h(s: &str) -> Hash {
     s.parse().unwrap()
@@ -325,155 +295,6 @@ fn scc3_first_landing_checks_in_a_holder() {
 }
 
 // ---- Task 3b: the pull replay ----
-
-const URL: &str = "https://127.0.0.1:9/r/demo";
-
-fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for e in std::fs::read_dir(from).unwrap() {
-        let e = e.unwrap();
-        let p = e.path();
-        if p.is_dir() {
-            copy_dir(&p, &to.join(e.file_name()));
-        } else {
-            std::fs::copy(&p, to.join(e.file_name())).unwrap();
-        }
-    }
-}
-
-/// The hub's copy and the local project after one shared landing that holds a section `s`, on
-/// pack `pack(severity)`, in a stable doc; the local project last synced at that landing.
-struct Synced {
-    dir: tempfile::TempDir,
-    hub: Rdy,
-    local: Rdy,
-    base: Hash,
-    section: String,
-    /// The log end after the last pull's fetch: where its second batch starts.
-    fetched: Option<Location>,
-}
-
-fn synced(severity: &str) -> Synced {
-    let dir = tempfile::tempdir().unwrap();
-    let a = dir.path().join("hub");
-    drop(Rdy::init(&a, "rdy-standard").unwrap());
-    use_pack(&a, "scc3", &pack(severity), "");
-    let mut hub = Rdy::open(&a).unwrap();
-    let w = put_j(
-        &mut hub,
-        "seed",
-        json!([
-            {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview", "lifecycle": "stable"}},
-            {"op": "create", "type": "section", "id": "$s", "parent": "$n", "fields": {"title": "Rules"}}
-        ]),
-        j_typo(),
-    );
-    land(&mut hub, "seed").unwrap();
-    let base = hub.read().canon_head().unwrap();
-    drop(hub);
-    let b = dir.path().join("local");
-    copy_dir(&a, &b);
-    let mut local = Rdy::open(&b).unwrap();
-    let repo = local.store().reader().repo_id().unwrap().unwrap();
-    local
-        .store_mut()
-        .write_sync(
-            "origin",
-            vec![rdy_store::sync_state::SyncStep::Canon(
-                rdy_store::sync_state::SyncCanon {
-                    repo_id: repo,
-                    url: URL.into(),
-                    fetched: Some(base),
-                    applied: Some(base),
-                    held: None,
-                },
-            )],
-        )
-        .unwrap();
-    Synced {
-        hub: Rdy::open(&a).unwrap(),
-        local,
-        base,
-        section: w.created["$s"].clone(),
-        dir,
-        fetched: None,
-    }
-}
-
-/// Writes a claim (`ok` when `ok`) under the section in view `view` of `r` and lands it.
-fn land_claim(r: &mut Rdy, section: &str, view: &str, ok: bool) -> Hash {
-    let fields = json!({ "ok": ok });
-    put_j(
-        r,
-        view,
-        json!([{"op": "create", "type": "claim", "parent": section, "body": format!("{view} holds."), "fields": fields}]),
-        j_typo(),
-    );
-    land(r, view).unwrap();
-    r.read().canon_head().unwrap()
-}
-
-/// Lands a new draft doc named `name` in view `name` of `r`: a hub landing apart from the
-/// stable section, so it opens no change-plan item for a replayed claim.
-fn land_apart(r: &mut Rdy, name: &str) -> Hash {
-    put_j(
-        r,
-        name,
-        json!([{"op": "create", "type": "doc", "fields": {"name": name, "title": name, "doc_type": "overview"}}]),
-        j_typo(),
-    );
-    land(r, name).unwrap();
-    r.read().canon_head().unwrap()
-}
-
-impl Synced {
-    /// Fetches the hub's canon and runs the pull's second batch.
-    fn pull(&mut self, strict: bool) -> rdy_engine::sync_replay::PullOutcome {
-        use rdy_engine::sync_fetch::HubState;
-        let tip = self.hub.read().canon_head().unwrap();
-        let mut out = Vec::new();
-        rdy_engine::stream_export::write_history(
-            &self.hub.read(),
-            rdy_store::sync_stream::StreamPurpose::CanonHistory,
-            tip,
-            Some(self.base),
-            &std::collections::BTreeSet::new(),
-            &mut out,
-        )
-        .unwrap();
-        let path = self.dir.path().join("batch");
-        std::fs::write(&path, out).unwrap();
-        let target = rdy_store::take_batch::FetchTarget {
-            remote: "origin".into(),
-            url: URL.into(),
-            purpose: rdy_store::sync_stream::StreamPurpose::CanonHistory,
-            root: tip,
-            view: None,
-        };
-        rdy_engine::sync_fetch::fetch(
-            &mut self.local,
-            &[std::fs::File::open(&path).unwrap()],
-            &target,
-        )
-        .unwrap();
-        self.fetched = Some(self.local.store().log_end());
-        let repo = self.hub.store().reader().repo_id().unwrap();
-        rdy_engine::sync_replay::pull(
-            &mut self.local,
-            &approver(),
-            &rdy_engine::sync_replay::PullRequest {
-                remote: "origin".into(),
-                hub: HubState {
-                    repo_id: repo,
-                    canon: Some(tip),
-                },
-                take: false,
-                strict,
-            },
-        )
-        .unwrap()
-    }
-}
 
 /// D-QCE8M, D-NME32: each replayed landing passes the gate again at its new base, with the
 /// pack and gate settings the project has now: the shared evaluator runs once per replay and

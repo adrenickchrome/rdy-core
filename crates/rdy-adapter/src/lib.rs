@@ -10,7 +10,9 @@
 //! call (`maintenance::upgrade`): no open upgrades a store (D-WWAK7). `sync` checks a push into
 //! a holder and makes the hub's canon and view moves; `landing_check` checks a stored landing
 //! with the inputs the hub passes. `compare` compares and diffs any two scopes a snapshot reads;
-//! `version_tests` tests whether a chain of landings merges onto a landing's state.
+//! `version_tests` tests whether a chain of landings merges onto a landing's state;
+//! `replay_test` tests where a pull replay of a chain would stop, with each landing's gate
+//! result.
 //! No product behaviour is promised stable across pins.
 
 pub mod capabilities;
@@ -27,6 +29,7 @@ pub mod publication;
 pub mod publication_take;
 pub mod reads;
 pub mod rendering;
+pub mod replay_test;
 pub mod signatures;
 mod store;
 pub mod stream;
@@ -38,6 +41,7 @@ pub mod version_tests;
 pub use compare::{Compare, CompareEntry, Diff, DiffChange, DiffCounts, DiffEntry};
 pub use follower::Follower;
 pub use foreign_removal::{ForeignRemovalTaken, RemovalTaken};
+pub use landing_check::LandingCheck;
 pub use link_take::{DeliverySource, DeliveryTaken, LinkRevoked, LinkSource};
 pub use maintenance::{
     ChainEnd, DumpStop, LoadedChainFile, Location, StoppedAt, UpgradePlan, UpgradeReceipt,
@@ -59,6 +63,7 @@ pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::holder::StoreMode;
 pub use rdy_store::meta::Origin;
 pub use reads::{ReadRequest, SearchRequest};
+pub use replay_test::{ReplayStop, ReplayStopCause, ReplayTest, ReplayedCheck};
 pub use store::{Identity, Snapshot, StoreHandle};
 pub use sync::{
     CanonMove, ChainFacts, CheckedQuarantine, Moved, PushedView, QuarantineFacts, RdyVersion,

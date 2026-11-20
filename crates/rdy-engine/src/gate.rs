@@ -858,7 +858,7 @@ pub(crate) fn blocking_conflicts(
 ) -> Result<Vec<Conflict>, RdyError> {
     let reader = st.reader();
     let base = st.effective_base(view);
-    let state = reader.state_of(base)?;
+    let state = st.state_at(base)?;
     let cs = changes_of(st, changes)?;
     let touched: BTreeSet<BlockId> = cs
         .iter()

@@ -1135,6 +1135,59 @@ impl ReadState {
         }
     }
 
+    /// [`ReadState::candidate_state`] on a `prev` state that may be built in memory (D-2QX9W
+    /// Gate result): canon reads `prev.state`, not a stored landing's snapshot, and its head is
+    /// `prev.at`, the last stored landing under it. The view merges `changes` onto `prev.state`,
+    /// and deletions read as of `prev.at` (`merge_onto`'s `at`). Both builds are made here, so no
+    /// scope build of this state reads canon's state from the store. With `prev` a stored
+    /// landing's own state, it reads as `candidate_state` on that landing.
+    pub(crate) fn candidate_state_over(
+        &self,
+        prev: &crate::landing_check::PrevState,
+        view: &str,
+        changes: &[Hash],
+        inputs: &crate::landing_check::CheckInputs,
+    ) -> Result<ReadState, RdyError> {
+        let mut st = self.candidate_state(prev.at, view, changes, inputs);
+        let snap = (*prev.state).clone();
+        let canon = Built::new(
+            Arc::new(materialize(&st.reader, None, snap)?),
+            Arc::new(vec![]),
+        );
+        let _ = canon.snapshot.set(Arc::clone(&prev.state));
+        let canon = Arc::new(canon);
+        let mut entry = Entry::new(None, prev.at, None, Arc::new(vec![]));
+        entry.seed_shared(Arc::clone(&canon));
+        st.canon = Arc::new(entry);
+        if let Some(old) = st.views.get(view).cloned()
+            && !old.floats()
+        {
+            let list = old
+                .included
+                .iter()
+                .map(|c| st.reader.change(c))
+                .collect::<Result<Vec<Change>, _>>()?;
+            let merged = st.reader.merge_onto(prev.at, &prev.state, &list)?;
+            let by_id: HashMap<Hash, Change> = old.included.iter().copied().zip(list).collect();
+            let mut entry = Entry::new(
+                old.name.clone(),
+                old.base,
+                old.head.clone(),
+                Arc::clone(&old.included),
+            );
+            entry.seed(build_merged(
+                &st.reader,
+                Some(&canon),
+                None,
+                &entry,
+                merged,
+                &by_id,
+            )?);
+            st.views.insert(view.to_string(), Arc::new(entry));
+        }
+        Ok(st)
+    }
+
     /// The state of a pushed view at one op of its chain (D-00ZG2): canon at `head.base`, and one
     /// view `name` with `head` and the changes its chain includes at `head.head`. It is
     /// [`ReadState::candidate_state`] with this state's pack and gate settings and the view's own
@@ -1214,6 +1267,19 @@ impl ReadState {
         }
         let s = self.reader.state_of(self.canon_head)?;
         Ok(Arc::clone(built.snapshot.get_or_init(|| Arc::new(s))))
+    }
+
+    /// The store state of landing `base` as this state reads it: for an explicit candidate whose
+    /// canon head is `base`, its canon's state, which may be built in memory
+    /// ([`ReadState::candidate_state_over`]); else the stored landing's state.
+    pub(crate) fn state_at(
+        &self,
+        base: Option<Hash>,
+    ) -> Result<Arc<rdy_model::StateSnapshot>, RdyError> {
+        if self.explicit_base && base == self.canon_head {
+            return self.canon_snapshot();
+        }
+        Ok(Arc::new(self.reader.state_of(base)?))
     }
 
     pub(crate) fn built(&self, scope: &Scope) -> Result<Arc<Built>, RdyError> {

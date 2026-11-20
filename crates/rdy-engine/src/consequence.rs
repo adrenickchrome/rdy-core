@@ -2061,19 +2061,19 @@ impl ReadState {
             self.graph(&Scope::Canon)?;
             self.lexicon(&Scope::Canon)?;
             let reader = self.reader();
-            // a conflict the version carries: it has no consequences until it is resolved
-            let (_, applied) =
-                match reader.merge_checked(&reader.state_of(self.canon_head())?, &changes) {
-                    Ok(merged) => merged,
-                    Err(StoreError::StaleBase { id, .. }) => {
-                        return Err(RdyError::new(
-                            E_CONFLICT_UNRESOLVED,
-                            conflict_message(&[id.to_string()]),
-                            CONFLICT_FIX,
-                        ));
-                    }
-                    Err(e) => return Err(e.into()),
-                };
+            // a conflict the version carries: it has no consequences until it is resolved. Canon's
+            // state is the one this state reads (built in memory for a replay test's candidate)
+            let (_, applied) = match reader.merge_checked(&*self.canon_snapshot()?, &changes) {
+                Ok(merged) => merged,
+                Err(StoreError::StaleBase { id, .. }) => {
+                    return Err(RdyError::new(
+                        E_CONFLICT_UNRESOLVED,
+                        conflict_message(&[id.to_string()]),
+                        CONFLICT_FIX,
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            };
             let next = self
                 .built(&Scope::Canon)?
                 .after(&applied_ops(&changes, &applied), self.pack());
