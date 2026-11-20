@@ -1177,3 +1177,95 @@ fn scc9_dump_reply_names_checked_file_and_next() {
     assert!(t.contains(made["digest"].as_str().unwrap()), "{t}");
     assert!(t.contains(made["repo_id"].as_str().unwrap()), "{t}");
 }
+
+/// cra2 (D-FNRXT): a push carries a landed removal with its proof. The put batches hold one
+/// dropped record for the removed block version (and one for its carrier change), all under the
+/// removal's apply; the apply
+/// and the removal landing travel present; the hub holds all of them after the write; and no
+/// batch holds the removed bytes.
+#[test]
+fn cra2_push_carries_a_landed_removal_with_its_proof() {
+    use rdy_engine::redaction::RedactInput;
+    use rdy_store::kinds;
+    use rdy_store::object_refs::ObjectKey;
+    use rdy_store::sync_stream::{StreamReader, StreamRecord};
+
+    const SECRET: &str = "cra2-secret-token";
+    let k = kit(&["a"]);
+    let removal = {
+        let mut r = Rdy::open(k.proj.path()).unwrap();
+        let w = rdy_qa::fixtures::write(
+            &mut r,
+            "seed",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "b", "title": "B", "doc_type": "page"}},
+                {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
+                {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": SECRET}
+            ]),
+        )
+        .unwrap();
+        land(&mut r, "seed").unwrap();
+        let prose = w.created["$p"].clone();
+        r.redact_in(
+            &writer(),
+            "rm",
+            RedactInput {
+                targets: vec![prose],
+                reason_class: "secret".into(),
+                reason: "a leaked token".into(),
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        let landing: Hash = land(&mut r, "rm").unwrap().parse().unwrap();
+        r.close().unwrap();
+        landing
+    };
+    let v = cli_ok(&k, &["push"]);
+    assert_eq!(v["canon"]["status"], "taken", "{v}");
+    assert_eq!(k.hub.canon(), Some(removal.to_string()));
+
+    let mut dropped = vec![];
+    let mut present: Vec<ObjectKey> = vec![];
+    for put in k.hub.of("/objects/put") {
+        assert!(
+            !put.body
+                .windows(SECRET.len())
+                .any(|w| w == SECRET.as_bytes()),
+            "a put body holds the removed bytes"
+        );
+        let (mut reader, _) = StreamReader::open_history(&put.body[..]).unwrap();
+        while let Some(rec) = reader.next().unwrap() {
+            match rec {
+                StreamRecord::Dropped { key, apply, .. } => dropped.push((key, apply)),
+                StreamRecord::Present { key, .. } => present.push(key),
+            }
+        }
+    }
+    // the removed block version, and the change that carried it, drop under one apply
+    let blocks: Vec<_> = dropped
+        .iter()
+        .filter(|(key, _)| key.kind == kinds::BLOCK)
+        .collect();
+    assert_eq!(blocks.len(), 1, "{dropped:?}");
+    let (gone, apply) = *blocks[0];
+    assert!(dropped.iter().all(|(_, a)| *a == apply), "{dropped:?}");
+    let proof = ObjectKey {
+        kind: kinds::REDACTION_APPLY,
+        hash: apply,
+    };
+    let landing = ObjectKey {
+        kind: kinds::LANDING,
+        hash: removal,
+    };
+    assert!(present.contains(&proof), "the apply travels present");
+    assert!(present.contains(&landing), "the removal landing travels");
+    let held = k.hub.shared.repo.lock().unwrap().held.clone();
+    for key in dropped
+        .iter()
+        .map(|(key, _)| *key)
+        .chain([gone, proof, landing])
+    {
+        assert!(held.contains(&key), "the hub holds {key:?}");
+    }
+}
