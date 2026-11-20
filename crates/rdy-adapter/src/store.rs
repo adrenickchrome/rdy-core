@@ -8,7 +8,7 @@ use rdy_model::{Hash, RepoId, Tag};
 use rdy_store::OpenPolicy;
 use rdy_store::format::{RdyVersion, StoreFeatures};
 use rdy_store::holder::StoreMode;
-use rdy_store::hub_canon::{HELD_REF, VIEW_REF};
+use rdy_store::hub_canon::{HELD_REF, REPLACED_REF, Replaced, ReplacedKind, VIEW_REF};
 use rdy_store::meta::Origin;
 use rdy_store::upgrade::UpgradeStep;
 use rdy_store::view::ViewHead;
@@ -182,7 +182,7 @@ impl StoreHandle {
 }
 
 /// The snapshot of the captured `state`: its identity, canon head, every `tag/*`, `view/*` and
-/// `held/*` ref and the store's minimum rdy, all read through its own reader. The caller holds
+/// `held/*` ref, every `replaced/*` mark of a landing and the store's minimum rdy, all read through its own reader. The caller holds
 /// the store's lock, so the refs and the state's log position are one point.
 pub(crate) fn snapshot_of(state: Arc<ReadState>) -> Result<Snapshot, RdyError> {
     let reader = state.reader();
@@ -220,6 +220,16 @@ pub(crate) fn snapshot_of(state: Arc<ReadState>) -> Result<Snapshot, RdyError> {
             held.push(h);
         }
     }
+    // a mark that does not decode is fsck's to report; a read passes it over
+    let mut replaced = Vec::new();
+    for (name, value) in reader.refs_with_prefix(REPLACED_REF)? {
+        let landing = Replaced::decode(&value).is_ok_and(|m| m.kind == ReplacedKind::Landing);
+        if let Some(h) = name.strip_prefix(REPLACED_REF).and_then(|h| h.parse().ok())
+            && landing
+        {
+            replaced.push(h);
+        }
+    }
     let features = reader.store_features()?;
     Ok(Snapshot {
         state,
@@ -228,6 +238,7 @@ pub(crate) fn snapshot_of(state: Arc<ReadState>) -> Result<Snapshot, RdyError> {
         tags,
         views,
         held,
+        replaced,
         features,
     })
 }
@@ -244,6 +255,8 @@ pub struct Snapshot {
     views: BTreeMap<String, ViewHead>,
     /// The heads the `held/` refs named, in name order.
     held: Vec<Hash>,
+    /// The landings the `replaced/` marks of a landing named, in name order.
+    replaced: Vec<Hash>,
     /// The store's features when the snapshot was taken: they give its minimum rdy (D-4XHPH).
     features: StoreFeatures,
 }
@@ -321,6 +334,25 @@ impl Snapshot {
     /// The captured `held/` heads.
     pub(crate) fn captured_held(&self) -> &[Hash] {
         &self.held
+    }
+
+    /// The heads of D-Y32MN's reach in this snapshot: the canon head, each captured tag's
+    /// landing in name order, each captured `held/` head and each landing a captured `replaced/`
+    /// mark names.
+    pub(crate) fn reach_heads(&self) -> Vec<Hash> {
+        self.canon
+            .into_iter()
+            .chain(self.tags.values().map(|(_, tag)| tag.landing))
+            .chain(self.held.iter().copied())
+            .chain(self.replaced.iter().copied())
+            .collect()
+    }
+
+    /// Whether D-Y32MN's reach from this snapshot's captured refs finds landing `hash`.
+    pub(crate) fn reached_landing(&self, hash: Hash) -> Result<bool, RdyError> {
+        let found =
+            rdy_engine::history_facts::reached(self.read_state(), &self.reach_heads(), &[hash])?;
+        Ok(found.first().copied().unwrap_or(false))
     }
 
     /// The captured tag that names `name`'s version, as `tag:<version>` reads it: `1.2.0` finds

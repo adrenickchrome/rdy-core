@@ -536,6 +536,24 @@ pub(crate) fn read_cited(
     format: &str,
     pattern: Option<&Pattern>,
 ) -> Result<ReadEntries, RdyError> {
+    check_format(format)?;
+    let scope = scope_of(view, st, scope)?;
+    cited_entries(st, fr, &scope, format, pattern)
+}
+
+/// [`read_cited`] in a scope the caller resolved itself.
+pub(crate) fn read_cited_in(
+    st: &ReadState,
+    fr: &ForeignRef<'_>,
+    scope: &Scope,
+    format: &str,
+    pattern: Option<&Pattern>,
+) -> Result<ReadEntries, RdyError> {
+    check_format(format)?;
+    cited_entries(st, fr, scope, format, pattern)
+}
+
+fn check_format(format: &str) -> Result<(), RdyError> {
     if !["compact", "markdown", "yaml"].contains(&format) {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -543,8 +561,18 @@ pub(crate) fn read_cited(
             "use compact, markdown or yaml",
         ));
     }
-    let scope = scope_of(view, st, scope)?;
-    let m = st.materialized(&scope)?;
+    Ok(())
+}
+
+/// The entry of a cited block read in `scope`, in a `format` already checked.
+fn cited_entries(
+    st: &ReadState,
+    fr: &ForeignRef<'_>,
+    scope: &Scope,
+    format: &str,
+    pattern: Option<&Pattern>,
+) -> Result<ReadEntries, RdyError> {
+    let m = st.materialized(scope)?;
     let links = RepoLinks::of_view(&m);
     let foreign = st.foreign()?;
     // the cited block, and the version the alias's profile delivers now

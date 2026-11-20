@@ -5,13 +5,17 @@
 //! (`rdy_engine::tool_reads`). They omit the transport `reminder`. The adapter has no session, so
 //! three inputs that belong to one are refused with `E_BAD_INPUT`: a view name as `scope`, `page`
 //! and `brief: true`. The scopes it accepts are `canon`, `tag:<version>`, `landing:<id>` and
-//! `proposal:P-<id>@<n>`; none is a default but `canon`. A cut reply carries `truncated` and
+//! `proposal:P-<id>@<n>`; none is a default but `canon`. A full landing hash (`landing:` and 64
+//! lowercase hex) reads any landing that D-Y32MN's reach finds from the snapshot's captured
+//! refs: canon, a tag, a held chain or a replaced mark, and a met landing's `rebased_from`. A
+//! shorter landing id matches among canon's chain, as `rdy_read` matches it. A cut reply carries `truncated` and
 //! `omitted` and no `next`: a host narrows the read instead of paging it.
 
 use crate::store::Snapshot;
 use rdy_engine::search::{SearchFilters, SearchQuery};
 use rdy_engine::tool_reads::{self, check_tokens};
-use rdy_engine::{E_BAD_INPUT, RdyError, Scope, is_proposal_ref};
+use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, RdyError, Scope, is_proposal_ref};
+use rdy_model::Hash;
 use serde_json::{Value, json};
 
 /// The scope `rdy_read` and `rdy_search` take when none is given.
@@ -72,6 +76,12 @@ fn check_scope(scope: &Option<String>) -> Result<(), RdyError> {
     ))
 }
 
+/// The landing a `landing:<64 lowercase hex>` scope names; None for every other scope text.
+fn full_landing(scope: &Option<String>) -> Option<Hash> {
+    // a hash parses from exactly 64 lowercase hex digits
+    scope.as_deref()?.strip_prefix("landing:")?.parse().ok()
+}
+
 fn check_page(page: &Option<String>) -> Result<(), RdyError> {
     if page.is_some() {
         return Err(refuse(
@@ -91,6 +101,25 @@ fn without_next(mut v: Value) -> Value {
 }
 
 impl Snapshot {
+    /// The scope of a full landing hash: `Scope::At` the landing when D-Y32MN's reach finds it
+    /// from the captured refs, else `E_NOT_FOUND`. None for every other scope text, which the
+    /// engine resolves as it does for `rdy_read`.
+    fn reached_scope(&self, scope: &Option<String>) -> Result<Option<Scope>, RdyError> {
+        let Some(hash) = full_landing(scope) else {
+            return Ok(None);
+        };
+        if self.reached_landing(hash)? {
+            return Ok(Some(Scope::At(hash)));
+        }
+        Err(RdyError::new(
+            E_NOT_FOUND,
+            format!(
+                "landing {hash} is not reached from canon, a tag, a held chain or a replaced mark"
+            ),
+            "name a landing this store reaches, or read canon",
+        ))
+    }
+
     /// The reply `rdy_read` gives for `req` on this snapshot, without `reminder` and `next`.
     pub fn read(&self, req: ReadRequest) -> Result<Value, RdyError> {
         check_tokens(req.max_tokens)?;
@@ -112,14 +141,23 @@ impl Snapshot {
             );
         }
         let format = req.format.clone().unwrap_or_else(|| "compact".into());
-        let read = tool_reads::read_entries(
-            state,
-            &req.id,
-            DEFAULT_SCOPE,
-            &req.scope,
-            &format,
-            req.pattern.as_deref(),
-        )?;
+        let read = match self.reached_scope(&req.scope)? {
+            Some(scope) => tool_reads::read_entries_at(
+                state,
+                &req.id,
+                &scope,
+                &format,
+                req.pattern.as_deref(),
+            )?,
+            None => tool_reads::read_entries(
+                state,
+                &req.id,
+                DEFAULT_SCOPE,
+                &req.scope,
+                &format,
+                req.pattern.as_deref(),
+            )?,
+        };
         // the token only names a cursor, and the adapter returns none; its length is the one a
         // cursor has, so the page is cut where `rdy_read` cuts it
         let token = read.token(&json!({"id": req.id, "scope": req.scope, "format": format}));
@@ -143,7 +181,10 @@ impl Snapshot {
         }
         check_scope(&req.scope)?;
         let state = self.read_state();
-        let scope: Scope = tool_reads::scope_of(DEFAULT_SCOPE, state, &req.scope)?;
+        let scope: Scope = match self.reached_scope(&req.scope)? {
+            Some(scope) => scope,
+            None => tool_reads::scope_of(DEFAULT_SCOPE, state, &req.scope)?,
+        };
         let reply = tool_reads::search_reply(
             state,
             &scope,
