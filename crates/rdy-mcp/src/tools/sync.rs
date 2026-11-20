@@ -360,7 +360,7 @@ pub struct PullParams {
     pub views: Option<Vec<String>>,
     /// true takes hub canon with no replay (a card first); with views it takes only those views and canon pulls as usual.
     pub take: Option<bool>,
-    /// true stops a replay at its first conflict. Not with take and no views.
+    /// true replays none of the unpushed landings: canon takes the hub tip and they go into a new view pull-<n>. Not with take and no views.
     pub strict: Option<bool>,
     /// The id of a dump that the hub's dump job gave (1 to 256 printable ASCII bytes): fetch that dump to out instead of pulling. Takes only out and one of remote or url.
     pub dump: Option<String>,

@@ -322,6 +322,97 @@ fn rpl34_the_exact_adapter_names(
     let _ = handle.take_foreign_removal(stream, *repo);
 }
 
+/// cra1: the reads of a full landing hash (D-Y32MN), by their exact names. This function is never
+/// called: it compiles only while each name has the receiver and the arguments listed.
+#[allow(dead_code)]
+fn cra1_adapter_names(
+    state: &rdy_engine::ReadState,
+    heads: &[Hash],
+    hashes: &[Hash],
+    scope: &rdy_engine::Scope,
+) {
+    let _: Result<Vec<bool>, RdyError> = rdy_engine::history_facts::reached(state, heads, hashes);
+    let _: Result<rdy_engine::tool_reads::ReadEntries, RdyError> =
+        rdy_engine::tool_reads::read_entries_at(state, "id", scope, "compact", None);
+}
+
+/// cra3: the place of each landing (D-H1SHC), by its exact names. This function is never called:
+/// it compiles only while each name has the receiver, the arguments and the result listed.
+#[allow(dead_code)]
+fn cra3_adapter_names(snap: &Snapshot, state: &rdy_engine::ReadState, hashes: &[Hash]) {
+    use rdy_adapter::history::{LandingPlace, LandingPlaceFact};
+    let _: Result<Vec<LandingPlaceFact>, RdyError> = snap.landing_places(hashes);
+    let _: Result<Vec<rdy_engine::history_facts::LandingPlaceFact>, RdyError> =
+        rdy_engine::history_facts::places(state, None, hashes, hashes);
+    let fact = LandingPlaceFact {
+        hash: Hash::of(b"x"),
+        place: LandingPlace::InCanon,
+    };
+    let _ = matches!(
+        fact.place,
+        LandingPlace::InCanon | LandingPlace::OffCanon | LandingPlace::NotStored
+    );
+}
+
+/// cra5: the render request of a landing and of a review pair (D-CST6K), by its exact names. This
+/// function is never called: it compiles only while each name has the receiver and the arguments
+/// listed.
+#[allow(dead_code)]
+fn cra5_adapter_names(snap: &Snapshot, inputs: &rdy_adapter::rendering::RenderInputs) {
+    use rdy_adapter::rendering::{RenderFormat, ScopeRender, ScopeRenderReport};
+    let target = ScopeRender {
+        scope: String::new(),
+        against: Some(String::new()),
+    };
+    let r: Result<ScopeRenderReport, RdyError> = snap.write_scope_render_request(
+        &target,
+        "implicit:org",
+        inputs,
+        RenderFormat::Site,
+        Vec::<u8>::new(),
+    );
+    if let Ok(ScopeRenderReport { scope, against }) = r {
+        let _: (rdy_adapter::rendering::BatchReport, Option<_>) = (scope, against);
+    }
+}
+
+/// cra6: a pushed view at an op as a read and render scope (D-00ZG2, D-V9RF5), by its exact
+/// names. This function is never called: it compiles only while each name has the receiver, the
+/// arguments and the result listed.
+#[allow(dead_code)]
+fn cra6_adapter_names(
+    state: &rdy_engine::ReadState,
+    reader: &rdy_store::StoreReader,
+    head: rdy_store::view::ViewHead,
+    inputs: rdy_adapter::rendering::RenderInputs,
+    stream: &[u8],
+    history: &mut dyn rdy_engine::render_source::TagHistorySource,
+    pack: &rdy_schema::Pack,
+) {
+    let h = Hash::of(b"x");
+    let _: Result<rdy_store::view::ViewHead, rdy_store::StoreError> =
+        reader.view_head_at("draft", &h, &h);
+    let _: Result<rdy_engine::ReadState, RdyError> = state.pushed_view_state("draft", head);
+    let _: Result<rdy_store::hub_canon::ViewAtOp, rdy_store::StoreError> =
+        rdy_store::hub_canon::view_at_op(&h, &mut |_| Ok(None));
+    let _: Result<(), RdyError> =
+        rdy_render::process::write_state_list(1, &[], &mut Vec::<u8>::new());
+    let opened: Result<rdy_engine::render_source::ViewStream, RdyError> =
+        rdy_engine::render_source::RenderSource::open_view(stream, inputs, h, |_| {
+            RdyError::new("E_BAD_INPUT", "", "")
+        });
+    if let Ok(view) = opened {
+        let _: (&str, Option<Hash>, bool) = (view.name(), view.base(), view.holds_version(&h));
+        let _: &std::collections::BTreeSet<rdy_model::BlockId> = view.touched();
+        let _: Result<
+            rdy_engine::render_source::RenderSource<rdy_engine::render_source::RootedFacts>,
+            RdyError,
+        > = view.into_source(&BTreeMap::new());
+    }
+    let _: Result<bool, RdyError> =
+        rdy_engine::render_source::view_is_redacted(history, None, &[], pack);
+}
+
 /// rpl34: the surface runs on an empty project (its reads answer with no rows, never with an
 /// error that names a missing method), its writes enter the store's one writer lane through a
 /// shared handle, and the build's format capabilities name `foreign_copy` with its minimum rdy.

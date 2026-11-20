@@ -340,6 +340,50 @@ pub fn read_entries(
     }
     let (target, slug) = crate::section::split_address(id)?;
     let (scope, id) = read_target(view, st_, target, scope)?;
+    entries_in(st_, scope, id, slug, format, pattern)
+}
+
+/// [`read_entries`] on a scope the caller resolved itself, such as a landing that D-Y32MN's reach
+/// finds. An `id@version` pins its own scope, so a pinned id is refused as [`read_target`]
+/// refuses a pin that differs from the scope, with [`rdy_model::reference::PIN_CLASH_FIX`].
+pub fn read_entries_at(
+    st_: &ReadState,
+    id: &str,
+    scope: &Scope,
+    format: &str,
+    pattern: Option<&str>,
+) -> Result<ReadEntries, RdyError> {
+    let pattern = pattern.map(Pattern::parse).transpose()?;
+    if let Some(cited) = rdy_model::reference::foreign_ref(id.trim()) {
+        return crate::links::read_cited_in(st_, &cited, scope, format, pattern.as_ref());
+    }
+    let (target, slug) = crate::section::split_address(id)?;
+    let t = rdy_model::reference::parse_target(target)
+        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::BAD_REF_FIX))?;
+    if t.version.is_some() {
+        // a resolved scope is never the pin's `tag:<version>`, so the pin always clashes
+        let clash = t
+            .scope_text(Some(""))
+            .expect_err("a pin differs from an empty scope");
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            clash,
+            rdy_model::reference::PIN_CLASH_FIX,
+        ));
+    }
+    let id = st_.resolve_id(scope, &t.id)?;
+    entries_in(st_, scope.clone(), id, slug, format, pattern)
+}
+
+/// The entries of a read of block `id` (or its section `slug`) on the resolved `scope`.
+fn entries_in(
+    st_: &ReadState,
+    scope: Scope,
+    id: BlockId,
+    slug: Option<&str>,
+    format: &str,
+    pattern: Option<Pattern>,
+) -> Result<ReadEntries, RdyError> {
     let suspects: std::collections::BTreeSet<BlockId> = st_
         .suspect_details(&scope)?
         .into_iter()

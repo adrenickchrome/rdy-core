@@ -9,7 +9,26 @@
 //!
 //! A u32 little-endian length, then that many bytes of compact UTF-8 JSON
 //! `{profile,format,render_inputs}`, then exactly one complete version-1 tag history stream and
-//! the end of the input. `profile` is a full profile id or `implicit:org`
+//! the end of the input: the tag request. A scope request's prelude adds `scope`, and may add
+//! `against`, each `landing:` and the landing's 64 lowercase hex digits (D-CST6K). Then the
+//! stream of `scope` follows as a u64 little-endian length and that many bytes, then with
+//! `against` the stream of `against` in the same form, then the end of the input. Each is one
+//! complete canon history stream rooted at its prelude landing with nothing known, at most
+//! 2,147,483,648 bytes, and is checked whole as a tag stream is ([`RenderSource::read_rooted`]).
+//! Every length and root is checked before the render starts. A request with `against` builds
+//! `site` only.
+//!
+//! A scope may also name a pushed view at an op, `view:<name>@` and the op's 64 lowercase hex
+//! digits (D-V9RF5); `against` stays a landing, the view's base at the op. The view's side has
+//! two parts, each after its u64 little-endian length and at most 2,147,483,648 bytes: the
+//! complete view history stream rooted at the op with nothing known, checked whole, and the
+//! state list. The state list is one row for each block that the included changes at the op
+//! touch, in block id order: the id's length as one byte, the id, then `0` for a block the
+//! merged state lacks, or `1` and the 32 bytes of the version the holder's merge gives it
+//! ([`write_state_list`]). The process does not merge: it renders the base landing's snapshot
+//! with each row applied. Before the render it refuses a row for a block no included change
+//! touches, a touched block with no row, two rows for one block, rows out of order and a
+//! version the stream does not hold. `profile` is a full profile id or `implicit:org`
 //! (`publication::check_stable_selector`: a key is no stable selector); `format` is `site`,
 //! `markdown` or `techdocs`; `render_inputs` is the strict [`RenderInputs`] object. The prelude
 //! is checked whole (at most 8,400,896 bytes, depth 33, 200,010 values, 1,048,576 bytes per
@@ -26,13 +45,17 @@
 //! 32, 1,000,000 values and 1,048,576 bytes per string. A refusal writes no byte; an output
 //! failure may leave a partial packet, which the refusal invalidates.
 //!
-//! `site` builds with [`build_publication`]. `markdown` and `techdocs` build the same
+//! `site` builds with [`build_publication`], or for a request with `against` with
+//! [`build_review_publication`]: the state at `scope` with core's review marks against `against`.
+//! A scope render names no version, and its redacted mark reads the landing's own history.
+//! `markdown` and `techdocs` build the same
 //! preparation into the print and hand its files to [`emit_files`] with the generated header,
 //! laid out plainly or for TechDocs; their manifest has the same schema and recipe and no
 //! notice offset. The process writes no publication record.
 use crate::print::{self, Layout, md::emit_files};
 use crate::{
-    Budget, PublicationArtifact, bad_manifest, build_publication, publication, without_parameters,
+    Budget, PublicationArtifact, bad_manifest, build_publication, build_review_publication,
+    publication, without_parameters,
 };
 use rdy_engine::did_you_mean::unknown_field_error_in;
 use rdy_engine::hub_http::{JsonLimits, check_json};
@@ -42,9 +65,9 @@ use rdy_engine::publication_manifest::{
     allocation_failed, artifact_mismatch, artifact_unreadable, hex_hash, manifest_hash,
 };
 use rdy_engine::render_inputs::{NOT_READABLE, RenderInputs, read_inputs_value, validate_inputs};
-use rdy_engine::render_source::RenderSource;
+use rdy_engine::render_source::{MAX_STREAM_BYTES, RenderSource, RootedFacts, ViewStream};
 use rdy_engine::{E_BAD_INPUT, E_IO, E_LIMIT, Materialized, RdyError};
-use rdy_model::Hash;
+use rdy_model::{BlockId, Hash};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufWriter, ErrorKind, Read, Write};
@@ -97,19 +120,33 @@ pub struct ProcessSummary {
     pub manifest_hash: Hash,
 }
 
-/// The prelude as it is written: its keys in this order.
+/// The prelude as it is written: its keys in this order. A tag request writes no `scope` and no
+/// `against`.
 #[derive(Serialize)]
 struct PreludeOut<'a> {
     profile: &'a str,
     format: RenderFormat,
     render_inputs: &'a RenderInputs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    against: Option<&'a str>,
 }
 
-/// The prelude as it is read.
+/// The prelude as it is read: a scope request's scope and against landing, when it names them.
 struct Prelude {
     profile: String,
     format: RenderFormat,
     render_inputs: RenderInputs,
+    scope: Option<Side>,
+    against: Option<Hash>,
+}
+
+/// What a scope request's `scope` names: a landing, or a pushed view at an op (D-V9RF5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Side {
+    Landing(Hash),
+    View { name: String, op: Hash },
 }
 
 /// The prelude's own keys, read before its render inputs: the inputs are read whole by
@@ -121,6 +158,8 @@ struct PreludeKeys {
     profile: String,
     format: RenderFormat,
     render_inputs: serde::de::IgnoredAny,
+    scope: Option<String>,
+    against: Option<String>,
 }
 
 /// The output metadata as it is written.
@@ -191,6 +230,135 @@ fn request_failed() -> RdyError {
     )
 }
 
+/// `E_BAD_INPUT`: a prelude that names `against` and no `scope`.
+fn against_without_scope() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "render request names against with no scope",
+        "add scope, or omit against",
+    )
+}
+
+/// `E_BAD_INPUT`: a prelude scope `text` that is not `landing:<64 hex digits>` or
+/// `view:<name>@<64 hex digits>`.
+fn not_a_scope(text: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!(
+            "render request scope {text:?} is not landing:<64 hex digits> or view:<name>@<64 hex digits>"
+        ),
+        "name the landing or the view head by its full hash",
+    )
+}
+
+/// The fix of every refusal of a request that the adapter's scope render request never writes.
+const WRITE_WITH_ADAPTER: &str = "write the request with the adapter's scope render request";
+
+/// `E_BAD_INPUT`: stream `n` is rooted at op `op` of view `found`, not of the prelude's view
+/// `want`.
+fn wrong_view(n: u8, op: Hash, found: &str, want: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("render request stream {n} has root {op} of view {found:?}, not of view {want:?}"),
+        WRITE_WITH_ADAPTER,
+    )
+}
+
+/// `E_BAD_INPUT`: state list `n` has a row for block `id`, which no included change touches.
+fn row_not_touched(n: u8, id: &BlockId) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("render request state list {n} names block {id}, which no included change touches"),
+        WRITE_WITH_ADAPTER,
+    )
+}
+
+/// `E_BAD_INPUT`: state list `n` has no row for block `id`, which an included change touches.
+fn row_missing(n: u8, id: &BlockId) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!(
+            "render request state list {n} has no row for block {id}, which an included change touches"
+        ),
+        WRITE_WITH_ADAPTER,
+    )
+}
+
+/// `E_BAD_INPUT`: state list `n` has two rows for block `id`.
+fn row_repeated(n: u8, id: &BlockId) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("render request state list {n} names block {id} twice"),
+        WRITE_WITH_ADAPTER,
+    )
+}
+
+/// `E_BAD_INPUT`: state list `n` has the row of block `id` after the row of block `prev`.
+fn row_out_of_order(n: u8, id: &BlockId, prev: &BlockId) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("render request state list {n} names block {id} after block {prev}"),
+        WRITE_WITH_ADAPTER,
+    )
+}
+
+/// `E_BAD_INPUT`: state list `n` gives block `id` a version that stream `n` does not hold.
+fn row_version_not_held(n: u8, id: &BlockId, version: &Hash) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!(
+            "render request state list {n} gives block {id} version {version}, which stream {n} does not hold"
+        ),
+        WRITE_WITH_ADAPTER,
+    )
+}
+
+/// `E_LIMIT`: state list `n` declares `len` bytes, over [`MAX_STREAM_BYTES`].
+fn state_list_too_long(n: u8, len: u64) -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("render request state list {n} declares {len} bytes, over {MAX_STREAM_BYTES}"),
+        "render a smaller scope",
+    )
+}
+
+/// `E_BAD_INPUT`: a prelude against `text` that is not `landing:<64 hex digits>`.
+fn not_a_landing(text: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("render request scope {text:?} is not landing:<64 hex digits>"),
+        "name the landing by its full hash",
+    )
+}
+
+/// `E_BAD_INPUT`: stream `n` of a scope request is rooted at `found`, not at its prelude
+/// landing `want`.
+fn wrong_root(n: u8, found: Hash, want: Hash) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("render request stream {n} has root {found}, not {want}"),
+        WRITE_WITH_ADAPTER,
+    )
+}
+
+/// `E_BAD_INPUT`: a request with `against` in a format other than `site`.
+fn review_site_only() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "a review render request builds a site only",
+        "use format site, or omit against",
+    )
+}
+
+/// `E_LIMIT`: stream `n` of a scope request declares `len` bytes, over [`MAX_STREAM_BYTES`].
+fn stream_too_long(n: u8, len: u64) -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("render request stream {n} declares {len} bytes, over {MAX_STREAM_BYTES}"),
+        "render a smaller scope",
+    )
+}
+
 /// `E_LIMIT`: an error line over [`MAX_ERROR_BYTES`], which replaces it.
 fn error_too_long() -> RdyError {
     RdyError::new(
@@ -224,12 +392,88 @@ pub fn write_request_prelude<W: Write>(
     inputs: &RenderInputs,
     out: &mut W,
 ) -> Result<(), RdyError> {
+    write_prelude(profile, format, inputs, None, None, out)
+}
+
+/// Writes the prelude of a scope request (D-CST6K) for `profile` in `format` with `inputs` to
+/// `out`: the prelude of [`write_request_prelude`] with `scope` and, when given, `against`, each
+/// `landing:<64 hex digits>`. Everything [`run`] checks of a prelude is checked before any byte
+/// is written: a request with `against` builds `site` only. The caller then writes each stream
+/// with [`write_stream_length`] before it: `scope`'s, then `against`'s.
+pub fn write_scope_request_prelude<W: Write>(
+    profile: &str,
+    format: RenderFormat,
+    inputs: &RenderInputs,
+    scope: &str,
+    against: Option<&str>,
+    out: &mut W,
+) -> Result<(), RdyError> {
+    write_prelude(profile, format, inputs, Some(scope), against, out)
+}
+
+/// Writes the length of stream `n` (1 for `scope`, 2 for `against`) of a scope request to `out`:
+/// `len` as a u64 little-endian. A length over 2,147,483,648 is refused as [`run`] refuses it,
+/// before any byte is written.
+pub fn write_stream_length<W: Write>(n: u8, len: u64, out: &mut W) -> Result<(), RdyError> {
+    if len > MAX_STREAM_BYTES {
+        return Err(stream_too_long(n, len));
+    }
+    out.write_all(&len.to_le_bytes())
+        .map_err(|_| request_failed())
+}
+
+/// Writes the state list of a view side (D-V9RF5) of stream `n` to `out`, after its u64
+/// little-endian length: each row of `rows` as it is given, its block id's length as one byte,
+/// the id, then `0` for none, or `1` and the version's 32 bytes. The writer gives one row for
+/// each block that the view's included changes touch, in block id order; [`run`] refuses any
+/// other list. A list over 2,147,483,648 bytes is refused as [`run`] refuses it, before any byte
+/// is written.
+pub fn write_state_list<W: Write>(
+    n: u8,
+    rows: &[(BlockId, Option<Hash>)],
+    out: &mut W,
+) -> Result<(), RdyError> {
+    let mut list: Vec<u8> = Vec::new();
+    for (id, version) in rows {
+        let id = id.as_str().as_bytes();
+        // a block id is at most 9 bytes
+        let len = u8::try_from(id.len()).map_err(|_| bad_input())?;
+        list.push(len);
+        list.extend_from_slice(id);
+        match version {
+            Some(v) => {
+                list.push(1);
+                list.extend_from_slice(&v.0);
+            }
+            None => list.push(0),
+        }
+    }
+    let len = list.len() as u64;
+    if len > MAX_STREAM_BYTES {
+        return Err(state_list_too_long(n, len));
+    }
+    out.write_all(&len.to_le_bytes())
+        .and_then(|()| out.write_all(&list))
+        .map_err(|_| request_failed())
+}
+
+/// [`write_request_prelude`] and [`write_scope_request_prelude`].
+fn write_prelude<W: Write>(
+    profile: &str,
+    format: RenderFormat,
+    inputs: &RenderInputs,
+    scope: Option<&str>,
+    against: Option<&str>,
+    out: &mut W,
+) -> Result<(), RdyError> {
     check_stable_selector(profile)?;
     validate_inputs(inputs)?;
     let json = serde_json::to_vec(&PreludeOut {
         profile,
         format,
         render_inputs: inputs,
+        scope,
+        against,
     })
     .map_err(|_| bad_input())?;
     // what the process would refuse is never sent
@@ -357,22 +601,64 @@ fn parse_prelude(json: &[u8]) -> Result<Prelude, RdyError> {
             }
         })?;
     check_stable_selector(&keys.profile)?;
+    // a scope request's landings, and the format of a review
+    if keys.against.is_some() && keys.scope.is_none() {
+        return Err(against_without_scope());
+    }
+    // a hash parses from exactly 64 lowercase hex digits
+    let landing = |text: &str| text.strip_prefix("landing:")?.parse::<Hash>().ok();
+    let view = |text: &str| {
+        let (name, op) = text.strip_prefix("view:")?.rsplit_once('@')?;
+        Some(Side::View {
+            name: name.to_string(),
+            op: op.parse().ok()?,
+        })
+    };
+    let scope = match &keys.scope {
+        Some(text) => Some(
+            landing(text)
+                .map(Side::Landing)
+                .or_else(|| view(text))
+                .ok_or_else(|| not_a_scope(text))?,
+        ),
+        None => None,
+    };
+    let against = match &keys.against {
+        Some(text) => Some(landing(text).ok_or_else(|| not_a_landing(text))?),
+        None => None,
+    };
+    if against.is_some() && keys.format != RenderFormat::Site {
+        return Err(review_site_only());
+    }
     Ok(Prelude {
         profile: keys.profile,
         format: keys.format,
         render_inputs,
+        scope,
+        against,
     })
 }
 
 /// The artifact of `prelude` over the stream `input`. The stream is read and checked whole
 /// before the profile resolves; the tag's stored name and its redaction mark are the only
-/// history the output shows.
-fn render(prelude: Prelude, input: impl Read) -> Result<PublicationArtifact, RdyError> {
+/// history the output shows. A scope request reads its streams with [`render_scope`].
+fn render(prelude: Prelude, mut input: impl Read) -> Result<PublicationArtifact, RdyError> {
     let Prelude {
         profile,
         format,
         render_inputs,
+        scope,
+        against,
     } = prelude;
+    if let Some(scope) = scope {
+        return render_scope(
+            &profile,
+            format,
+            render_inputs,
+            (scope, against),
+            &mut input,
+        );
+    }
     let source = RenderSource::read(input, render_inputs)?;
     let m = source.materialized();
     let tag = source.facts().root.name.as_str();
@@ -393,6 +679,181 @@ fn render(prelude: Prelude, input: impl Read) -> Result<PublicationArtifact, Rdy
             Layout::Techdocs,
         ),
     }
+}
+
+/// The artifact of a scope request (D-CST6K) over `input`: the stream of `scope`, then with
+/// `against` the stream of `against`, each read whole and checked, its length and root included,
+/// then the end of the input; only then the render. The state at `scope` builds with no version
+/// label and the landing's own redaction mark: alone, as the tag request builds; with
+/// `against`, as the site with review marks against `against`'s state.
+fn render_scope(
+    profile: &str,
+    format: RenderFormat,
+    inputs: RenderInputs,
+    (scope, against): (Side, Option<Hash>),
+    input: &mut impl Read,
+) -> Result<PublicationArtifact, RdyError> {
+    let from_inputs = against.map(|_| inputs.clone());
+    let to = match scope {
+        Side::Landing(landing) => read_side(input, 1, landing, inputs)?,
+        Side::View { name, op } => read_view_side(input, 1, &name, op, inputs)?,
+    };
+    let from = match (against, from_inputs) {
+        (Some(landing), Some(inputs)) => Some(read_side(input, 2, landing, inputs)?),
+        _ => None,
+    };
+    // the end of the input, right after the last stream
+    let mut byte = [0u8; 1];
+    loop {
+        match input.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => return Err(bad_input()),
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return Err(input_unreadable()),
+        }
+    }
+    let (m, redacted, inputs) = (to.materialized(), to.tag_redacted(), to.inputs());
+    match (from, format) {
+        (Some(from), RenderFormat::Site) => build_review_publication(
+            &to,
+            m,
+            &from,
+            from.materialized(),
+            redacted,
+            profile,
+            inputs,
+        ),
+        // the prelude refused a review in another format
+        (Some(_), _) => Err(review_site_only()),
+        (None, RenderFormat::Site) => build_publication(&to, m, "", redacted, profile, inputs),
+        (None, RenderFormat::Markdown) => {
+            build_markdown(&to, m, "", redacted, profile, inputs, Layout::Plain)
+        }
+        (None, RenderFormat::Techdocs) => {
+            build_markdown(&to, m, "", redacted, profile, inputs, Layout::Techdocs)
+        }
+    }
+}
+
+/// Stream `n` of a scope request, rooted at `landing`: its u64 little-endian length, bounded
+/// before anything is read, then exactly that many bytes, read and checked whole. A stream
+/// rooted elsewhere, or a length that the input or the stream does not fill, is refused.
+fn read_side(
+    input: &mut impl Read,
+    n: u8,
+    landing: Hash,
+    inputs: RenderInputs,
+) -> Result<RenderSource<rdy_engine::render_source::RootedFacts>, RdyError> {
+    let mut len = [0u8; 8];
+    read_exactly(input, &mut len, bad_input, input_unreadable)?;
+    let len = u64::from_le_bytes(len);
+    if len > MAX_STREAM_BYTES {
+        return Err(stream_too_long(n, len));
+    }
+    let mut frame = input.take(len);
+    let source = RenderSource::read_rooted(&mut frame, inputs, landing, |found| {
+        wrong_root(n, found, landing)
+    })?;
+    // a complete stream that ends before its declared length frames nothing
+    if frame.limit() != 0 {
+        return Err(bad_input());
+    }
+    Ok(source)
+}
+
+/// The view side `n` of a scope request (D-V9RF5), rooted at op `op` of view `name`: the view
+/// history stream after its length, read and checked whole as [`read_side`] reads a landing's,
+/// then the state list after its length, each row checked as it is read
+/// ([`read_state_list`]). Only then is the state built: the base landing's snapshot with each
+/// row applied, with no merge.
+fn read_view_side(
+    input: &mut impl Read,
+    n: u8,
+    name: &str,
+    op: Hash,
+    inputs: RenderInputs,
+) -> Result<RenderSource<RootedFacts>, RdyError> {
+    let mut len = [0u8; 8];
+    read_exactly(input, &mut len, bad_input, input_unreadable)?;
+    let len = u64::from_le_bytes(len);
+    if len > MAX_STREAM_BYTES {
+        return Err(stream_too_long(n, len));
+    }
+    let mut frame = input.take(len);
+    let view = RenderSource::open_view(&mut frame, inputs, op, |found| wrong_root(n, found, op))?;
+    // a complete stream that ends before its declared length frames nothing
+    if frame.limit() != 0 {
+        return Err(bad_input());
+    }
+    if view.name() != name {
+        return Err(wrong_view(n, op, view.name(), name));
+    }
+    let rows = read_state_list(input, n, &view)?;
+    view.into_source(&rows)
+}
+
+/// State list `n` of a view side, after its u64 little-endian length (bounded before anything
+/// is read), checked against `view` row by row: each row names a block that an included change
+/// touches, after the row before it in block id order, with a version the stream holds; then
+/// every touched block has its row. A row is never kept past the touched set, so the list
+/// takes no more memory than the touched set does.
+fn read_state_list(
+    input: &mut impl Read,
+    n: u8,
+    view: &ViewStream,
+) -> Result<BTreeMap<BlockId, Option<Hash>>, RdyError> {
+    let mut len = [0u8; 8];
+    read_exactly(input, &mut len, bad_input, input_unreadable)?;
+    let len = u64::from_le_bytes(len);
+    if len > MAX_STREAM_BYTES {
+        return Err(state_list_too_long(n, len));
+    }
+    let mut frame = input.take(len);
+    let mut rows: BTreeMap<BlockId, Option<Hash>> = BTreeMap::new();
+    let mut last: Option<BlockId> = None;
+    while frame.limit() > 0 {
+        let mut id_len = [0u8; 1];
+        read_exactly(&mut frame, &mut id_len, bad_input, input_unreadable)?;
+        let mut id = vec![0u8; usize::from(id_len[0])];
+        read_exactly(&mut frame, &mut id, bad_input, input_unreadable)?;
+        let id = std::str::from_utf8(&id)
+            .ok()
+            .and_then(|s| BlockId::parse(s).ok())
+            .ok_or_else(bad_input)?;
+        let mut tag = [0u8; 1];
+        read_exactly(&mut frame, &mut tag, bad_input, input_unreadable)?;
+        let version = match tag[0] {
+            0 => None,
+            1 => {
+                let mut h = [0u8; 32];
+                read_exactly(&mut frame, &mut h, bad_input, input_unreadable)?;
+                Some(Hash(h))
+            }
+            _ => return Err(bad_input()),
+        };
+        if let Some(prev) = &last {
+            if id == *prev {
+                return Err(row_repeated(n, &id));
+            }
+            if id < *prev {
+                return Err(row_out_of_order(n, &id, prev));
+            }
+        }
+        if !view.touched().contains(&id) {
+            return Err(row_not_touched(n, &id));
+        }
+        if let Some(v) = &version
+            && !view.holds_version(v)
+        {
+            return Err(row_version_not_held(n, &id, v));
+        }
+        rows.insert(id.clone(), version);
+        last = Some(id);
+    }
+    if let Some(id) = view.touched().iter().find(|id| !rows.contains_key(*id)) {
+        return Err(row_missing(n, id));
+    }
+    Ok(rows)
 }
 
 /// The Markdown artifact of `selector` in `m`, laid out by `layout`: the profile resolves once

@@ -894,7 +894,8 @@ fn cp8_computed_close_wins_over_defer() {
 
 /// tb-2ZED7: update, rejustify and reaffirm take defer; confirm takes confirm and defer; code
 /// takes done and defer. A `pi-` prefix and a `cq-` id resolve to their full item, so two
-/// aliases of one item in a call are a duplicate; a stale alias is not an item.
+/// aliases of one item in a call are a duplicate; an earlier write's `cq-` id still names its
+/// item.
 #[test]
 fn cp8_plan_act_matrix_and_duplicate_aliases_are_exact() {
     let (d, mut r) = project();
@@ -1035,7 +1036,7 @@ fn cp8_plan_act_matrix_and_duplicate_aliases_are_exact() {
         .id
         .clone();
     let first_change: Hash = first.change.parse().unwrap();
-    let stale = st
+    let earlier = st
         .consequences(&Scope::View("w".into()), &first_change, None)
         .unwrap()
         .items
@@ -1065,14 +1066,31 @@ fn cp8_plan_act_matrix_and_duplicate_aliases_are_exact() {
         .find(|a| item_display(&a.item) == rejustify)
         .unwrap();
     assert_eq!(mapped.reason.as_deref(), Some("mapped"));
-    // an earlier write's consequence id is stale
-    expect_err(
-        r.answer_plan(&writer(), "w", &[ans(&stale, PlanAct::Confirm, Some("x"))])
-            .unwrap_err(),
-        E_PLAN_ITEM,
-        &format!("{stale} is not an item of the change plan for view:w"),
-        "read the plan with rdy_plan / rdy plan and pass an item id it lists",
+    // an earlier write's consequence id names its item too: with its pi id it is a duplicate
+    dup(
+        r.answer_plan(
+            &writer(),
+            "w",
+            &[
+                ans(&earlier, PlanAct::Confirm, Some("x")),
+                ans(&confirm, PlanAct::Confirm, Some("y")),
+            ],
+        )
+        .unwrap_err(),
+        &confirm,
     );
+    let h = answer(
+        &mut r,
+        "w",
+        &[ans(&earlier, PlanAct::Confirm, Some("earlier"))],
+    );
+    let p = r.read().reader().plan(&h).unwrap();
+    let mapped = p
+        .answers
+        .iter()
+        .find(|a| item_display(&a.item) == confirm)
+        .unwrap();
+    assert_eq!(mapped.reason.as_deref(), Some("earlier"));
 }
 
 /// p-PZX3T: a reader is E_PERMISSION and an agent answers only its own view (E_VIEW_OWNER),
@@ -2144,4 +2162,107 @@ fn rg15_a_plan_read_of_a_conflicting_view_refuses_with_the_conflict_code() {
     )
     .unwrap_err();
     expect_err(version, "E_CONFLICT_UNRESOLVED", &message, fix);
+}
+
+/// cra8: a cq- id from a decide's consequences names its plan item after later writes in the
+/// view. Canon holds decision D1 and three claims it governs; view w decides D2, which refines
+/// D1, then writes a doc of its own, so the decide is no longer the view's last change. Each
+/// confirm consequence id the decide reported answers its item, and the plan has 0 open.
+#[test]
+fn cra8_decide_consequence_ids_answer_the_plan_after_later_writes() {
+    let (_d, mut r) = project();
+    let s = spec(&mut r);
+    let d1 = r
+        .decide(
+            &writer(),
+            "seed2",
+            rdy_engine::DecisionInput {
+                parent: s.sec.clone(),
+                statement: "Keep 30 days".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    let w = put(
+        &mut r,
+        "seed2",
+        json!([
+            {"op": "create", "type": "claim", "id": "$x", "parent": s.sec, "body": "X keeps it.",
+             "links": {"decided_by": [{"target": d1}]}},
+            {"op": "create", "type": "claim", "id": "$y", "parent": s.sec, "body": "Y keeps it.",
+             "links": {"decided_by": [{"target": d1}]}},
+            {"op": "create", "type": "claim", "id": "$z", "parent": s.sec, "body": "Z keeps it.",
+             "links": {"decided_by": [{"target": d1}]}}
+        ]),
+    );
+    let governed: Vec<String> = ["$x", "$y", "$z"]
+        .iter()
+        .map(|k| w.created[*k].clone())
+        .collect();
+    land(&mut r, "seed2");
+    let decided = r
+        .decide(
+            &writer(),
+            "w",
+            rdy_engine::DecisionInput {
+                parent: s.sec.clone(),
+                statement: "Keep 7 days in the EU".into(),
+                refines: vec![d1.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // the decide's report, as its reply gives it: the state it published, its one change
+    let change: Hash = decided.change.parse().unwrap();
+    let report = r
+        .read()
+        .consequences(&Scope::View("w".into()), &change, Some(usize::MAX))
+        .unwrap();
+    let cqs: Vec<String> = governed
+        .iter()
+        .map(|b| {
+            let c = report
+                .items
+                .iter()
+                .find(|c| &c.block == b)
+                .unwrap_or_else(|| panic!("a consequence on {b}: {report:#?}"));
+            assert_eq!(
+                serde_json::to_value(c.follow_up).unwrap(),
+                "confirm",
+                "{c:#?}"
+            );
+            c.id.clone()
+        })
+        .collect();
+    // a later write in the view, on a doc of its own: the decide is no longer its last change
+    put(
+        &mut r,
+        "w",
+        json!([
+            {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$ns", "parent": "$n", "fields": {"title": "Notes"}},
+            {"op": "create", "type": "claim", "id": "$nc", "parent": "$ns", "body": "Notes stand."}
+        ]),
+    );
+    let before = whole(&r, "w");
+    assert_eq!(before["counts"]["open"], 3, "{before:#}");
+    let answers: Vec<PlanAnswerInput> = cqs
+        .iter()
+        .map(|cq| {
+            ans(
+                cq,
+                PlanAct::Confirm,
+                Some("still holds under the refinement"),
+            )
+        })
+        .collect();
+    answer(&mut r, "w", &answers);
+    let after = whole(&r, "w");
+    assert_eq!(after["counts"]["open"], 0, "{after:#}");
+    assert_eq!(
+        after["counts"]["by_kind"]["confirm"]["closed"], 3,
+        "{after:#}"
+    );
 }
