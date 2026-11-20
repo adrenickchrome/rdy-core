@@ -541,6 +541,52 @@ fn hub_head(
     ops: &[(Hash, ViewOp)],
     from: Option<(&ViewHead, Vec<Hash>)>,
 ) -> Result<ViewHead, StoreError> {
+    let mut undo = |target: &Hash| reader.undo_effect(name, target);
+    Ok(head_and_set(name, ops, from, &mut undo)?.0)
+}
+
+/// What a view history's root op says of its view (D-V9RF5): the view's name, and its base and
+/// included changes at that op.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewAtOp {
+    pub name: String,
+    pub base: Option<Hash>,
+    pub included: Vec<Hash>,
+}
+
+/// The view at op `op`, read from the ops that `op_of` gives alone: the chain from `op` back to
+/// its first op, with the view's own texts for a broken chain ([`walk_view`]), and the base and
+/// included changes the hub's head reads from that chain. An undo whose target the chain does not
+/// hold is a broken chain at the target: `the op is missing`.
+pub fn view_at_op(
+    op: &Hash,
+    op_of: &mut dyn FnMut(&Hash) -> Result<Option<ViewOp>, StoreError>,
+) -> Result<ViewAtOp, StoreError> {
+    let Some(first) = op_of(op)? else {
+        return Err(StoreError::NotFound(*op));
+    };
+    let name = first.view;
+    let chain = walk_view(&name, op, op_of)?;
+    let mut undo = |target: &Hash| {
+        Err(StoreError::Decode(format!(
+            "view chain of {name:?} is broken at {target}: the op is missing"
+        )))
+    };
+    let (head, included) = head_and_set(&name, &chain, None, &mut undo)?;
+    Ok(ViewAtOp {
+        base: head.base,
+        name,
+        included,
+    })
+}
+
+/// [`hub_head`] with the included changes, an undo of an op before `ops` read through `undo`.
+fn head_and_set(
+    name: &str,
+    ops: &[(Hash, ViewOp)],
+    from: Option<(&ViewHead, Vec<Hash>)>,
+    undo: &mut dyn FnMut(&Hash) -> Result<ResolvedOp, StoreError>,
+) -> Result<(ViewHead, Vec<Hash>), StoreError> {
     let (mut base, mut set, mut closed, mut last) = match &from {
         Some((h, set)) => (h.base, set.clone(), h.closed, h.last_write_ms),
         None => (None, vec![], false, 0),
@@ -608,7 +654,7 @@ fn hub_head(
                         _ => ResolvedOp::Close,
                     },
                 },
-                None => reader.undo_effect(name, target)?,
+                None => undo(target)?,
             },
         };
         match &effect {
@@ -628,7 +674,7 @@ fn hub_head(
         .map(|(h, _)| *h)
         .or(from.as_ref().map(|(h, _)| h.head))
         .ok_or_else(|| StoreError::Decode(format!("view {name:?} has no op")))?;
-    Ok(ViewHead {
+    let head = ViewHead {
         head,
         base,
         len: set.len() as u64,
@@ -636,7 +682,8 @@ fn hub_head(
         pinned: false,
         closed,
         last_write_ms: last,
-    })
+    };
+    Ok((head, set))
 }
 
 /// The overlay as a map source: the plan's landings and deltas first, then the holder's.

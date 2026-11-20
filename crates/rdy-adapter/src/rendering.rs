@@ -8,9 +8,12 @@
 //! ([`Snapshot::write_render_request`]), or renders one page of a captured tag in the call
 //! ([`Snapshot::render_page`]). A scope render request names a landing the holder reaches
 //! (D-Y32MN), alone or as a review pair against a second landing that the hub picks
-//! ([`Snapshot::write_scope_render_request`], D-CST6K); core builds no one-page call for it. A project captures explicit [`RenderInputs`] for a requested tag
-//! with [`Snapshot::capture_render_inputs`] (core's `rdy_render::render_input::capture_inputs`,
-//! with the tag's disagreement list); the holder adds no default and captures none.
+//! ([`Snapshot::write_scope_render_request`], D-CST6K); in a holder, it may name a pushed view
+//! at an op instead, whose side carries the view's history and the state list of its merge
+//! (D-V9RF5). Core builds no one-page call for it. A project captures explicit
+//! [`RenderInputs`] for a requested tag with [`Snapshot::capture_render_inputs`] (core's
+//! `rdy_render::render_input::capture_inputs`, with the tag's disagreement list); the holder
+//! adds no default and captures none.
 //! [`check_publication_media_type`] is core's rule for the media type of a manifest entry; a
 //! host checks each entry of an uploaded manifest with it and keeps no table of its own (hub
 //! D-X0F6P).
@@ -20,9 +23,9 @@ use rdy_engine::publication::ReadPublicationSource;
 use rdy_engine::render_source::{ReadTagHistorySource, tag_is_redacted};
 use rdy_engine::stream_export;
 use rdy_engine::{E_BAD_INPUT, E_INTERNAL, RdyError, Scope};
-use rdy_model::Hash;
+use rdy_model::{BlockId, Hash};
 use rdy_render::process::{
-    write_request_prelude, write_scope_request_prelude, write_stream_length,
+    write_request_prelude, write_scope_request_prelude, write_state_list, write_stream_length,
 };
 use rdy_store::sync_stream::StreamPurpose;
 use std::collections::BTreeSet;
@@ -41,7 +44,10 @@ pub use rdy_render::process::{ProcessSummary, RenderFormat};
 /// The target of a scope render request (D-CST6K): `scope` is the state to render, and
 /// `against`, when given, the state its review marks are against. Each is `landing:` and the
 /// landing's 64 lowercase hex digits. The hub picks the pair: a version against the next is
-/// `against` = the head of version n and `scope` = the head of version n+1.
+/// `against` = the head of version n and `scope` = the head of version n+1. In a holder, `scope`
+/// may also be `view:<name>@` and the 64 lowercase hex digits of an op of the view's chain
+/// (D-V9RF5); `against` is then the view's base at that op, and a view with no base there names
+/// none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScopeRender {
     pub scope: String,
@@ -72,6 +78,21 @@ fn stream_changed(n: u8) -> RdyError {
         format!("render request stream {n} changed while it was written"),
         "report this as a bug in rdy",
     )
+}
+
+/// What a scope render target names: a landing, or a pushed view at an op with what its side
+/// carries (see [`Snapshot::view_side`]).
+enum Side {
+    Landing(Hash),
+    View(ViewSide),
+}
+
+/// The side of a pushed view at an op (D-V9RF5): the op that roots its view history, and the
+/// state list, one row for each block that the included changes at the op touch, in block id
+/// order, with the version the holder's merge gives it.
+struct ViewSide {
+    op: Hash,
+    rows: Vec<(BlockId, Option<Hash>)>,
 }
 
 /// A writer that counts the bytes it is given and passes them on to `out`.
@@ -107,46 +128,116 @@ impl Snapshot {
         Ok(hash)
     }
 
-    /// The bytes of the complete canon history of `landing` with nothing known, counted as it
-    /// is written to nowhere.
-    fn history_len(&self, landing: Hash) -> Result<u64, RdyError> {
+    /// What the scope render target `text` names: in a holder, `view:<name>@<64 hex digits>`
+    /// names a pushed view at an op ([`Snapshot::view_side`]); every other text is
+    /// [`Snapshot::render_landing`]'s.
+    fn render_side(&self, text: &str) -> Result<Side, RdyError> {
+        if let Some((name, op)) = crate::reads::view_op_of(text)
+            && self.is_holder()?
+        {
+            return Ok(Side::View(self.view_side(name, op)?));
+        }
+        self.render_landing(text).map(Side::Landing)
+    }
+
+    /// The side of pushed view `name` at `op` (D-V9RF5): `op` must lie in the chain of the
+    /// view's captured head (else the reads' `E_NOT_FOUND`). The state list has one row for each
+    /// block that the changes the view includes at `op` touch, in block id order, with the
+    /// version that the view's state at `op` gives it (the holder's merge, a block in conflict at
+    /// its conflict's base), or none when that state lacks the block.
+    fn view_side(&self, name: &str, op: Hash) -> Result<ViewSide, RdyError> {
+        let read = self.read_state();
+        let head = self.view_head_at_op(name, op)?;
+        let reader = read.reader();
+        let included = reader.included_at(name, &head)?;
+        let mut touched: BTreeSet<BlockId> = BTreeSet::new();
+        for c in included.iter() {
+            for o in &reader.change(c)?.ops {
+                touched.insert(o.block_id().clone());
+            }
+        }
+        let state = read.pushed_view_state(name, head)?;
+        let m = state.materialized(&Scope::View(name.to_string()))?;
+        let rows = touched
+            .into_iter()
+            .map(|id| {
+                let version = m.version_of(&id);
+                (id, version)
+            })
+            .collect();
+        Ok(ViewSide { op, rows })
+    }
+
+    /// The history stream a side carries: the canon history of a landing, or the view history
+    /// of a view op.
+    fn side_root(side: &Side) -> (StreamPurpose, Hash) {
+        match side {
+            Side::Landing(landing) => (StreamPurpose::CanonHistory, *landing),
+            Side::View(view) => (StreamPurpose::ViewHistory, view.op),
+        }
+    }
+
+    /// The bytes of the complete history of `purpose` at `root` with nothing known, counted as
+    /// it is written to nowhere.
+    fn history_len(&self, purpose: StreamPurpose, root: Hash) -> Result<u64, RdyError> {
         let mut count = Counted {
             out: io::sink(),
             bytes: 0,
         };
-        self.write_rooted(landing, &mut count)?;
+        self.write_rooted(purpose, root, &mut count)?;
         Ok(count.bytes)
     }
 
-    /// Writes the complete canon history of `landing`, with nothing known, to `out`.
-    fn write_rooted<W: Write>(&self, landing: Hash, out: W) -> Result<BatchReport, RdyError> {
+    /// Writes the complete history of `purpose` at `root`, with nothing known, to `out`.
+    fn write_rooted<W: Write>(
+        &self,
+        purpose: StreamPurpose,
+        root: Hash,
+        out: W,
+    ) -> Result<BatchReport, RdyError> {
         stream_export::write_history(
             self.read_state(),
-            StreamPurpose::CanonHistory,
-            landing,
+            purpose,
+            root,
             None,
             &BTreeSet::new(),
             out,
         )
     }
 
-    /// Writes stream `n` of a scope request: its length `len`, then the canon history of
-    /// `landing`, which must take exactly `len` bytes.
+    /// The length of side `n`'s stream, and what the process would refuse of the side, checked
+    /// before any byte is written.
+    fn side_len(&self, n: u8, side: &Side) -> Result<u64, RdyError> {
+        let (purpose, root) = Self::side_root(side);
+        let len = self.history_len(purpose, root)?;
+        write_stream_length(n, len, &mut io::sink())?;
+        if let Side::View(view) = side {
+            write_state_list(n, &view.rows, &mut io::sink())?;
+        }
+        Ok(len)
+    }
+
+    /// Writes side `n` of a scope request: its stream's length `len`, then the stream, which must
+    /// take exactly `len` bytes; for a view, then its state list after its length.
     fn write_side<W: Write>(
         &self,
         n: u8,
-        landing: Hash,
+        side: &Side,
         len: u64,
         out: &mut W,
     ) -> Result<BatchReport, RdyError> {
+        let (purpose, root) = Self::side_root(side);
         write_stream_length(n, len, out)?;
         let mut counted = Counted {
             out: &mut *out,
             bytes: 0,
         };
-        let report = self.write_rooted(landing, &mut counted)?;
+        let report = self.write_rooted(purpose, root, &mut counted)?;
         if counted.bytes != len {
             return Err(stream_changed(n));
+        }
+        if let Side::View(view) = side {
+            write_state_list(n, &view.rows, out)?;
         }
         Ok(report)
     }
@@ -155,11 +246,14 @@ impl Snapshot {
     /// (`profile`, `format`, `inputs`, `scope` and `against`), then the complete canon history
     /// stream of `scope` with nothing known after its u64 little-endian length, then `against`'s
     /// in the same form. Each target names a landing by its full hash (`landing:<64 hex
-    /// digits>`) that the snapshot's captured refs reach (D-Y32MN). A request with `against`
-    /// builds `site` only. The targets, the prelude and each stream's length (at most
-    /// 2,147,483,648 bytes) are checked before any byte is written: each stream is counted once
-    /// before it is written. It returns no success until both streams and the epoch check have
-    /// finished; on an error the caller discards what it was given. No renderer runs here.
+    /// digits>`) that the snapshot's captured refs reach (D-Y32MN). In a holder, `scope` may name
+    /// a pushed view at an op (`view:<name>@<64 hex digits>`, D-V9RF5): its side is the complete
+    /// view history stream rooted at the op, then the state list of the view's state at the op,
+    /// each after its length. A request with `against` builds `site` only. The targets, the
+    /// prelude, the state list and each part's length (at most 2,147,483,648 bytes) are checked
+    /// before any byte is written: each stream is counted once before it is written. It returns
+    /// no success until both sides and the epoch check have finished; on an error the caller
+    /// discards what it was given. No renderer runs here.
     pub fn write_scope_render_request<W: Write>(
         &self,
         target: &ScopeRender,
@@ -170,9 +264,9 @@ impl Snapshot {
     ) -> Result<ScopeRenderReport, RdyError> {
         let read = self.read_state();
         read.ensure_current_epoch()?;
-        let scope = self.render_landing(&target.scope)?;
+        let scope = self.render_side(&target.scope)?;
         let against = match &target.against {
-            Some(text) => Some(self.render_landing(text)?),
+            Some(text) => Some(Side::Landing(self.render_landing(text)?)),
             None => None,
         };
         let against_text = target.against.as_deref();
@@ -185,13 +279,11 @@ impl Snapshot {
             against_text,
             &mut io::sink(),
         )?;
-        let scope_len = self.history_len(scope)?;
-        write_stream_length(1, scope_len, &mut io::sink())?;
+        let scope_len = self.side_len(1, &scope)?;
         let against_len = match against {
-            Some(landing) => {
-                let len = self.history_len(landing)?;
-                write_stream_length(2, len, &mut io::sink())?;
-                Some((landing, len))
+            Some(side) => {
+                let len = self.side_len(2, &side)?;
+                Some((side, len))
             }
             None => None,
         };
@@ -203,9 +295,9 @@ impl Snapshot {
             against_text,
             &mut out,
         )?;
-        let scope_report = self.write_side(1, scope, scope_len, &mut out)?;
+        let scope_report = self.write_side(1, &scope, scope_len, &mut out)?;
         let against_report = match against_len {
-            Some((landing, len)) => Some(self.write_side(2, landing, len, &mut out)?),
+            Some((side, len)) => Some(self.write_side(2, &side, len, &mut out)?),
             None => None,
         };
         read.ensure_current_epoch()?;

@@ -376,6 +376,43 @@ fn cra5_adapter_names(snap: &Snapshot, inputs: &rdy_adapter::rendering::RenderIn
     }
 }
 
+/// cra6: a pushed view at an op as a read and render scope (D-00ZG2, D-V9RF5), by its exact
+/// names. This function is never called: it compiles only while each name has the receiver, the
+/// arguments and the result listed.
+#[allow(dead_code)]
+fn cra6_adapter_names(
+    state: &rdy_engine::ReadState,
+    reader: &rdy_store::StoreReader,
+    head: rdy_store::view::ViewHead,
+    inputs: rdy_adapter::rendering::RenderInputs,
+    stream: &[u8],
+    history: &mut dyn rdy_engine::render_source::TagHistorySource,
+    pack: &rdy_schema::Pack,
+) {
+    let h = Hash::of(b"x");
+    let _: Result<rdy_store::view::ViewHead, rdy_store::StoreError> =
+        reader.view_head_at("draft", &h, &h);
+    let _: Result<rdy_engine::ReadState, RdyError> = state.pushed_view_state("draft", head);
+    let _: Result<rdy_store::hub_canon::ViewAtOp, rdy_store::StoreError> =
+        rdy_store::hub_canon::view_at_op(&h, &mut |_| Ok(None));
+    let _: Result<(), RdyError> =
+        rdy_render::process::write_state_list(1, &[], &mut Vec::<u8>::new());
+    let opened: Result<rdy_engine::render_source::ViewStream, RdyError> =
+        rdy_engine::render_source::RenderSource::open_view(stream, inputs, h, |_| {
+            RdyError::new("E_BAD_INPUT", "", "")
+        });
+    if let Ok(view) = opened {
+        let _: (&str, Option<Hash>, bool) = (view.name(), view.base(), view.holds_version(&h));
+        let _: &std::collections::BTreeSet<rdy_model::BlockId> = view.touched();
+        let _: Result<
+            rdy_engine::render_source::RenderSource<rdy_engine::render_source::RootedFacts>,
+            RdyError,
+        > = view.into_source(&BTreeMap::new());
+    }
+    let _: Result<bool, RdyError> =
+        rdy_engine::render_source::view_is_redacted(history, None, &[], pack);
+}
+
 /// rpl34: the surface runs on an empty project (its reads answer with no rows, never with an
 /// error that names a missing method), its writes enter the store's one writer lane through a
 /// shared handle, and the build's format capabilities name `foreign_copy` with its minimum rdy.
