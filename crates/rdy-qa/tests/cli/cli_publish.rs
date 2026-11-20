@@ -107,6 +107,8 @@ struct Shared {
     site: Mutex<(Value, Value)>,
     /// The bytes put to each push's quarantine so far, and its batches.
     objects: Mutex<BTreeMap<String, (u64, u64)>>,
+    /// The artifact files storage holds, by hash.
+    files: Mutex<BTreeMap<String, Vec<u8>>>,
     candidates: AtomicUsize,
 }
 
@@ -140,6 +142,7 @@ impl Hub {
             fault: Mutex::new(Fault::None),
             site: Mutex::new((Value::Null, Value::Null)),
             objects: Mutex::new(BTreeMap::new()),
+            files: Mutex::new(BTreeMap::new()),
             candidates: AtomicUsize::new(0),
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -196,6 +199,11 @@ impl Hub {
             .collect()
     }
 
+    /// The artifact files storage holds, by hash.
+    fn stored(&self) -> BTreeMap<String, Vec<u8>> {
+        self.shared.files.lock().unwrap().clone()
+    }
+
     /// Stops the listener and joins every thread.
     fn finish(mut self) {
         self.stop_threads();
@@ -219,6 +227,57 @@ impl Hub {
 impl Drop for Hub {
     fn drop(&mut self) {
         self.stop_threads();
+    }
+}
+
+/// The files of a files/put request: the one-file form's `hash` and body, or each entry of a
+/// tar body. A tar entry must be a regular file with a valid checksum, named by 64 lower-case
+/// hex digits, and the body must end in two zero blocks.
+fn files_of(req: &Req) -> Vec<(String, Vec<u8>)> {
+    if let Some(hash) = req.query.get("hash") {
+        return vec![(hash.clone(), req.body.clone())];
+    }
+    assert_eq!(req.header("content-type"), Some("application/x-tar"));
+    let octal = |f: &[u8]| -> usize {
+        let text = std::str::from_utf8(f)
+            .unwrap()
+            .trim_end_matches(['\0', ' ']);
+        usize::from_str_radix(text, 8).unwrap()
+    };
+    let body = &req.body;
+    assert_eq!(body.len() % 512, 0);
+    let mut out = Vec::new();
+    let mut at = 0;
+    loop {
+        let h = &body[at..at + 512];
+        if h.iter().all(|&b| b == 0) {
+            assert_eq!(body.len(), at + 1024, "two zero blocks end the body");
+            assert!(body[at..].iter().all(|&b| b == 0));
+            return out;
+        }
+        let name = String::from_utf8(h[..64].to_vec()).unwrap();
+        assert!(
+            name.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        assert_eq!(h[64], 0);
+        assert_eq!(h[156], b'0', "a regular file");
+        let sum: usize = h
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| {
+                if (148..156).contains(&i) {
+                    32
+                } else {
+                    usize::from(b)
+                }
+            })
+            .sum();
+        assert_eq!(octal(&h[148..156]), sum, "checksum");
+        let size = octal(&h[124..136]);
+        at += 512;
+        out.push((name, body[at..at + size].to_vec()));
+        at += size.next_multiple_of(512);
     }
 }
 
@@ -372,11 +431,22 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
             Some(reply(200, &json!({"missing": hashes}).to_string()))
         }
         ("POST", _, "/files/put") => {
-            let hash = req.query.get("hash").cloned().unwrap_or_default();
-            Some(reply(
-                201,
-                &json!({"hash": hash, "size": req.body.len()}).to_string(),
-            ))
+            let entries = files_of(req);
+            let mut stored = shared.files.lock().unwrap();
+            let mut items = Vec::new();
+            for (hash, bytes) in entries {
+                if rdy_model::Hash::of(&bytes).to_string() != hash {
+                    items.push(json!({"hash": hash, "code": "E_HUB_FILE_HASH"}));
+                    continue;
+                }
+                items.push(json!({"hash": hash, "size": bytes.len()}));
+                stored.insert(hash, bytes);
+            }
+            let body = match req.query.get("hash") {
+                Some(_) => items.remove(0),
+                None => json!({ "files": items }),
+            };
+            Some(reply(201, &body.to_string()))
         }
         ("POST", _, "/publish") => match fault {
             Fault::RefusePublish(status, body) => Some(reply(status, &body)),
@@ -800,7 +870,7 @@ fn upload_of(hub: &Hub, push: &str) -> (Value, Vec<Vec<u8>>, BTreeMap<String, Ve
         .filter(|r| {
             r.path.ends_with("/files/put") && r.query.get("push").map(String::as_str) == Some(push)
         })
-        .map(|r| (r.query["hash"].clone(), r.body.clone()))
+        .flat_map(files_of)
         .collect();
     (publish, objects, files)
 }
@@ -1365,5 +1435,36 @@ fn hpb15_failed_upload_leaves_source_log_and_config_unchanged() {
     }
     unchanged(&before, "with no daemon");
     assert_eq!(k.hub.publishes().len(), 6, "every run reached publish");
+    k.hub.finish();
+}
+
+/// A publish of several missing files sends them in tar bodies, with no hash in the query, and
+/// storage holds every file of the manifest with its bytes.
+#[test]
+fn crbp_publish_sends_many_files_in_tar_bodies() {
+    let k = kit();
+    let cli = cli_ok(&k, &[]);
+    check_candidate(&cli, &k.hub);
+    let push = cli["push"].as_str().unwrap();
+    let puts: Vec<Req> = k
+        .hub
+        .requests()
+        .into_iter()
+        .filter(|r| {
+            r.path.ends_with("/files/put") && r.query.get("push").map(String::as_str) == Some(push)
+        })
+        .collect();
+    assert_eq!(puts.len(), 1, "one tar body holds every missing file");
+    assert!(!puts[0].query.contains_key("hash"));
+    assert_eq!(puts[0].header("content-type"), Some("application/x-tar"));
+    let (publish, _, files) = upload_of(&k.hub, push);
+    assert!(files.len() >= 2, "several files: {}", files.len());
+    let stored = k.hub.stored();
+    for f in publish["manifest"]["files"].as_array().unwrap() {
+        let h = f["hash"].as_str().unwrap();
+        let bytes = &stored[h];
+        assert_eq!(bytes.len() as u64, f["size"].as_u64().unwrap());
+        assert_eq!(rdy_model::Hash::of(bytes).to_string(), h);
+    }
     k.hub.finish();
 }

@@ -2392,3 +2392,249 @@ fn np2_files_known_takes_added_members_at_the_maximum_count() {
     protocol(r);
     assert_eq!(s.finish(), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// files/put tar bodies
+// ---------------------------------------------------------------------------------------------
+
+/// A batch over in-memory files, each identified by its bytes.
+struct Mem {
+    files: Vec<FileIdentity>,
+    bodies: Vec<Cursor<Vec<u8>>>,
+}
+
+impl Mem {
+    fn new(contents: &[&[u8]]) -> Mem {
+        Mem {
+            files: contents
+                .iter()
+                .map(|c| FileIdentity {
+                    hash: Hash::of(c),
+                    size: c.len() as u64,
+                })
+                .collect(),
+            bodies: contents.iter().map(|c| Cursor::new(c.to_vec())).collect(),
+        }
+    }
+}
+
+impl FileBatch for Mem {
+    fn files(&self) -> &[FileIdentity] {
+        &self.files
+    }
+    fn media_type(&self, _: usize) -> &str {
+        "application/octet-stream"
+    }
+    fn read(&mut self, index: usize, out: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.bodies[index], out)
+    }
+}
+
+/// The entries of a ustar body, each checked to be a regular file with a valid checksum and
+/// zero padding, and the body checked to end in exactly two zero blocks: (name, content).
+fn crbp_entries(body: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let octal = |f: &[u8]| -> u64 {
+        let text = std::str::from_utf8(f)
+            .unwrap()
+            .trim_end_matches(['\0', ' ']);
+        u64::from_str_radix(text, 8).unwrap()
+    };
+    assert_eq!(body.len() % 512, 0);
+    let mut out = Vec::new();
+    let mut at = 0;
+    loop {
+        let h = &body[at..at + 512];
+        if h.iter().all(|&b| b == 0) {
+            assert_eq!(
+                &body[at..],
+                &[0u8; 1024][..],
+                "two zero blocks end the body"
+            );
+            return out;
+        }
+        let name_len = h[..100].iter().position(|&b| b == 0).unwrap();
+        let name = String::from_utf8(h[..name_len].to_vec()).unwrap();
+        assert!(h[100..156].iter().any(|&b| b != 0));
+        assert_eq!(h[156], b'0', "a regular file");
+        assert_eq!(&h[257..265], b"ustar\x0000");
+        let sum: u64 = h
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| {
+                if (148..156).contains(&i) {
+                    32
+                } else {
+                    u64::from(b)
+                }
+            })
+            .sum();
+        assert_eq!(octal(&h[148..156]), sum, "checksum");
+        let size = octal(&h[124..136]) as usize;
+        at += 512;
+        let content = body[at..at + size].to_vec();
+        let padded = size.next_multiple_of(512);
+        assert!(body[at + size..at + padded].iter().all(|&b| b == 0));
+        at += padded;
+        out.push((name, content));
+    }
+}
+
+fn crbp_reply(items: &[String]) -> String {
+    format!(r#"{{"files":[{}]}}"#, items.join(","))
+}
+
+fn crbp_held(f: &FileIdentity) -> String {
+    format!(r#"{{"hash":"{}","size":{}}}"#, f.hash, f.size)
+}
+
+/// Many files go in one tar body: no hash in the query, the tar media type, one regular entry
+/// per file named by its hash as 64 lower-case hex digits, in batch order, then two zero blocks.
+#[test]
+fn crbp_tar_body_has_one_regular_entry_per_file_named_by_its_hash() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let big = vec![7u8; 600];
+    let contents: [&[u8]; 3] = [b"\x89PNG", &big, b""];
+    let mut batch = Mem::new(&contents);
+    let files = batch.files.clone();
+    let items: Vec<String> = files.iter().map(crbp_held).collect();
+    let (r, req) = served(&mut s, Reply::json(201, &crbp_reply(&items)), || {
+        hub.wire.put_files(&cx, PUSH, &mut batch)
+    });
+    let answers: Vec<FileIdentity> = r.unwrap().into_iter().map(Result::unwrap).collect();
+    assert_eq!(answers, files);
+    assert_eq!(
+        req.target,
+        format!("/sync/v1/acme/designs/files/put?push={PUSH}")
+    );
+    assert_eq!(req.header("content-type"), Some("application/x-tar"));
+    assert_eq!(req.body.len() as u64, tar_len(&files).unwrap());
+    // 4 -> 512, 600 -> 1024, 0 -> 0, each with a header, then the end blocks
+    assert_eq!(req.body.len(), 3 * 512 + 512 + 1024 + 1024);
+    let entries = crbp_entries(&req.body);
+    let want: Vec<(String, Vec<u8>)> = files
+        .iter()
+        .zip(contents)
+        .map(|(f, c)| (f.hash.to_string(), c.to_vec()))
+        .collect();
+    assert_eq!(entries, want);
+    for (name, _) in &entries {
+        assert_eq!(name.len(), 64);
+        assert!(
+            name.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// The tar reply: every sent hash once, in body order, with its size. An item with a code is
+/// that entry's refusal, by the code the one-file form keeps; a missing, duplicate, reordered or
+/// mis-sized item, or an item with both or neither member, is uncertain. A duplicate hash in
+/// the batch is refused before any connection.
+#[test]
+fn crbp_tar_reply_is_read_item_by_item() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let contents: [&[u8]; 3] = [b"one", b"two", b"three"];
+    let files = Mem::new(&contents).files;
+    let held: Vec<String> = files.iter().map(crbp_held).collect();
+
+    // a per-entry code: that item is the refusal, the others still count
+    let refused = format!(r#"{{"hash":"{}","code":"E_HUB_FILE_HASH"}}"#, files[1].hash);
+    let unknown = format!(
+        r#"{{"hash":"{}","code":"E_HUB_SOMETHING_NEW"}}"#,
+        files[2].hash
+    );
+    let mut batch = Mem::new(&contents);
+    let (r, _) = served(
+        &mut s,
+        Reply::json(
+            200,
+            &crbp_reply(&[held[0].clone(), refused.clone(), unknown]),
+        ),
+        || hub.wire.put_files(&cx, PUSH, &mut batch),
+    );
+    let answers = r.unwrap();
+    assert_eq!(answers[0].as_ref().unwrap(), &files[0]);
+    let e = answers[1].as_ref().unwrap_err();
+    assert_eq!(e.code, "E_HUB_FILE_HASH");
+    assert!(e.message.contains(&files[1].hash.to_string()), "{e:?}");
+    let e = answers[2].as_ref().unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_UPSTREAM_REFUSED,
+            UPSTREAM_REFUSED_MESSAGE,
+            UPSTREAM_REFUSED_FIX
+        )
+    );
+
+    let wrong_size = format!(r#"{{"hash":"{}","size":99}}"#, files[2].hash);
+    let both = format!(
+        r#"{{"hash":"{}","size":{},"code":"E_HUB_BUSY"}}"#,
+        files[2].hash, files[2].size
+    );
+    let neither = format!(r#"{{"hash":"{}"}}"#, files[2].hash);
+    let bad_code = format!(r#"{{"hash":"{}","code":"e_hub_busy"}}"#, files[2].hash);
+    let other = FileIdentity {
+        hash: h(9),
+        size: 5,
+    };
+    for items in [
+        // a missing hash
+        vec![held[0].clone(), held[1].clone()],
+        // a duplicate
+        vec![held[0].clone(), held[1].clone(), held[1].clone()],
+        vec![
+            held[0].clone(),
+            held[1].clone(),
+            held[2].clone(),
+            held[2].clone(),
+        ],
+        // out of body order
+        vec![held[1].clone(), held[0].clone(), held[2].clone()],
+        // another file
+        vec![held[0].clone(), held[1].clone(), crbp_held(&other)],
+        vec![held[0].clone(), held[1].clone(), wrong_size],
+        vec![held[0].clone(), held[1].clone(), both],
+        vec![held[0].clone(), held[1].clone(), neither],
+        vec![held[0].clone(), held[1].clone(), bad_code],
+    ] {
+        let mut batch = Mem::new(&contents);
+        let (r, _) = served(&mut s, Reply::json(200, &crbp_reply(&items)), || {
+            hub.wire.put_files(&cx, PUSH, &mut batch)
+        });
+        assert_eq!(err(r).code, E_UPSTREAM_UNCERTAIN, "{items:?}");
+    }
+
+    // a whole-body refusal keeps the one-file form's mapping
+    let mut batch = Mem::new(&contents);
+    let (r, _) = served(
+        &mut s,
+        Reply::json(
+            422,
+            &error_body(
+                "E_HUB_ARTIFACT_LIMIT",
+                "too many files",
+                "send fewer",
+                "[]",
+                "",
+            ),
+        ),
+        || hub.wire.put_files(&cx, PUSH, &mut batch),
+    );
+    let e = err(r);
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("E_HUB_ARTIFACT_LIMIT", "too many files")
+    );
+
+    // a hash twice in the batch never connects
+    let mut batch = Mem::new(&[b"same", b"same"]);
+    let r = unsent(&[&s], || hub.wire.put_files(&cx, PUSH, &mut batch));
+    assert_eq!(err(r).code, E_BAD_INPUT);
+    assert_eq!(s.finish(), 0);
+}

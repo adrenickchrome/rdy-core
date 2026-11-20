@@ -349,6 +349,17 @@ pub trait PublishWire: Send + Sync {
         media_type: &str,
         body: &mut dyn Read,
     ) -> Result<FileIdentity, RdyError>;
+    /// `POST <base>/files/put?push=<push>`: the files of `batch` in one tar body, in its order.
+    /// The answer has one item per file, in that order: the file storage holds, or the hub's
+    /// refusal of that entry. The default sends each file in the one-file form instead.
+    fn put_files(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        batch: &mut dyn FileBatch,
+    ) -> Result<Vec<Result<FileIdentity, RdyError>>, RdyError> {
+        put_each(self, cx, push, batch)
+    }
     /// `POST <base>/publish`.
     fn publish(
         &self,
@@ -359,6 +370,212 @@ pub trait PublishWire: Send + Sync {
         manifest: &Manifest,
         keep_latest: Option<bool>,
     ) -> Result<Candidate, RdyError>;
+}
+
+/// The files of one files/put tar body: each file's identity and media type, and its bytes,
+/// read in order. A file is opened at its first read, so one file at a time is open.
+pub trait FileBatch {
+    /// The files, in body order, each hash once.
+    fn files(&self) -> &[FileIdentity];
+    /// The media type of the file at `index`, for the one-file form.
+    fn media_type(&self, index: usize) -> &str;
+    /// Reads the next bytes of the file at `index` into `out`, as [`Read::read`] does.
+    fn read(&mut self, index: usize, out: &mut [u8]) -> std::io::Result<usize>;
+}
+
+/// The bytes of one file of a batch, as a reader.
+struct BatchFile<'a> {
+    batch: &'a mut dyn FileBatch,
+    index: usize,
+}
+
+impl Read for BatchFile<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        self.batch.read(self.index, out)
+    }
+}
+
+/// Sends each file of `batch` in the one-file form, in order. The first failed request ends the
+/// batch with its error.
+pub fn put_each<W: PublishWire + ?Sized>(
+    wire: &W,
+    cx: &UploadContext,
+    push: &str,
+    batch: &mut dyn FileBatch,
+) -> Result<Vec<Result<FileIdentity, RdyError>>, RdyError> {
+    let mut held = Vec::new();
+    for index in 0..batch.files().len() {
+        let file = batch.files()[index];
+        let media_type = batch.media_type(index).to_string();
+        let mut body = BatchFile {
+            batch: &mut *batch,
+            index,
+        };
+        held.push(Ok(wire.put_file(
+            cx,
+            push,
+            &file,
+            &media_type,
+            &mut body,
+        )?));
+    }
+    Ok(held)
+}
+
+/// The media type of a files/put tar body.
+pub const TAR_MEDIA_TYPE: &str = "application/x-tar";
+/// A tar block: each header, and the unit file content is padded to.
+pub const TAR_BLOCK: u64 = 512;
+
+/// The bytes a tar body of `files` takes: a header and the content padded to a block for each
+/// file, then two zero blocks. `None` past `u64`.
+pub fn tar_len(files: &[FileIdentity]) -> Option<u64> {
+    files.iter().try_fold(2 * TAR_BLOCK, |n, f| {
+        n.checked_add(TAR_BLOCK)?
+            .checked_add(f.size.checked_next_multiple_of(TAR_BLOCK)?)
+    })
+}
+
+/// The ustar header of `file`: a regular file whose name is its hash as 64 lower-case hex
+/// digits, mode 0644, owner 0, time 0.
+pub fn tar_header(file: &FileIdentity) -> [u8; 512] {
+    fn octal(field: &mut [u8], value: u64) {
+        // the digits fill the field but its last byte, which stays NUL
+        let digits = field.len() - 1;
+        let text = format!("{value:0digits$o}");
+        field[..digits].copy_from_slice(text.as_bytes());
+    }
+    let mut h = [0u8; 512];
+    let name = file.hash.to_string();
+    h[..name.len()].copy_from_slice(name.as_bytes());
+    octal(&mut h[100..108], 0o644);
+    octal(&mut h[108..116], 0);
+    octal(&mut h[116..124], 0);
+    octal(&mut h[124..136], file.size);
+    octal(&mut h[136..148], 0);
+    h[156] = b'0';
+    h[257..263].copy_from_slice(b"ustar\0");
+    h[263..265].copy_from_slice(b"00");
+    // the checksum counts its own field as spaces
+    h[148..156].copy_from_slice(b"        ");
+    let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    let text = format!("{sum:06o}");
+    h[148..154].copy_from_slice(text.as_bytes());
+    h[154] = 0;
+    h[155] = b' ';
+    h
+}
+
+/// Where a tar body's reader is.
+#[derive(Clone, Copy)]
+enum TarAt {
+    Header { index: usize, pos: usize },
+    Content { index: usize, left: u64 },
+    Pad { index: usize, left: u64 },
+    End { left: u64 },
+}
+
+/// A tar body over a batch: each file's header, content and padding, then two zero blocks.
+struct TarBody<'a> {
+    batch: &'a mut dyn FileBatch,
+    header: [u8; 512],
+    at: TarAt,
+}
+
+impl<'a> TarBody<'a> {
+    fn new(batch: &'a mut dyn FileBatch) -> TarBody<'a> {
+        let mut body = TarBody {
+            batch,
+            header: [0; 512],
+            at: TarAt::End { left: 0 },
+        };
+        body.start(0);
+        body
+    }
+
+    /// Moves to the header of the file at `index`, or to the end blocks after the last file.
+    fn start(&mut self, index: usize) {
+        match self.batch.files().get(index) {
+            Some(f) => {
+                self.header = tar_header(f);
+                self.at = TarAt::Header { index, pos: 0 };
+            }
+            None => {
+                self.at = TarAt::End {
+                    left: 2 * TAR_BLOCK,
+                }
+            }
+        }
+    }
+
+    /// Moves past the content of the file at `index`.
+    fn pad(&mut self, index: usize) {
+        let size = self.batch.files()[index].size;
+        let left = size.next_multiple_of(TAR_BLOCK) - size;
+        self.at = TarAt::Pad { index, left };
+    }
+}
+
+fn zeros(out: &mut [u8], left: u64) -> usize {
+    let n = usize::try_from(left).map_or(out.len(), |l| l.min(out.len()));
+    out[..n].fill(0);
+    n
+}
+
+impl Read for TarBody<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if out.is_empty() {
+                return Ok(0);
+            }
+            match self.at {
+                TarAt::Header { index, pos } => {
+                    let n = (self.header.len() - pos).min(out.len());
+                    out[..n].copy_from_slice(&self.header[pos..pos + n]);
+                    if pos + n == self.header.len() {
+                        let left = self.batch.files()[index].size;
+                        self.at = TarAt::Content { index, left };
+                    } else {
+                        self.at = TarAt::Header {
+                            index,
+                            pos: pos + n,
+                        };
+                    }
+                    return Ok(n);
+                }
+                TarAt::Content { index, left: 0 } => self.pad(index),
+                TarAt::Content { index, left } => {
+                    let want = usize::try_from(left).map_or(out.len(), |l| l.min(out.len()));
+                    let n = self.batch.read(index, &mut out[..want])?;
+                    if n == 0 || n > want {
+                        return Err(std::io::Error::other("publication file ended early"));
+                    }
+                    let left = left - n as u64;
+                    self.at = TarAt::Content { index, left };
+                    if left == 0 {
+                        self.pad(index);
+                    }
+                    return Ok(n);
+                }
+                TarAt::Pad { index, left: 0 } => self.start(index + 1),
+                TarAt::Pad { index, left } => {
+                    let n = zeros(out, left);
+                    self.at = TarAt::Pad {
+                        index,
+                        left: left - n as u64,
+                    };
+                    return Ok(n);
+                }
+                TarAt::End { left } => {
+                    let n = zeros(out, left);
+                    self.at = TarAt::End {
+                        left: left - n as u64,
+                    };
+                    return Ok(n);
+                }
+            }
+        }
+    }
 }
 
 /// The upload steps over [`HttpHubTransport::upload`].
@@ -599,6 +816,27 @@ impl<'de> Deserialize<'de> for HexHash {
 #[derive(Deserialize)]
 struct MissingFiles {
     missing: Vec<HexHash>,
+}
+
+/// An optional member that, when present, is a string.
+fn present_text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(d).map(Some)
+}
+
+/// One item of a tar files/put reply: `{hash, size}` for a held file, `{hash, code}` for a
+/// refused entry.
+#[derive(Deserialize)]
+struct FilePutItem {
+    hash: HexHash,
+    #[serde(default, deserialize_with = "present_u64")]
+    size: Option<u64>,
+    #[serde(default, deserialize_with = "present_text")]
+    code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FilesPut {
+    files: Vec<FilePutItem>,
 }
 
 #[derive(Deserialize)]
@@ -1048,6 +1286,19 @@ fn known_code(code: &str) -> Option<&'static str> {
     match api_error_entry(code, None) {
         Ok(Some((c, _))) => Some(c),
         _ => core_error_code(code),
+    }
+}
+
+/// The hub's refusal of one tar entry, `file`, by its code alone: a recognized code is kept,
+/// any other is the generic refusal.
+fn entry_refusal(code: &str, file: &FileIdentity) -> RdyError {
+    match known_code(code) {
+        Some(code) => RdyError::new(
+            code,
+            format!("the hub refused publication file {}", file.hash),
+            "fix what the code names, then publish again",
+        ),
+        None => upstream_refused(),
     }
 }
 
@@ -1632,6 +1883,61 @@ impl PublishWire for HttpPublishWire {
             return Err(upstream_uncertain());
         }
         Ok(held)
+    }
+
+    fn put_files(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        batch: &mut dyn FileBatch,
+    ) -> Result<Vec<Result<FileIdentity, RdyError>>, RdyError> {
+        check_push(push)?;
+        let files: Vec<FileIdentity> = batch.files().to_vec();
+        check_entries(files.len(), MAX_KNOWN_FILES, "file")?;
+        let mut held: Vec<Hash> = files.iter().map(|f| f.hash).collect();
+        held.sort_unstable();
+        if held.windows(2).any(|w| w[0] == w[1]) {
+            return Err(bad_input(
+                "the tar body names a file hash twice",
+                "name each file once",
+            ));
+        }
+        let len = tar_len(&files).ok_or_else(|| hub_limit(usize::MAX, LimitUnit::Bytes))?;
+        let url = route(cx, &["files", "put"], &[("push", push)])?;
+        let mut body = TarBody::new(batch);
+        let reply_body = self.exchange(
+            cx,
+            Exchange {
+                effect: Effect::Write,
+                method: UploadMethod::Post,
+                url: &url,
+                content_type: TAR_MEDIA_TYPE,
+                body: Some(&mut body),
+                body_len: len,
+                reply_limit: FILES_KNOWN_REPLY_BYTES,
+                success: &[200, 201],
+            },
+        )?;
+        // Three values per item, with headroom for added members.
+        let dto: FilesPut = reply(
+            &reply_body,
+            limits(FILES_KNOWN_REPLY_BYTES, known_values(files.len(), 3)),
+            Effect::Write,
+            &cx.bearer,
+        )?;
+        if dto.files.len() != files.len() {
+            return Err(upstream_uncertain());
+        }
+        dto.files
+            .into_iter()
+            .zip(&files)
+            .map(|(item, file)| match (item.size, item.code) {
+                _ if item.hash.0 != file.hash => Err(upstream_uncertain()),
+                (Some(size), None) if size == file.size => Ok(Ok(*file)),
+                (None, Some(code)) if code_ok(&code) => Ok(Err(entry_refusal(&code, file))),
+                _ => Err(upstream_uncertain()),
+            })
+            .collect()
     }
 
     fn publish(

@@ -10,18 +10,20 @@
 //!   and the exact empty notice slot at each HTML notice offset. A reader is never collected
 //!   into a file-sized buffer.
 //! - **By content.** [`upload_files`] names each distinct hash once in one files/known request,
-//!   in raw hash order, and sends only the files the hub lacks, in that order, each with the
+//!   in raw hash order, and sends only the files the hub lacks, in that order. Two or more go in
+//!   tar bodies ([`file_batches`] bounds each); a lone file goes in the one-file form with the
 //!   media type of its lexicographically first path. The manifest keeps every path's own media
 //!   type. A sent file is hashed again while it streams; bytes that changed since the check are
-//!   withheld before the request completes.
+//!   withheld before the request completes. One file is open at a time.
 //! - **One final call.** [`publish_record`] checks the record against its manifest and sends the
 //!   one publish request; `keep_latest` reaches the wire unchanged.
 //! - **No retry.** Each request is sent once. A failed or lost one ends the upload with the
 //!   wire's error, so a lost write stays `E_UPSTREAM_UNCERTAIN`.
 use crate::error::{E_BAD_INPUT, E_LIMIT, RdyError, upstream_protocol, upstream_uncertain};
+use crate::hub_http::MAX_UPLOAD_BODY_BYTES;
 use crate::hub_publish_wire::{
-    CORE_ARTIFACT_BYTES, CORE_ARTIFACT_FILES, Candidate, FileIdentity, MAX_KNOWN_FILES,
-    MAX_SELECTION_ROWS, PublicationInputs, PublishWire, UploadContext,
+    CORE_ARTIFACT_BYTES, CORE_ARTIFACT_FILES, Candidate, FileBatch, FileIdentity, MAX_KNOWN_FILES,
+    MAX_SELECTION_ROWS, PublicationInputs, PublishWire, TAR_BLOCK, UploadContext,
 };
 use crate::hub_types::{LimitUnit, check_count};
 use crate::publication_manifest::{
@@ -31,6 +33,7 @@ use crate::publication_manifest::{
 use rdy_model::Hash;
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind, Read};
+use std::ops::Range;
 
 /// A rendered artifact: its manifest and its files' bytes, which never change.
 pub trait ArtifactSource {
@@ -50,7 +53,7 @@ pub struct ArtifactLimits {
     pub files: u32,
 }
 
-/// What an upload sent: the file requests and their bytes.
+/// What an upload sent: the files and their bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FilesSent {
     pub files: u32,
@@ -335,10 +338,192 @@ impl Read for Streamed<'_> {
     }
 }
 
+/// The tar bodies that send files of `sizes`, in order, as ranges of `sizes`. Each body holds at
+/// most the negotiated file count, at most the negotiated bytes of content (each first held to
+/// core's caps), and its whole tar body is at most the longest upload body. A file that alone
+/// passes a bound is a body of its own.
+pub fn file_batches(sizes: &[u64], limits: ArtifactLimits) -> Vec<Range<usize>> {
+    let max_files = u64::from(limits.files).min(CORE_ARTIFACT_FILES);
+    let max_bytes = limits.bytes.min(CORE_ARTIFACT_BYTES);
+    let empty = 2 * TAR_BLOCK;
+    let mut out = Vec::new();
+    let (mut start, mut bytes, mut framed) = (0, 0u64, empty);
+    for (i, &size) in sizes.iter().enumerate() {
+        let entry = size
+            .checked_next_multiple_of(TAR_BLOCK)
+            .and_then(|n| n.checked_add(TAR_BLOCK))
+            .unwrap_or(u64::MAX);
+        let fits = ((i - start) as u64) < max_files
+            && bytes.saturating_add(size) <= max_bytes
+            && framed.saturating_add(entry) <= MAX_UPLOAD_BODY_BYTES;
+        if i > start && !fits {
+            out.push(start..i);
+            (start, bytes, framed) = (i, 0, empty);
+        }
+        bytes = bytes.saturating_add(size);
+        framed = framed.saturating_add(entry);
+    }
+    if start < sizes.len() {
+        out.push(start..sizes.len());
+    }
+    out
+}
+
+/// The files of one tar body, read from the source through the checking stream. One file is
+/// open at a time; the first check that fails is kept.
+struct Batch<'s> {
+    source: &'s dyn ArtifactSource,
+    entries: &'s [&'s ManifestEntry],
+    files: Vec<FileIdentity>,
+    open: Option<(usize, Streamed<'s>)>,
+    verified: Vec<bool>,
+    failed: Option<RdyError>,
+}
+
+impl<'s> Batch<'s> {
+    fn new(source: &'s dyn ArtifactSource, entries: &'s [&'s ManifestEntry]) -> Batch<'s> {
+        Batch {
+            source,
+            entries,
+            files: entries.iter().map(|e| identity(e)).collect(),
+            open: None,
+            verified: vec![false; entries.len()],
+            failed: None,
+        }
+    }
+
+    /// Closes the open file, keeping whether it was verified or its failed check.
+    fn close(&mut self) {
+        if let Some((index, s)) = self.open.take() {
+            if s.check == Check::Verified {
+                self.verified[index] = true;
+            } else if let Err(e) = s.outcome() {
+                self.failed.get_or_insert(e);
+            }
+        }
+    }
+
+    /// The first failed check: changed bytes were withheld, so the hub cannot hold them.
+    fn outcome(&mut self) -> Result<(), RdyError> {
+        self.close();
+        match self.failed.take() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Completes the check of each file the wire did not read to its end.
+    fn finish(&mut self) -> Result<(), RdyError> {
+        self.outcome()?;
+        for (index, e) in self.entries.iter().enumerate() {
+            if !self.verified[index] {
+                Streamed::new(self.source.open(&e.path)?, &self.files[index])?.finish()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn withheld() -> io::Error {
+    io::Error::other("publication artifact changed while it was sent")
+}
+
+impl FileBatch for Batch<'_> {
+    fn files(&self) -> &[FileIdentity] {
+        &self.files
+    }
+
+    fn media_type(&self, index: usize) -> &str {
+        &self.entries[index].media_type
+    }
+
+    fn read(&mut self, index: usize, out: &mut [u8]) -> io::Result<usize> {
+        if self.failed.is_some() || index >= self.entries.len() {
+            return Err(withheld());
+        }
+        if self.open.as_ref().map(|(i, _)| *i) != Some(index) {
+            self.close();
+            let file = &self.files[index];
+            match self
+                .source
+                .open(&self.entries[index].path)
+                .and_then(|r| Streamed::new(r, file))
+            {
+                Ok(s) => self.open = Some((index, s)),
+                Err(e) => {
+                    self.failed = Some(e);
+                    return Err(withheld());
+                }
+            }
+        }
+        let Some((_, s)) = self.open.as_mut() else {
+            return Err(withheld());
+        };
+        let r = s.read(out);
+        if r.is_err()
+            && let Err(e) = s.outcome()
+        {
+            self.failed.get_or_insert(e);
+        }
+        r
+    }
+}
+
+fn identity(e: &ManifestEntry) -> FileIdentity {
+    FileIdentity {
+        hash: e.hash,
+        size: e.size,
+    }
+}
+
+/// Sends one file in the one-file form.
+fn send_one(
+    source: &dyn ArtifactSource,
+    push: &str,
+    e: &ManifestEntry,
+    wire: &dyn PublishWire,
+    cx: &UploadContext,
+) -> Result<(), RdyError> {
+    let file = identity(e);
+    let mut body = Streamed::new(source.open(&e.path)?, &file)?;
+    let reply = wire.put_file(cx, push, &file, &e.media_type, &mut body);
+    // Changed bytes were withheld, so the hub cannot hold them.
+    body.outcome()?;
+    if reply? != file {
+        return Err(upstream_uncertain());
+    }
+    body.finish()
+}
+
+/// Sends `entries` in one tar body. Each answer must hold its file; the first refused entry
+/// ends the upload with the hub's code.
+fn send_batch(
+    source: &dyn ArtifactSource,
+    push: &str,
+    entries: &[&ManifestEntry],
+    wire: &dyn PublishWire,
+    cx: &UploadContext,
+) -> Result<(), RdyError> {
+    let mut batch = Batch::new(source, entries);
+    let reply = wire.put_files(cx, push, &mut batch);
+    batch.outcome()?;
+    let answers = reply?;
+    if answers.len() != batch.files.len() {
+        return Err(upstream_uncertain());
+    }
+    for (answer, file) in answers.into_iter().zip(&batch.files) {
+        if answer? != *file {
+            return Err(upstream_uncertain());
+        }
+    }
+    batch.finish()
+}
+
 /// Sends the files of `source` that the hub lacks, for push `push`. The artifact is checked
 /// first ([`validate_artifact`]). Then one files/known request names each distinct hash once,
-/// and each missing file is sent once, in hash order. `context` gives each request its upload
-/// context. Any failed request ends the upload with its error; nothing is retried.
+/// and each missing file is sent once, in hash order: two or more in tar bodies that
+/// [`file_batches`] bounds, a lone file in the one-file form. `context` gives each request its
+/// upload context. Any failed request ends the upload with its error; nothing is retried.
 pub fn upload_files(
     source: &dyn ArtifactSource,
     push: &str,
@@ -350,13 +535,7 @@ pub fn upload_files(
     let order = by_path(source.manifest());
     let files = distinct(&order)?;
     check_count(files.len(), MAX_KNOWN_FILES, LimitUnit::Entries)?;
-    let identities: Vec<FileIdentity> = files
-        .values()
-        .map(|e| FileIdentity {
-            hash: e.hash,
-            size: e.size,
-        })
-        .collect();
+    let identities: Vec<FileIdentity> = files.values().map(|e| identity(e)).collect();
     let cx = context()?;
     let missing = wire.known_files(&cx, push, &identities)?;
     let subset = missing.windows(2).all(|w| w[0].0 < w[1].0)
@@ -364,30 +543,29 @@ pub fn upload_files(
     if !subset {
         return Err(upstream_protocol());
     }
+    let chosen = missing
+        .iter()
+        .map(|h| files.get(&h.0).copied().ok_or_else(upstream_protocol))
+        .collect::<Result<Vec<&ManifestEntry>, RdyError>>()?;
+    let sizes: Vec<u64> = chosen.iter().map(|e| e.size).collect();
     let mut sent = FilesSent { files: 0, bytes: 0 };
-    for hash in &missing {
-        let e = files.get(&hash.0).ok_or_else(upstream_protocol)?;
-        let file = FileIdentity {
-            hash: e.hash,
-            size: e.size,
-        };
+    for range in file_batches(&sizes, limits) {
+        let part = &chosen[range];
         let cx = context()?;
-        let mut body = Streamed::new(source.open(&e.path)?, &file)?;
-        let reply = wire.put_file(&cx, push, &file, &e.media_type, &mut body);
-        // Changed bytes were withheld, so the hub cannot hold them.
-        body.outcome()?;
-        if reply? != file {
-            return Err(upstream_uncertain());
+        match part {
+            [one] => send_one(source, push, one, wire, &cx)?,
+            _ => send_batch(source, push, part, wire, &cx)?,
         }
-        body.finish()?;
         // At most 32,000 files of at most 2 GiB in all.
-        sent = FilesSent {
-            files: sent.files.checked_add(1).ok_or_else(artifact_mismatch)?,
-            bytes: sent
-                .bytes
-                .checked_add(file.size)
-                .ok_or_else(artifact_mismatch)?,
-        };
+        for e in part {
+            sent = FilesSent {
+                files: sent.files.checked_add(1).ok_or_else(artifact_mismatch)?,
+                bytes: sent
+                    .bytes
+                    .checked_add(e.size)
+                    .ok_or_else(artifact_mismatch)?,
+            };
+        }
     }
     Ok(sent)
 }
