@@ -148,6 +148,13 @@ enum Target {
     View(Box<ReadState>, Scope),
 }
 
+/// A scope text resolved for a read: the scope, and for a holder's pushed view at an op the
+/// view's own state, which the scope reads instead of the snapshot's state.
+pub(crate) struct Resolved {
+    pub(crate) view: Option<Box<ReadState>>,
+    pub(crate) scope: Scope,
+}
+
 impl Snapshot {
     /// Whether the snapshot's store is a holder.
     fn is_holder(&self) -> Result<bool, RdyError> {
@@ -182,6 +189,27 @@ impl Snapshot {
             return Ok(Target::View(Box::new(state), Scope::View(name.to_string())));
         }
         Ok(Target::Engine)
+    }
+
+    /// The one scope resolver of the adapter's reads: `check_scope`, then a full landing hash
+    /// (D-Y32MN's reach), then a holder's pushed view at an op (D-00ZG2), then the engine's
+    /// resolution of the text (`tool_reads::scope_of`). None is `canon`. `search` and the
+    /// compare calls take every scope through it; `read` takes its first three steps and leaves
+    /// the last to the engine, because a read's id may pin a version.
+    pub(crate) fn read_scope(&self, text: Option<&str>) -> Result<Resolved, RdyError> {
+        let scope = text.map(str::to_string);
+        check_scope(&scope, || self.is_holder())?;
+        Ok(match self.target(&scope)? {
+            Target::At(scope) => Resolved { view: None, scope },
+            Target::View(view, scope) => Resolved {
+                view: Some(view),
+                scope,
+            },
+            Target::Engine => Resolved {
+                view: None,
+                scope: tool_reads::scope_of(DEFAULT_SCOPE, self.read_state(), &scope)?,
+            },
+        })
     }
 
     /// The scope of a full landing hash: `Scope::At` the landing when D-Y32MN's reach finds it
@@ -267,16 +295,8 @@ impl Snapshot {
                 "omit brief",
             ));
         }
-        check_scope(&req.scope, || self.is_holder())?;
         let state = self.read_state();
-        let (view, scope): (Option<Box<ReadState>>, Scope) = match self.target(&req.scope)? {
-            Target::At(scope) => (None, scope),
-            Target::View(view, scope) => (Some(view), scope),
-            Target::Engine => (
-                None,
-                tool_reads::scope_of(DEFAULT_SCOPE, state, &req.scope)?,
-            ),
-        };
+        let Resolved { view, scope } = self.read_scope(req.scope.as_deref())?;
         let reply = tool_reads::search_reply(
             view.as_deref().unwrap_or(state),
             &scope,
