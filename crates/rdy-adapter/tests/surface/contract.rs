@@ -322,6 +322,20 @@ fn rpl34_the_exact_adapter_names(
     let _ = handle.take_foreign_removal(stream, *repo);
 }
 
+/// cra1: the reads of a full landing hash (D-Y32MN), by their exact names. This function is never
+/// called: it compiles only while each name has the receiver and the arguments listed.
+#[allow(dead_code)]
+fn cra1_adapter_names(
+    state: &rdy_engine::ReadState,
+    heads: &[Hash],
+    hashes: &[Hash],
+    scope: &rdy_engine::Scope,
+) {
+    let _: Result<Vec<bool>, RdyError> = rdy_engine::history_facts::reached(state, heads, hashes);
+    let _: Result<rdy_engine::tool_reads::ReadEntries, RdyError> =
+        rdy_engine::tool_reads::read_entries_at(state, "id", scope, "compact", None);
+}
+
 /// rpl34: the surface runs on an empty project (its reads answer with no rows, never with an
 /// error that names a missing method), its writes enter the store's one writer lane through a
 /// shared handle, and the build's format capabilities name `foreign_copy` with its minimum rdy.
