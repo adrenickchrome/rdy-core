@@ -1,5 +1,6 @@
 //! The sync ops (D-H0BZN): a push of local canon and named views to a share remote's hub repo,
-//! a pull of hub canon and named views from it, and the restore of a dump into it (D-J3YA0). Each runs the engine's sync coordinator
+//! a pull of hub canon and named views from it, the restore of a dump into it (D-J3YA0), and the
+//! fetch of a hub dump to a new file (D-7CDEQ), which takes no role, lock or store write. Each runs the engine's sync coordinator
 //! ([`SyncService`]) with this crate's renderer for the render inputs a write carries. The
 //! coordinator holds the store's writer only for its local steps, never across a request.
 //!
@@ -14,6 +15,7 @@
 //! fenced to that request's install, and drops them with the call. The user config, and so the
 //! credentials, are this process's own. The ops route requests only; their surfaces come later.
 use super::publish::{CredentialTransport, fenced};
+use super::resolve_path;
 use rdy_engine::answer::relay::{RelayInput, relayed};
 use rdy_engine::config_levels::user_file_from_env;
 use rdy_engine::engine::SyncCall;
@@ -25,8 +27,8 @@ use rdy_engine::hub_sync::{
     SyncService, WriteEnd,
 };
 use rdy_engine::hub_sync_wire::{
-    GetRequest, HttpSyncWire, KnownPage, KnownPull, LookupOutcome, OutcomeReply, SyncState,
-    SyncStateRequest, SyncWire, WriteFailure, WriteReply, WriteRequest,
+    DumpRequest, GetRequest, HttpSyncWire, KnownPage, KnownPull, LookupOutcome, OutcomeReply,
+    SyncState, SyncStateRequest, SyncWire, WriteFailure, WriteReply, WriteRequest,
 };
 use rdy_engine::hub_types::SystemHubClock;
 use rdy_engine::sync_fetch::FetchOutcome;
@@ -150,6 +152,16 @@ impl SyncWire for LazyWire<'_> {
 
     fn outcome(&self, cx: &UploadContext, push: &str) -> Result<OutcomeReply, RdyError> {
         self.wire(cx)?.outcome(cx, push)
+    }
+
+    fn dump(
+        &self,
+        cx: &UploadContext,
+        request: &DumpRequest,
+        sink: &mut dyn Write,
+        limit: u64,
+    ) -> Result<u64, RdyError> {
+        self.wire(cx)?.dump(cx, request, sink, limit)
     }
 }
 
@@ -377,13 +389,24 @@ pub(crate) fn push(
 
 /// Pulls for `session` into the project at `root`, and replies with the pull's fetches and
 /// replays, or with the person's card for a take of hub canon (see the module docs). A reader
-/// is refused first.
+/// is refused first. With `dump`, it fetches that hub dump to `out`, resolved against `cwd`,
+/// with no role, lock or store write (D-7CDEQ).
 pub(crate) fn pull(
     engine: &dyn Engine,
     root: &Path,
+    cwd: &Path,
     who: &Who<'_>,
     inputs: PullInputs,
 ) -> Result<Value, RdyError> {
+    if let Some(dump) = &inputs.dump {
+        inputs.check()?;
+        let out = resolve_path(cwd, inputs.out.as_deref().unwrap_or_default());
+        let fetched = with_service(root, |s| match &inputs.url {
+            Some(url) => s.fetch_dump_at(who.session, url, dump, &out),
+            None => s.fetch_dump(engine, who.session, inputs.remote.as_deref(), dump, &out),
+        })?;
+        return serde_json::to_value(&fetched).map_err(|_| internal());
+    }
     require_writer(who.session, "pull")?;
     inputs.check()?;
     let relay = inputs.relay();
@@ -452,6 +475,7 @@ pub(crate) fn call(
         ),
         "pull" => pull(
             engine,
+            root,
             root,
             &who,
             serde_json::from_value(call.args).map_err(bad)?,

@@ -1,0 +1,532 @@
+{
+  "about": [
+    "The hub's frozen sync wire fixture, version 5 (D-H0BZN in rdy-design, p-1FPMG in rdyhub-design): the dump of a hub repo and the restore from a dump. Versions 1, 2, 3a and 4 stay beside it, and hold the other steps' cases.",
+    "Each step holds one request to the real hub and the hub's reply, as the test dp9_ in rdyhub-server/tests/pg_dp9_wire_v5.rs checks them, in the order the test sends them. The step dumps.create and the step dumps.show are hub operations of the API, which a client calls before the sync step dump (i-W9RPP).",
+    "Normalized: the bearer token of ana is <token>, and that of bo is <other-token>; each request id is <request-id>; the dump's id is <dump> and its job's id is <job>, also inside a path or a text; the times end and expires_at of dumps.show are <end> and <expires-at>; the repo id of the view fixture's project, which is new on each run, is <repo-id>. Object members are in key order.",
+    "The hub repo is acme/docs, owned by ana, on a test install with Share on, artifact storage and its default sync settings. bo is a member of acme, so bo reads acme/docs, and bo did not start the dump. acme/empty, acme/views and acme/later are hub repos of ana with no store and no hub canon.",
+    "The landings are those of rdyhub-core's push fixture, whose repo id is the same on each run. Before the first step, a canon push seeded hub canon in acme/docs with the history of the second landing of the chain and its tag v1.0.0 (version 2 holds that write's form).",
+    "The dump job made the dump of acme/docs on the hub's job pool. A binary body gives its length and its sha256: the sync step dump gives the whole dump file, whose sha256 is the one shown, and the digest of dumps.show is rdy core's trailer digest of that file, not its sha256.",
+    "Each restore puts one batch: the canon history of the dump's tip, which a temporary holder exports after it loads the downloaded dump. A restore sends no render inputs and no gate settings, because a hub dump holds neither (r-Z4TS8), and names the tag that the batch carries.",
+    "Before the restore into content, a canon push moved hub canon of acme/docs to the third landing of the chain, which the dump does not hold, so the restore replaces it as a force push.",
+    "The restore into acme/views and its view writes use rdyhub-core's view fixture, a project whose view draft has two writes and a close on canon's first landing; its hashes are the same on each run. Its batches are those that a restore of that project's dump sends, put before each write: first the canon history of canon's tip, then the view's history. Each view write sends null render inputs, as a restore's view writes do (i-B40VF).",
+    "The restore of another project puts a batch of rdyhub-core's public fixture, a project with another repo id; the put step refuses it.",
+    "The write in read-only mode came after its batch was put, while the operator had read-only mode on.",
+    "The list headers names the request headers that the hub reads on these steps. The list not_served is empty: this hub serves each case that version 4 of this file left out."
+  ],
+  "fixture": "sync-client-wire",
+  "headers": [
+    {
+      "name": "authorization",
+      "steps": [
+        "every step"
+      ],
+      "use": "the bearer token"
+    },
+    {
+      "name": "content-length",
+      "steps": [
+        "every POST step"
+      ],
+      "use": "the body's bound is checked before the body is read; put needs it"
+    },
+    {
+      "name": "rdy-actor",
+      "steps": [
+        "every POST step of sync"
+      ],
+      "use": "the claimed actor"
+    },
+    {
+      "name": "rdy-run",
+      "steps": [
+        "every POST step of sync"
+      ],
+      "use": "the claimed run"
+    }
+  ],
+  "media_type": "application/vnd.rdy.sync+json",
+  "not_served": [],
+  "steps": [
+    {
+      "case": "a client of stream formats 2 and 4; hub canon at the seed, before the dump",
+      "reply": {
+        "body": {
+          "artifact_bytes": 201326592,
+          "artifact_files": 32000,
+          "audience": null,
+          "batch_bytes": 41943040,
+          "batch_records": 1000000,
+          "canon": {
+            "hash": "278632dc52b499f6d94b5bf3e95129bdc0aad4d37f7fdec525e8659f611a98be",
+            "kind": 4
+          },
+          "features": [],
+          "min_rdy": "0.53.0",
+          "profile": null,
+          "quarantine_seconds": 3600,
+          "rdy": "0.54.0",
+          "repo_id": "397fd4b98bae3dfed53504ef0e4f9d91",
+          "stream_read": [
+            2,
+            4
+          ],
+          "stream_write": [
+            2,
+            4
+          ],
+          "views": []
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "actor": "agent:ana/claude",
+          "rdy": "0.54.0",
+          "run": "run-ana",
+          "site": null,
+          "stream_read": [
+            2,
+            4
+          ],
+          "stream_write": [
+            2,
+            4
+          ]
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/state"
+      },
+      "step": "state"
+    },
+    {
+      "case": "202: a dump job of acme/docs starts, with the dump's id and its job's id",
+      "reply": {
+        "body": {
+          "dump": "<dump>",
+          "job": "<job>"
+        },
+        "content_type": "application/json",
+        "status": 202
+      },
+      "request": {
+        "body": {},
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/json"
+        },
+        "method": "POST",
+        "path": "/api/v1/orgs/acme/repos/docs/dumps"
+      },
+      "step": "dumps.create"
+    },
+    {
+      "case": "succeeded: the dump's size, its digest, the end of its job and the time the hub deletes the file",
+      "reply": {
+        "body": {
+          "bytes": 7375,
+          "digest": "b455b4b1cd7dc94a2f68a7158d6949a29aaf12d5306d7679b32fdb54772b0916",
+          "dump": "<dump>",
+          "end": "<end>",
+          "expires_at": "<expires-at>",
+          "state": "succeeded"
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": null,
+        "headers": {
+          "authorization": "Bearer <token>"
+        },
+        "method": "GET",
+        "path": "/api/v1/orgs/acme/repos/docs/dumps/<dump>"
+      },
+      "step": "dumps.show"
+    },
+    {
+      "case": "the dump file of the caller's dump that succeeded, as a binary body",
+      "reply": {
+        "body": {
+          "bytes": 7375,
+          "sha256": "2182ddc63c284787f60be375db66b9feb10c81a60ef39bdc794058aea2b9c4a0"
+        },
+        "content_type": "application/octet-stream",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "dump": "<dump>"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/dump"
+      },
+      "step": "dump"
+    },
+    {
+      "case": "E_HUB_NOT_FOUND: the dump of another caller, who reads the hub repo; the same text as for a dump that does not exist",
+      "reply": {
+        "body": {
+          "code": "E_HUB_NOT_FOUND",
+          "fix": "start a dump with dumps.create, then wait for it to succeed",
+          "issues": [],
+          "message": "no dump <dump> of yours in acme/docs",
+          "request_id": "<request-id>"
+        },
+        "content_type": "application/json",
+        "status": 404
+      },
+      "request": {
+        "body": {
+          "dump": "<dump>"
+        },
+        "headers": {
+          "authorization": "Bearer <other-token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:bo/claude",
+          "rdy-run": "run-bo"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/dump"
+      },
+      "step": "dump"
+    },
+    {
+      "case": "one batch of a restore: the canon history of the dump's tip, from the temporary holder",
+      "reply": {
+        "body": {
+          "bytes": 5788,
+          "records": 18
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "bytes": 5788,
+          "sha256": "69c373b46008ea277a4dad13fc14334720201cc55ec78bc5781ad266eae64054"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/octet-stream",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/empty/objects/put?push=0123456789abcdefghjkmnpq02"
+      },
+      "step": "put"
+    },
+    {
+      "case": "taken: a restore into an empty hub repo seeds hub canon at the dump's tip; no render inputs and no gate settings",
+      "reply": {
+        "body": {
+          "min_rdy_raised": true,
+          "outcome": "taken",
+          "request": null,
+          "tip": {
+            "hash": "278632dc52b499f6d94b5bf3e95129bdc0aad4d37f7fdec525e8659f611a98be",
+            "kind": 4
+          }
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "expected": null,
+          "gate": null,
+          "kind": "restore",
+          "push": "0123456789abcdefghjkmnpq02",
+          "render_inputs": null,
+          "tags": [
+            {
+              "disagreements": [],
+              "name": "v1.0.0"
+            }
+          ],
+          "view": null
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/empty/write"
+      },
+      "step": "write"
+    },
+    {
+      "case": "taken: a restore into content is a force push; hub canon moves back to the dump's tip and the third landing is replaced",
+      "reply": {
+        "body": {
+          "min_rdy_raised": false,
+          "outcome": "taken",
+          "request": null,
+          "tip": {
+            "hash": "278632dc52b499f6d94b5bf3e95129bdc0aad4d37f7fdec525e8659f611a98be",
+            "kind": 4
+          }
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "expected": {
+            "hash": "4416f95c6a5f1b80ea14cfa48ee0b24c5f6a18a5882ebbc7f70175c3a3e3b62b",
+            "kind": 4
+          },
+          "gate": null,
+          "kind": "restore",
+          "push": "0123456789abcdefghjkmnpq04",
+          "render_inputs": null,
+          "tags": [
+            {
+              "disagreements": [],
+              "name": "v1.0.0"
+            }
+          ],
+          "view": null
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/write"
+      },
+      "step": "write"
+    },
+    {
+      "case": "taken, of the kind restore: the restore into content",
+      "reply": {
+        "body": {
+          "code": null,
+          "kind": "restore",
+          "outcome": "taken",
+          "request": null,
+          "request_state": null,
+          "tip": {
+            "hash": "278632dc52b499f6d94b5bf3e95129bdc0aad4d37f7fdec525e8659f611a98be",
+            "kind": 4
+          },
+          "view": null
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "push": "0123456789abcdefghjkmnpq04"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/outcome"
+      },
+      "step": "outcome"
+    },
+    {
+      "case": "taken: a restore of a project with a view into an empty hub repo; it seeds hub canon and writes no view",
+      "reply": {
+        "body": {
+          "min_rdy_raised": true,
+          "outcome": "taken",
+          "request": null,
+          "tip": {
+            "hash": "c08112d3acbb1e6adcd841c43d5a326f9e07c86253d6ce60e7dbda55cad998b8",
+            "kind": 4
+          }
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "expected": null,
+          "gate": null,
+          "kind": "restore",
+          "push": "0123456789abcdefghjkmnpq07",
+          "render_inputs": null,
+          "tags": [],
+          "view": null
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/views/write"
+      },
+      "step": "write"
+    },
+    {
+      "case": "taken: the restore's first view write, a new view, with null render inputs; the tip is the view's head, a view op (kind 13)",
+      "reply": {
+        "body": {
+          "min_rdy_raised": false,
+          "outcome": "taken",
+          "request": null,
+          "tip": {
+            "hash": "cc89048720c2d7ebd2509310ff08a42202eab74d23a42bda9350ce3b578dba48",
+            "kind": 13
+          }
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "expected": null,
+          "gate": null,
+          "kind": "view",
+          "push": "0123456789abcdefghjkmnpq08",
+          "render_inputs": null,
+          "tags": [],
+          "view": "draft"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/views/write"
+      },
+      "step": "write"
+    },
+    {
+      "case": "taken: the restore's next view write, the view's close, with null render inputs; it expects the hub's head of the view",
+      "reply": {
+        "body": {
+          "min_rdy_raised": false,
+          "outcome": "taken",
+          "request": null,
+          "tip": {
+            "hash": "fcc5a0e9f250b31fc29022b58918154ff776beedf792863085fd456bae85d637",
+            "kind": 13
+          }
+        },
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "body": {
+          "expected": {
+            "hash": "cc89048720c2d7ebd2509310ff08a42202eab74d23a42bda9350ce3b578dba48",
+            "kind": 13
+          },
+          "gate": null,
+          "kind": "view",
+          "push": "0123456789abcdefghjkmnpq09",
+          "render_inputs": null,
+          "tags": [],
+          "view": "draft"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/views/write"
+      },
+      "step": "write"
+    },
+    {
+      "case": "E_HUB_OTHER_PROJECT: one batch of a restore of another project's dump into a hub repo of this project",
+      "reply": {
+        "body": {
+          "code": "E_HUB_OTHER_PROJECT",
+          "fix": "publish from the project that this hub repo holds",
+          "issues": [],
+          "message": "the batch comes from another project than the one this hub repo holds",
+          "request_id": "<request-id>"
+        },
+        "content_type": "application/json",
+        "status": 409
+      },
+      "request": {
+        "body": {
+          "bytes": 4538,
+          "sha256": "c6b882ed1f945a142b595b57dbf61984f467ba4816dcdd2bd7b0b25ed7e0ac28"
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/octet-stream",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/docs/objects/put?push=0123456789abcdefghjkmnpq05"
+      },
+      "step": "put"
+    },
+    {
+      "case": "E_HUB_READ_ONLY: a restore while the install is in read-only mode, with retry_after",
+      "reply": {
+        "body": {
+          "code": "E_HUB_READ_ONLY",
+          "fix": "try again later; reads still work",
+          "issues": [],
+          "message": "the install is in read-only mode and takes no writes",
+          "request_id": "<request-id>",
+          "retry_after": 60
+        },
+        "content_type": "application/json",
+        "status": 503
+      },
+      "request": {
+        "body": {
+          "expected": null,
+          "gate": null,
+          "kind": "restore",
+          "push": "0123456789abcdefghjkmnpq06",
+          "render_inputs": null,
+          "tags": [
+            {
+              "disagreements": [],
+              "name": "v1.0.0"
+            }
+          ],
+          "view": null
+        },
+        "headers": {
+          "authorization": "Bearer <token>",
+          "content-type": "application/vnd.rdy.sync+json",
+          "rdy-actor": "agent:ana/claude",
+          "rdy-run": "run-ana"
+        },
+        "method": "POST",
+        "path": "/sync/acme/later/write"
+      },
+      "step": "write"
+    }
+  ],
+  "version": 5
+}

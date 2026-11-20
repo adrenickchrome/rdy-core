@@ -1,7 +1,7 @@
-//! A loopback TLS hub that speaks the sync protocol (rdyhub wire fixture v2's shapes), shared by
-//! the `cli_sync` and `mcp_sync` tests. It serves discovery, state (with views), known (push and
-//! pull forms), objects put and get, write, and outcome, and it records every request, so a
-//! test compares what each surface sent.
+//! A loopback TLS hub that speaks the sync protocol (rdyhub wire fixture v2's shapes, and v5's
+//! dump step), shared by the `cli_sync` and `mcp_sync` tests. It serves discovery, state (with
+//! views), known (push and pull forms), objects put and get, write, outcome, and dump, and it
+//! records every request, so a test compares what each surface sent.
 //!
 //! The hub keeps no store of its own for a push: it takes each put batch with core's checks,
 //! holds its keys, and moves canon (or a view) to the batch's root when a write comes. A pull is
@@ -104,6 +104,8 @@ pub struct Repo {
     pub move_on_settings: Option<String>,
     /// A get batch that leaves out every record of this kind, as if the client held them.
     pub get_omits: Option<u8>,
+    /// The dump files the dump step serves, by id; any other id gets wire fixture v5's refusal.
+    pub dumps: BTreeMap<String, Vec<u8>>,
 }
 
 pub struct Shared {
@@ -203,6 +205,16 @@ impl Hub {
     /// Hub canon moves to `tip` once the settings step is served.
     pub fn move_on_settings(&self, tip: Hash) {
         self.shared.repo.lock().unwrap().move_on_settings = Some(tip.to_string());
+    }
+
+    /// The dump step serves `bytes` for the dump id `id` (D-7CDEQ).
+    pub fn dump(&self, id: &str, bytes: Vec<u8>) {
+        self.shared
+            .repo
+            .lock()
+            .unwrap()
+            .dumps
+            .insert(id.to_string(), bytes);
     }
 
     /// Each get batch leaves out the records of `kind`.
@@ -596,6 +608,20 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
                 ))
             }
         },
+        // the dump step (wire fixture v5): the file, or the hub's refusal of a dump that does
+        // not exist, is not ready or another account started
+        ("POST", _, "/dump") => {
+            let id = req.json()["dump"].as_str().unwrap_or_default().to_string();
+            Some(match repo.dumps.get(&id) {
+                Some(bytes) => reply_bytes(200, "application/octet-stream", bytes),
+                None => hub_error(
+                    404,
+                    "E_HUB_NOT_FOUND",
+                    &format!("no dump {id} of yours in acme/docs"),
+                    "start a dump with dumps.create, then wait for it to succeed",
+                ),
+            })
+        }
         ("POST", _, "/settings") => {
             let body = repo.settings.clone().unwrap_or_else(|| settings_step(5));
             if let Some(tip) = repo.move_on_settings.take() {
@@ -829,6 +855,21 @@ pub fn kit(docs: &[&str]) -> Kit {
     let proj = Proj::new(docs);
     proj.remote(&home, &format!("{}{REMOTE_PATH}", hub.origin()));
     Kit { hub, home, proj }
+}
+
+/// `rdy <args>` in the directory `dir`, outside every project, as the person of `home`, with
+/// nothing else of this process.
+pub fn command_in(dir: &Path, home: &Home, args: &[&str]) -> Command {
+    let mut cmd = rdy_qa::fixtures::rdy_command();
+    cmd.env_clear()
+        .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
+        .envs(std::env::var_os("TEMP").map(|dir| ("TEMP", dir)))
+        .envs(std::env::var_os("TMP").map(|dir| ("TMP", dir)))
+        .envs(home.env())
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null());
+    cmd
 }
 
 /// `rdy --project <p> <args>` as the person of `home`, with nothing else of this process.

@@ -273,6 +273,25 @@ pub fn load_chain(
     crate::load_chain::load_verified(&plan, project, crate::load_chain::LoadPurpose::Ordinary)
 }
 
+/// What the file-only check of a dump read ([`check_dump`]): its length, its dump format, its
+/// kind, the repo id its header names (none for dump format 1 or 2, whose header names none) and
+/// its trailer digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckedDump {
+    pub bytes: u64,
+    pub dump_format: u32,
+    pub kind: DumpKind,
+    pub repo_id: Option<rdy_model::RepoId>,
+    pub digest: Hash,
+}
+
+/// Checks the dump `file` as `rdy load` checks it before it writes (D-7CDEQ): the header, the
+/// framing and the trailer, with the load's codes and texts, each naming `name`. It writes
+/// nothing and creates no store (`crate::load_chain::check_file`).
+pub(crate) fn check_dump(file: &Path, name: &Path) -> Result<CheckedDump, RdyError> {
+    crate::load_chain::check_file(file, name)
+}
+
 /// A step that runs after the open of step 7, under the load's lock and before `fsck`: a
 /// clone's origin batch (`crate::clone`). Its error fails the load, which then undoes.
 pub(crate) type AfterOpen<'a> = &'a mut dyn FnMut(&mut Rdy) -> Result<(), RdyError>;

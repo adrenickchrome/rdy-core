@@ -9,6 +9,8 @@
 //!   `--json`, `--card-hash`, `--answer` and `--relayed-by`, the command prints the card and asks
 //!   in place, as `rdy auth sign-in` does (D-VRH3Z); the answer goes through the same relay check
 //!   as `--answer`. Otherwise the card is the reply: answer it with the relay flags.
+//! - **A hub dump.** `rdy pull --dump <id> --out <file> [--remote <name> | --url <url>]`
+//!   fetches the hub's dump to a new file (D-7CDEQ): no role, no lock, no store write.
 //! - **The reply is the engine's.** The text relays what the op returned: the lookup of an
 //!   earlier write, each end, the partial results of a pull, a restore's omissions. `--json`
 //!   prints the reply unchanged.
@@ -73,6 +75,15 @@ pub(crate) struct PullArgs {
     /// Stop the replay at its first conflict. Not with --take and no --view.
     #[arg(long)]
     strict: bool,
+    /// Fetch the hub dump with this id (the id the hub's dump job gave) to --out instead of pulling. Takes only --out and one of --remote or --url.
+    #[arg(long, value_name = "ID")]
+    dump: Option<String>,
+    /// The new file a dump fetch writes. Only with --dump.
+    #[arg(long, value_name = "FILE")]
+    out: Option<std::path::PathBuf>,
+    /// The https URL of the hub repo a dump fetch reads, in place of --remote; it needs no project. Only with --dump.
+    #[arg(long, value_name = "URL")]
+    url: Option<String>,
     #[command(flatten)]
     relay: RelayArgs,
 }
@@ -129,6 +140,15 @@ pub(crate) fn pull_request(a: &PullArgs) -> Value {
     }
     if a.strict {
         args["strict"] = json!(true);
+    }
+    if let Some(d) = &a.dump {
+        args["dump"] = json!(d);
+    }
+    if let Some(o) = &a.out {
+        args["out"] = json!(o.to_string_lossy());
+    }
+    if let Some(u) = &a.url {
+        args["url"] = json!(u);
     }
     put_relay(&mut args, &a.relay);
     args
@@ -187,8 +207,56 @@ pub(crate) fn push(env: &Env, a: PushArgs, as_json: bool) -> Result<(Value, Stri
     Ok((v, t))
 }
 
+/// `rdy pull --dump`: the fetch of a hub dump (D-7CDEQ). Its closed inputs are checked first.
+/// In a project it runs through the daemon's `pull` op; a `--url` fetch outside one runs in this
+/// process with the user config's trust and sign-in, as `rdy clone <url>` runs. Its text names
+/// the file as `rdy dump` reports it, then the next step.
+fn pull_dump(env: &Env, a: &PullArgs) -> Result<(Value, String), ErrorReply> {
+    let args = pull_request(a);
+    let given: Vec<&str> = args
+        .as_object()
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    rdy_mcp::tools::check_dump_inputs(&given)?;
+    let in_project = env.project.join(".rdy").join("store").exists();
+    let v = match (&a.url, &a.dump, &a.out) {
+        (Some(url), Some(dump), Some(out)) if !in_project => {
+            rdy_engine::sync_dump::check_dump_id(dump)?;
+            let user_file = rdy_engine::hub_credentials::require_user_file(
+                rdy_engine::config_levels::user_file_from_env(),
+            )?;
+            let person = rdy_mcp::tools::auth_person(None, &user_file)?;
+            let (actor, run) = crate::conn::session_env()?;
+            let session = rdy_engine::classify(
+                &person,
+                actor.as_deref(),
+                run.as_deref(),
+                rdy_model::Role::Reader,
+            )?;
+            let out = env.cwd.join(out);
+            let f = rdy_engine::sync_dump::fetch_dump_url(&session, url, dump, &out, &user_file)?;
+            serde_json::to_value(&f).expect("a reply serializes")
+        }
+        _ => call(env, "pull", args)?,
+    };
+    let t = format!(
+        "fetched hub dump to {} ({} bytes): dump format {}, {} dump\nrepo id: {}\ndigest: {}\nnext: {}",
+        text(&v["out"]),
+        num(&v["bytes"]),
+        num(&v["dump_format"]),
+        text(&v["kind"]),
+        text(&v["repo_id"]),
+        text(&v["digest"]),
+        text(&v["next"])
+    );
+    Ok((v, t))
+}
+
 /// `rdy pull`: the `pull` op's reply and its text.
 pub(crate) fn pull(env: &Env, a: PullArgs, as_json: bool) -> Result<(Value, String), ErrorReply> {
+    if a.dump.is_some() || a.out.is_some() || a.url.is_some() {
+        return pull_dump(env, &a);
+    }
     let v = run_op(
         &mut |args| call(env, "pull", args),
         pull_request(&a),

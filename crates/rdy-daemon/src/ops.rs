@@ -701,13 +701,18 @@ pub fn dispatch_with(
             )?;
             sync::push(cx.engine, &cx.engine.root(), &sync_who(cx), inputs)
         }
+        // a dump fetch (D-7CDEQ) checks the keys it was given first: a false bool counts
         "pull" => {
+            if let Some(keys) = args.as_object() {
+                let given: Vec<&str> = keys.keys().map(String::as_str).collect();
+                rdy_mcp::tools::check_dump_inputs(&given)?;
+            }
             let inputs = parse(
                 op,
                 args,
-                "{remote?, views?, take?, strict?, card_hash?, answer?, relayed_by?, evidence?, question?, session_ref?}",
+                "{remote?, views?, take?, strict?, dump?, out?, url?, card_hash?, answer?, relayed_by?, evidence?, question?, session_ref?}",
             )?;
-            sync::pull(cx.engine, &cx.engine.root(), &sync_who(cx), inputs)
+            sync::pull(cx.engine, &cx.engine.root(), cx.cwd, &sync_who(cx), inputs)
         }
         // a restore reads only the dump and its temporary store: the project gives the remote
         "restore" => {

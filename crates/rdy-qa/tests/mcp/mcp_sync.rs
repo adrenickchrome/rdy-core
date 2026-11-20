@@ -219,7 +219,6 @@ fn scc9_sync_inputs_refuse_unknown_keys_with_suggestions() {
         ("rdy_push", json!({"forse": true}), "forse", "force"),
         ("rdy_pull", json!({"tkae": true}), "tkae", "take"),
         ("rdy_pull", json!({"strcit": true}), "strcit", "strict"),
-        ("rdy_pull", json!({"dump": "x"}), "dump", ""),
     ] {
         let e = mcp_err(&mut c, tool, args);
         assert_eq!(e["code"], "E_BAD_INPUT");
@@ -1045,4 +1044,171 @@ fn scc8_held_lookup_refusal_warns_and_the_pull_goes_on() {
     assert_eq!(v["canon"]["status"], "held_open", "{v}");
     assert_eq!(v["canon"]["request"], 4, "{v}");
     assert_eq!(writes(&k).len(), before);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The fetch of a hub dump (D-7CDEQ)
+// ---------------------------------------------------------------------------------------------
+
+const DUMP_ID: &str = "dmp_01J9";
+const DUMP_NEXT: &str = "rdy push --restore <file>, or rdy load <file> <dir> for a copy";
+
+/// A kit whose hub serves a dump of the kit's own project as [`DUMP_ID`], with the project's
+/// repo id in its state step; and that dump's `rdy dump` reply.
+fn dump_kit() -> (Kit, Value) {
+    let k = kit(&["a", "b"]);
+    let src = k.proj.path().join("src.rdydump");
+    let made = cli_ok(&k, &["dump", "--out", src.to_str().unwrap()]);
+    k.hub.dump(DUMP_ID, std::fs::read(&src).unwrap());
+    std::fs::remove_file(&src).unwrap();
+    // the daemon holds the store: the repo id comes from the dump's reply
+    k.hub
+        .set_canon(None, made["repo_id"].as_str().map(str::to_string));
+    (k, made)
+}
+
+/// scc9: `rdy_pull {dump, out, remote?, url?}` is closed. With `dump`, every other pull input is
+/// refused, a false bool, an empty list and each relay field included; `out` or `url` without
+/// `dump`, `dump` without `out`, and `remote` with `url` get D-7CDEQ's exact words; an id of 0 or
+/// 257 bytes, or with a byte outside printable ASCII, is refused; an unknown key keeps the
+/// present suggestion. Nothing reaches the hub.
+#[test]
+fn scc9_dump_inputs_and_cli_refusals_are_exact() {
+    let (k, _) = dump_kit();
+    let url = hub_url(&k);
+    let mut c = chat(&k, Some("reader"));
+    let only = (
+        "a dump fetch takes only out and remote or url",
+        "run the dump fetch on its own",
+    );
+    let base = json!({"dump": DUMP_ID, "out": "f.rdydump"});
+    let with = |k: &str, v: Value| {
+        let mut a = base.clone();
+        a[k] = v;
+        a
+    };
+    let mut cases = vec![
+        (
+            json!({"out": "f"}),
+            ("out goes only with dump", "add --dump <id>, or remove out"),
+        ),
+        (
+            json!({"url": url}),
+            ("url goes only with dump", "add --dump <id>, or remove url"),
+        ),
+        (
+            json!({"dump": DUMP_ID}),
+            ("a dump fetch needs out", "add --out <file>"),
+        ),
+        (
+            with("url", json!(url))
+                .as_object()
+                .cloned()
+                .map(|mut m| {
+                    m.insert("remote".into(), json!("origin"));
+                    Value::Object(m)
+                })
+                .unwrap(),
+            ("name remote or url, not both", "keep one of them"),
+        ),
+    ];
+    for (key, v) in [
+        ("take", json!(false)),
+        ("strict", json!(false)),
+        ("views", json!([])),
+        ("card_hash", json!("x")),
+        ("answer", json!("confirm")),
+        ("evidence", json!("yes")),
+        ("question", json!("q")),
+        ("session_ref", json!("s")),
+    ] {
+        cases.push((with(key, v), only));
+    }
+    let id = (
+        "the dump id is not 1 to 256 bytes of printable ASCII",
+        "pass the id that the hub's dump job gave",
+    );
+    for bad in [
+        String::new(),
+        "x".repeat(257),
+        "d\u{e9}".into(),
+        "a\nb".into(),
+    ] {
+        cases.push((with("dump", json!(bad)), id));
+    }
+    for (args, (message, fix)) in cases {
+        let e = mcp_err(&mut c, "rdy_pull", args.clone());
+        assert_eq!(
+            (&e["code"], &e["message"], &e["fix"]),
+            (&json!("E_BAD_INPUT"), &json!(message), &json!(fix)),
+            "{args}"
+        );
+    }
+    let e = mcp_err(&mut c, "rdy_pull", with("dumps", json!("x")));
+    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+    assert!(e.to_string().contains("dump"), "a suggestion: {e}");
+    assert!(k.hub.requests().is_empty(), "no refusal reaches the hub");
+    // 1 and 256 bytes pass the checks: the hub refuses ids it never made
+    for id in ["x".to_string(), "x".repeat(256)] {
+        let e = mcp_err(&mut c, "rdy_pull", with("dump", json!(id)));
+        assert_eq!(e["code"], "E_HUB_NOT_FOUND", "{e}");
+    }
+}
+
+/// scc9: a reader session fetches by the default remote and by `url`: the fetch needs no project
+/// role, runs discovery, state and dump with the machine's sign-in, and moves no store or sync
+/// state. An ordinary pull still needs the writer role.
+#[test]
+fn scc9_dump_remote_and_url_use_sign_in_without_project_role() {
+    let (k, made) = dump_kit();
+    let mut c = chat(&k, Some("reader"));
+    let before = cli_ok(&k, &["status"]);
+    for (out, extra) in [
+        ("r.rdydump", json!({})),
+        ("u.rdydump", json!({"url": hub_url(&k)})),
+    ] {
+        let mut args = json!({"dump": DUMP_ID, "out": out});
+        if let Some(u) = extra.get("url") {
+            args["url"] = u.clone();
+        }
+        let n = k.hub.requests().len();
+        let v = mcp_ok(&mut c, "rdy_pull", args);
+        assert_eq!(v["digest"], made["digest"], "{v}");
+        assert_eq!(k.hub.routes()[n..], ["discovery", "state", "dump"]);
+        assert!(k.proj.path().join(out).is_file());
+        for r in &k.hub.requests()[n..] {
+            assert!(
+                r.headers
+                    .iter()
+                    .any(|(h, v)| h == "authorization" && v == &format!("Bearer {ACCESS}")),
+                "the machine's sign-in"
+            );
+        }
+    }
+    assert_eq!(before["sync"], cli_ok(&k, &["status"])["sync"]);
+    let e = mcp_err(&mut c, "rdy_pull", json!({}));
+    assert_eq!(e["code"], "E_PERMISSION", "{e}");
+}
+
+/// scc9: the chat reply names the checked file as `rdy dump` names it (size, dump format, kind,
+/// repo id, trailer digest), the file under the project root, and the next step exactly.
+#[test]
+fn scc9_dump_reply_names_checked_file_and_next() {
+    let (k, made) = dump_kit();
+    let mut c = writer(&k);
+    let v = mcp_ok(
+        &mut c,
+        "rdy_pull",
+        json!({"dump": DUMP_ID, "out": "fetched.rdydump"}),
+    );
+    for m in ["bytes", "dump_format", "kind", "repo_id", "digest"] {
+        assert_eq!(v[m], made[m], "{m}: {v}");
+    }
+    let out = k.proj.path().join("fetched.rdydump");
+    assert_eq!(v["out"], out.display().to_string());
+    assert_eq!(v["next"], DUMP_NEXT);
+    assert_eq!(
+        std::fs::metadata(&out).unwrap().len(),
+        made["bytes"].as_u64().unwrap()
+    );
 }

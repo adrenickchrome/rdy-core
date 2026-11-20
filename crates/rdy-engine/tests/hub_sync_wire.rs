@@ -1,7 +1,8 @@
 //! scc8 (D-H0BZN, D-N8PR2, D-4XHPH): the sync wire's steps against rdyhub's frozen wire
 //! fixtures. Fixture v1 covers discovery, state (the publish-upload form, no views), known (push
 //! form) and put; fixture v2 adds state with named views, known's pull form, get, write and the
-//! outcome lookup; fixture v3a adds the held write reply and the held outcomes. Every test drives the real HTTPS wire against loopback TLS fixtures with
+//! outcome lookup; fixture v3a adds the held write reply and the held outcomes; fixture v5 adds
+//! the dump step (D-7CDEQ) and the restore's writes. Every test drives the real HTTPS wire against loopback TLS fixtures with
 //! generated CAs; the exchange-level pins run the sync service over the fake hub of
 //! `support/sync_env.rs`. Each fixture is a byte copy of the hub's file; its SHA-256 is pinned.
 mod common;
@@ -19,9 +20,10 @@ use rdy_engine::hub_publish_wire::{
 };
 use rdy_engine::hub_sync::{PullRequest, check_minimum};
 use rdy_engine::hub_sync_wire::{
-    GateSettings, GetRequest, HttpSyncWire, HubRequest, KnownPull, LookupOutcome, MAX_STATE_VIEWS,
-    PackReason, ProposeGate, SETTINGS_MEMBERS, SyncStateRequest, SyncWire, WRITE_REQUEST_BYTES,
-    WriteFailure, WriteKind, WriteOutcome, WriteRequest as SyncWrite, WriteTag, decode_settings,
+    DumpRequest, GateSettings, GetRequest, HttpSyncWire, HubRequest, KnownPull, LookupOutcome,
+    MAX_STATE_VIEWS, PackReason, ProposeGate, SETTINGS_MEMBERS, SyncStateRequest, SyncWire,
+    WRITE_REQUEST_BYTES, WriteFailure, WriteKind, WriteOutcome, WriteRequest as SyncWrite,
+    WriteTag, decode_settings,
 };
 use rdy_engine::hub_types::{Origin, OriginFence, RequestClaim, Secret};
 use rdy_engine::render_inputs::RenderInputs;
@@ -48,6 +50,8 @@ const FIXTURE_V2_SHA256: &str = "15a6c243840c2fa58428a2b6d821d87c57466a14de70a42
 /// rdyhub's fixture v3a (972e7867): the held write reply and the held outcomes.
 const FIXTURE_V3A: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v3a.json");
 const FIXTURE_V3A_SHA256: &str = "4fce80edaadbab7df7dc82c2346d82ab413af223c2df74100f89d5bbb9ebe565";
+const FIXTURE_V5: &[u8] = include_bytes!("../../rdy-qa/fixtures/sync/sync-client-wire-v5.json");
+const FIXTURE_V5_SHA256: &str = "304f53c1f29be0d5228c62763d1a208cc1b2a3f82f6435c6af3edf44a6c75df7";
 const PUSH: &str = "0123456789abcdefghjkmnpqrs";
 const REPO_PATH: &str = "/acme/docs";
 
@@ -2069,7 +2073,8 @@ fn scc8_state_canon_reads_object_key_and_hex_forms() {
 /// and reads `held` with the request and the unchanged hub tip. Steps 1 and 2, the outcome of a
 /// held push (i-6YB7Y): `held` with its request, kind and tip, and `request_state` `open` or
 /// `closed`. Each decoded outcome then drives a pull over the fake hub: `open` keeps `held`,
-/// `closed` (the request closed with no landing) clears it. The dump step stays not served.
+/// `closed` (the request closed with no landing) clears it. Fixture v3a lists the dump step as
+/// not served; fixture v5 serves it (scc8_wire_fixture_v5_dump_and_restore).
 #[test]
 fn scc8_wire_fixture_v3a_held_write_and_outcome() {
     assert_eq!(sha256(FIXTURE_V3A), FIXTURE_V3A_SHA256);
@@ -2172,4 +2177,394 @@ fn scc8_wire_fixture_v3a_held_write_and_outcome() {
         let want = (state == "open").then_some(held);
         assert_eq!((c.applied, c.held), (Some(tip), want), "{state}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fixture v5: the dump step (D-7CDEQ) and the restore's writes (D-J3YA0)
+// ---------------------------------------------------------------------------------------------
+
+/// The dump id the tests send in place of the fixture's `<dump>`: printable ASCII the client
+/// never parses.
+const DUMP_ID: &str = "dmp_01J9 x/y?z=1";
+
+fn fixture_v5() -> Value {
+    serde_json::from_slice(FIXTURE_V5).unwrap()
+}
+
+/// The fixture's request `s` with its `<dump>` in path and body as `id`.
+fn with_dump(s: &Value, id: &str) -> Value {
+    serde_json::from_str(&s.to_string().replace("<dump>", id)).unwrap()
+}
+
+/// A binary reply of `body`, as the dump step's success.
+fn binary(body: &[u8]) -> Reply {
+    Reply::with_headers(
+        200,
+        &[
+            "content-type: application/octet-stream".into(),
+            format!("content-length: {}", body.len()),
+            "connection: close".into(),
+        ],
+        body,
+    )
+}
+
+/// The client's write of the fixture's restore or view write body `b`: every member as given.
+fn restore_write_of(b: &Value) -> SyncWrite {
+    assert!(b["gate"].is_null() && b["render_inputs"].is_null(), "{b}");
+    SyncWrite {
+        expected: (!b["expected"].is_null()).then(|| key_of(&b["expected"])),
+        gate: None,
+        kind: match b["kind"].as_str().unwrap() {
+            "restore" => WriteKind::Restore,
+            "view" => WriteKind::View,
+            other => panic!("{other}"),
+        },
+        push: b["push"].as_str().unwrap().into(),
+        render_inputs: None,
+        tags: b["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| WriteTag {
+                name: t["name"].as_str().unwrap().into(),
+                disagreements: vec![],
+            })
+            .collect(),
+        view: b["view"].as_str().map(str::to_string),
+    }
+}
+
+/// Fixture v5 (rdyhub b5ccd503; D-7CDEQ, D-H0BZN, D-J3YA0): the dump of a hub repo and the
+/// restore from a dump, with nothing left not served. The dump step: the state step first (its
+/// additive members ignored, D-N8PR2), then `POST <base>/dump` with the id as given and the sync
+/// headers; the binary body streams to the sink whole; another account's dump is the hub's
+/// `E_HUB_NOT_FOUND`. The hub operations `dumps.create` and `dumps.show` are the hub's API, which
+/// the client does not call. The restore's steps: each put and write body is the client's
+/// encoding of the fixture's, member for member (a restore and its view writes send no gate and
+/// no render inputs), each reply decodes, and the refusals keep the hub's words, request id and
+/// wait.
+#[test]
+fn scc8_wire_fixture_v5_dump_and_restore() {
+    assert_eq!(sha256(FIXTURE_V5), FIXTURE_V5_SHA256);
+    let f = fixture_v5();
+    assert_eq!(f["fixture"], "sync-client-wire");
+    assert_eq!(f["version"], 5);
+    assert_eq!(f["media_type"], SYNC_MEDIA_TYPE);
+    assert_eq!(
+        f["not_served"],
+        json!([]),
+        "v5 serves every case v4 left out"
+    );
+    let st: Vec<Value> = f["steps"].as_array().unwrap().clone();
+    let named: Vec<&str> = st.iter().map(|s| s["step"].as_str().unwrap()).collect();
+    assert_eq!(
+        named,
+        [
+            "state",
+            "dumps.create",
+            "dumps.show",
+            "dump",
+            "dump",
+            "put",
+            "write",
+            "write",
+            "outcome",
+            "write",
+            "write",
+            "write",
+            "put",
+            "write"
+        ]
+    );
+    // the hub's API steps: no sync path, so no client step sends them
+    for i in [1, 2] {
+        assert!(
+            st[i]["request"]["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("/api/v1/")
+        );
+    }
+
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+
+    // 0: state, the client's request; the reply's members beyond the client's are ignored
+    let plain = SyncStateRequest::new(&cx.claim);
+    let (r, req) = served(&mut s, reply_of(&st[0]), || hub.wire.state(&cx, &plain));
+    matches_request(&req, &st[0]);
+    let state = r.unwrap();
+    let rep = &st[0]["reply"]["body"];
+    assert_eq!(state.canon, Some(key_of(&rep["canon"]).hash));
+    assert_eq!(
+        state.repo_id.map(|r| r.to_string()).as_deref(),
+        rep["repo_id"].as_str()
+    );
+    assert_eq!(state.min_rdy.as_deref(), Some("0.53.0"));
+    check_minimum(&state, "acme/docs").unwrap();
+
+    // 3: the dump step; the id is sent as given, the body streams to the sink
+    let d = with_dump(&st[3], DUMP_ID);
+    let len = d["reply"]["body"]["bytes"].as_u64().unwrap();
+    let body: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+    let request = DumpRequest {
+        dump: DUMP_ID.into(),
+    };
+    let mut sink = Vec::new();
+    let (r, req) = served(&mut s, binary(&body), || {
+        hub.wire.dump(&cx, &request, &mut sink, u64::MAX)
+    });
+    assert_eq!(req.method, "POST");
+    assert_eq!(req.target, "/sync/acme/docs/dump");
+    for (name, value) in d["request"]["headers"].as_object().unwrap() {
+        let value = value.as_str().unwrap().replace("<token>", ACCESS);
+        assert_eq!(req.header(name), Some(value.as_str()), "{name}");
+    }
+    assert_eq!(
+        serde_json::from_slice::<Value>(&req.body).unwrap(),
+        d["request"]["body"]
+    );
+    assert_eq!(r.unwrap(), len);
+    assert_eq!(sink, body);
+    assert_eq!(d["reply"]["content_type"], "application/octet-stream");
+
+    // 4: another account's dump is the hub's E_HUB_NOT_FOUND, with its words and request id
+    let refusal = with_dump(&st[4], DUMP_ID);
+    let mut sink = Vec::new();
+    let (r, _) = served(&mut s, reply_of(&refusal), || {
+        hub.wire.dump(&cx, &request, &mut sink, u64::MAX)
+    });
+    matches_refusal(&err(r), &refusal);
+    assert!(sink.is_empty());
+
+    // 5, 12: a restore's batch put under its push id; 12 is the hub's refusal of another project
+    let put = &st[5];
+    let p = put["request"]["path"].as_str().unwrap();
+    let push = p.rsplit_once("push=").unwrap().1;
+    let len = put["request"]["body"]["bytes"].as_u64().unwrap();
+    let batch = vec![0u8; len as usize];
+    let (r, req) = served(&mut s, reply_of(put), || {
+        hub.wire.put(&cx, push, &mut &batch[..], len)
+    });
+    assert_eq!(req.target, p.replace("/acme/empty/", "/acme/docs/"));
+    let rep = &put["reply"]["body"];
+    assert_eq!(
+        r.unwrap(),
+        ObjectPut {
+            records: rep["records"].as_u64().unwrap(),
+            bytes: rep["bytes"].as_u64().unwrap()
+        }
+    );
+    let other = &st[12];
+    let p = other["request"]["path"].as_str().unwrap();
+    let push = p.rsplit_once("push=").unwrap().1;
+    let len = other["request"]["body"]["bytes"].as_u64().unwrap();
+    let (r, _) = served(&mut s, reply_of(other), || {
+        hub.wire
+            .put(&cx, push, &mut &vec![0u8; len as usize][..], len)
+    });
+    matches_refusal(&err(r), other);
+
+    // 6, 7, 9, 10, 11: the restore's writes and its view writes, taken
+    for i in [6, 7, 9, 10, 11] {
+        let w = &st[i];
+        let b = &w["request"]["body"];
+        let (r, req) = served(&mut s, reply_of(w), || {
+            hub.wire.write(&cx, &restore_write_of(b))
+        });
+        for (name, value) in w["request"]["headers"].as_object().unwrap() {
+            let value = value.as_str().unwrap().replace("<token>", ACCESS);
+            assert_eq!(req.header(name), Some(value.as_str()), "step {i}: {name}");
+        }
+        assert_eq!(
+            serde_json::from_slice::<Value>(&req.body).unwrap(),
+            *b,
+            "step {i}"
+        );
+        let rep = &w["reply"]["body"];
+        let got = r.unwrap();
+        assert_eq!(
+            (got.outcome, got.tip, got.request, got.min_rdy_raised),
+            (
+                WriteOutcome::Taken,
+                Some(key_of(&rep["tip"])),
+                None,
+                rep["min_rdy_raised"].as_bool().unwrap()
+            ),
+            "step {i}"
+        );
+    }
+    // 8: the outcome of the restore into content: taken, of the kind restore
+    let o = &st[8];
+    let push = o["request"]["body"]["push"].as_str().unwrap();
+    let (r, req) = served(&mut s, reply_of(o), || hub.wire.outcome(&cx, push));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&req.body).unwrap(),
+        o["request"]["body"]
+    );
+    let got = r.unwrap();
+    assert_eq!(
+        got.outcome,
+        LookupOutcome::Taken {
+            tip: key_of(&o["reply"]["body"]["tip"])
+        }
+    );
+    assert_eq!(got.kind.as_deref(), Some("restore"));
+    // 13: a restore while the install is read-only: the hub's words, request id and wait
+    let w = &st[13];
+    let e = refused(
+        served(&mut s, reply_of(w), || {
+            hub.wire
+                .write(&cx, &restore_write_of(&w["request"]["body"]))
+        })
+        .0,
+    );
+    matches_refusal(&e, w);
+    assert_eq!(s.finish(), 0);
+}
+
+/// scc8 (D-7CDEQ): the dump fetch runs discovery and the state step first, then the dump step
+/// with the id unchanged, on the machine's sign-in (the sync service's credential, never a
+/// token of the call), and places the checked file. Over the real wire, a dump step whose sync
+/// base is outside the origin fence never connects.
+#[test]
+fn scc8_dump_fixture_runs_state_before_dump() {
+    let e = fake_env(2);
+    let (dir, file) = dump_file(&e, "project.rdydump");
+    let bytes = std::fs::read(&file).unwrap();
+    let fake = sync_env::Hub::new().with_state(|x| x.repo_id = Some(sync_env::repo_of(&e)));
+    fake.dumps
+        .lock()
+        .unwrap()
+        .insert(DUMP_ID.into(), bytes.clone());
+    let out = dir.path().join("fetched.rdydump");
+    let sync = sync_env::Sync::new(&e, &fake);
+    let reader = Session::agent("agent:reader".into(), Some("run-r".into()), Role::Reader).unwrap();
+    let got = sync
+        .service()
+        .fetch_dump(&e.engine, &reader, None, DUMP_ID, &out)
+        .unwrap();
+    assert_eq!(fake.steps(), ["discovery", "state", "dump"]);
+    assert_eq!(*fake.dump_ids.lock().unwrap(), [DUMP_ID]);
+    assert!(fake.calls().iter().all(|c| c.bearer == sync_env::access()));
+    assert_eq!(std::fs::read(&out).unwrap(), bytes);
+    assert_eq!(got.bytes, bytes.len() as u64);
+    assert_eq!(got.repo_id, sync_env::repo_of(&e));
+    assert_eq!(got.out, out.display().to_string());
+
+    // the real wire: a sync base outside the fence is refused before any connection
+    let a = Server::start();
+    let other = Server::start();
+    let hub = Hub::new(&a, &[], &[&other]);
+    let cx = hub.cx_with(Some(format!("{}/sync{REPO_PATH}", other.origin())));
+    let request = DumpRequest {
+        dump: DUMP_ID.into(),
+    };
+    let e = err(unsent(&[&a, &other], || {
+        hub.wire.dump(&cx, &request, &mut Vec::new(), u64::MAX)
+    }));
+    assert_eq!(e.code, E_UPSTREAM_ORIGIN);
+    // an id outside 1 to 256 printable ASCII bytes never leaves
+    let cx = hub.cx();
+    for bad in [
+        String::new(),
+        "x".repeat(257),
+        "tab\there".into(),
+        "é".into(),
+    ] {
+        let request = DumpRequest { dump: bad };
+        let e = err(unsent(&[&a], || {
+            hub.wire.dump(&cx, &request, &mut Vec::new(), u64::MAX)
+        }));
+        assert_eq!(e.code, E_BAD_INPUT);
+    }
+}
+
+/// scc8 (D-7CDEQ, D-4XHPH): a hub `min_rdy` above this rdy, and a remote whose hub repo holds
+/// another project, stop after the state step: no dump step is sent and no file or partial file
+/// is made.
+#[test]
+fn scc8_dump_minimum_and_remote_repo_checks_precede_body() {
+    let e = fake_env(1);
+    let (dir, file) = dump_file(&e, "project.rdydump");
+    let bytes = std::fs::read(&file).unwrap();
+    let out = dir.path().join("fetched.rdydump");
+    let other_repo = sync_env::repo_of(&fake_env(1));
+    for (hub, code) in [
+        (
+            sync_env::Hub::new().with_state(|x| {
+                x.repo_id = Some(sync_env::repo_of(&e));
+                x.min_rdy = Some("999.0.0".into());
+            }),
+            E_STORE_FORMAT,
+        ),
+        (
+            sync_env::Hub::new().with_state(|x| x.repo_id = Some(other_repo)),
+            "E_REPO_MISMATCH",
+        ),
+    ] {
+        hub.dumps
+            .lock()
+            .unwrap()
+            .insert(DUMP_ID.into(), bytes.clone());
+        let sync = sync_env::Sync::new(&e, &hub);
+        let r = sync
+            .service()
+            .fetch_dump(&e.engine, &sync_env::agent(), None, DUMP_ID, &out);
+        assert_eq!(err(r).code, code);
+        assert_eq!(hub.steps(), ["discovery", "state"], "{code}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "{code}");
+    }
+}
+
+/// scc8 (D-47HVF, D-7CDEQ): the hub's refusal of a dump that does not exist, that is not ready or
+/// that another account started is the same `E_HUB_NOT_FOUND` (fixture v5), mapped as publish
+/// maps it with the hub's words and request id; the fetch then places nothing and leaves no
+/// partial file.
+#[test]
+fn scc8_dump_hub_refusals_keep_mapping() {
+    let f = fixture_v5();
+    let refusal = with_dump(&f["steps"][4], DUMP_ID);
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let request = DumpRequest {
+        dump: DUMP_ID.into(),
+    };
+    for case in ["missing", "not ready", "another account's"] {
+        let (r, _) = served(&mut s, reply_of(&refusal), || {
+            hub.wire.dump(&cx, &request, &mut Vec::new(), u64::MAX)
+        });
+        let e = err(r);
+        assert_eq!(e.code, "E_HUB_NOT_FOUND", "{case}");
+        matches_refusal(&e, &refusal);
+    }
+    assert_eq!(s.finish(), 0);
+
+    // through the service: the refusal passes as given, and nothing is placed
+    let e = fake_env(1);
+    let dir = sync_env::private_dir();
+    let out = dir.path().join("fetched.rdydump");
+    let fake = sync_env::Hub::new().with_state(|x| x.repo_id = Some(sync_env::repo_of(&e)));
+    let sync = sync_env::Sync::new(&e, &fake);
+    let r = sync
+        .service()
+        .fetch_dump(&e.engine, &sync_env::agent(), None, DUMP_ID, &out);
+    let got = err(r);
+    let want = sync_env::dump_not_found(DUMP_ID);
+    assert_eq!(
+        (&got.code, &got.message, &got.fix),
+        (&want.code, &want.message, &want.fix)
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+/// A full dump of `e`'s project in a new private directory.
+fn dump_file(e: &sync_env::Env, name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = sync_env::private_dir();
+    let file = dir.path().join(name);
+    e.engine.read().dump(&file).unwrap();
+    (dir, file)
 }

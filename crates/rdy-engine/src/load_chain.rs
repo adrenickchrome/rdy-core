@@ -16,8 +16,9 @@ use crate::error::{
     E_BAD_INPUT, E_IO, RdyError, holder_load_redaction_limit, stopped_load_redaction_limit,
 };
 use crate::load::{
-    LoadSummary, LoadedChainFile, Made, ORIGIN, StoppedAt, check_target_locked, create_store,
-    damaged, holder_files, incomplete, next_step, open_dump, place, read_error, target_error,
+    CheckedDump, LoadSummary, LoadedChainFile, Made, ORIGIN, StoppedAt, check_target_locked,
+    create_store, damaged, holder_files, incomplete, next_step, open_dump, place, read_error,
+    target_error,
 };
 use rdy_model::RepoId;
 use rdy_store::StoreError;
@@ -155,6 +156,57 @@ pub(crate) fn inspect(files: &[PathBuf], stop: Option<&DumpStop>) -> Result<Chai
     Ok(ChainPlan {
         files: files.to_vec(),
         inner: Inner::Chain(Box::new(plan)),
+    })
+}
+
+/// The file-only check of a fetched dump (D-7CDEQ, `crate::load::check_dump`): `file` is read
+/// through its trailer with the checks `rdy load` runs before it writes, and every text names
+/// `name`. Dump format 3 and later take the pre-pass of a one-file chain with no stop: its
+/// envelope and link, the framing of every batch and the removal proofs. A file of dump format 1
+/// or 2 is read item by item to its verified trailer, as the released single-file load reads it.
+/// No directory, store or other file is made.
+pub(crate) fn check_file(file: &Path, name: &Path) -> Result<CheckedDump, RdyError> {
+    let names = [name.to_path_buf()];
+    let bytes = std::fs::metadata(file)
+        .map_err(|e| crate::load::io_at(name, e))?
+        .len();
+    if let Some(format) = released_format(file) {
+        let f = open_dump(file)?;
+        let (mut r, _, _) =
+            DumpReader::open(std::io::BufReader::new(f)).map_err(|e| read_error(name, e))?;
+        while r.next().map_err(|e| read_error(name, e))?.is_some() {}
+        let digest = r
+            .trailer()
+            .map(|t| t.digest)
+            .ok_or_else(|| incomplete("it ends before its trailer".to_string()))?;
+        return Ok(CheckedDump {
+            bytes,
+            dump_format: format,
+            kind: DumpKind::Full,
+            repo_id: None,
+            digest,
+        });
+    }
+    let files = [file.to_path_buf()];
+    let mut src = ChainSource::open(&files).map_err(|e| scan_error(&names, e))?;
+    let empty = src.envelopes().iter().all(|e| e.trailer.batches == 0);
+    let plan = scan(&mut src, None).map_err(|e| match e {
+        ScanError::Input {
+            source: StoreError::Dump { ref what, .. },
+            ..
+        } if empty && what == METADATA_MISMATCH => incomplete("it holds no batches".to_string()),
+        e => scan_error(&names, e),
+    })?;
+    if plan.mode() == StoreMode::Holder && plan.files().iter().any(|f| !f.files.is_empty()) {
+        return Err(holder_files());
+    }
+    let e = &plan.envelopes()[0];
+    Ok(CheckedDump {
+        bytes,
+        dump_format: e.format,
+        kind: e.header.chain.map_or(DumpKind::Full, |c| c.kind),
+        repo_id: Some(chain_repo(&plan)),
+        digest: e.trailer.digest,
     })
 }
 

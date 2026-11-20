@@ -20,6 +20,11 @@
 //!   bounds before it is sent. A refusal is the hub's error object; a write that may have reached
 //!   the hub with no decodable reply is uncertain.
 //! - **Outcome.** The outcome of a write by its push id: taken, held, refused or unknown.
+//! - **Dump** (D-7CDEQ, wire fixture v5). `POST <base>/dump` names the id of a dump that the
+//!   hub's dump job made, as it is. The reply is the binary dump file, streamed to the caller's
+//!   sink, never held whole in memory. A refusal is the hub's error object, mapped as publish
+//!   maps it: a dump that does not exist, is not ready or another account started is the hub's
+//!   `E_HUB_NOT_FOUND`.
 use crate::error::{E_BAD_INPUT, E_UPSTREAM_UNCERTAIN, RdyError, actor_unbound, upstream_protocol};
 use crate::formats::formats;
 use crate::hub_http::HttpHubTransport;
@@ -661,6 +666,13 @@ pub fn decode_outcome(body: &[u8], bearer: &Secret) -> Result<OutcomeReply, RdyE
     })
 }
 
+/// The dump step's request (D-7CDEQ, wire fixture v5): the id the hub's dump job gave, sent as
+/// it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DumpRequest {
+    pub dump: String,
+}
+
 /// The sync exchange's wire steps. [`HttpSyncWire`] sends them; tests inject another
 /// implementation.
 pub trait SyncWire: Send + Sync {
@@ -705,6 +717,18 @@ pub trait SyncWire: Send + Sync {
     /// `POST <base>/settings` with an empty body: the hub repo's settings bundle. A wire with no
     /// settings step refuses with `E_UPSTREAM_PROTOCOL`.
     fn settings(&self, _cx: &UploadContext) -> Result<SettingsBundle, RdyError> {
+        Err(upstream_protocol())
+    }
+    /// `POST <base>/dump` (D-7CDEQ): the dump file streamed to `sink`, at most `limit` bytes, as
+    /// [`SyncWire::get`] streams a batch. Returns its bytes. A wire with no dump step refuses
+    /// with `E_UPSTREAM_PROTOCOL`.
+    fn dump(
+        &self,
+        _cx: &UploadContext,
+        _request: &DumpRequest,
+        _sink: &mut dyn Write,
+        _limit: u64,
+    ) -> Result<u64, RdyError> {
         Err(upstream_protocol())
     }
 }
@@ -887,5 +911,19 @@ impl SyncWire for HttpSyncWire {
     fn settings(&self, cx: &UploadContext) -> Result<SettingsBundle, RdyError> {
         let body = self.read_post(cx, &["settings"], b"{}".to_vec(), KNOWN_REPLY_BYTES)?;
         decode_settings(&body, &cx.bearer)
+    }
+
+    fn dump(
+        &self,
+        cx: &UploadContext,
+        request: &DumpRequest,
+        sink: &mut dyn Write,
+        limit: u64,
+    ) -> Result<u64, RdyError> {
+        crate::sync_dump::check_dump_id(&request.dump)?;
+        let json = encode(request, REPLY_BYTES)?;
+        let url = route(cx, &["dump"], &[])?;
+        self.inner
+            .post_streamed(cx, &url, SYNC_MEDIA_TYPE, json, sink, limit)
     }
 }
