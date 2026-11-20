@@ -4,8 +4,9 @@
 //! captured read snapshots; no daemon and no second writer service. A record or a rule belongs to
 //! core: this crate adds none. Every type its signatures use is re-exported here, so a consumer
 //! depends on this crate alone. No raw `Local`, `Rdy`, `ReadState` or `StoreReader` escapes it.
-//! `rendering` writes a render request for the host's child process and renders one page of a
-//! captured tag; the renderer itself is core's (`rdy-render`). A store upgrade is an explicit
+//! `rendering` writes a render request for the host's child process, of a captured tag or of a
+//! reached landing alone or against a second one (D-CST6K), and renders one page of a captured
+//! tag; the renderer itself is core's (`rdy-render`). A store upgrade is an explicit
 //! call (`maintenance::upgrade`): no open upgrades a store (D-WWAK7). `sync` checks a push into
 //! a holder and makes the hub's canon and view moves; `landing_check` checks a stored landing
 //! with the inputs the hub passes.

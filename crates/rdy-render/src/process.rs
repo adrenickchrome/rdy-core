@@ -9,7 +9,14 @@
 //!
 //! A u32 little-endian length, then that many bytes of compact UTF-8 JSON
 //! `{profile,format,render_inputs}`, then exactly one complete version-1 tag history stream and
-//! the end of the input. `profile` is a full profile id or `implicit:org`
+//! the end of the input: the tag request. A scope request's prelude adds `scope`, and may add
+//! `against`, each `landing:` and the landing's 64 lowercase hex digits (D-CST6K). Then the
+//! stream of `scope` follows as a u64 little-endian length and that many bytes, then with
+//! `against` the stream of `against` in the same form, then the end of the input. Each is one
+//! complete canon history stream rooted at its prelude landing with nothing known, at most
+//! 2,147,483,648 bytes, and is checked whole as a tag stream is ([`RenderSource::read_rooted`]).
+//! Every length and root is checked before the render starts. A request with `against` builds
+//! `site` only. `profile` is a full profile id or `implicit:org`
 //! (`publication::check_stable_selector`: a key is no stable selector); `format` is `site`,
 //! `markdown` or `techdocs`; `render_inputs` is the strict [`RenderInputs`] object. The prelude
 //! is checked whole (at most 8,400,896 bytes, depth 33, 200,010 values, 1,048,576 bytes per
@@ -26,13 +33,17 @@
 //! 32, 1,000,000 values and 1,048,576 bytes per string. A refusal writes no byte; an output
 //! failure may leave a partial packet, which the refusal invalidates.
 //!
-//! `site` builds with [`build_publication`]. `markdown` and `techdocs` build the same
+//! `site` builds with [`build_publication`], or for a request with `against` with
+//! [`build_review_publication`]: the state at `scope` with core's review marks against `against`.
+//! A scope render names no version, and its redacted mark reads the landing's own history.
+//! `markdown` and `techdocs` build the same
 //! preparation into the print and hand its files to [`emit_files`] with the generated header,
 //! laid out plainly or for TechDocs; their manifest has the same schema and recipe and no
 //! notice offset. The process writes no publication record.
 use crate::print::{self, Layout, md::emit_files};
 use crate::{
-    Budget, PublicationArtifact, bad_manifest, build_publication, publication, without_parameters,
+    Budget, PublicationArtifact, bad_manifest, build_publication, build_review_publication,
+    publication, without_parameters,
 };
 use rdy_engine::did_you_mean::unknown_field_error_in;
 use rdy_engine::hub_http::{JsonLimits, check_json};
@@ -42,7 +53,7 @@ use rdy_engine::publication_manifest::{
     allocation_failed, artifact_mismatch, artifact_unreadable, hex_hash, manifest_hash,
 };
 use rdy_engine::render_inputs::{NOT_READABLE, RenderInputs, read_inputs_value, validate_inputs};
-use rdy_engine::render_source::RenderSource;
+use rdy_engine::render_source::{MAX_STREAM_BYTES, RenderSource};
 use rdy_engine::{E_BAD_INPUT, E_IO, E_LIMIT, Materialized, RdyError};
 use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
@@ -97,19 +108,26 @@ pub struct ProcessSummary {
     pub manifest_hash: Hash,
 }
 
-/// The prelude as it is written: its keys in this order.
+/// The prelude as it is written: its keys in this order. A tag request writes no `scope` and no
+/// `against`.
 #[derive(Serialize)]
 struct PreludeOut<'a> {
     profile: &'a str,
     format: RenderFormat,
     render_inputs: &'a RenderInputs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    against: Option<&'a str>,
 }
 
-/// The prelude as it is read.
+/// The prelude as it is read: a scope request's landings, when it names them.
 struct Prelude {
     profile: String,
     format: RenderFormat,
     render_inputs: RenderInputs,
+    scope: Option<Hash>,
+    against: Option<Hash>,
 }
 
 /// The prelude's own keys, read before its render inputs: the inputs are read whole by
@@ -121,6 +139,8 @@ struct PreludeKeys {
     profile: String,
     format: RenderFormat,
     render_inputs: serde::de::IgnoredAny,
+    scope: Option<String>,
+    against: Option<String>,
 }
 
 /// The output metadata as it is written.
@@ -191,6 +211,52 @@ fn request_failed() -> RdyError {
     )
 }
 
+/// `E_BAD_INPUT`: a prelude that names `against` and no `scope`.
+fn against_without_scope() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "render request names against with no scope",
+        "add scope, or omit against",
+    )
+}
+
+/// `E_BAD_INPUT`: a prelude scope or against `text` that is not `landing:<64 hex digits>`.
+fn not_a_landing(text: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("render request scope {text:?} is not landing:<64 hex digits>"),
+        "name the landing by its full hash",
+    )
+}
+
+/// `E_BAD_INPUT`: stream `n` of a scope request is rooted at `found`, not at its prelude
+/// landing `want`.
+fn wrong_root(n: u8, found: Hash, want: Hash) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("render request stream {n} has root {found}, not {want}"),
+        "write the request with the adapter's scope render request",
+    )
+}
+
+/// `E_BAD_INPUT`: a request with `against` in a format other than `site`.
+fn review_site_only() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "a review render request builds a site only",
+        "use format site, or omit against",
+    )
+}
+
+/// `E_LIMIT`: stream `n` of a scope request declares `len` bytes, over [`MAX_STREAM_BYTES`].
+fn stream_too_long(n: u8, len: u64) -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("render request stream {n} declares {len} bytes, over {MAX_STREAM_BYTES}"),
+        "render a smaller scope",
+    )
+}
+
 /// `E_LIMIT`: an error line over [`MAX_ERROR_BYTES`], which replaces it.
 fn error_too_long() -> RdyError {
     RdyError::new(
@@ -224,12 +290,53 @@ pub fn write_request_prelude<W: Write>(
     inputs: &RenderInputs,
     out: &mut W,
 ) -> Result<(), RdyError> {
+    write_prelude(profile, format, inputs, None, None, out)
+}
+
+/// Writes the prelude of a scope request (D-CST6K) for `profile` in `format` with `inputs` to
+/// `out`: the prelude of [`write_request_prelude`] with `scope` and, when given, `against`, each
+/// `landing:<64 hex digits>`. Everything [`run`] checks of a prelude is checked before any byte
+/// is written: a request with `against` builds `site` only. The caller then writes each stream
+/// with [`write_stream_length`] before it: `scope`'s, then `against`'s.
+pub fn write_scope_request_prelude<W: Write>(
+    profile: &str,
+    format: RenderFormat,
+    inputs: &RenderInputs,
+    scope: &str,
+    against: Option<&str>,
+    out: &mut W,
+) -> Result<(), RdyError> {
+    write_prelude(profile, format, inputs, Some(scope), against, out)
+}
+
+/// Writes the length of stream `n` (1 for `scope`, 2 for `against`) of a scope request to `out`:
+/// `len` as a u64 little-endian. A length over 2,147,483,648 is refused as [`run`] refuses it,
+/// before any byte is written.
+pub fn write_stream_length<W: Write>(n: u8, len: u64, out: &mut W) -> Result<(), RdyError> {
+    if len > MAX_STREAM_BYTES {
+        return Err(stream_too_long(n, len));
+    }
+    out.write_all(&len.to_le_bytes())
+        .map_err(|_| request_failed())
+}
+
+/// [`write_request_prelude`] and [`write_scope_request_prelude`].
+fn write_prelude<W: Write>(
+    profile: &str,
+    format: RenderFormat,
+    inputs: &RenderInputs,
+    scope: Option<&str>,
+    against: Option<&str>,
+    out: &mut W,
+) -> Result<(), RdyError> {
     check_stable_selector(profile)?;
     validate_inputs(inputs)?;
     let json = serde_json::to_vec(&PreludeOut {
         profile,
         format,
         render_inputs: inputs,
+        scope,
+        against,
     })
     .map_err(|_| bad_input())?;
     // what the process would refuse is never sent
@@ -357,22 +464,54 @@ fn parse_prelude(json: &[u8]) -> Result<Prelude, RdyError> {
             }
         })?;
     check_stable_selector(&keys.profile)?;
+    // a scope request's landings, and the format of a review
+    if keys.against.is_some() && keys.scope.is_none() {
+        return Err(against_without_scope());
+    }
+    let landing = |text: &Option<String>| -> Result<Option<Hash>, RdyError> {
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        // a hash parses from exactly 64 lowercase hex digits
+        match text.strip_prefix("landing:").map(str::parse::<Hash>) {
+            Some(Ok(h)) => Ok(Some(h)),
+            _ => Err(not_a_landing(text)),
+        }
+    };
+    let scope = landing(&keys.scope)?;
+    let against = landing(&keys.against)?;
+    if against.is_some() && keys.format != RenderFormat::Site {
+        return Err(review_site_only());
+    }
     Ok(Prelude {
         profile: keys.profile,
         format: keys.format,
         render_inputs,
+        scope,
+        against,
     })
 }
 
 /// The artifact of `prelude` over the stream `input`. The stream is read and checked whole
 /// before the profile resolves; the tag's stored name and its redaction mark are the only
-/// history the output shows.
-fn render(prelude: Prelude, input: impl Read) -> Result<PublicationArtifact, RdyError> {
+/// history the output shows. A scope request reads its streams with [`render_scope`].
+fn render(prelude: Prelude, mut input: impl Read) -> Result<PublicationArtifact, RdyError> {
     let Prelude {
         profile,
         format,
         render_inputs,
+        scope,
+        against,
     } = prelude;
+    if let Some(scope) = scope {
+        return render_scope(
+            &profile,
+            format,
+            render_inputs,
+            (scope, against),
+            &mut input,
+        );
+    }
     let source = RenderSource::read(input, render_inputs)?;
     let m = source.materialized();
     let tag = source.facts().root.name.as_str();
@@ -393,6 +532,83 @@ fn render(prelude: Prelude, input: impl Read) -> Result<PublicationArtifact, Rdy
             Layout::Techdocs,
         ),
     }
+}
+
+/// The artifact of a scope request (D-CST6K) over `input`: the stream of `scope`, then with
+/// `against` the stream of `against`, each read whole and checked, its length and root included,
+/// then the end of the input; only then the render. The state at `scope` builds with no version
+/// label and the landing's own redaction mark: alone, as the tag request builds; with
+/// `against`, as the site with review marks against `against`'s state.
+fn render_scope(
+    profile: &str,
+    format: RenderFormat,
+    inputs: RenderInputs,
+    (scope, against): (Hash, Option<Hash>),
+    input: &mut impl Read,
+) -> Result<PublicationArtifact, RdyError> {
+    let from_inputs = against.map(|_| inputs.clone());
+    let to = read_side(input, 1, scope, inputs)?;
+    let from = match (against, from_inputs) {
+        (Some(landing), Some(inputs)) => Some(read_side(input, 2, landing, inputs)?),
+        _ => None,
+    };
+    // the end of the input, right after the last stream
+    let mut byte = [0u8; 1];
+    loop {
+        match input.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => return Err(bad_input()),
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return Err(input_unreadable()),
+        }
+    }
+    let (m, redacted, inputs) = (to.materialized(), to.tag_redacted(), to.inputs());
+    match (from, format) {
+        (Some(from), RenderFormat::Site) => build_review_publication(
+            &to,
+            m,
+            &from,
+            from.materialized(),
+            redacted,
+            profile,
+            inputs,
+        ),
+        // the prelude refused a review in another format
+        (Some(_), _) => Err(review_site_only()),
+        (None, RenderFormat::Site) => build_publication(&to, m, "", redacted, profile, inputs),
+        (None, RenderFormat::Markdown) => {
+            build_markdown(&to, m, "", redacted, profile, inputs, Layout::Plain)
+        }
+        (None, RenderFormat::Techdocs) => {
+            build_markdown(&to, m, "", redacted, profile, inputs, Layout::Techdocs)
+        }
+    }
+}
+
+/// Stream `n` of a scope request, rooted at `landing`: its u64 little-endian length, bounded
+/// before anything is read, then exactly that many bytes, read and checked whole. A stream
+/// rooted elsewhere, or a length that the input or the stream does not fill, is refused.
+fn read_side(
+    input: &mut impl Read,
+    n: u8,
+    landing: Hash,
+    inputs: RenderInputs,
+) -> Result<RenderSource<rdy_engine::render_source::RootedFacts>, RdyError> {
+    let mut len = [0u8; 8];
+    read_exactly(input, &mut len, bad_input, input_unreadable)?;
+    let len = u64::from_le_bytes(len);
+    if len > MAX_STREAM_BYTES {
+        return Err(stream_too_long(n, len));
+    }
+    let mut frame = input.take(len);
+    let source = RenderSource::read_rooted(&mut frame, inputs, landing, |found| {
+        wrong_root(n, found, landing)
+    })?;
+    // a complete stream that ends before its declared length frames nothing
+    if frame.limit() != 0 {
+        return Err(bad_input());
+    }
+    Ok(source)
 }
 
 /// The Markdown artifact of `selector` in `m`, laid out by `layout`: the profile resolves once

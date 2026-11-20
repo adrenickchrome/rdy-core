@@ -100,6 +100,15 @@ fn without_next(mut v: Value) -> Value {
     v
 }
 
+/// `E_NOT_FOUND`: a full landing hash that D-Y32MN's reach does not find from the captured refs.
+pub(crate) fn unreached(hash: Hash) -> RdyError {
+    RdyError::new(
+        E_NOT_FOUND,
+        format!("landing {hash} is not reached from canon, a tag, a held chain or a replaced mark"),
+        "name a landing this store reaches, or read canon",
+    )
+}
+
 impl Snapshot {
     /// The scope of a full landing hash: `Scope::At` the landing when D-Y32MN's reach finds it
     /// from the captured refs, else `E_NOT_FOUND`. None for every other scope text, which the
@@ -111,13 +120,7 @@ impl Snapshot {
         if self.reached_landing(hash)? {
             return Ok(Some(Scope::At(hash)));
         }
-        Err(RdyError::new(
-            E_NOT_FOUND,
-            format!(
-                "landing {hash} is not reached from canon, a tag, a held chain or a replaced mark"
-            ),
-            "name a landing this store reaches, or read canon",
-        ))
+        Err(unreached(hash))
     }
 
     /// The reply `rdy_read` gives for `req` on this snapshot, without `reminder` and `next`.

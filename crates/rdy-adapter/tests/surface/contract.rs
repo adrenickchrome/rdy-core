@@ -354,6 +354,28 @@ fn cra3_adapter_names(snap: &Snapshot, state: &rdy_engine::ReadState, hashes: &[
     );
 }
 
+/// cra5: the render request of a landing and of a review pair (D-CST6K), by its exact names. This
+/// function is never called: it compiles only while each name has the receiver and the arguments
+/// listed.
+#[allow(dead_code)]
+fn cra5_adapter_names(snap: &Snapshot, inputs: &rdy_adapter::rendering::RenderInputs) {
+    use rdy_adapter::rendering::{RenderFormat, ScopeRender, ScopeRenderReport};
+    let target = ScopeRender {
+        scope: String::new(),
+        against: Some(String::new()),
+    };
+    let r: Result<ScopeRenderReport, RdyError> = snap.write_scope_render_request(
+        &target,
+        "implicit:org",
+        inputs,
+        RenderFormat::Site,
+        Vec::<u8>::new(),
+    );
+    if let Ok(ScopeRenderReport { scope, against }) = r {
+        let _: (rdy_adapter::rendering::BatchReport, Option<_>) = (scope, against);
+    }
+}
+
 /// rpl34: the surface runs on an empty project (its reads answer with no rows, never with an
 /// error that names a missing method), its writes enter the store's one writer lane through a
 /// shared handle, and the build's format capabilities name `foreign_copy` with its minimum rdy.

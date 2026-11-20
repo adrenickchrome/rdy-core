@@ -28,6 +28,11 @@
 //!
 //! Then the root's state is materialized (a removed block reads as its approved residue's stub,
 //! with its original version hash) and the tag's redaction marker is read ([`tag_is_redacted`]).
+//!
+//! [`RenderSource::read_rooted`] reads one canon history stream rooted at a landing, with
+//! nothing known, for a scope render request (D-CST6K): its header must name that landing as
+//! its root, the closure is the landing's, step 4 has no name to check, the chain rules hold on
+//! the landing's chain, and the state and the redaction marker are the landing's own.
 //! A removed blob yields its removal request, never stale bytes; a present blob's bytes are read
 //! from the scratch file only when a caller asks for them, checked chunk by chunk.
 use crate::Materialized;
@@ -42,18 +47,23 @@ use crate::stream_error::{Reason, StreamError, to_rdy};
 use crate::version::parse_version;
 use rdy_model::redaction::{RedactionApply, RedactionResidue};
 use rdy_model::signature::Signature;
-use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, StateSnapshot};
+use rdy_model::{
+    Answer, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, RepoId, StateSnapshot,
+};
 use rdy_schema::Pack;
 use rdy_store::check_holder;
+use rdy_store::format::StoreFeatures;
 use rdy_store::kinds::{self, BlobManifest};
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::snapshot::{
     CacheTag, MapCache, RecordSnapshots, check_snapshot_chains, read_landing_snapshot,
 };
 use rdy_store::stream_error::LIMIT_TOTAL_BYTES;
-use rdy_store::stream_source::CheckedStream;
+pub use rdy_store::stream_source::RootedFacts;
+use rdy_store::stream_source::{CheckedStream, RootedError};
 use rdy_store::sync_proof::ObjectSource;
-use rdy_store::sync_stream::{MAX_STREAM_BYTES, StreamRecord};
+pub use rdy_store::sync_stream::MAX_STREAM_BYTES;
+use rdy_store::sync_stream::StreamRecord;
 use rdy_store::take_batch::{UploadFacts, UploadTarget, check_input_bounds};
 use rdy_store::{StoreError, StoreReader};
 use std::cell::RefCell;
@@ -94,22 +104,61 @@ fn scratch_io(e: RdyError) -> RdyError {
     if e.code == E_IO { scratch_error() } else { e }
 }
 
-/// One checked tag history stream, read from its scratch file, with the render inputs the
-/// caller supplied: the tagged state, its redaction marker and the publication reads.
-pub struct RenderSource {
-    stream: CheckedStream<Box<dyn ScratchFile>>,
+/// One checked history stream, read from its scratch file, with the render inputs the caller
+/// supplied: the root's state, its redaction marker and the publication reads. `F` is what the
+/// checks found: a tag history's [`UploadFacts`] ([`RenderSource::read`]), or a canon history's
+/// [`RootedFacts`] ([`RenderSource::read_rooted`]).
+pub struct RenderSource<F = UploadFacts> {
+    stream: CheckedStream<Box<dyn ScratchFile>, F>,
     materialized: Materialized,
     inputs: RenderInputs,
     tag_redacted: bool,
 }
 
-impl std::fmt::Debug for RenderSource {
+impl<F> std::fmt::Debug for RenderSource<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderSource")
-            .field("root", &self.facts().root_hash)
             .field("blocks", &self.materialized.len())
             .field("tag_redacted", &self.tag_redacted)
             .finish_non_exhaustive()
+    }
+}
+
+impl RenderSource<RootedFacts> {
+    /// The canon history stream `input`, rooted at `landing` with nothing known, rendered with
+    /// `inputs`, through one anonymous temporary file: the checks of [`RenderSource::read`],
+    /// with the landing as the root. A stream whose header is not a canon history rooted at
+    /// `landing` is `wrong_root` of the root its header names, before any object record is
+    /// checked. The redaction marker reads the landing's own history.
+    pub fn read_rooted(
+        mut input: impl Read,
+        inputs: RenderInputs,
+        landing: Hash,
+        wrong_root: impl FnOnce(Hash) -> RdyError,
+    ) -> Result<RenderSource<RootedFacts>, RdyError> {
+        validate_inputs(&inputs)?;
+        let mut file: Box<dyn ScratchFile> =
+            Box::new(tempfile::tempfile().map_err(|_| scratch_error())?);
+        copy(&mut input, &mut *file)?;
+        let stream = match CheckedStream::open_rooted(file, landing) {
+            Ok(s) => s,
+            Err(RootedError::Root(found)) => return Err(wrong_root(found.hash)),
+            Err(RootedError::Stream(e)) => return Err(from_stream(e)),
+        };
+        // the take's step 7: a change that keeps removed content readable needs its approval
+        if let Some(h) = stream.uncovered_change() {
+            return Err(crate::stream_take::uncovered_change(h));
+        }
+        // a record read again from the scratch file that fails is the scratch error
+        check_rooted_snapshots(&mut &stream, stream.facts()).map_err(scratch_io)?;
+        let (snapshot, blocks) = stream.materialize_root().map_err(from_stream)?;
+        let tag_redacted = tag_is_redacted(&mut StreamHistory(&stream), landing, &inputs.pack)?;
+        Ok(RenderSource {
+            stream,
+            materialized: Materialized::build(snapshot, blocks),
+            inputs,
+            tag_redacted,
+        })
     }
 }
 
@@ -161,13 +210,16 @@ impl RenderSource {
             tag_redacted,
         })
     }
+}
 
-    /// What the checks found: the repo, the root tag, every key and the relay answers.
-    pub fn facts(&self) -> &UploadFacts {
+impl<F> RenderSource<F> {
+    /// What the checks found: the repo, the root (a tag history's root tag), every key and the
+    /// relay answers.
+    pub fn facts(&self) -> &F {
         self.stream.facts()
     }
 
-    /// The root tag's state: its snapshot and blocks, a removed block as its stub.
+    /// The root's state: its snapshot and blocks, a removed block as its stub.
     pub fn materialized(&self) -> &Materialized {
         &self.materialized
     }
@@ -177,7 +229,7 @@ impl RenderSource {
         &self.inputs
     }
 
-    /// Whether the tag's history holds content an approved removal removed
+    /// Whether the root's history holds content an approved removal removed
     /// ([`tag_is_redacted`] over the stream, with the supplied effective pack).
     pub fn tag_redacted(&self) -> bool {
         self.tag_redacted
@@ -255,7 +307,7 @@ fn copy(input: &mut dyn Read, out: &mut dyn ScratchFile) -> Result<(), RdyError>
     Ok(())
 }
 
-impl PublicationSource for RenderSource {
+impl<F> PublicationSource for RenderSource<F> {
     fn pack(&self) -> &Pack {
         &self.inputs.pack
     }
@@ -416,9 +468,9 @@ pub fn tag_is_redacted(
 }
 
 /// The tag history of one checked stream.
-struct StreamHistory<'a, R: Read + Seek>(&'a CheckedStream<R>);
+struct StreamHistory<'a, R: Read + Seek, F>(&'a CheckedStream<R, F>);
 
-impl<R: Read + Seek> TagHistorySource for StreamHistory<'_, R> {
+impl<R: Read + Seek, F> TagHistorySource for StreamHistory<'_, R, F> {
     fn landing(&mut self, h: Hash) -> Result<LandingRecord, RdyError> {
         let key = ObjectKey {
             kind: kinds::LANDING,
@@ -459,7 +511,7 @@ impl<R: Read + Seek> TagHistorySource for StreamHistory<'_, R> {
     }
 }
 
-impl TagHistorySource for RenderSource {
+impl<F> TagHistorySource for RenderSource<F> {
     fn landing(&mut self, h: Hash) -> Result<LandingRecord, RdyError> {
         StreamHistory(&self.stream).landing(h)
     }
@@ -585,6 +637,53 @@ pub(crate) fn check_snapshots(
     facts: &UploadFacts,
     keep: Option<Hash>,
 ) -> Result<Option<CheckedSnapshot>, RdyError> {
+    let facts = Checks {
+        repo_id: facts.repo_id,
+        objects: &facts.objects,
+        relay_answers: &facts.relay_answers,
+        features: &facts.features,
+        head: facts.root.landing,
+        refname: format!("{}{}", rdy_store::holder::TAG_REF, facts.root.name),
+    };
+    check_all(held, source, &facts, keep)
+}
+
+/// [`check_snapshots`] of a canon history stream rooted at a landing, with nothing held: the
+/// chain rules hold on the root landing's chain, named `landing:<hash>` in their refusals.
+fn check_rooted_snapshots(
+    source: &mut dyn ObjectSource,
+    facts: &RootedFacts,
+) -> Result<(), RdyError> {
+    let facts = Checks {
+        repo_id: facts.repo_id,
+        objects: &facts.objects,
+        relay_answers: &facts.relay_answers,
+        features: &facts.features,
+        head: facts.root.hash,
+        refname: format!("landing:{}", facts.root.hash),
+    };
+    check_all(&NothingHeld, source, &facts, None).map(|_| ())
+}
+
+/// What the structural and snapshot checks read of the records to check: the repo, every key
+/// (sorted), the relay answers, the header's features, and the one chain whose rules hold (its
+/// head landing, and the name its refusals give it).
+struct Checks<'a> {
+    repo_id: RepoId,
+    objects: &'a [ObjectKey],
+    relay_answers: &'a BTreeMap<Hash, Hash>,
+    features: &'a StoreFeatures,
+    head: Hash,
+    refname: String,
+}
+
+/// The checks of [`check_snapshots`], in the take's order.
+fn check_all(
+    held: &dyn Held,
+    source: &mut dyn ObjectSource,
+    facts: &Checks<'_>,
+    keep: Option<Hash>,
+) -> Result<Option<CheckedSnapshot>, RdyError> {
     check_records(held, source, facts)?;
     check_landing_rules(held, source, facts)?;
     check_signatures(held, source, facts)?;
@@ -601,7 +700,7 @@ pub(crate) fn check_snapshots(
 fn check_signatures(
     held: &dyn Held,
     source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
+    facts: &Checks<'_>,
 ) -> Result<(), RdyError> {
     let in_union = |k: &ObjectKey| facts.objects.binary_search(k).is_ok();
     let has = |k: &ObjectKey| -> Result<bool, RdyError> { Ok(in_union(k) || held.holds(k)?) };
@@ -664,7 +763,7 @@ fn check_signatures(
 fn relay_answer(
     held: &dyn Held,
     source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
+    facts: &Checks<'_>,
     tag: &Hash,
 ) -> Result<Option<(Hash, Answer)>, RdyError> {
     let hash = match facts.relay_answers.get(tag) {
@@ -693,7 +792,7 @@ fn relay_answer(
 fn check_records(
     held: &dyn Held,
     source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
+    facts: &Checks<'_>,
 ) -> Result<(), RdyError> {
     let wanted = |k: &&ObjectKey| matches!(k.kind, kinds::BLOCK | kinds::BLOB_MANIFEST);
     for key in facts.objects.iter().filter(wanted) {
@@ -777,7 +876,7 @@ fn check_chunk_lengths(
 fn check_landing_rules(
     held: &dyn Held,
     source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
+    facts: &Checks<'_>,
 ) -> Result<(), RdyError> {
     let in_union = |k: &ObjectKey| facts.objects.binary_search(k).is_ok();
     for key in facts.objects.iter().filter(|k| k.kind == kinds::LANDING) {
@@ -812,12 +911,11 @@ fn check_landing_rules(
         )
         .map_err(|e| e.into_rdy(*key))?;
     }
-    let root = &facts.root;
     let head = ObjectKey {
         kind: kinds::LANDING,
-        hash: root.landing,
+        hash: facts.head,
     };
-    let chain = check_holder::tag_chain_with(&root.landing, &mut |h| {
+    let chain = check_holder::tag_chain_with(&facts.head, &mut |h| {
         let key = ObjectKey {
             kind: kinds::LANDING,
             hash: *h,
@@ -829,8 +927,7 @@ fn check_landing_rules(
         }
     })
     .map_err(|e| e.into_rdy(head))?;
-    let refname = format!("{}{}", rdy_store::holder::TAG_REF, root.name);
-    check_holder::chain_rules(&refname, &chain, &mut |l, c| {
+    check_holder::chain_rules(&facts.refname, &chain, &mut |l, c| {
         let landing = ObjectKey {
             kind: kinds::LANDING,
             hash: *l,
@@ -933,7 +1030,7 @@ fn at_object(e: RdyError, key: ObjectKey) -> RdyError {
 fn check_landings(
     held: &dyn Held,
     source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
+    facts: &Checks<'_>,
     keep: Option<Hash>,
 ) -> Result<Option<CheckedSnapshot>, RdyError> {
     let keep_state = match keep {

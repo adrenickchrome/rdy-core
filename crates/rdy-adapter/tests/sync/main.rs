@@ -6,6 +6,7 @@ mod export_walk_known;
 mod follower_follow;
 mod follower_seed;
 mod hub_contract;
+mod hub_renders;
 mod hub_scopes;
 mod hub_world;
 mod link_export;
