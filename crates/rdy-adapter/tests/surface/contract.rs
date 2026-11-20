@@ -336,6 +336,24 @@ fn cra1_adapter_names(
         rdy_engine::tool_reads::read_entries_at(state, "id", scope, "compact", None);
 }
 
+/// cra3: the place of each landing (D-H1SHC), by its exact names. This function is never called:
+/// it compiles only while each name has the receiver, the arguments and the result listed.
+#[allow(dead_code)]
+fn cra3_adapter_names(snap: &Snapshot, state: &rdy_engine::ReadState, hashes: &[Hash]) {
+    use rdy_adapter::history::{LandingPlace, LandingPlaceFact};
+    let _: Result<Vec<LandingPlaceFact>, RdyError> = snap.landing_places(hashes);
+    let _: Result<Vec<rdy_engine::history_facts::LandingPlaceFact>, RdyError> =
+        rdy_engine::history_facts::places(state, None, hashes, hashes);
+    let fact = LandingPlaceFact {
+        hash: Hash::of(b"x"),
+        place: LandingPlace::InCanon,
+    };
+    let _ = matches!(
+        fact.place,
+        LandingPlace::InCanon | LandingPlace::OffCanon | LandingPlace::NotStored
+    );
+}
+
 /// rpl34: the surface runs on an empty project (its reads answer with no rows, never with an
 /// error that names a missing method), its writes enter the store's one writer lane through a
 /// shared handle, and the build's format capabilities name `foreign_copy` with its minimum rdy.

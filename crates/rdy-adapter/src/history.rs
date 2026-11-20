@@ -16,7 +16,8 @@ use rdy_model::Hash;
 use std::collections::HashMap;
 
 pub use rdy_engine::history_facts::{
-    BlockOp, BlockWrite, DisputeFacts, LandingFacts, ObjectPresence, SignatureFact,
+    BlockOp, BlockWrite, DisputeFacts, LandingFacts, LandingPlace, LandingPlaceFact,
+    ObjectPresence, SignatureFact,
 };
 pub use rdy_model::dispute::{Dispute, DisputeOutcome, DisputeResolution};
 pub use rdy_model::signature::Signature;
@@ -93,6 +94,16 @@ impl Snapshot {
         );
         read.ensure_current_epoch()?;
         Ok(hashes.iter().filter_map(|h| found.remove(h)).collect())
+    }
+
+    /// The place of each landing of `hashes` (D-H1SHC), one per distinct hash, in the order each
+    /// first occurs: `InCanon` when the captured canon's chain holds it, `OffCanon` when D-Y32MN's
+    /// reach from the captured refs finds it off that chain, `NotStored` for any other hash. A
+    /// landing stored after the snapshot was captured reads as the snapshot saw it. The input
+    /// counts before its repeats collapse: at most 100000 hashes, else `E_LIMIT`. A removal since
+    /// the snapshot is `E_REDACTED_STATE`.
+    pub fn landing_places(&self, hashes: &[Hash]) -> Result<Vec<LandingPlaceFact>, RdyError> {
+        history_facts::places(self.read_state(), self.canon(), &self.reach_heads(), hashes)
     }
 
     /// Every dispute of each landing of `landings`, with its resolution (O26): in input order,
