@@ -137,7 +137,7 @@ fn landing_key(hash: Hash) -> ObjectKey {
 
 /// The landings of the history that starts at `start`, newest first: `start`, then each `prev`.
 /// More than [`MAX_LANDINGS`] is `E_LIMIT`; a landing met twice is the dependency-cycle error.
-fn walk(read: &ReadState, start: Hash) -> Result<Vec<Hash>, RdyError> {
+pub(crate) fn walk(read: &ReadState, start: Hash) -> Result<Vec<Hash>, RdyError> {
     let reader = read.reader();
     let mut out = Vec::new();
     let mut seen = HashSet::new();

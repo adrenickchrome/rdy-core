@@ -12,7 +12,11 @@
 //! The landing may be one the store holds, or a captured record whose changes and proposal the
 //! state's reader holds (a store's reader, or a reader over a checked quarantine). It runs the
 //! one readiness implementation ([`crate::readiness::assess`]) on the candidate's state
-//! (`ReadState::candidate_state`); no rule is copied here.
+//! (`ReadState::candidate_state_over`); no rule is copied here.
+//!
+//! [`check_landing_over`] runs the same check on a `prev` state built in memory, with no stored
+//! landing for it (D-2QX9W Gate result: a pull's replay, or a replay test). [`check_landing`] is
+//! that check on the landing's own stored `prev`.
 //!
 //! Who approved, and the signatures, are out of scope.
 
@@ -22,9 +26,12 @@ use crate::error::{E_BAD_INPUT, RdyError};
 use crate::readiness::assessment::{GateConfig, config_digest, pack_digest};
 use crate::readiness::{Candidate, assess};
 use rdy_model::assessment::AssessedPolicy;
-use rdy_model::{Hash, LandingRecord, Proposal};
+use rdy_model::{BlockId, Change, Hash, LandingRecord, Op, Proposal, StateSnapshot};
 use rdy_schema::{Issue, Pack};
+use serde::Serialize;
 use std::cell::Cell;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, OnceLock};
 
 /// What the caller passes (D-0WWYR): the effective pack in full and the gate settings readiness
 /// reads. `require_up_to_date` enters only the config digest that `assessment_matches` compares:
@@ -109,7 +116,7 @@ impl CheckInputs {
 }
 
 /// What [`check_landing`] found.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct LandingCheck {
     /// True exactly when `rows` is empty.
     pub pass: bool,
@@ -123,10 +130,171 @@ pub struct LandingCheck {
     pub assessment_matches: bool,
 }
 
-/// The check of `landing` on `st` (see the module docs). `st`'s reader holds the landing's
-/// changes, its approved version and every record readiness reads.
+/// The `prev` a landing is checked on: its state, and `at`, the last stored landing under it.
+/// For a stored `prev`, `state` is that landing's own state, and its deletes read as of `at`.
+/// A state built in memory (a replay or rebase test's merge onto a stored landing, D-2QX9W)
+/// keeps the stored landing it was built on, and reads its deletes from [`ChainDeletes`].
+#[derive(Clone, Debug)]
+pub struct PrevState {
+    pub at: Option<Hash>,
+    pub state: Arc<StateSnapshot>,
+    /// The deletes of a state built in memory; none for a stored landing's state.
+    pub(crate) deletes: Option<Arc<ChainDeletes>>,
+}
+
+impl PrevState {
+    /// The state of stored landing `at` (the empty state for none).
+    pub fn stored(st: &ReadState, at: Option<Hash>) -> Result<PrevState, RdyError> {
+        Ok(PrevState {
+            at,
+            state: Arc::new(st.reader().state_of(at)?),
+            deletes: None,
+        })
+    }
+}
+
+/// The chain of a stored landing `onto`, each landing with its distance from `onto`, read once.
+#[derive(Debug)]
+pub(crate) struct OntoChain {
+    onto: Option<Hash>,
+    positions: OnceLock<Result<Arc<HashMap<Hash, usize>>, RdyError>>,
+}
+
+impl OntoChain {
+    pub(crate) fn new(onto: Option<Hash>) -> Arc<OntoChain> {
+        Arc::new(OntoChain {
+            onto,
+            positions: OnceLock::new(),
+        })
+    }
+
+    fn positions(&self, st: &ReadState) -> Result<Arc<HashMap<Hash, usize>>, RdyError> {
+        self.positions
+            .get_or_init(|| {
+                let chain = match self.onto {
+                    Some(h) => crate::history_facts::walk(st, h)?,
+                    None => vec![],
+                };
+                Ok(Arc::new(chain.into_iter().zip(0..).collect()))
+            })
+            .clone()
+    }
+}
+
+/// Which change removed a block, as a state built in memory on the stored landing `onto` reads
+/// it (D-2QX9W, D-N0NVF): a landing of the tested chain merged so far that removed it, the
+/// latest first; else a landing of `onto`'s own chain (`StoreReader::deleters_on_chain`). A
+/// landing outside `onto`'s chain, a later landing of the tested chain and current canon's
+/// landed rows never count, so a test reads the deletes that its simulated replay has.
+#[derive(Clone, Debug)]
+pub(crate) struct ChainDeletes {
+    onto: Arc<OntoChain>,
+    /// The change of the tested chain that removed each block, latest landing first.
+    chain: HashMap<BlockId, Hash>,
+}
+
+impl ChainDeletes {
+    /// The deletes of `onto`'s state, before any landing of the tested chain.
+    pub(crate) fn new(onto: Option<Hash>) -> ChainDeletes {
+        ChainDeletes {
+            onto: OntoChain::new(onto),
+            chain: HashMap::new(),
+        }
+    }
+
+    /// These deletes after one landing of the tested chain merged `changes` from state `before`
+    /// to state `after`: each block `before` held and `after` lacks was removed by the smallest
+    /// of `changes` that deletes it, as a landing's deletes are read.
+    pub(crate) fn after(
+        &self,
+        before: &StateSnapshot,
+        after: &StateSnapshot,
+        changes: &[Change],
+    ) -> ChainDeletes {
+        let mut next = self.clone();
+        let mut removed: HashMap<BlockId, Hash> = HashMap::new();
+        for c in changes {
+            let id = c.id();
+            for op in &c.ops {
+                let b = op.block_id();
+                if matches!(op, Op::Delete { .. })
+                    && before.blocks.contains_key(b)
+                    && !after.blocks.contains_key(b)
+                {
+                    let e = removed.entry(b.clone()).or_insert(id);
+                    *e = (*e).min(id);
+                }
+            }
+        }
+        next.chain.extend(removed);
+        next
+    }
+
+    /// The change that removed each of `blocks` that `base` lacks (see the type's docs).
+    pub(crate) fn deleters<'a>(
+        &self,
+        st: &ReadState,
+        base: &StateSnapshot,
+        blocks: impl IntoIterator<Item = &'a BlockId>,
+    ) -> Result<HashMap<BlockId, Hash>, RdyError> {
+        let mut out = HashMap::new();
+        let mut rest: BTreeSet<&BlockId> = BTreeSet::new();
+        for b in blocks {
+            if base.blocks.contains_key(b) {
+                continue;
+            }
+            match self.chain.get(b) {
+                Some(c) => {
+                    out.insert(b.clone(), *c);
+                }
+                None => {
+                    rest.insert(b);
+                }
+            }
+        }
+        let reader = st.reader();
+        if rest.is_empty() || !reader.ever_deleted(rest.iter().copied())? {
+            return Ok(out);
+        }
+        let positions = self.onto.positions(st)?;
+        out.extend(reader.deleters_on_chain(rest.iter().copied(), &positions)?);
+        Ok(out)
+    }
+
+    /// The deletes `deleters` gives for the blocks `changes` write.
+    pub(crate) fn of_changes(
+        &self,
+        st: &ReadState,
+        base: &StateSnapshot,
+        changes: &[Change],
+    ) -> Result<HashMap<BlockId, Hash>, RdyError> {
+        self.deleters(
+            st,
+            base,
+            changes.iter().flat_map(|c| c.ops.iter().map(Op::block_id)),
+        )
+    }
+}
+
+/// The check of `landing` on `st` (see the module docs), on the landing's own stored `prev`.
+/// `st`'s reader holds the landing's changes, its approved version and every record readiness
+/// reads.
 pub fn check_landing(
     st: &ReadState,
+    landing: &LandingRecord,
+    inputs: &CheckInputs,
+) -> Result<LandingCheck, RdyError> {
+    let prev = PrevState::stored(st, landing.prev)?;
+    check_landing_over(st, &prev, landing, inputs)
+}
+
+/// The check of `landing` on the `prev` state `prev`, which may be built in memory (D-2QX9W
+/// Gate result): the candidate is `prev.state` plus the landing's changes, as one view
+/// (`ReadState::candidate_state_over`). The landing's own `prev` is not read. Everything else is
+/// [`check_landing`]'s.
+pub fn check_landing_over(
+    st: &ReadState,
+    prev: &PrevState,
     landing: &LandingRecord,
     inputs: &CheckInputs,
 ) -> Result<LandingCheck, RdyError> {
@@ -135,11 +303,11 @@ pub fn check_landing(
     let pref = crate::gate::version_ref(st, &version)?;
     let stored = st.reader().proposal(&version)?;
     let candidate = Proposal {
-        canon_at: landing.prev,
+        canon_at: prev.at,
         changes: landing.changes.clone(),
         ..stored
     };
-    let cst = st.candidate_state(landing.prev, &candidate.view, &landing.changes, inputs);
+    let cst = st.candidate_state_over(prev, &candidate.view, &landing.changes, inputs)?;
     let gate = inputs.gate_config();
     let c = Candidate::stored(&cst, pref, candidate)?;
     let readiness = assess(&cst, &c, &gate)?.readiness;
@@ -171,11 +339,11 @@ fn stored_assessment(
 }
 
 thread_local! {
-    /// This thread's runs of [`check_landing`].
+    /// This thread's runs of [`check_landing_over`] (every [`check_landing`] runs it once).
     static LANDING_CHECKS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Tests only (as `readiness_calls_for_tests`): this thread's runs of [`check_landing`].
+/// Tests only (as `readiness_calls_for_tests`): this thread's runs of [`check_landing_over`].
 #[doc(hidden)]
 pub fn landing_checks_for_tests() -> u64 {
     LANDING_CHECKS.with(Cell::get)

@@ -12,7 +12,7 @@ use rdy_engine::hub_credentials::require_user_file;
 use rdy_engine::hub_http::HttpHubTransport;
 use rdy_engine::hub_publish::{PublishRequest, PublishService, result_json};
 use rdy_engine::hub_publish_wire::{
-    Candidate, Discovery, FileIdentity, HttpPublishWire, ObjectPut, PublicationInputs,
+    Candidate, Discovery, FileBatch, FileIdentity, HttpPublishWire, ObjectPut, PublicationInputs,
     PublishState, PublishWire, StateRequest, UploadContext,
 };
 use rdy_engine::hub_types::{HubCall, HubFailure, HubReply, HubTransport, Origin, SystemHubClock};
@@ -118,6 +118,15 @@ impl PublishWire for UploadWire<'_> {
         body: &mut dyn Read,
     ) -> Result<FileIdentity, RdyError> {
         self.wire(cx)?.put_file(cx, push, file, media_type, body)
+    }
+
+    fn put_files(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        batch: &mut dyn FileBatch,
+    ) -> Result<Vec<Result<FileIdentity, RdyError>>, RdyError> {
+        self.wire(cx)?.put_files(cx, push, batch)
     }
 
     fn publish(

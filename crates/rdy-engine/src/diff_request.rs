@@ -117,17 +117,26 @@ pub struct LandingShow {
     pub diff: DiffReply,
 }
 
-/// One side of a diff: a scope with its label, or the empty state.
-pub(crate) enum DiffSide {
+/// One side of a diff: the empty state, a scope of the state that diffs it with its label, or a
+/// side read already ([`ReadState::diff_side_of`]), which any state may diff.
+pub enum DiffSide {
     Empty,
-    Scope { scope: Scope, label: ScopeLabel },
+    Scope {
+        scope: Scope,
+        label: ScopeLabel,
+    },
+    Read {
+        label: ScopeLabel,
+        state: Arc<Materialized>,
+        graph: Arc<Graph>,
+    },
 }
 
 impl DiffSide {
     fn label(&self) -> ScopeLabel {
         match self {
             DiffSide::Empty => ScopeLabel::of(LabelKind::Empty),
-            DiffSide::Scope { label, .. } => label.clone(),
+            DiffSide::Scope { label, .. } | DiffSide::Read { label, .. } => label.clone(),
         }
     }
 }
@@ -181,7 +190,24 @@ impl ReadState {
     /// The scope `text` names and its label.
     fn labelled_side(&self, text: &str, own_view: Option<&str>) -> Result<DiffSide, RdyError> {
         let scope = self.resolve_read_scope(text, own_view)?;
-        let label = match &scope {
+        let label = self.label_of(text, &scope)?;
+        Ok(DiffSide::Scope { scope, label })
+    }
+
+    /// The side that scope `text`, resolved by the caller to `scope` on this state, reads: its
+    /// label as `rdy_diff` gives it, and its state and graph read now, so a state other than
+    /// this one may diff it.
+    pub fn diff_side_of(&self, text: &str, scope: Scope) -> Result<DiffSide, RdyError> {
+        Ok(DiffSide::Read {
+            label: self.label_of(text, &scope)?,
+            state: self.materialized(&scope)?,
+            graph: self.graph(&scope)?,
+        })
+    }
+
+    /// The label of scope `text`, resolved to `scope`.
+    fn label_of(&self, text: &str, scope: &Scope) -> Result<ScopeLabel, RdyError> {
+        Ok(match scope {
             Scope::Canon => ScopeLabel {
                 landing: self.canon_head().map(|h| h.to_string()),
                 ..ScopeLabel::of(LabelKind::Canon)
@@ -208,8 +234,7 @@ impl ReadState {
                     ..ScopeLabel::of(LabelKind::Proposal)
                 }
             }
-        };
-        Ok(DiffSide::Scope { scope, label })
+        })
     }
 
     /// The name a tag holds in the store, for `tag:<name>` as a request spells it.
@@ -243,6 +268,7 @@ impl ReadState {
         match side {
             DiffSide::Empty => Ok(Arc::new(Materialized::default())),
             DiffSide::Scope { scope, .. } => self.materialized(scope),
+            DiffSide::Read { state, .. } => Ok(Arc::clone(state)),
         }
     }
 
@@ -253,6 +279,7 @@ impl ReadState {
                 Arc::clone(self.reader().tracking()),
             ))),
             DiffSide::Scope { scope, .. } => self.graph(scope),
+            DiffSide::Read { graph, .. } => Ok(Arc::clone(graph)),
         }
     }
 
@@ -307,16 +334,31 @@ impl ReadState {
         max_tokens: usize,
     ) -> Result<DiffReply, RdyError> {
         let (from, to) = self.diff_sides(req, own_view)?;
-        self.diff_between_page(
+        self.diff_page_of(
             &from,
             &to,
             req.doc.as_deref(),
             req.detail,
             page,
             max_tokens,
-            0,
             "rdy_diff",
         )
+    }
+
+    /// The page of the diff from `from` to `to` that fits `max_tokens`, with no wrapper: the
+    /// sides resolved by the caller. `tool` names the caller in a cursor's refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn diff_page_of(
+        &self,
+        from: &DiffSide,
+        to: &DiffSide,
+        doc: Option<&str>,
+        detail: bool,
+        page: Option<&str>,
+        max_tokens: usize,
+        tool: &str,
+    ) -> Result<DiffReply, RdyError> {
+        self.diff_between_page(from, to, doc, detail, page, max_tokens, 0, tool)
     }
 
     /// The cut of `diff_between`'s reply: `wrapper` is the caller's bytes around the diff, `tool`

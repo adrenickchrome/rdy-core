@@ -20,7 +20,7 @@ use rdy_engine::hub_publish::{
 };
 use rdy_engine::hub_publish_files::ArtifactSource;
 use rdy_engine::hub_publish_wire::{
-    Candidate, Discovery, FileIdentity, ObjectPut, ProfileIdentity, PublicationInputs,
+    Candidate, Discovery, FileBatch, FileIdentity, ObjectPut, ProfileIdentity, PublicationInputs,
     PublishState, PublishWire, StateRequest, UploadContext, encode_publish,
 };
 use rdy_engine::hub_remotes::{RemoteLevel, RemoteService};
@@ -668,6 +668,30 @@ impl PublishWire for Wire {
         Ok(*file)
     }
 
+    /// One request: one `file` step for the whole tar body.
+    fn put_files(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        batch: &mut dyn FileBatch,
+    ) -> Result<Vec<Result<FileIdentity, RdyError>>, RdyError> {
+        self.enter("file", cx, Some(push))?;
+        let files = batch.files().to_vec();
+        let mut buf = vec![0u8; 65_536];
+        for (index, file) in files.iter().enumerate() {
+            let mut bytes = Vec::new();
+            loop {
+                let n = batch.read(index, &mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buf[..n]);
+            }
+            self.files.lock().unwrap().insert(file.hash, bytes);
+        }
+        Ok(files.into_iter().map(Ok).collect())
+    }
+
     fn publish(
         &self,
         cx: &UploadContext,
@@ -859,7 +883,11 @@ fn hpb14_end_to_end_upload_returns_candidate_and_writes_no_project_record() {
             .iter()
             .all(|s| *s == "file")
     );
-    assert_eq!(steps.len() - files_at - 2, 2, "both artifact files");
+    assert_eq!(
+        steps.len() - files_at - 2,
+        1,
+        "one tar body holds both artifact files"
+    );
     assert_eq!(steps.last(), Some(&"publish"));
     let calls = wire.calls();
     assert_eq!(calls[0].sync_base, None);

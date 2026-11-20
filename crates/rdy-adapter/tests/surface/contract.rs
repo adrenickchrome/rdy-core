@@ -336,6 +336,121 @@ fn cra1_adapter_names(
         rdy_engine::tool_reads::read_entries_at(state, "id", scope, "compact", None);
 }
 
+/// crb1: the compare and the diff of two scopes (D-2QX9W), by their exact names. This function
+/// is never called: it compiles only while each name has the receiver, the arguments and the
+/// result listed, and each type is re-exported from the module and the crate root.
+#[allow(dead_code)]
+fn crb1_adapter_names(snap: &Snapshot) {
+    let _: Result<rdy_adapter::Compare, RdyError> = snap.compare(Some("canon"), "canon");
+    let _: Result<rdy_adapter::Diff, RdyError> = snap.diff(Some("canon"), "canon");
+    let _: Option<(
+        rdy_adapter::compare::Compare,
+        rdy_adapter::compare::CompareEntry,
+        rdy_adapter::compare::Diff,
+        rdy_adapter::compare::DiffChange,
+        rdy_adapter::compare::DiffEntry,
+        rdy_adapter::compare::DiffCounts,
+    )> = None;
+    let _: Option<(
+        rdy_adapter::CompareEntry,
+        rdy_adapter::DiffChange,
+        rdy_adapter::DiffEntry,
+        rdy_adapter::DiffCounts,
+    )> = None;
+}
+
+/// crb3: the rebase test (D-2QX9W), by its exact names. This function is never called: it
+/// compiles only while the name has the receiver, the arguments and the result listed, and each
+/// type is re-exported from the module and the crate root.
+#[allow(dead_code)]
+fn crb3_adapter_names(snap: &Snapshot, chain: &[Hash]) {
+    let _: Result<rdy_adapter::RebaseTest, RdyError> = snap.rebase_test(chain, "canon");
+    let _: Option<(
+        rdy_adapter::version_tests::RebaseTest,
+        rdy_adapter::version_tests::MergeConflict,
+        rdy_adapter::version_tests::ConflictKind,
+        rdy_adapter::MergeConflict,
+        rdy_adapter::ConflictKind,
+    )> = None;
+}
+
+/// crb5: the compare page with the whole diff's counts (D-V2X3H), from an optional side
+/// (D-AJW0S), by its exact names. This function is never called: it compiles only while each
+/// name has the receiver, the arguments and the result listed.
+#[allow(dead_code)]
+fn crb5_adapter_names(snap: &Snapshot, state: &rdy_engine::ReadState) {
+    let q = rdy_adapter::compare::DiffQuery {
+        from: None,
+        to: "canon".to_string(),
+        doc: None,
+        detail: false,
+        max_tokens: None,
+        page: None,
+    };
+    let _: rdy_adapter::DiffQuery = q.clone();
+    let _: Result<serde_json::Value, RdyError> = snap.diff_reply(&q);
+    let _: Result<rdy_adapter::Compare, RdyError> = snap.compare(None, "canon");
+    let _: Result<rdy_adapter::Diff, RdyError> = snap.diff(None, "canon");
+    let side: Result<rdy_engine::diff_request::DiffSide, RdyError> =
+        state.diff_side_of("canon", rdy_engine::Scope::Canon);
+    let side = side.unwrap();
+    let _: Result<rdy_engine::DiffReply, RdyError> = state.diff_page_of(
+        &rdy_engine::diff_request::DiffSide::Empty,
+        &side,
+        None,
+        false,
+        None,
+        4_000,
+        "diff_reply",
+    );
+}
+
+/// crb6: the version pair of the carry-over (D-G8T2W), by its exact names. This function is never
+/// called: it compiles only while the name has the receiver, the arguments and the result listed,
+/// and each type is re-exported from the module and the crate root.
+#[allow(dead_code)]
+fn crb6_adapter_names(snap: &Snapshot, base: Option<Hash>, chain: Vec<Hash>) {
+    let old = rdy_adapter::VersionChain { base, chain };
+    let new: rdy_adapter::version_tests::VersionChain = old.clone();
+    let t: Result<rdy_adapter::VersionTests, RdyError> = snap.compare_versions(&old, &new);
+    let _: Option<rdy_adapter::version_tests::VersionTests> = t.ok();
+    let _ = |t: rdy_adapter::VersionTests| -> (bool, bool) {
+        (t.replays_one_for_one, t.base_moves_write_request_blocks)
+    };
+}
+
+/// crb4: the replay test (D-2QX9W), by its exact names. This function is never called: it
+/// compiles only while each name has the receiver, the arguments and the result listed.
+#[allow(dead_code)]
+fn crb4_adapter_names(
+    snap: &Snapshot,
+    chain: &[Hash],
+    inputs: &rdy_adapter::landing_check::CheckInputs,
+) {
+    use rdy_adapter::replay_test::{ReplayStop, ReplayStopCause, ReplayTest, ReplayedCheck};
+    let _: Result<rdy_adapter::ReplayTest, RdyError> = snap.replay_test(chain, "canon", inputs);
+    let test = ReplayTest {
+        replayed: vec![],
+        stop: None,
+    };
+    let _: Vec<ReplayedCheck> = test.replayed;
+    let _: Option<ReplayStop> = test.stop;
+    let _: Option<(
+        rdy_adapter::ReplayStop,
+        rdy_adapter::ReplayedCheck,
+        rdy_adapter::LandingCheck,
+    )> = None;
+    let _ = matches!(
+        ReplayStopCause::Conflict,
+        ReplayStopCause::Conflict
+            | ReplayStopCause::Gate
+            | ReplayStopCause::Policy
+            | ReplayStopCause::Removal
+            | ReplayStopCause::UpToDate
+    );
+    let _: rdy_adapter::ReplayStopCause = ReplayStopCause::Gate;
+}
+
 /// cra3: the place of each landing (D-H1SHC), by its exact names. This function is never called:
 /// it compiles only while each name has the receiver, the arguments and the result listed.
 #[allow(dead_code)]

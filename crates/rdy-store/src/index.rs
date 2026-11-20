@@ -2140,6 +2140,23 @@ impl Index {
         }
     }
 
+    /// Every landing whose LANDING frame carries `change`, on canon or not, in ascending hash
+    /// order. It follows no replay.
+    pub fn carriers(&self, change: &Hash) -> Result<Vec<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(CARRIERS).map_err(db)?;
+        let mut lo = change.0.to_vec();
+        lo.extend_from_slice(&[0u8; 32]);
+        let mut hi = change.0.to_vec();
+        hi.extend_from_slice(&[0xffu8; 32]);
+        let mut out = vec![];
+        for item in t.range(&lo[..]..=&hi[..]).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            out.push(hash_from(&k.value()[32..], "carriers key")?);
+        }
+        Ok(out)
+    }
+
     /// The landing whose LANDING frame first carried `change` in log order, among those the log
     /// holds before `before` (all of them for None), on canon or not. A history reader's answer:
     /// what a landing carried as the log stood at its bound, whatever canon is now. It follows no
