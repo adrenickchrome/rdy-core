@@ -38,6 +38,8 @@
 //!    (D-PGQZM). An `unknown` answer clears `held` after hub canon applies; a refused lookup
 //!    keeps it and warns `W_UPSTREAM_HELD_LOOKUP` (D-H67EN). The pull goes on in each case.
 //! 10. **Restore.** A dump goes to the hub through a temporary store (`crate::sync_restore`).
+//! 11. **Dump fetch.** The hub's dump goes to a new file through the state and dump steps, with
+//!     no guard, store write or sync state (`crate::sync_dump`, D-7CDEQ).
 //!
 //! A hub refusal keeps the hub's message, fix and request id. `E_HUB_TAG_TAKEN` takes core's
 //! code `E_TAG_EXISTS` with the hub's words (rdyhub-design i-B40VF).
@@ -261,7 +263,7 @@ fn diverged(tip: &Hash) -> RdyError {
 }
 
 /// The hub repo's name in the words of D-4XHPH: the remote URL's path without its slashes.
-fn repo_name(url: &str) -> String {
+pub(crate) fn repo_name(url: &str) -> String {
     url::Url::parse(url)
         .map(|u| u.path().trim_matches('/').to_string())
         .unwrap_or_default()
@@ -554,7 +556,7 @@ impl<'a> SyncService<'a> {
 
     /// [`SyncService::context`] with no state to check when `read` is None: a URL clone's
     /// steps before its project exists.
-    fn context_at(
+    pub(crate) fn context_at(
         &self,
         t: &Target,
         read: Option<&ReadState>,
@@ -604,6 +606,18 @@ impl<'a> SyncService<'a> {
         remote: Option<&str>,
         run: impl FnOnce(&Target) -> Result<T, RdyError>,
     ) -> Result<T, RdyError> {
+        self.with_target_guarded(session, remote, true, run)
+    }
+
+    /// [`SyncService::with_target`], with the remote's guard taken only when `guarded`: the
+    /// fetch of a hub dump takes no sync lock (D-7CDEQ).
+    pub(crate) fn with_target_guarded<T>(
+        &self,
+        session: &Session,
+        remote: Option<&str>,
+        guarded: bool,
+        run: impl FnOnce(&Target) -> Result<T, RdyError>,
+    ) -> Result<T, RdyError> {
         // 1. the remote
         if let Some(name) = remote
             && !hub_config::is_remote_name(name)
@@ -624,7 +638,11 @@ impl<'a> SyncService<'a> {
         }
 
         // 2. one push or pull per remote
-        let _guard = RemoteGuard::take(&self.project, &remote.name)?;
+        let _guard = if guarded {
+            Some(RemoteGuard::take(&self.project, &remote.name)?)
+        } else {
+            None
+        };
 
         // 3. the install, its CA file and pins; the session's claim; access
         let install = remote.url.origin().clone();
@@ -660,12 +678,28 @@ impl<'a> SyncService<'a> {
         url: &crate::hub_types::RemoteUrl,
         run: impl FnOnce(&Target) -> Result<T, RdyError>,
     ) -> Result<T, RdyError> {
-        let settings = HubConfig::load(None, Some(&self.user_file))?;
+        self.url_target(session, url, true, run)
+    }
+
+    /// The steps of [`SyncService::clone_target`] for the hub repo at `url`, with the settings of
+    /// this coordinator's project when it has one. A share remote in the settings is
+    /// `E_REMOTE_EXISTS` only when `new_remote`: a URL clone makes one, the fetch of a hub dump
+    /// (D-7CDEQ) makes none.
+    pub(crate) fn url_target<T>(
+        &self,
+        session: &Session,
+        url: &crate::hub_types::RemoteUrl,
+        new_remote: bool,
+        run: impl FnOnce(&Target) -> Result<T, RdyError>,
+    ) -> Result<T, RdyError> {
+        let project = (!self.projectless).then_some(self.project.as_path());
+        let settings = HubConfig::load(project, Some(&self.user_file))?;
         let warnings = settings.warnings.clone();
-        if settings
-            .remotes()
-            .iter()
-            .any(|r| r.mode == RemoteMode::Share)
+        if new_remote
+            && settings
+                .remotes()
+                .iter()
+                .any(|r| r.mode == RemoteMode::Share)
         {
             return Err(self.fail(None, &warnings, crate::error::remote_exists()));
         }

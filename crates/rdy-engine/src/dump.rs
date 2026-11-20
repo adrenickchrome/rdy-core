@@ -340,7 +340,7 @@ impl ReadState {
     }
 
     /// The guards of [`ReadState::check_dump_out`] for the command `cmd`.
-    fn check_out(&self, out: &Path, cmd: &str) -> Result<(), RdyError> {
+    pub(crate) fn check_out(&self, out: &Path, cmd: &str) -> Result<(), RdyError> {
         if std::fs::symlink_metadata(out).is_ok() {
             return Err(exists(out, cmd));
         }
@@ -521,6 +521,15 @@ fn store_of(st: &ReadState) -> Result<DumpStore, RdyError> {
 /// The command `rdy dump` names in its texts.
 const DUMP_CMD: &str = "rdy dump";
 
+/// The command a hub dump fetch names in the texts of `rdy dump` (D-7CDEQ).
+pub(crate) const DUMP_FETCH_CMD: &str = "rdy pull --dump";
+
+/// Whether `cmd` places a dump: `rdy dump`, or the fetch of a hub dump, which takes the texts
+/// of `rdy dump` with its own command name (D-7CDEQ).
+fn places_dump(cmd: &str) -> bool {
+    cmd == DUMP_CMD || cmd == DUMP_FETCH_CMD
+}
+
 /// Places a file at `out` as `rdy dump` and `rdy export` do: `out` must not exist and its
 /// directory must. The bytes go to `<out>.partial-<pid>` (`create_new`), which is synced, then
 /// hard-linked to `out`, so `out` is the whole file or nothing and never replaces a file. The
@@ -535,8 +544,9 @@ pub fn place_file(out: &Path, bytes: &[u8], cmd: &str) -> Result<u64, RdyError> 
 }
 
 /// The write rule of [`place_file`] with the filling of the partial file left to `fill`, which
-/// gets the partial's path and the file, and syncs it.
-fn place<T>(
+/// gets the partial's path and the file, and syncs it. The fetch of a hub dump fills it from
+/// the hub's stream and checks it before it returns (D-7CDEQ, `crate::sync_dump`).
+pub(crate) fn place<T>(
     out: &Path,
     cmd: &str,
     fill: impl FnOnce(&Path, std::fs::File) -> Result<T, RdyError>,
@@ -608,7 +618,7 @@ fn link_into_place(
         if e.kind() == ErrorKind::AlreadyExists {
             exists(out, cmd)
         } else if no_hard_links(&e) {
-            let (noun, verb) = if cmd == DUMP_CMD {
+            let (noun, verb) = if places_dump(cmd) {
                 ("the dump", "dump")
             } else {
                 ("the file", cmd.strip_prefix("rdy ").unwrap_or(cmd))
@@ -649,7 +659,7 @@ fn inside_rdy(root: &Path, dir: &Path, out: &Path, cmd: &str) -> Result<(), RdyE
         return Err(RdyError::new(
             E_BAD_INPUT,
             format!("{} is inside the project .rdy directory", out.display()),
-            if cmd == DUMP_CMD {
+            if places_dump(cmd) {
                 "dump to a path outside .rdy".to_string()
             } else {
                 "write to a path outside .rdy".to_string()
@@ -748,11 +758,11 @@ fn io_at(path: &Path, e: std::io::Error) -> RdyError {
 
 /// `out` exists: neither `rdy dump` nor `rdy export` overwrites a file.
 fn exists(out: &Path, cmd: &str) -> RdyError {
-    if cmd == DUMP_CMD {
+    if places_dump(cmd) {
         return RdyError::new(
             E_ALREADY_EXISTS,
             format!("{} exists", out.display()),
-            "pick a new file name; rdy dump never overwrites a file",
+            format!("pick a new file name; {cmd} never overwrites a file"),
         );
     }
     RdyError::new(

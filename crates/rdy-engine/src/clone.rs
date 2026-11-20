@@ -436,7 +436,7 @@ pub fn clone_url_checked(
 }
 
 /// The render-input capture of a URL clone: it renders nothing.
-struct NoRenderer;
+pub(crate) struct NoRenderer;
 
 impl PublishRenderer for NoRenderer {
     fn capture(&self, _: &ReadState, _: &Scope) -> Result<RenderInputs, RdyError> {
