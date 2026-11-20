@@ -9,6 +9,9 @@
 //! the state of one landing (`E_BAD_INPUT`); each hash names a landing that D-Y32MN's reach finds
 //! from the captured refs (`E_NOT_FOUND`, with that reach's text). `onto` then resolves as a read
 //! resolves it. The chain needs no contiguity, and an empty chain is clean.
+//!
+//! The version pair of two request versions (D-G8T2W, `Snapshot::compare_versions`) takes each
+//! chain through the same chain checks, and each base and chain landing through the same reach.
 
 use crate::reads::unreached;
 use crate::store::Snapshot;
@@ -17,7 +20,7 @@ use rdy_engine::{E_BAD_INPUT, E_LIMIT, RdyError, Scope};
 use rdy_model::Hash;
 use std::collections::HashSet;
 
-pub use rdy_engine::version_tests::RebaseTest;
+pub use rdy_engine::version_tests::{RebaseTest, VersionChain, VersionTests};
 pub use rdy_store::{ConflictKind, MergeConflict};
 
 /// Whether `onto` names the state of one landing: `canon`, `tag:<version>` or `landing:<id>`.
@@ -43,23 +46,7 @@ impl Snapshot {
         chain: &[Hash],
         onto: &str,
     ) -> Result<Option<Hash>, RdyError> {
-        if chain.len() > MAX_LANDINGS {
-            return Err(RdyError::new(
-                E_LIMIT,
-                format!("version test chain exceeds {MAX_LANDINGS} landings"),
-                format!("send at most {MAX_LANDINGS} landings"),
-            ));
-        }
-        let mut seen: HashSet<Hash> = HashSet::with_capacity(chain.len());
-        for h in chain {
-            if !seen.insert(*h) {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    format!("landing {h} appears twice in the chain"),
-                    "name each landing of the chain once",
-                ));
-            }
-        }
+        check_chain(chain)?;
         if !names_a_landing(onto) {
             return Err(not_a_landing(onto));
         }
@@ -85,6 +72,60 @@ impl Snapshot {
         let onto = self.version_test_inputs(chain, onto)?;
         let read = self.read_state();
         let out = rdy_engine::version_tests::rebase_test(read, chain, onto)?;
+        read.ensure_current_epoch()?;
+        Ok(out)
+    }
+}
+
+/// The checks of one chain before any read: at most 100,000 hashes (`E_LIMIT`), each once
+/// (`E_BAD_INPUT`).
+fn check_chain(chain: &[Hash]) -> Result<(), RdyError> {
+    if chain.len() > MAX_LANDINGS {
+        return Err(RdyError::new(
+            E_LIMIT,
+            format!("version test chain exceeds {MAX_LANDINGS} landings"),
+            format!("send at most {MAX_LANDINGS} landings"),
+        ));
+    }
+    let mut seen: HashSet<Hash> = HashSet::with_capacity(chain.len());
+    for h in chain {
+        if !seen.insert(*h) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("landing {h} appears twice in the chain"),
+                "name each landing of the chain once",
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl Snapshot {
+    /// The two answers of the carry-over rule for request versions `old` and `new` (D-G8T2W):
+    /// whether `new` replays `old`'s landings one for one, and whether a landing that entered
+    /// canon between the two bases writes a block that the request writes (true when the old
+    /// base is not in the new base's chain). Each chain is checked as the rebase test checks its
+    /// chain, before any read; a landing may be in both chains. Each chain landing and each base
+    /// must be one that D-Y32MN's reach finds from the captured refs (`E_NOT_FOUND`); a base of
+    /// None is the empty state. A removal since the snapshot is `E_REDACTED_STATE`.
+    pub fn compare_versions(
+        &self,
+        old: &VersionChain,
+        new: &VersionChain,
+    ) -> Result<VersionTests, RdyError> {
+        check_chain(&old.chain)?;
+        check_chain(&new.chain)?;
+        let read = self.read_state();
+        read.ensure_current_epoch()?;
+        let heads = self.reach_heads();
+        let bases: Vec<Hash> = old.base.into_iter().chain(new.base).collect();
+        for hashes in [&old.chain, &new.chain, &bases] {
+            let found = history_facts::reached(read, &heads, hashes)?;
+            if let Some((h, _)) = hashes.iter().zip(&found).find(|(_, f)| !**f) {
+                return Err(unreached(*h));
+            }
+        }
+        let out = rdy_engine::version_tests::version_pair(read, old, new)?;
         read.ensure_current_epoch()?;
         Ok(out)
     }

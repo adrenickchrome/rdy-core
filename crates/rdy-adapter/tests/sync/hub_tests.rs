@@ -1,12 +1,16 @@
-//! crb3: the rebase test of a chain of landings onto a landing's state (D-2QX9W, D-N0NVF), in a
-//! holder, from the snapshot's captured refs only, with no write.
+//! crb3: the rebase test of a chain of landings onto a landing's state (D-2QX9W, D-N0NVF), and
+//! crb6: the version pair of the carry-over (D-G8T2W), in a holder, from the snapshot's captured
+//! refs only, with no write.
 
 use crate::hub_world::{
-    AT, World, check, copy_dir, doc, export, land, moved, project, repo_of, seed, world, write_in,
+    AT, World, check, copy_dir, doc, export, land, moved, project, replayed, repo_of, seed, world,
+    write_in,
 };
 use rdy_adapter::stream::StreamPurpose;
 use rdy_adapter::sync::CanonMove;
-use rdy_adapter::{ConflictKind, Hash, MergeConflict, RebaseTest, StoreHandle};
+use rdy_adapter::{
+    ConflictKind, Hash, MergeConflict, RebaseTest, StoreHandle, VersionChain, VersionTests,
+};
 use rdy_engine::Rdy;
 use serde_json::json;
 use std::path::Path;
@@ -322,6 +326,223 @@ fn crb3_no_write() {
     snap.rebase_test(&[c.q2, c.q4, c.q5, c.q6], "canon")
         .unwrap();
     snap.rebase_test(&[c.q4], &landing(&c.w.p1)).unwrap();
+    drop(snap);
+    h.close().unwrap();
+    assert_eq!(log_and_refs(&root), before);
+}
+
+// ---------------------------------------------------------------------------------------------
+// crb6: the version pair of the carry-over (D-G8T2W)
+
+fn version(base: Option<Hash>, chain: &[Hash]) -> VersionChain {
+    VersionChain {
+        base,
+        chain: chain.to_vec(),
+    }
+}
+
+fn answers(replays_one_for_one: bool, base_moves_write_request_blocks: bool) -> VersionTests {
+    VersionTests {
+        replays_one_for_one,
+        base_moves_write_request_blocks,
+    }
+}
+
+/// The world's hub: canon `p1` then `p2`, and `q2` held beside `p2`.
+fn held_world() -> (World, StoreHandle) {
+    let w = world();
+    let h = w.holder("hub");
+    seed(&h, &w);
+    move_file(&h, &w.e2, CanonMove::Extend, Some(w.p1), w.p2);
+    move_file(&h, &w.eq, CanonMove::Hold, Some(w.p2), w.q2);
+    (w, h)
+}
+
+/// The pull replayed `l` onto `p2` as `l2`; `p2`, the only landing between the bases, writes
+/// none of the blocks that `l` and `l2` write.
+#[test]
+fn crb6_a_clean_pull_replay_carries() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let r = replayed();
+    let snap = r.hub.snapshot().unwrap();
+    let p1 = snap.landings(&[r.p2]).unwrap()[0].record.prev;
+    assert!(p1.is_some());
+    assert_eq!(
+        snap.compare_versions(&version(p1, &[r.l]), &version(Some(r.p2), &[r.l2]))
+            .unwrap(),
+        answers(true, false)
+    );
+    drop(snap);
+    r.hub.close().unwrap();
+}
+
+#[test]
+fn crb6_an_added_or_dropped_landing_does_not_replay_one_for_one() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let r = replayed();
+    let snap = r.hub.snapshot().unwrap();
+    let p1 = snap.landings(&[r.p2]).unwrap()[0].record.prev;
+    let old = version(p1, &[r.l]);
+    let new = |chain: &[Hash]| version(Some(r.p2), chain);
+    for chain in [&[r.l2, r.p2][..], &[], &[r.p2, r.l2]] {
+        let t = snap.compare_versions(&old, &new(chain)).unwrap();
+        assert!(!t.replays_one_for_one, "{chain:?}");
+    }
+    drop(snap);
+    r.hub.close().unwrap();
+}
+
+/// `p2` entered canon between the bases, and the request writes its blocks.
+#[test]
+fn crb6_a_landing_between_the_bases_that_writes_a_request_block() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let (w, h) = held_world();
+    let snap = h.snapshot().unwrap();
+    assert_eq!(
+        snap.compare_versions(&version(Some(w.p1), &[w.p2]), &version(Some(w.p2), &[w.p2]))
+            .unwrap(),
+        answers(true, true)
+    );
+    // a null base comes before the first landing: `p1` and `p2` are between the bases
+    assert_eq!(
+        snap.compare_versions(&version(None, &[w.p2]), &version(Some(w.p2), &[w.p2]))
+            .unwrap(),
+        answers(true, true)
+    );
+    // `p1` alone is between them, and `q2` writes none of its blocks
+    assert_eq!(
+        snap.compare_versions(&version(None, &[w.q2]), &version(Some(w.p1), &[w.q2]))
+            .unwrap(),
+        answers(true, false)
+    );
+    drop(snap);
+    h.close().unwrap();
+}
+
+#[test]
+fn crb6_equal_bases_have_no_landing_between() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let (w, h) = held_world();
+    let snap = h.snapshot().unwrap();
+    let v = version(Some(w.p1), &[w.q2]);
+    assert_eq!(snap.compare_versions(&v, &v).unwrap(), answers(true, false));
+    // the request writes `p2`'s blocks, and no landing is between equal bases
+    let v = version(Some(w.p2), &[w.p2]);
+    assert_eq!(snap.compare_versions(&v, &v).unwrap(), answers(true, false));
+    let v = version(None, &[w.p1]);
+    assert_eq!(snap.compare_versions(&v, &v).unwrap(), answers(true, false));
+    drop(snap);
+    h.close().unwrap();
+}
+
+/// A hub force move, or canon moved back: the old base is not in the new base's chain.
+#[test]
+fn crb6_new_base_off_the_old_base_chain_moves() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let (w, h) = held_world();
+    let snap = h.snapshot().unwrap();
+    let pairs = [
+        (Some(w.p2), Some(w.p1)),
+        (Some(w.p1), None),
+        (Some(w.q2), Some(w.p2)),
+        (Some(w.p2), Some(w.q2)),
+    ];
+    for (old, new) in pairs {
+        assert_eq!(
+            snap.compare_versions(&version(old, &[w.q2]), &version(new, &[w.q2]))
+                .unwrap(),
+            answers(true, true),
+            "{old:?} -> {new:?}"
+        );
+    }
+    drop(snap);
+    h.close().unwrap();
+}
+
+#[test]
+fn crb6_input_refusals() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let (w, h) = held_world();
+    let snap = h.snapshot().unwrap();
+    let ok = version(Some(w.p1), &[w.q2]);
+    let both = |old: &VersionChain, new: &VersionChain| {
+        let a = snap.compare_versions(old, new).unwrap_err();
+        let b = snap.compare_versions(new, old).unwrap_err();
+        assert_eq!(
+            (a.code, &a.message, &a.fix),
+            (b.code, &b.message, &b.fix),
+            "{a:#?}"
+        );
+        a
+    };
+    // more than 100,000 hashes in one chain, before any read: none of them is a landing
+    let many: Vec<Hash> = (0..100_001u32)
+        .map(|n| rdy_adapter::hash_bytes(&n.to_be_bytes()))
+        .collect();
+    refused(
+        both(&ok, &version(Some(w.p1), &many)),
+        "E_LIMIT",
+        "version test chain exceeds 100000 landings",
+        "send at most 100000 landings",
+    );
+    // a repeat within one chain; one landing in both chains is no repeat
+    refused(
+        both(&ok, &version(Some(w.p1), &[w.q2, w.p2, w.q2])),
+        "E_BAD_INPUT",
+        &format!("landing {} appears twice in the chain", w.q2),
+        "name each landing of the chain once",
+    );
+    // an unreached chain landing or base, with the text of D-Y32MN's reach
+    let stray = rdy_adapter::hash_bytes(b"not a landing");
+    let unreached = |e| {
+        refused(
+            e,
+            "E_NOT_FOUND",
+            &format!(
+                "landing {stray} is not reached from canon, a tag, a held chain or a replaced mark"
+            ),
+            "name a landing this store reaches, or read canon",
+        )
+    };
+    unreached(both(&ok, &version(Some(w.p1), &[w.q2, stray])));
+    unreached(both(&ok, &version(Some(stray), &[w.q2])));
+    drop(snap);
+    h.close().unwrap();
+
+    // a landing held after the snapshot was taken is not reached from it
+    let w = world();
+    let h = w.holder("hub");
+    seed(&h, &w);
+    move_file(&h, &w.e2, CanonMove::Extend, Some(w.p1), w.p2);
+    let s1 = h.snapshot().unwrap();
+    move_file(&h, &w.eq, CanonMove::Hold, Some(w.p2), w.q2);
+    let held = version(Some(w.p1), &[w.q2]);
+    let e = s1.compare_versions(&held, &held).unwrap_err();
+    assert_eq!(e.code, "E_NOT_FOUND", "{e:#?}");
+    let e = s1
+        .compare_versions(&version(Some(w.q2), &[]), &version(Some(w.p2), &[]))
+        .unwrap_err();
+    assert_eq!(e.code, "E_NOT_FOUND", "{e:#?}");
+    let s2 = h.snapshot().unwrap();
+    assert_eq!(
+        s2.compare_versions(&held, &held).unwrap(),
+        answers(true, false)
+    );
+    drop((s1, s2));
+    h.close().unwrap();
+}
+
+#[test]
+fn crb6_no_write() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let (w, h) = held_world();
+    let root = w.dir.path().join("hub");
+    h.close().unwrap();
+    let before = log_and_refs(&root);
+    let h = StoreHandle::open_holder(&root).unwrap();
+    let snap = h.snapshot().unwrap();
+    snap.compare_versions(&version(None, &[w.q2]), &version(Some(w.p2), &[w.q2]))
+        .unwrap();
     drop(snap);
     h.close().unwrap();
     assert_eq!(log_and_refs(&root), before);
