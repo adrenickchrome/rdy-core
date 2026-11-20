@@ -359,6 +359,21 @@ fn crb1_adapter_names(snap: &Snapshot) {
     )> = None;
 }
 
+/// crb3: the rebase test (D-2QX9W), by its exact names. This function is never called: it
+/// compiles only while the name has the receiver, the arguments and the result listed, and each
+/// type is re-exported from the module and the crate root.
+#[allow(dead_code)]
+fn crb3_adapter_names(snap: &Snapshot, chain: &[Hash]) {
+    let _: Result<rdy_adapter::RebaseTest, RdyError> = snap.rebase_test(chain, "canon");
+    let _: Option<(
+        rdy_adapter::version_tests::RebaseTest,
+        rdy_adapter::version_tests::MergeConflict,
+        rdy_adapter::version_tests::ConflictKind,
+        rdy_adapter::MergeConflict,
+        rdy_adapter::ConflictKind,
+    )> = None;
+}
+
 /// cra3: the place of each landing (D-H1SHC), by its exact names. This function is never called:
 /// it compiles only while each name has the receiver, the arguments and the result listed.
 #[allow(dead_code)]

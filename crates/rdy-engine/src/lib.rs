@@ -153,6 +153,7 @@ pub mod trace;
 pub mod transitions;
 mod tree_io;
 mod version;
+pub mod version_tests;
 pub mod view_api;
 pub mod view_query;
 pub mod views;
