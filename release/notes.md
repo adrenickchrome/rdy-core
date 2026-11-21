@@ -1,6 +1,6 @@
 **Your intent, ready for anyone who needs it.** rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents. Before an agent writes, rdy shows it what governs the change and what depends on it. After the write, rdy shows what the change affected. Nothing joins the accepted design until a person approves it.
 
-In this release, rdy shares a project through a hub. `rdy push` sends canon, and the views that you name, to a hub repo. `rdy pull` brings them back, `rdy clone` makes a project from a hub repo's URL, and `rdy pull --dump` fetches a dump that the hub made. An approve card now recommends nothing while a decision or a review speaks against the proposal. rdy 0.55.0 opens a 0.54.0 project as it is. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
+In this release, rdy shares a project through a hub. `rdy push` sends canon, and the views that you name, to a hub repo. `rdy pull` brings them back, `rdy clone` makes a project from a hub repo's URL, and `rdy pull --dump` fetches a dump that the hub made. For a hub, rdy-adapter now reads and renders any landing it reaches, compares two states, and tests how a chain of landings replays. An approve card now recommends nothing while a decision or a review speaks against the proposal. rdy 0.55.0 opens a 0.54.0 project as it is. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
 
 ## What you get
 
@@ -168,11 +168,21 @@ Compare this line and fingerprint with the ones in the README at v0.55.0. Use th
 - **Fetch a hub dump.** `rdy pull --dump <id> --out <file>` and `rdy_pull {dump, out}` download a dump that the hub's dump job made. rdy checks it as `rdy load` does, and writes it to a new file only when it is whole. With `--url <url>` in place of a remote, you need no project. The fetch uses this machine's sign-in for that hub. Compare the `digest` in the reply with the one that the hub shows. Then run `rdy push --restore <file>`, or `rdy load <file> <dir>` for a copy.
 - **Sync state.** `rdy status` shows `sync <remote>:` lines for each remote that has sync state. `rdy status --json` and `rdy_overview` add `sync` and `uncovered_warnings`. With a daemon, `rdy status --json` also adds `memory`, with `live_bytes` and `capped_cache_bytes`. `live_bytes` is `null` except on Linux with glibc.
 - **A write that may have reached the hub.** On `E_UPSTREAM_UNCERTAIN`, do not send the write again yourself. Run push or pull again: rdy finds the outcome of the earlier push before it writes again. `E_LOCKED` tells you that another push or pull with that remote is running.
+- **For hub integrators.** rdy-adapter is the library that a hub, such as rdyhub, uses to read rdy stores. Its calls have no promise of a stable API. The calls below change nothing in a project that rdy runs.
+    - **Store features and history.** rdy-adapter reads the store's features, carried sources and pages of history.
+    - **Reads at any landing.** `Snapshot::read` and `Snapshot::search` take `landing:<hash>`, with the full 64-digit hash, for each landing that the store reaches: canon, a tag, a held chain, a replaced landing or a `rebased_from` source. A hash outside that reach gives `E_NOT_FOUND`. A short id still matches canon's chain only.
+    - **Pushed views at an op.** In a hub holder, `read`, `search` and the scope render request take `view:<name>@<op>`: the pushed view at that op of its chain. A project still refuses this scope.
+    - **Landing places.** `Snapshot::landing_places(hashes)` gives `in_canon`, `off_canon` or `not_stored` for each distinct hash. It takes at most 100,000 hashes.
+    - **Render a scope.** `Snapshot::write_scope_render_request` writes a render request with a `scope` and an `against`. A request without them is the tag request, byte for byte. `against` builds the site only: `markdown` and `techdocs` refuse it. `rdy_render::build_review_publication` builds the whole site with the review marks.
+    - **Compare and diff.** `Snapshot::compare` and `Snapshot::diff` take any read scope on each side. `from` is now optional: with none, the older side is the empty state, labelled `empty`. `Snapshot::diff_reply` gives one page of the `rdy_diff` body, with the counts of the whole diff on every page.
+    - **Rebase and replay tests.** `Snapshot::rebase_test(chain, onto)` tells whether a chain of landings merges clean onto `onto`, and gives each conflict with its kind. `Snapshot::replay_test(chain, onto, inputs)` takes the steps of a real pull, and gives the gate result of each landing or the step where the test stops. `Snapshot::compare_versions(old, new)` tells whether a new version of a request replays the old one, one landing for one, and whether the base moved under its blocks. Each takes at most 100,000 landings in a chain.
+    - **Store.** `StoreReader::merge_conflicts` gives every conflict of a merge with its kind: `stale_base`, `deleted_since`, `already_exists` or `frozen`. A hold against an empty hub canon now keeps the held chain when its head reaches the chain's first landing.
 
 ### Changes
 
 - **Approve cards recommend nothing over an objection.** While a confirm card beside a proposal recommends Reject and has no answer, or an open tension from a reviewer touches one of its blocks, the approve card recommends no option. Approve keeps its place, with no reason line. A new `Recommendation` fact, after Policy, names each cause, such as `none: D-<id> the proposer recommends reject`. When the causes clear, the usual reason comes back. A list of recommended answers that names such a card is refused as a whole. The proposal's readiness does not change. A card that now shows the `Recommendation` fact gets a new `card_hash`. Read the card again before you relay an answer to it.
 - **`rdy clone` of a URL.** In rdy 0.54.0, `rdy clone` refused every source that is a URL. Now an `https://` source clones that hub repo. Any other URL is refused as `rdy remote add` refuses a URL that is not HTTPS.
+- **`rdy publish` sends missing files together.** When the hub lacks two or more files of a publication, `rdy publish` sends them to the hub's `files/put` in tar bodies, not one request for each file. A lone missing file keeps the one-file form. Each body keeps to the hub's limits on files and bytes. When the hub's reply does not match the body, the publish stops with `E_UPSTREAM_UNCERTAIN`, and sends nothing again. The first file that the hub refuses ends the upload, with the hub's code.
 - **You do nothing to move.** rdy 0.55.0 opens a store made by rdy 0.54.0 as it is, with no upgrade step and no dump and load. Store format 19, dump format 4 and the store features stay.
 
 ### Fixes
@@ -180,11 +190,13 @@ Compare this line and fingerprint with the ones in the README at v0.55.0. Use th
 - **Reopen after a shutdown.** When the daemon shuts down, it now stops its notifier and its site worker and waits for them. Before, opening the store right after `rdy serve --stop` or a daemon exit could fail with `E_HELD_BY_READER`.
 - **Daemon memory over many landings.** A scope that is not canon, such as an old landing, a proposal version, or a view on an older base, now shares canon's blocks, graph and lexicon, and reads only the blocks that differ. Before, each such scope held about as much memory as canon. A closed view drops its build. On Linux with glibc, the daemon gives free memory back to the system after each landing.
 - **The snapshot cache counts real bytes.** The store's snapshot map cache charged about 30% less than its maps held, so it could hold more than its budget of 64 MiB. Now it keeps a compact copy of each map and charges its measured bytes. The budget stays 64 MiB.
+- **Plan answers find earlier ids.** `rdy_plan` answers now find a `cq-` id that any earlier write in the view gave, while its item is open. Before, only the ids of the view's last change were found.
+- **The help of `rdy pull --strict`.** The help, the `rdy_pull` description and its schema now say that strict replays none of your landings: canon takes the hub tip, and your unpushed landings go into a new view `pull-<n>`. What the pull does is not changed.
+- **A pull over a chain that writes one block twice.** The readiness check of a replayed landing read its base from the store, and could stop such a chain with no cause. It now reads the base from memory.
 - **Measured.** In one soak test on a Linux test project of about 20,000 blocks, on one machine, the daemon's live memory, less what its capped caches hold, grew 16 MB from landing 10 to landing 40. This is a measurement, not a limit.
 
 ### Project and build
 
-- **rdy-adapter.** rdy-adapter adds the reads that rdyhub needs: store features, carried sources and pages of history. They change nothing in a project that rdy runs.
 - **Dependencies.** No crate is new to the build. `Cargo.lock` gains two lines under rdy-adapter: `rcgen` and `rustls`. The lock already held both. Only rdy-adapter's tests use them.
 
 ## Feedback
@@ -239,8 +251,12 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
   - When the project description that a push sent holds a newline or a tab, `rdy clone <url>` of that hub repo fails with `E_BAD_INPUT`. A new push does not fix it.
   - A clone refuses a hub pack whose custom parent pack this rdy does not have, with `E_BAD_INPUT`.
   - When the last flush of the folder fails after the clone is in place, the clone returns `E_IO` but leaves the project there.
-  - The help of `rdy pull --strict` and the description of `rdy_pull` say that `strict` stops at the first conflict. It replays none of your landings, as "New features" says.
   - A pull reply does not list the warnings about removals that a publication does not cover. `rdy status` and `rdy_overview` show them in `uncovered_warnings`.
+- Hub reads in rdy-adapter:
+  - A pushed view whose included change was redacted does not render at an op. The holder and the render process refuse it. A read of the same scope works.
+  - `rebase_test` and `replay_test` read deletions as of `onto`. A block that was deleted before `onto`, and that the chain re-creates, deletes and re-creates again, can show a false `deleted_since`. A real pull of the same chain is clean.
+  - On a chain where one landing deletes a block and a later landing re-creates its id, a real pull stops at the same landing as the replay test. The cause of the real stop can be the gate or a conflict. The replay test always says `conflict`.
+  - The replay test's check of each landing reports `assessment_matches` for the stored assessment of the source landing, not for the new assessment of the replayed landing.
 - Snapshot deltas and the daemon:
   - An upgrade that rdy refuses, for example on a snapshot whose bytes are not canonical, keeps its backup. Every later open to write then refuses with `E_UPGRADE_BACKUP`. Move the backup folder aside, then open the project again. Readers still open the project. The refusal of the upgrade gives the fix "run rdy fsck", which does not help in this case.
   - The upgrade, and the load of a dump without the feature, keep all new snapshot deltas in memory. A very long history of very large projects, such as 2,500 landings of 100,000 blocks each, can run out of memory. Nothing is written in that case.
