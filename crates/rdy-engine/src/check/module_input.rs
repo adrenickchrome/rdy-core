@@ -160,10 +160,24 @@ pub fn module_neighbours<'g>(
     root: &BlockId,
     depth: u8,
 ) -> Vec<Neighbour<'g>> {
+    let mut out = Vec::new();
+    walk(m, g, root, depth, |n| out.push(n));
+    out
+}
+
+/// [`module_neighbours`], each given to `visit` in order and kept nowhere. The walk holds the
+/// blocks it has reached and the best step to each block of the current count: references into
+/// `m`, at most one of each per block of `m`.
+fn walk<'g>(
+    m: &'g Materialized,
+    g: &'g Graph,
+    root: &BlockId,
+    depth: u8,
+    mut visit: impl FnMut(Neighbour<'g>),
+) {
     let Some(root) = m.get(root).map(|b| &b.id) else {
-        return Vec::new();
+        return;
     };
-    let mut out: Vec<Neighbour<'g>> = Vec::new();
     let mut seen: BTreeSet<&BlockId> = BTreeSet::from([root]);
     let mut level: Vec<&BlockId> = vec![root];
     for hops in 1..=depth {
@@ -186,10 +200,11 @@ pub fn module_neighbours<'g>(
         if best.is_empty() {
             break;
         }
-        level = best.keys().copied().collect();
+        level.clear();
         for (id, (from, via)) in best {
             seen.insert(id);
-            out.push(Neighbour {
+            level.push(id);
+            visit(Neighbour {
                 id,
                 hops,
                 from,
@@ -197,7 +212,6 @@ pub fn module_neighbours<'g>(
             });
         }
     }
-    out
 }
 
 /// Whether the step `a` comes before `b`: the near block's id, then the step's words, in byte
@@ -247,10 +261,13 @@ pub(crate) fn module_inputs(
         return Ok(());
     }
     value_inputs(st, root, out)?;
-    for n in module_neighbours(st.m, st.graph, root, depth) {
-        value_inputs(st, n.id, out)?;
-    }
-    Ok(())
+    let mut result = Ok(());
+    walk(st.m, st.graph, root, depth, |n| {
+        if result.is_ok() {
+            result = value_inputs(st, n.id, out);
+        }
+    });
+    result
 }
 
 /// Adds `b` and the blocks its value's derived facts read.
@@ -288,8 +305,9 @@ pub enum InputError {
 
 /// The input envelope of rule `rule` with `args` for block `root` of `st`, its neighbours to
 /// `depth` steps: at most [`INPUT_BYTES_MAX`] bytes. The neighbours at the end of the order drop
-/// until the envelope, its omitted count included, fits. The whole envelope is measured before
-/// its buffer is made, so a root that cannot fit fails with no buffer of its size.
+/// until the envelope, its omitted count included, fits. The root is measured before the walk
+/// and the whole envelope before its buffer is made, so a root that cannot fit fails with no
+/// walk and no buffer of its size, and only the neighbours that can fit are kept.
 pub fn encode_input(
     st: &ModuleState,
     rule: &str,
@@ -299,44 +317,65 @@ pub fn encode_input(
 ) -> Result<Vec<u8>, InputError> {
     let b = st.m.get(root).ok_or(InputError::Missing)?;
     let value = block_value(st, b);
-    let near = module_neighbours(st.m, st.graph, root, depth);
-    let total = near.len();
     let head = measure(|o| put_head(o, args, &value));
     let tail = |omitted: usize| measure(|o| put_tail(o, omitted, rule));
-    let mut used = head.saturating_add(tail(total));
-    if used > INPUT_BYTES_MAX {
+    // the root with the smallest tail, before any walk: a root that cannot fit fails here
+    let least = head.saturating_add(tail(0));
+    if least > INPUT_BYTES_MAX {
         return Err(InputError::TooLarge);
     }
-    // each neighbour that fits, in order; the first that does not ends the walk, since the
-    // envelope only grows with each one kept
-    let mut kept: Vec<(Neighbour, BlockValue)> = Vec::new();
-    for (i, n) in near.iter().enumerate() {
+    // the neighbours that fit with the smallest tail, each with its entry's length; past them the
+    // walk only counts. Each kept entry is at least its block's id long, so they are fewer than
+    // the cap's bytes, and their values are made again as the buffer is written.
+    let mut kept: Vec<(Neighbour, usize)> = Vec::new();
+    let mut used = least;
+    let mut full = false;
+    let mut total = 0usize;
+    walk(st.m, st.graph, root, depth, |n| {
+        total += 1;
+        if full {
+            return;
+        }
         let Some(nb) = st.m.get(n.id) else {
-            break;
+            full = true;
+            return;
         };
         let nv = block_value(st, nb);
-        let entry = measure(|o| put_neighbour(o, n, &nv)).saturating_add(usize::from(i > 0));
-        // the same envelope with this neighbour, and one fewer omitted
-        let with = used
-            .saturating_add(entry)
-            .saturating_sub(tail(total - i))
-            .saturating_add(tail(total - i - 1));
-        if with > INPUT_BYTES_MAX {
-            break;
+        let entry =
+            measure(|o| put_neighbour(o, &n, &nv)).saturating_add(usize::from(!kept.is_empty()));
+        if used.saturating_add(entry) > INPUT_BYTES_MAX {
+            full = true;
+            return;
         }
-        used = with;
-        kept.push((*n, nv));
+        used = used.saturating_add(entry);
+        kept.push((n, entry));
+    });
+    // the real tail counts every omitted neighbour; drop from the end until the envelope fits,
+    // since each dropped neighbour shrinks it
+    let size = |kept: &[(Neighbour, usize)]| {
+        kept.iter()
+            .fold(head, |sum, k| sum.saturating_add(k.1))
+            .saturating_add(tail(total - kept.len()))
+    };
+    let mut whole = size(&kept);
+    while whole > INPUT_BYTES_MAX {
+        if kept.pop().is_none() {
+            return Err(InputError::TooLarge);
+        }
+        whole = size(&kept);
     }
-    let mut buf: Vec<u8> = Vec::with_capacity(used);
+    let mut buf: Vec<u8> = Vec::with_capacity(whole);
     put_head(&mut buf, args, &value);
-    for (i, (n, nv)) in kept.iter().enumerate() {
+    for (i, (n, _)) in kept.iter().enumerate() {
         if i > 0 {
             buf.put(b",");
         }
-        put_neighbour(&mut buf, n, nv);
+        if let Some(nb) = st.m.get(n.id) {
+            put_neighbour(&mut buf, n, &block_value(st, nb));
+        }
     }
     put_tail(&mut buf, total - kept.len(), rule);
-    debug_assert_eq!(buf.len(), used);
+    debug_assert_eq!(buf.len(), whole);
     Ok(buf)
 }
 

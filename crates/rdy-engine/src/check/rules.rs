@@ -767,10 +767,7 @@ fn ancestors<'m>(m: &'m Materialized, b: &BlockId) -> Vec<&'m BlockId> {
 /// The blocks one explicit link, pinned reference or placement edge away from `b`, in either
 /// direction.
 fn neighbours<'g>(m: &'g Materialized, g: &'g Graph, b: &BlockId) -> Vec<&'g BlockId> {
-    labelled_neighbours(m, g, b)
-        .into_iter()
-        .map(|(_, n)| n)
-        .collect()
+    labelled_neighbours(m, g, b).map(|(_, n)| n).collect()
 }
 
 /// One step from a block to a neighbour: placement, or an explicit link or pinned reference in
@@ -806,28 +803,26 @@ pub(crate) fn labelled_neighbours<'g>(
     m: &'g Materialized,
     g: &'g Graph,
     b: &BlockId,
-) -> Vec<(Step<'g>, &'g BlockId)> {
-    let mut out: Vec<(Step<'g>, &BlockId)> = m
+) -> impl Iterator<Item = (Step<'g>, &'g BlockId)> + 'g {
+    let children = m
         .children(Some(b))
+        .into_iter()
+        .map(|c| (Step::Child, &c.id));
+    let parent = m
+        .get(b)
+        .and_then(|x| x.parent.as_ref())
+        .map(|p| (Step::Parent, p));
+    let out = g
+        .outgoing(b)
         .iter()
-        .map(|c| (Step::Child, &c.id))
-        .collect();
-    if let Some(p) = m.get(b).and_then(|x| x.parent.as_ref()) {
-        out.push((Step::Parent, p));
-    }
-    out.extend(
-        g.outgoing(b)
-            .iter()
-            .filter(|e| is_link(&e.kind))
-            .map(|e| (Step::Out(&e.kind), &e.to)),
-    );
-    out.extend(
-        g.incoming(b)
-            .iter()
-            .filter(|e| is_link(&e.kind))
-            .map(|e| (Step::In(&e.kind), &e.from)),
-    );
-    out
+        .filter(|e| is_link(&e.kind))
+        .map(|e| (Step::Out(&e.kind), &e.to));
+    let inc = g
+        .incoming(b)
+        .iter()
+        .filter(|e| is_link(&e.kind))
+        .map(|e| (Step::In(&e.kind), &e.from));
+    children.chain(parent).chain(out).chain(inc)
 }
 
 /// The explicit link and reference neighbours of `b`, in either direction.
@@ -946,7 +941,34 @@ pub(super) fn field_inputs(
         Ok(())
     };
     match field {
-        Field::Lifecycle | Field::Path | Field::Doc | Field::Area => add_ancestors(out)?,
+        Field::Lifecycle => add_ancestors(out)?,
+        // a path reads the names on the chain, and a derived name its siblings' names
+        Field::Path | Field::Doc => {
+            add_ancestors(out)?;
+            path_inputs(m, b, out)?;
+        }
+        // a decision is also in the areas of the paths that its `affects` links target
+        Field::Area => {
+            add_ancestors(out)?;
+            path_inputs(m, b, out)?;
+            if let Some(x) = m
+                .get(b)
+                .filter(|x| x.block_type == rdy_model::decision::DECISION)
+            {
+                for l in x
+                    .links
+                    .get(rdy_model::decision::AFFECTS)
+                    .into_iter()
+                    .flatten()
+                {
+                    out.insert(&l.target)?;
+                    for a in ancestors(m, &l.target) {
+                        out.insert(a)?;
+                    }
+                    path_inputs(m, &l.target, out)?;
+                }
+            }
+        }
         Field::Status => {
             for e in g.incoming(b).iter().filter(|e| is_link(&e.kind)) {
                 out.insert(&e.from)?;
@@ -976,6 +998,40 @@ pub(super) fn field_inputs(
         Field::Id | Field::Key | Field::Type | Field::Trait | Field::Custom(_) => {}
     }
     Ok(())
+}
+
+/// Adds the blocks whose names the path of `b` reads beyond its chain: for each doc or folder on
+/// the chain whose parent holds a doc or folder with no stored name, every doc and folder under
+/// that parent, since a derived name is de-duplicated against its siblings' names.
+fn path_inputs(m: &Materialized, b: &BlockId, out: &mut Bounded) -> Result<(), ()> {
+    let chain = std::iter::once(b).chain(ancestors(m, b));
+    for at in chain {
+        let Some(x) = m.get(at) else { continue };
+        if !rdy_model::tree::is_tree_type(&x.block_type) || !m.has_nameless_under(x.parent.as_ref())
+        {
+            continue;
+        }
+        for sibling in m.children(x.parent.as_ref()) {
+            if rdy_model::tree::is_tree_type(&sibling.block_type) {
+                out.insert(&sibling.id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Tests only: the blocks that a filter test of `field` at `b` reads besides link candidates,
+/// as rule reach records them.
+#[doc(hidden)]
+pub fn field_inputs_for_tests(
+    field: &Field,
+    m: &Materialized,
+    g: &Graph,
+    b: &BlockId,
+) -> BTreeSet<BlockId> {
+    let mut out = Bounded::unbounded();
+    let _ = field_inputs(field, m, g, b, &mut out);
+    out.set
 }
 
 /// The reach a version's rules add to its assessment (TASK-946, D-DSPMW, D-AJ0XQ): empty when

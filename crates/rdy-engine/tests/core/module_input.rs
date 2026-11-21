@@ -661,13 +661,28 @@ fn wck4_input_at_and_past_one_mib() {
     assert_eq!(kept(&all), (3, 0));
     let value: serde_json::Value = serde_json::from_slice(&one).unwrap();
     assert_eq!(value["neighbours"][0]["block"]["id"], "N-00000");
-    // a root far over the cap fails without a buffer of its size
-    let big = wide(2 * INPUT_MAX, 3);
-    let st = ModuleState::new(&pack, &big.0, &big.1, &areas);
+    // a root far over the cap fails before the walk, without a buffer of its size, however
+    // large its neighbourhood
+    for children in [3, 20_000] {
+        let big = wide(2 * INPUT_MAX, children);
+        let st = ModuleState::new(&pack, &big.0, &big.1, &areas);
+        let (result, peak) =
+            counting::peak_during(|| encode_input(&st, "rule-a", &no_args(), &id("C-AAAAA"), 1));
+        assert_eq!(result, Err(InputError::TooLarge));
+        assert!(peak < 64 * 1024, "{children} children: peak {peak}");
+    }
+    // a root that fits with a large neighbourhood keeps only what fits: it holds the envelope's
+    // buffer and the walk's references into the state (about 3 MB here), no value of a block
+    // that drops
+    let many = wide(0, 20_000);
+    let st = ModuleState::new(&pack, &many.0, &many.1, &areas);
     let (result, peak) =
         counting::peak_during(|| encode_input(&st, "rule-a", &no_args(), &id("C-AAAAA"), 1));
-    assert_eq!(result, Err(InputError::TooLarge));
-    assert!(peak < 64 * 1024, "peak {peak}");
+    let bytes = result.unwrap();
+    let (fit, omitted) = kept(&bytes);
+    assert_eq!(fit as u64 + omitted, 20_000);
+    assert!(omitted > 0 && bytes.len() <= INPUT_MAX);
+    assert!(peak < 4 * INPUT_MAX, "peak {peak}");
 }
 
 #[test]
@@ -810,4 +825,74 @@ fn wck4_input_reads_one_snapshot_and_raw_references() {
     let st = ModuleState::new(&pack, &big.0, &big.1, &areas);
     let reads = module_inputs_for_tests(&st, &id("C-AAAAA"), 1);
     assert_eq!(reads.len(), 3);
+}
+
+/// A top-level doc with no stored name, `C-AAAAA` under it, and a sibling doc named `sibling`.
+fn nameless(sibling: &str) -> (Materialized, Graph) {
+    state(vec![
+        text(blk("D-AAAAA", "doc", None, ""), "title", "Guide"),
+        text(blk("D-BBBBB", "doc", None, ""), "name", sibling),
+        blk("C-AAAAA", "claim", Some("D-AAAAA"), "Body."),
+        link(
+            text(
+                text(
+                    blk("D-CCCCC", "decision", None, "Moved."),
+                    "statement",
+                    "Moved",
+                ),
+                "status",
+                "proposed",
+            ),
+            "affects",
+            "C-AAAAA",
+        ),
+    ])
+}
+
+#[test]
+fn wck4_module_inputs_read_the_siblings_of_a_derived_name() {
+    let pack = pack();
+    let areas = pack.area_matcher();
+    // renaming the sibling renames the nameless doc, so the claim's path and areas move
+    for (sibling, path, area) in [("other", "guide", true), ("guide", "guide-2", false)] {
+        let s = nameless(sibling);
+        let bytes = input(&pack, &areas, &s, "C-AAAAA", 0).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["block"]["path"], path);
+        assert_eq!(v["block"]["area"].as_array().unwrap().is_empty(), !area);
+        let st = ModuleState::new(&pack, &s.0, &s.1, &areas);
+        let reads = module_inputs_for_tests(&st, &id("C-AAAAA"), 0);
+        assert!(reads.contains(&id("D-BBBBB")), "{reads:?}");
+        // the decision's areas come from its target's path, which reads the sibling too
+        let reads = module_inputs_for_tests(&st, &id("D-CCCCC"), 0);
+        for want in ["C-AAAAA", "D-AAAAA", "D-BBBBB"] {
+            assert!(reads.contains(&id(want)), "{want} {reads:?}");
+        }
+    }
+    // with every doc named, no sibling is read
+    let s = state(vec![
+        text(blk("D-AAAAA", "doc", None, ""), "name", "guide"),
+        text(blk("D-BBBBB", "doc", None, ""), "name", "other"),
+        blk("C-AAAAA", "claim", Some("D-AAAAA"), "Body."),
+    ]);
+    let st = ModuleState::new(&pack, &s.0, &s.1, &areas);
+    let reads = module_inputs_for_tests(&st, &id("C-AAAAA"), 0);
+    assert!(!reads.contains(&id("D-BBBBB")), "{reads:?}");
+}
+
+#[test]
+fn wck4_filter_reach_reads_the_siblings_of_a_derived_name() {
+    use rdy_engine::check::rules::field_inputs_for_tests;
+    use rdy_schema::filter::Field;
+    let (m, g) = nameless("guide");
+    for field in [Field::Path, Field::Doc, Field::Area] {
+        let reads = field_inputs_for_tests(&field, &m, &g, &id("C-AAAAA"));
+        assert!(reads.contains(&id("D-BBBBB")), "{field:?} {reads:?}");
+    }
+    let reads = field_inputs_for_tests(&Field::Lifecycle, &m, &g, &id("C-AAAAA"));
+    assert!(!reads.contains(&id("D-BBBBB")), "{reads:?}");
+    let reads = field_inputs_for_tests(&Field::Area, &m, &g, &id("D-CCCCC"));
+    for want in ["C-AAAAA", "D-AAAAA", "D-BBBBB"] {
+        assert!(reads.contains(&id(want)), "{want} {reads:?}");
+    }
 }
