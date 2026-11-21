@@ -75,6 +75,13 @@ jobs:
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
       - name: Not root
         run: test "$(id -u)" -ne 0
+      - name: Test parser
+        # The gate's Python CI tests need PyYAML; hosted macOS images no longer ship it.
+        # Hash-pinned and test-only, in a fresh environment first on PATH.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-tests"
+          "$RUNNER_TEMP/ci-tests/bin/python" -m pip install --require-hashes -r tests/ci/requirements-release-producers.txt
+          echo "$RUNNER_TEMP/ci-tests/bin" >> "$GITHUB_PATH"
       - name: Locked dependencies
         run: cargo fetch --locked
       - name: Native fast gate (fmt, clippy, tests; no perf)
