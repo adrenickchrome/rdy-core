@@ -274,17 +274,22 @@ pub fn validate_rule_input(input: &Value) -> Result<RuleInput, SchemaError> {
             }
             RuleTestSpec::Filter { require }
         }
-        (None, Some(text)) => RuleTestSpec::Module(ModuleTest {
-            module: decode_module(name, text).map_err(invalid)?,
-            args: args
-                .map(|a| check_args(name, a))
-                .transpose()
-                .map_err(invalid)?,
-            depth: depth
-                .map(|d| check_depth(name, d))
-                .transpose()
-                .map_err(invalid)?,
-        }),
+        (None, Some(text)) => {
+            let m = ModuleTest {
+                module: decode_module(name, text).map_err(invalid)?,
+                args: args
+                    .map(|a| check_args(name, a))
+                    .transpose()
+                    .map_err(invalid)?,
+                depth: depth
+                    .map(|d| check_depth(name, d))
+                    .transpose()
+                    .map_err(invalid)?,
+            };
+            // the typed checks every caller's module rule meets, so the two cannot differ
+            check_module_test(name, &m).map_err(invalid)?;
+            RuleTestSpec::Module(m)
+        }
     };
     Ok(RuleInput {
         name: raw.name,
@@ -332,9 +337,7 @@ fn decode_module(name: &str, text: &str) -> Result<Vec<u8>, String> {
         .count();
     let decoded = (count / 4 * 3).saturating_sub(padding);
     if decoded > MAX_MODULE_BYTES {
-        return Err(format!(
-            "rule {name} module is {decoded} bytes; a module takes at most {MAX_MODULE_BYTES}"
-        ));
+        return Err(module_size_refusal(name, decoded));
     }
     let mut packed = Vec::with_capacity(count);
     packed.extend(text.bytes().filter(|b| !ignored(b)));
@@ -358,11 +361,76 @@ fn check_args(name: &str, args: &Value) -> Result<BTreeMap<String, ArgValue>, St
     };
     match read {
         Ok(ArgValue::Map(m)) => Ok(m),
-        Ok(_) | Err(ArgsRefusal::Kind) => Err(format!(
-            "rule {name} args: only strings, integers, booleans, null, lists and mappings"
-        )),
-        Err(ArgsRefusal::Size) => Err(format!("rule {name} args: at most {MAX_ARGS_BYTES} bytes")),
+        Ok(_) => Err(args_refusal(name, ArgsRefusal::Kind)),
+        Err(r) => Err(args_refusal(name, r)),
     }
+}
+
+/// The structure of the module test `m` of rule `name`, as a caller builds it: the module at most
+/// [`MAX_MODULE_BYTES`], `args` integers from -2^53 to 2^53 and at most [`MAX_ARGS_BYTES`] as
+/// compact JSON, and `depth` from 0 to [`MAX_DEPTH`]. The refusals are the words a pack file's
+/// rule gets for the same value ([`validate_rule_input`] runs this check too). The module's code
+/// is not read.
+pub fn check_module_test(name: &str, m: &ModuleTest) -> Result<(), String> {
+    if m.module.len() > MAX_MODULE_BYTES {
+        return Err(module_size_refusal(name, m.module.len()));
+    }
+    if let Some(args) = &m.args {
+        spend_map(args, &mut 0).map_err(|r| args_refusal(name, r))?;
+    }
+    if m.depth.is_some_and(|d| d > MAX_DEPTH) {
+        return Err(depth_refusal(name));
+    }
+    Ok(())
+}
+
+fn module_size_refusal(name: &str, bytes: usize) -> String {
+    format!("rule {name} module is {bytes} bytes; a module takes at most {MAX_MODULE_BYTES}")
+}
+
+fn args_refusal(name: &str, refusal: ArgsRefusal) -> String {
+    match refusal {
+        ArgsRefusal::Kind => {
+            format!("rule {name} args: only strings, integers, booleans, null, lists and mappings")
+        }
+        ArgsRefusal::Size => format!("rule {name} args: at most {MAX_ARGS_BYTES} bytes"),
+    }
+}
+
+fn depth_refusal(name: &str) -> String {
+    format!("rule {name} depth must be 0 to {MAX_DEPTH}")
+}
+
+/// Adds the compact JSON bytes of the typed args value `v` to `used`, as [`arg_value`] counts
+/// them; an integer past 2^53 in magnitude is the kind refusal.
+fn spend_typed(v: &ArgValue, used: &mut usize) -> Result<(), ArgsRefusal> {
+    match v {
+        ArgValue::Null => spend(used, 4),
+        ArgValue::Bool(b) => spend(used, if *b { 4 } else { 5 }),
+        ArgValue::Int(i) => {
+            if i.unsigned_abs() > MAX_ARGS_INT.unsigned_abs() {
+                return Err(ArgsRefusal::Kind);
+            }
+            spend(used, decimal_len(*i))
+        }
+        ArgValue::Str(text) => spend_str(used, text),
+        ArgValue::List(items) => {
+            spend(used, 2 + items.len().saturating_sub(1))?;
+            items.iter().try_for_each(|item| spend_typed(item, used))
+        }
+        ArgValue::Map(m) => spend_map(m, used),
+    }
+}
+
+/// [`spend_typed`] of a typed args mapping.
+fn spend_map(m: &BTreeMap<String, ArgValue>, used: &mut usize) -> Result<(), ArgsRefusal> {
+    // braces and commas, and a colon per entry
+    spend(used, 2 + m.len().saturating_sub(1) + m.len())?;
+    for (key, item) in m {
+        spend_str(used, key)?;
+        spend_typed(item, used)?;
+    }
+    Ok(())
 }
 
 /// Adds `n` bytes to `used`; Err past [`MAX_ARGS_BYTES`].
@@ -456,7 +524,7 @@ fn check_depth(name: &str, depth: &Value) -> Result<u8, String> {
         _ => None,
     }
     .filter(|d| *d <= MAX_DEPTH)
-    .ok_or_else(|| format!("rule {name} depth must be 0 to {MAX_DEPTH}"))
+    .ok_or_else(|| depth_refusal(name))
 }
 
 /// Whether `text` has 1 to 2000 characters once trimmed, and at most 8000 bytes.
@@ -496,21 +564,24 @@ pub(crate) struct RuleView<'a> {
     pub require: Option<&'a str>,
     /// The decoded bytes of a module rule's module; 0 for a filter rule.
     pub module_bytes: usize,
+    /// The module test of a module rule; `None` for a filter rule.
+    pub module: Option<&'a ModuleTest>,
     pub message: &'a str,
     pub fix: &'a str,
 }
 
 impl<'a> From<&'a RuleInput> for RuleView<'a> {
     fn from(rule: &'a RuleInput) -> RuleView<'a> {
-        let (require, module_bytes) = match &rule.test {
-            RuleTestSpec::Filter { require } => (Some(require.as_str()), 0),
-            RuleTestSpec::Module(m) => (None, m.module.len()),
+        let (require, module_bytes, module) = match &rule.test {
+            RuleTestSpec::Filter { require } => (Some(require.as_str()), 0, None),
+            RuleTestSpec::Module(m) => (None, m.module.len(), Some(m)),
         };
         RuleView {
             name: &rule.name,
             select: &rule.select,
             require,
             module_bytes,
+            module,
             message: &rule.message,
             fix: &rule.fix,
         }

@@ -984,7 +984,8 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
 }
 
 /// The rules of the resolved `pack`, of either kind, checked and parsed, in exact name order: at
-/// most [`crate::MAX_RULES`] rules, each name declared once, each name, text and filter as
+/// most [`crate::MAX_RULES`] rules, each name declared once, each module rule's module, `args`
+/// and `depth` as [`crate::check_module_test`] checks them, each name, text and filter as
 /// [`crate::compile_rules`] checks them, then at most [`crate::MAX_PACK_MODULE_BYTES`] of decoded
 /// modules in all. `rules` holds the parent's rules first, as the resolved pack lists them; each
 /// module counts, an identical one too. Err: the first refusal, in the order of `rules`.
@@ -1024,6 +1025,9 @@ pub(crate) fn checked_rules<'a>(
         crate::rules::check_name(rule.name)?;
         if !names.insert(rule.name) {
             return Err(format!("rule {} is declared more than once", rule.name));
+        }
+        if let Some(m) = rule.module {
+            crate::rules::check_module_test(rule.name, m)?;
         }
         parsed.push(crate::rules::check_rule(pack, &rule)?);
         total = total.saturating_add(rule.module_bytes);

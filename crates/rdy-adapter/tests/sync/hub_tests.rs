@@ -613,6 +613,35 @@ fn crb4_a_held_chain_replays_onto_canon_in_a_holder() {
     h.close().unwrap();
 }
 
+/// D-WV7ZS: the replay test refuses a typed module rule over a limit of a pack file's rule before
+/// any landing is replayed, whatever its select matches, as the landing check refuses it.
+#[test]
+fn crb4_replay_test_refuses_over_limit_module_rules() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = world();
+    let inputs = inputs_of_p(&w);
+    let h = w.holder("hub");
+    seed(&h, &w);
+    move_file(&h, &w.e2, CanonMove::Extend, Some(w.p1), w.p2);
+    move_file(&h, &w.eq, CanonMove::Hold, Some(w.p2), w.q2);
+    let snap = h.snapshot().unwrap();
+    for select in [crate::sync::SELECTS_NOTHING, "type = doc"] {
+        let ok = crate::sync::at_limit_module_inputs(&inputs, select);
+        let test = snap.replay_test(&[w.q2], "canon", &ok).unwrap();
+        assert_eq!(test.replayed.len(), 1, "{test:#?}");
+        for (bad, want) in crate::sync::over_limit_module_inputs(&inputs, select) {
+            let e = snap.replay_test(&[w.q2], "canon", &bad).unwrap_err();
+            assert_eq!(
+                (e.code, e.message.as_str()),
+                ("E_BAD_INPUT", want),
+                "{select}"
+            );
+        }
+    }
+    drop(snap);
+    h.close().unwrap();
+}
+
 #[test]
 fn crb4_no_write() {
     let _clock = rdy_engine::pin_clock(AT);

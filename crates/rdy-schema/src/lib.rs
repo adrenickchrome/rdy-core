@@ -20,8 +20,8 @@ pub use resolve::{
 pub use rules::{
     ArgValue, CompiledRule, DEFAULT_DEPTH, MAX_ARGS_BYTES, MAX_ARGS_INT, MAX_DEPTH,
     MAX_MODULE_BYTES, MAX_PACK_MODULE_BYTES, MAX_RULE_NAME_CHARS, MAX_RULES, MAX_TEXT_BYTES,
-    MAX_TEXT_CHARS, ModuleTest, RuleInput, RuleSeverity, RuleTestSpec, compile_rules,
-    validate_rule_input,
+    MAX_TEXT_CHARS, ModuleTest, RuleInput, RuleSeverity, RuleTestSpec, check_module_test,
+    compile_rules, validate_rule_input,
 };
 pub use validate::{
     ASSET_BLOB_FIELDS, ASSET_MEDIA_TYPE_FIELDS, CONFIRMATION_FIELD, DARK_BLOB_FIELD,
