@@ -522,6 +522,76 @@ fn wck3_table_count_and_elements_at_and_past_limit() {
     assert_eq!(refusal(&c), CompileFailure::TableElements);
 }
 
+/// Every encoding of a table's element type the interpreter takes is read in full before the
+/// limits: the one-byte shorthand and the two-byte nullable forms, at 10000 elements and at
+/// 10001, as minimum and as maximum. The forms the configuration refuses are refused by the
+/// interpreter, never misread.
+#[test]
+fn wck3_table_element_type_encodings_at_and_past_limit() {
+    let mut wrong = vec![];
+    for (what, element, taken) in [
+        ("funcref", &[FUNCREF][..], true),
+        ("externref", &[0x6f], true),
+        ("(ref null func)", &[0x63, FUNCREF], true),
+        ("(ref null extern)", &[0x63, 0x6f], true),
+        // a non-null reference, and a concrete type, need function references, which are off
+        ("(ref func)", &[0x64, FUNCREF], false),
+        ("(ref null 0)", &[0x63, 0x00], false),
+    ] {
+        let table = |limits: Vec<u8>| {
+            let mut c = Check::new();
+            c.tables = vec![[element.to_vec(), limits].concat()];
+            compile_module(&c.bytes()).err()
+        };
+        if !taken {
+            let got = table(limits(1, None));
+            if !matches!(got, Some(CompileFailure::Invalid(_))) {
+                wrong.push(format!("{what}: {got:?}"));
+            }
+            continue;
+        }
+        for (case, limits, want) in [
+            ("minimum 10000", limits(10_000, None), None),
+            ("maximum 10000", limits(10_000, Some(10_000)), None),
+            (
+                "minimum 10001",
+                limits(10_001, None),
+                Some(CompileFailure::TableElements),
+            ),
+            (
+                "maximum 10001",
+                limits(1, Some(10_001)),
+                Some(CompileFailure::TableElements),
+            ),
+        ] {
+            let got = table(limits);
+            if got != want {
+                wrong.push(format!("{what} {case}: {got:?}, not {want:?}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    // a table with an initializer expression needs function references, which are off
+    for init in [
+        [
+            &[0x40, 0x00, FUNCREF][..],
+            &limits(1, None),
+            &[0xd0, FUNCREF, 0x0b],
+        ]
+        .concat(),
+        [
+            &[0x40, 0x00, 0x64, FUNCREF][..],
+            &limits(1, None),
+            &[0xd2, 0x00, 0x0b],
+        ]
+        .concat(),
+    ] {
+        let mut c = Check::new();
+        c.tables = vec![init];
+        assert!(matches!(refusal(&c), CompileFailure::Invalid(_)));
+    }
+}
+
 /// The memory a call of this thread holds at its peak, in bytes (the counting allocator).
 mod counting {
     use std::alloc::{GlobalAlloc, Layout, System};

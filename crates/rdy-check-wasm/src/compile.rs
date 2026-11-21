@@ -112,18 +112,12 @@ fn check_tables(bytes: &[u8]) -> Result<(), CompileFailure> {
         return Err(CompileFailure::Tables);
     }
     for _ in 0..count {
-        // the element type: one byte with this configuration (funcref or externref)
-        r.byte().ok_or(CompileFailure::HostFault)?;
-        let flags = r.byte().ok_or(CompileFailure::HostFault)?;
-        let minimum = r.u32().ok_or(CompileFailure::HostFault)?;
-        let maximum = if flags & 1 == 1 {
-            Some(r.u32().ok_or(CompileFailure::HostFault)?)
-        } else {
-            None
-        };
-        if minimum > TABLE_ELEMENTS_MAX || maximum.is_some_and(|m| m > TABLE_ELEMENTS_MAX) {
+        let (minimum, maximum) = r.table_limits().ok_or(CompileFailure::HostFault)?;
+        let max = u64::from(TABLE_ELEMENTS_MAX);
+        if minimum > max || maximum.is_some_and(|m| m > max) {
             return Err(CompileFailure::TableElements);
         }
+        // a table past the first is refused above, so its initializer, if any, is never read
     }
     Ok(())
 }
@@ -156,6 +150,69 @@ impl Reader<'_> {
         let b = *self.bytes.get(self.at)?;
         self.at += 1;
         Some(b)
+    }
+
+    /// One table type's minimum and maximum. The whole encoding before the limits is read
+    /// first: the `0x40 0x00` prefix of a table with an initializer, then the element type, one
+    /// byte as shorthand or `0x63`/`0x64` and a heap type. A 64-bit table's limits are read as
+    /// such. The initializer after the limits is not read.
+    fn table_limits(&mut self) -> Option<(u64, Option<u64>)> {
+        if self.bytes.get(self.at) == Some(&0x40) {
+            self.at += 1;
+            if self.byte()? != 0x00 {
+                return None;
+            }
+        }
+        self.ref_type()?;
+        let flags = self.byte()?;
+        let wide = flags & 0x04 != 0;
+        let limit = |r: &mut Self| {
+            if wide {
+                r.u64()
+            } else {
+                r.u32().map(u64::from)
+            }
+        };
+        let minimum = limit(self)?;
+        let maximum = if flags & 0x01 != 0 {
+            Some(limit(self)?)
+        } else {
+            None
+        };
+        Some((minimum, maximum))
+    }
+
+    /// A reference type: a one-byte shorthand (`funcref`, `externref` and the like), or `0x63`
+    /// (nullable) or `0x64` (non-null) and then a heap type: an optional `0x65` (shared) and a
+    /// signed LEB128 of at most 33 bits, a one-byte abstract type or a type index.
+    fn ref_type(&mut self) -> Option<()> {
+        let b = self.byte()?;
+        if b != 0x63 && b != 0x64 {
+            // a shorthand is one byte with its high bit clear
+            return (b & 0x80 == 0).then_some(());
+        }
+        if self.bytes.get(self.at) == Some(&0x65) {
+            self.at += 1;
+        }
+        for _ in 0..5 {
+            if self.byte()? & 0x80 == 0 {
+                return Some(());
+            }
+        }
+        None
+    }
+
+    /// An unsigned LEB128 value of at most ten bytes.
+    fn u64(&mut self) -> Option<u64> {
+        let mut value: u64 = 0;
+        for shift in (0u32..64).step_by(7) {
+            let b = self.byte()?;
+            value |= u64::from(b & 0x7f).checked_shl(shift)?;
+            if b & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
     }
 
     /// An unsigned LEB128 value of at most five bytes.
