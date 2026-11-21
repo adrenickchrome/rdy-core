@@ -767,21 +767,65 @@ fn ancestors<'m>(m: &'m Materialized, b: &BlockId) -> Vec<&'m BlockId> {
 /// The blocks one explicit link, pinned reference or placement edge away from `b`, in either
 /// direction.
 fn neighbours<'g>(m: &'g Materialized, g: &'g Graph, b: &BlockId) -> Vec<&'g BlockId> {
-    let mut out: Vec<&BlockId> = m.children(Some(b)).iter().map(|c| &c.id).collect();
+    labelled_neighbours(m, g, b)
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect()
+}
+
+/// One step from a block to a neighbour: placement, or an explicit link or pinned reference in
+/// either direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step<'g> {
+    /// The neighbour is a child of the near block.
+    Child,
+    /// The neighbour is the near block's parent.
+    Parent,
+    /// An edge of this kind leads from the near block to the neighbour.
+    Out(&'g EdgeKind),
+    /// An edge of this kind leads from the neighbour to the near block.
+    In(&'g EdgeKind),
+}
+
+impl Step<'_> {
+    /// The step's words: `child`, `parent`, `out <kind>` or `in <kind>`, where a pinned
+    /// reference's kind is `references`.
+    pub fn label(&self) -> String {
+        match self {
+            Step::Child => "child".into(),
+            Step::Parent => "parent".into(),
+            Step::Out(kind) => format!("out {}", kind.name()),
+            Step::In(kind) => format!("in {}", kind.name()),
+        }
+    }
+}
+
+/// [`neighbours`], each with the step that reaches it, in the same order: the children, the
+/// parent, the edges out, then the edges in. A block can appear more than once.
+pub(crate) fn labelled_neighbours<'g>(
+    m: &'g Materialized,
+    g: &'g Graph,
+    b: &BlockId,
+) -> Vec<(Step<'g>, &'g BlockId)> {
+    let mut out: Vec<(Step<'g>, &BlockId)> = m
+        .children(Some(b))
+        .iter()
+        .map(|c| (Step::Child, &c.id))
+        .collect();
     if let Some(p) = m.get(b).and_then(|x| x.parent.as_ref()) {
-        out.push(p);
+        out.push((Step::Parent, p));
     }
     out.extend(
         g.outgoing(b)
             .iter()
             .filter(|e| is_link(&e.kind))
-            .map(|e| &e.to),
+            .map(|e| (Step::Out(&e.kind), &e.to)),
     );
     out.extend(
         g.incoming(b)
             .iter()
             .filter(|e| is_link(&e.kind))
-            .map(|e| &e.from),
+            .map(|e| (Step::In(&e.kind), &e.from)),
     );
     out
 }
@@ -888,7 +932,7 @@ fn edge_is(kind: &LinkKind, edge: &EdgeKind) -> bool {
     }
 }
 
-fn field_inputs(
+pub(super) fn field_inputs(
     field: &Field,
     m: &Materialized,
     g: &Graph,
