@@ -4827,9 +4827,9 @@ fn mcp_hook_probes(seen: &mut Seen) {
 
 /// The project of the vector probes (D-Y1WEY, D-0ZPAP), landed, tagged `v1.0.0` and landed
 /// again. Section One of doc `vec-alpha` holds two sources that share words and the link target
-/// `$t` with the claims of doc `vec-beta`, so their briefing lists rows with words and links from
-/// both sources, sorted together. Doc `vec-many` holds 501 claims, so its briefing scores the
-/// first 20 and counts 481 skipped sources. Returns the project, the addresses of section One and
+/// `$t` with the claims of doc `vec-beta`, so their briefing lists two rows for each source, each
+/// neighbor once, with words and links, sorted together. Doc `vec-many` holds 501 claims, more than 20, so its briefing
+/// scores none and counts 501 skipped sources. Returns the project, the addresses of section One and
 /// of `vec-many`'s section, and a budget whose first page shows some vector rows and cuts the
 /// rest (`omitted.vector_neighbors`).
 fn vector_project() -> (tempfile::TempDir, String, String, usize) {
@@ -4846,6 +4846,8 @@ fn vector_project() -> (tempfile::TempDir, String, String, usize) {
         json!({"op": "create", "type": "claim", "id": "$t1", "parent": "$sb", "body": "Zebras graze by the walrus colony.", "links": {"describes": [{"target": "$t"}]}}),
         json!({"op": "create", "type": "claim", "id": "$t2", "parent": "$sb", "body": "Otters swim by the moose herd.", "links": {"describes": [{"target": "$t"}]}}),
         json!({"op": "create", "type": "claim", "id": "$t3", "parent": "$sb", "body": "The walrus colony and the moose herd."}),
+        json!({"op": "create", "type": "claim", "id": "$t4", "parent": "$sb", "body": "Otters swim past the herd."}),
+        json!({"op": "create", "type": "claim", "id": "$t5", "parent": "$sb", "body": "Zebras graze near the colony."}),
         json!({"op": "create", "type": "doc", "id": "$m", "fields": {"name": "vec-many", "title": "Many", "doc_type": "overview"}}),
         json!({"op": "create", "type": "section", "id": "$sm", "parent": "$m", "fields": {"title": "Rows"}}),
         json!({"op": "create", "type": "term", "id": "$e", "parent": "$sm", "fields": {"name": "Inventory"}, "body": "Holds the lots."}),
@@ -4877,7 +4879,7 @@ fn vector_project() -> (tempfile::TempDir, String, String, usize) {
         .brief(&Scope::Canon, &cov, Some(1_000_000))
         .expect("brief section One");
     assert!(full.vector_neighbors.len() >= 4, "rows of both sources");
-    // the budgets whose first page shows some rows and cuts the rest; the middle one
+    // the budgets whose first page shows some rows and cuts the rest; the largest one
     let cuts: Vec<usize> = (1..4_000)
         .filter(|max| {
             let b = r
@@ -4891,14 +4893,14 @@ fn vector_project() -> (tempfile::TempDir, String, String, usize) {
     let many = format!("{}#rows", w.created["$m"]);
     r.close().expect("close");
     std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").expect("the person");
-    (dir, address, many, cuts[cuts.len() / 2])
+    (dir, address, many, *cuts.last().unwrap())
 }
 
 /// One briefing on a surface: target, scope, budget and cursor in, the reply's JSON out.
 type BriefCall<'a> = dyn FnMut(&str, Option<&str>, Option<usize>, Option<&str>) -> Value + 'a;
 
 /// The vector probes of one surface: the rows of two sources with words and links, a cut first
-/// page and the rest, a source past the first 20, and a past landing with no rows. `brief` runs
+/// page and the rest, a briefing of more than 20 sources, and a past landing with no rows. `brief` runs
 /// one briefing (target, scope, budget, cursor) and returns its JSON.
 fn vector_probes(address: &str, many: &str, cut: usize, brief: &mut BriefCall<'_>) {
     let full = brief(address, None, None, None);
@@ -4908,6 +4910,13 @@ fn vector_probes(address: &str, many: &str, cut: usize, brief: &mut BriefCall<'_
     let fors: std::collections::BTreeSet<&str> =
         rows.iter().filter_map(|v| v["for"].as_str()).collect();
     assert_eq!(fors.len(), 2, "rows of both sources: {full}");
+    for f in &fors {
+        let n = rows.iter().filter(|v| v["for"].as_str() == Some(f)).count();
+        assert!(n <= 2, "at most two rows for {f}: {full}");
+    }
+    let blocks: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|v| v["block"].as_str()).collect();
+    assert_eq!(blocks.len(), rows.len(), "each neighbor once: {full}");
     assert!(
         rows.iter()
             .any(|v| !v["links"].as_array().unwrap().is_empty())
@@ -4929,7 +4938,7 @@ fn vector_probes(address: &str, many: &str, cut: usize, brief: &mut BriefCall<'_
         brief(address, None, Some(cut), Some(next));
     }
     let skipped = brief(many, None, None, None);
-    assert_eq!(skipped["vector_neighbors_skipped"], json!(481), "{skipped}");
+    assert_eq!(skipped["vector_neighbors_skipped"], json!(501), "{skipped}");
     assert!(skipped.get("vector_neighbors").is_none(), "{skipped}");
     // a past landing has no rows and no count (the command line has no such scope)
     let old = brief(address, Some("tag:v1.0.0"), None, None);

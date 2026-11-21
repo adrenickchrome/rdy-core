@@ -899,14 +899,15 @@ pub struct Briefing {
     pub neighbors: Vec<crate::neighbors::Neighbor>,
     /// nb7: the neighbor rows of the whole briefing per doc.
     pub neighbors_by_doc: Vec<NeighborDocCount>,
-    /// D-Y1WEY: the vector neighbors of the first 20 covered content blocks in reading order,
-    /// the rows of every source sorted together. Left out when empty, at a past landing and in a
-    /// proposal version.
+    /// D-Y1WEY, D-5BM47: the vector neighbors of the covered content blocks when there are at
+    /// most 20 of them: up to two rows for each, each neighbor once under the covered block where
+    /// it scores highest, the rows of every source sorted together. Left out when empty, at a past
+    /// landing and in a proposal version.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub vector_neighbors: Vec<VectorNeighbor>,
-    /// D-0ZPAP: how many covered content blocks got no vector rows computed: those past the
-    /// first 20, and those a work guard stopped. A source with no seed word or target, and rows
-    /// past a source's ten, count nowhere. Left out when zero.
+    /// D-0ZPAP, D-5BM47: how many covered content blocks got no vector rows computed: every one
+    /// of a briefing that covers more than 20, and those a work guard stopped. A source with no
+    /// seed word or target, and rows past a source's two, count nowhere. Left out when zero.
     #[serde(skip_serializing_if = "is_zero")]
     pub vector_neighbors_skipped: usize,
     /// rf9: the findings the covered decisions depend on directly, by (for, finding), at most
@@ -2179,11 +2180,11 @@ impl ReadState {
         })
     }
 
-    /// D-Y1WEY, D-0ZPAP: the vector neighbor rows of `ids` in `scope` (`m` and `g`), with each
-    /// row's summary from `summary_of`, and the count of sources whose rows were not computed.
-    /// The sources are the covered content blocks in reading order; the first 20 are scored
-    /// against the scope's weights. A past landing and a proposal version have no rows and build
-    /// no weights.
+    /// D-Y1WEY, D-0ZPAP, D-5BM47: the vector neighbor rows of `ids` in `scope` (`m` and `g`), with
+    /// each row's summary from `summary_of`, and the count of sources whose rows were not
+    /// computed. The sources are all the covered content blocks, in reading order. At most 20 are
+    /// scored against the scope's weights; more score none, count as skipped and build no
+    /// weights. A past landing and a proposal version have no rows and build no weights.
     fn brief_vectors(
         &self,
         scope: &Scope,
@@ -2203,6 +2204,9 @@ impl ReadState {
         );
         if sources.is_empty() {
             return Ok((vec![], 0));
+        }
+        if !AdviceCut::BRIEFING.scores(sources.len()) {
+            return Ok((vec![], sources.len()));
         }
         let w = self.vector_weights(WeightScope::Read(scope))?;
         let advice = vector_neighbors_in(

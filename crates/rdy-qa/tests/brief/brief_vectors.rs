@@ -1,9 +1,10 @@
-//! D-Y1WEY, D-0ZPAP: a briefing lists vector neighbors after its neighbors. The rows of every
-//! source sort together; they are advice and change no token, coverage, consequence, suspect or
-//! plan item. The first 20 covered content blocks in reading order are scored; the rest, and the
-//! ones a work guard stops, count in `vector_neighbors_skipped`. The rows page like neighbors,
-//! their order vouches for a page and their scores do not, and a past landing or a proposal
-//! version has none.
+//! D-Y1WEY, D-0ZPAP, D-5BM47: a briefing lists vector neighbors after its neighbors. The rows of
+//! every source sort together; they are advice and change no token, coverage, consequence,
+//! suspect or plan item. A briefing of at most 20 covered content blocks scores each of them, with
+//! at most two rows each and each neighbor once, under the covered block where it scores highest
+//! (D-5Y64F); a wider one scores none and counts them all in `vector_neighbors_skipped`, as it
+//! counts the ones a work guard stops. The rows page like neighbors, their order vouches for a
+//! page and their scores do not, and a past landing or a proposal version has none.
 use rdy_engine::brief::{Briefing, Coverage, PAGE_SECTIONS, VectorNeighbor};
 use rdy_engine::plan::api::PlanQuery;
 use rdy_engine::vectors::{WeightScope, WeightStats};
@@ -109,9 +110,12 @@ fn vrow(
 
 /// The rows of [`pair`] for covered c-00001 and c-00002, computed by hand from the weights (N =
 /// 13 blocks with words; df 5 for zebra, otter, yak and newt, 3 for walrus and moose, 2 for
-/// sibling). All sources' rows sort together by exact score. The three rows at 0.725 have the
-/// same exact score: c-00041 shares its source's doc and comes first, then c-00042 before c-00043
-/// by position in beta. The two rows of c-00045 tie too; S1 comes first in reading order.
+/// sibling). Each covered block keeps its two best rows among the neighbors it owns, and all
+/// sources' rows sort together by exact score. S1 owns c-00031, c-00041, c-00042 and c-00045 (the
+/// two sources tie on c-00045, and S1 comes first in reading order); S2 owns c-00032, c-00043 and
+/// c-00044. The two rows at 0.725 have the same exact score: c-00041 shares its source's doc and
+/// comes first. S1's c-00042 and c-00045 and S2's c-00044 are past the cap of two and show
+/// nowhere.
 fn pair_rows() -> Vec<VectorNeighbor> {
     let (a, b) = ("d-0000A", "d-0000B");
     vec![
@@ -140,14 +144,6 @@ fn pair_rows() -> Vec<VectorNeighbor> {
             "zebra yak",
         ),
         vrow(
-            "c-00001",
-            "c-00042",
-            0.725,
-            &["yak", "zebra"],
-            b,
-            "zebra yak",
-        ),
-        vrow(
             "c-00002",
             "c-00043",
             0.725,
@@ -155,16 +151,6 @@ fn pair_rows() -> Vec<VectorNeighbor> {
             b,
             "otter newt",
         ),
-        vrow(
-            "c-00002",
-            "c-00044",
-            0.693,
-            &["newt", "otter"],
-            b,
-            "otter newt newt",
-        ),
-        vrow("c-00001", "c-00045", 0.326, &["zebra"], b, "zebra otter"),
-        vrow("c-00002", "c-00045", 0.326, &["otter"], b, "zebra otter"),
     ]
 }
 
@@ -316,35 +302,18 @@ fn wide(r: &mut Rdy) -> Vec<String> {
 }
 
 #[test]
-fn vxs3_first_20_sources_and_guard_counts_are_explicit() {
-    // 26 covered claims: the first 20 in reading order (every claim of s-0000P, then the first
-    // 7 of s-0000Q) are scored, the last six count as skipped. Id order would pick others.
-    let (_d, mut r) = project();
-    let claims = pairs(&mut r, 26);
+fn vxs3_twenty_sources_score_wider_briefings_skip_and_guard_counts_are_explicit() {
+    // 20 covered claims: every one is scored, and each lists its partner, its only neighbor
     let path = Coverage {
         ids: vec![],
         path: Some("many".into()),
     };
+    let (_d, mut r) = project();
+    let claims = pairs(&mut r, 20);
     let b = r.read().brief(&work(), &path, Some(usize::MAX)).unwrap();
-    assert_eq!(b.covers, 29);
-    assert_eq!(b.vector_neighbors_skipped, 6);
-    let reading: Vec<&String> = claims
-        .iter()
-        .step_by(2)
-        .chain(claims.iter().skip(1).step_by(2))
-        .collect();
-    let scored: BTreeSet<&str> = reading[..20].iter().map(|s| s.as_str()).collect();
-    let fors: BTreeSet<&str> = b
-        .vector_neighbors
-        .iter()
-        .map(|v| v.r#for.as_str())
-        .collect();
-    assert_eq!(fors, scored);
-    assert_eq!(
-        b.vector_neighbors.len(),
-        20,
-        "one row for each scored source"
-    );
+    assert_eq!(b.covers, 23);
+    assert_eq!(b.vector_neighbors_skipped, 0);
+    assert_eq!(b.vector_neighbors.len(), 20, "one row for each source");
     for v in &b.vector_neighbors {
         let k = claims.iter().position(|c| *c == v.r#for).unwrap();
         assert_eq!(v.block, claims[k ^ 1], "{v:?}");
@@ -353,40 +322,59 @@ fn vxs3_first_20_sources_and_guard_counts_are_explicit() {
             (1.0, vec![format!("pair{}", k / 2)])
         );
     }
-    // the skipped sources are the last six of s-0000Q, never the first ones by id
-    for k in [15, 17, 19, 21, 23, 25] {
-        assert!(!fors.contains(claims[k].as_str()), "{k}");
-    }
-    for k in [0, 1, 2, 24] {
-        assert!(fors.contains(claims[k].as_str()), "{k}");
-    }
-    assert_eq!(json_of(&b)["vector_neighbors_skipped"], json!(6));
+    // 26 covered claims: none is scored, whatever the reading order, and all 26 count
+    let (_d, mut r) = project();
+    pairs(&mut r, 26);
+    let b = r.read().brief(&work(), &path, Some(usize::MAX)).unwrap();
+    assert_eq!(b.covers, 29);
+    assert!(b.vector_neighbors.is_empty());
+    assert_eq!(b.vector_neighbors_skipped, 26);
+    assert_eq!(json_of(&b)["vector_neighbors_skipped"], json!(26));
 
-    // the section work guard: each source charges 64 seeds of 100 postings each (6,400), so the
-    // first 20 sources (128,000) fit the 2,000,000 posting incidences of a briefing and none is
-    // stopped. The other 580 are past the first 20 and count as skipped.
+    // the section work guard: each source charges 64 seeds of 100 postings each (6,400), so 20
+    // sources (128,000) fit the 2,000,000 posting incidences of a briefing and none is stopped.
+    // The 20 are claims 0 to 19 of six groups: in each group the first source owns every member
+    // at the same score and lists two; the second owns only the first, the others own nothing.
     let (_d, mut r) = project();
     let claims = wide(&mut r);
+    let first = Coverage {
+        ids: claims[..20].to_vec(),
+        path: None,
+    };
+    let b = r.read().brief(&work(), &first, Some(usize::MAX)).unwrap();
+    assert_eq!(b.vector_neighbors_skipped, 0);
+    for (k, c) in claims[..20].iter().enumerate() {
+        let n = b.vector_neighbors.iter().filter(|v| v.r#for == *c).count();
+        let want = match k {
+            0..6 => 2,
+            6..12 => 1,
+            _ => 0,
+        };
+        assert_eq!(n, want, "claim {k}");
+        if (6..12).contains(&k) {
+            let row = b.vector_neighbors.iter().find(|v| v.r#for == *c).unwrap();
+            assert_eq!(
+                row.block,
+                claims[k - 6],
+                "claim {k} owns the first of its group"
+            );
+        }
+    }
+    let blocks: BTreeSet<&str> = b
+        .vector_neighbors
+        .iter()
+        .map(|v| v.block.as_str())
+        .collect();
+    assert_eq!(blocks.len(), b.vector_neighbors.len(), "each neighbor once");
+    assert!(b.omitted.is_empty(), "{:?}", b.omitted);
+    // the whole doc: 600 sources, none scored, all counted
     let path = Coverage {
         ids: vec![],
         path: Some("wide".into()),
     };
     let b = r.read().brief(&work(), &path, Some(usize::MAX)).unwrap();
-    assert_eq!(b.vector_neighbors_skipped, 580);
-    let fors: BTreeSet<&str> = b
-        .vector_neighbors
-        .iter()
-        .map(|v| v.r#for.as_str())
-        .collect();
-    let complete: BTreeSet<&str> = claims[..20].iter().map(|s| s.as_str()).collect();
-    assert_eq!(fors, complete, "the complete sources, in reading order");
-    // a complete source keeps its ten best rows; the 89 more it found count nowhere
-    assert_eq!(b.vector_neighbors.len(), 20 * 10);
-    for c in &complete {
-        let n = b.vector_neighbors.iter().filter(|v| v.r#for == *c).count();
-        assert_eq!(n, 10, "{c}");
-    }
-    assert!(b.omitted.is_empty(), "{:?}", b.omitted);
+    assert!(b.vector_neighbors.is_empty());
+    assert_eq!(b.vector_neighbors_skipped, 600);
 }
 
 #[test]
@@ -403,8 +391,8 @@ fn vxs3_empty_fields_row_caps_and_no_seed_sources_have_exact_counts() {
         assert!(v.get("omitted").is_none(), "{v}");
     }
 
-    // a source with twelve neighbors of one score keeps ten, the first ten in reading order; the
-    // other two count nowhere
+    // a source with twelve neighbors of one score keeps two, the first two in reading order; the
+    // other ten count nowhere
     let (_d, mut r) = project();
     let mut blocks = vec![
         doc("d-0000A", "alpha", "a1"),
@@ -428,7 +416,7 @@ fn vxs3_empty_fields_row_caps_and_no_seed_sources_have_exact_counts() {
         .iter()
         .map(|v| v.block.as_str())
         .collect();
-    let want: Vec<&str> = neighbors[..10].iter().map(String::as_str).collect();
+    let want: Vec<&str> = neighbors[..2].iter().map(String::as_str).collect();
     assert_eq!(shown, want);
     assert!(b.vector_neighbors.iter().all(|v| v.score == 1.0));
     assert_eq!(b.vector_neighbors_skipped, 0);
@@ -535,6 +523,12 @@ fn vxs3_pages_fit_and_show_each_vector_row_once() {
             seen, full.vector_neighbors,
             "every row once, in order, at {max}"
         );
+        let targets: BTreeSet<&str> = seen.iter().map(|v| v.block.as_str()).collect();
+        assert_eq!(
+            targets.len(),
+            seen.len(),
+            "each neighbor once over the pages, at {max}"
+        );
         assert_eq!(all.last().unwrap().offsets[at], full.vector_neighbors.len());
     }
     assert!(cut_rows, "some budget cuts vector rows from a first page");
@@ -570,7 +564,7 @@ fn vxs3_order_changes_stale_pages_but_score_drift_does_not() {
             write(
                 r,
                 "work",
-                json!([{"op": "update", "id": "c-00045", "body": "kiwi lemon"}]),
+                json!([{"op": "update", "id": "c-00041", "body": "kiwi lemon"}]),
             )
             .unwrap();
         }),
@@ -578,7 +572,7 @@ fn vxs3_order_changes_stale_pages_but_score_drift_does_not() {
             raw_commit(
                 r,
                 "work",
-                vec![blk("c-00046", "claim", "s-0000C", "a6", "zebra walrus")],
+                vec![blk("c-00046", "claim", "s-0000C", "a6", "zebra walrus yak")],
             );
         }),
         ("two rows swap", |r| {
@@ -619,7 +613,7 @@ fn vxs3_order_changes_stale_pages_but_score_drift_does_not() {
         );
     }
     // a doc and a claim with new words change N and every weight: every score drifts (0.888 to
-    // 0.882, 0.802 to 0.797, ...) and the order stays, so the page holds
+    // 0.882, 0.802 to 0.797, 0.725 to 0.734) and the order stays, so the page holds
     let (_d, mut r) = project();
     pair(&mut r, "work");
     let (_first, cursor) = cut_first(&r);
@@ -637,10 +631,7 @@ fn vxs3_order_changes_stale_pages_but_score_drift_does_not() {
         .brief(&work(), &cov(&["c-00001", "c-00002"]), Some(1_000_000))
         .unwrap();
     let scores: Vec<f64> = drifted.vector_neighbors.iter().map(|v| v.score).collect();
-    assert_eq!(
-        scores,
-        [0.882, 0.797, 0.734, 0.734, 0.734, 0.701, 0.334, 0.334]
-    );
+    assert_eq!(scores, [0.882, 0.797, 0.734, 0.734]);
     let pairs_of = |rows: &[VectorNeighbor]| -> Vec<(String, String)> {
         rows.iter()
             .map(|v| (v.r#for.clone(), v.block.clone()))
@@ -734,7 +725,7 @@ fn vxs3_vector_advice_changes_no_token_plan_or_suspect() {
         .iter()
         .map(|v| v.block.clone())
         .collect();
-    assert_eq!(advised, ["c-00031", "c-00041", "c-00042", "c-00045"]);
+    assert_eq!(advised, ["c-00031", "c-00041"]);
     // a vector neighbor that changes moves its row, never the token
     write(
         &mut r,
@@ -887,5 +878,163 @@ fn vxs3_cli_and_mcp_show_the_same_vector_advice() {
         text.find("\nneighbors:").unwrap() < text.find("\nvector neighbors:").unwrap(),
         "{text}"
     );
+    s.stop();
+}
+
+/// A coverage made from the covered claims.
+type CoverageOf = fn(&[String]) -> Coverage;
+
+/// The weight stats of `scope` in `st`: all zero while no weight was computed.
+fn weight_stats(st: &ReadState, scope: &Scope) -> WeightStats {
+    st.vector_weights(WeightScope::Read(scope)).unwrap().stats()
+}
+
+#[test]
+fn vxs11_twenty_scores_twenty_one_skips_before_weights() {
+    let many = Coverage {
+        ids: vec![],
+        path: Some("many".into()),
+    };
+    // 0 and 1 covered content blocks: no row and no count; the doc and its sections count
+    // nowhere
+    for n in [0, 1] {
+        let (_d, mut r) = project();
+        pairs(&mut r, n);
+        let b = r.read().brief(&work(), &many, Some(usize::MAX)).unwrap();
+        assert_eq!(b.covers, 3 + n, "{n}");
+        assert!(b.vector_neighbors.is_empty(), "{n}");
+        assert_eq!(b.vector_neighbors_skipped, 0, "{n}");
+    }
+    // 20 claims beside the doc, two sections and a supporting finding: every claim is scored,
+    // and each lists its partner once
+    let (_d, mut r) = project();
+    let claims = pairs(&mut r, 20);
+    raw_commit(
+        &mut r,
+        "work",
+        vec![blk("fi-00001", "finding", "s-0000P", "b1", "pair0 pair1")],
+    );
+    let st = r.read();
+    let b = st.brief(&work(), &many, Some(usize::MAX)).unwrap();
+    assert_eq!(b.covers, 24);
+    assert_eq!(b.vector_neighbors_skipped, 0);
+    let fors: BTreeSet<&str> = b
+        .vector_neighbors
+        .iter()
+        .map(|v| v.r#for.as_str())
+        .collect();
+    assert_eq!(fors, claims.iter().map(String::as_str).collect());
+    assert_eq!(b.vector_neighbors.len(), 20);
+    assert_ne!(weight_stats(&st, &work()), WeightStats::default());
+    drop(st);
+
+    // 21: the 20 claims and a deprecated one, which is no target but is covered content. No
+    // block is scored, every covered content block counts, and no weight is computed
+    let wide_cases: [(&str, CoverageOf); 3] = [
+        ("the doc's path", |_| Coverage {
+            ids: vec![],
+            path: Some("many".into()),
+        }),
+        ("the ids", |c| Coverage {
+            ids: c.to_vec(),
+            path: None,
+        }),
+        ("the ids reversed", |c| Coverage {
+            ids: c.iter().rev().cloned().collect(),
+            path: None,
+        }),
+    ];
+    for (what, coverage) in wide_cases {
+        let (_d, mut r) = project();
+        let mut claims = pairs(&mut r, 20);
+        raw_commit(
+            &mut r,
+            "work",
+            vec![raw(
+                "c-00500",
+                "claim",
+                Some("s-0000P"),
+                "b1",
+                &[("lifecycle", "deprecated")],
+                "pair0 pair1",
+            )],
+        );
+        claims.push("c-00500".into());
+        let c = coverage(&claims);
+        let st = r.read();
+        let b = st.brief(&work(), &c, Some(usize::MAX)).unwrap();
+        assert!(b.vector_neighbors.is_empty(), "{what}");
+        assert_eq!(b.vector_neighbors_skipped, 21, "{what}");
+        assert_eq!(json_of(&b)["vector_neighbors_skipped"], json!(21), "{what}");
+        assert!(json_of(&b).get("vector_neighbors").is_none(), "{what}");
+        assert_eq!(
+            weight_stats(&st, &work()),
+            WeightStats::default(),
+            "{what}: no weight computed"
+        );
+        // a first page that shows fewer than 20 blocks counts the whole covered set
+        let first = st.brief(&work(), &c, Some(300)).unwrap();
+        assert!(first.truncated, "{what}");
+        assert!(first.base.blocks.len() < 20, "{what}");
+        assert!(first.vector_neighbors.is_empty(), "{what}");
+        assert_eq!(first.vector_neighbors_skipped, 21, "{what}");
+    }
+}
+
+#[test]
+fn vxs11_wide_brief_explains_like_and_matches_cli() {
+    let guidance = "For similar blocks, use rdy_search with like.";
+    let s = Served::new();
+    let address = {
+        let mut r = Rdy::open(s.dir.path()).unwrap();
+        let mut ops = vec![
+            json!({"op": "create", "type": "doc", "id": "$a", "fields": {"name": "alpha", "title": "Alpha", "doc_type": "overview"}}),
+            json!({"op": "create", "type": "section", "id": "$sa", "parent": "$a", "fields": {"title": "One"}}),
+        ];
+        for k in 0..21 {
+            ops.push(json!({"op": "create", "type": "claim", "parent": "$sa", "body": format!("Zebras graze near walrus colony {k}.")}));
+        }
+        let w = write(&mut r, "work", Value::Array(ops)).unwrap();
+        land(&mut r, "work").unwrap();
+        r.close().unwrap();
+        format!("{}#one", w.created["$a"])
+    };
+    let mut c = McpClient::start_proxy(&s);
+    let reply = c.call(
+        "rdy_session",
+        json!({"actor": "agent:vxs11", "run": "v1", "role": "writer"}),
+    );
+    assert!(reply.code().is_none());
+    let m = c
+        .call("rdy_brief", json!({"ids": [address], "scope": "canon"}))
+        .ok();
+    let sch = c.call("rdy_schema", json!({})).ok();
+    drop(c);
+    assert!(m.get("vector_neighbors").is_none(), "{m}");
+    assert_eq!(m["vector_neighbors_skipped"], json!(21), "{m}");
+    for text in [&sch["brief"], &sch["edit_loop"]] {
+        let text = text.as_str().unwrap();
+        assert!(text.contains(guidance), "{text}");
+    }
+    let (ok, cli) = s.json(&["--json", "brief", &address]);
+    assert!(ok, "{cli}");
+    assert!(cli.get("vector_neighbors").is_none(), "{cli}");
+    assert_eq!(
+        cli["vector_neighbors_skipped"],
+        m["vector_neighbors_skipped"]
+    );
+    let o = s.rdy(&["brief", &address]);
+    assert!(o.status.success());
+    let text = String::from_utf8_lossy(&o.stdout).into_owned();
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.ends_with("vector neighbors:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let rest: Vec<&str> = lines[at + 1..at + 3]
+        .iter()
+        .map(|l| l.trim_start_matches(['#', ' ']))
+        .collect();
+    assert_eq!(rest, ["21 source(s) not scored", guidance], "{text}");
     s.stop();
 }

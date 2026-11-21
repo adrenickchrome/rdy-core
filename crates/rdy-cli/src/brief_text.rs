@@ -63,6 +63,9 @@ fn neighbor_line(n: &Value) -> String {
     )
 }
 
+/// D-5BM47: what a briefing with skipped vector sources tells the reader to do instead.
+const SIMILAR_BLOCKS: &str = "For similar blocks, use rdy_search with like.";
+
 /// D-Y1WEY: one vector neighbor row: `<block> (vector neighbor of <for>, score <score>[; words
 /// <words>][; links <links>]; doc <doc>) <summary>`, each list only when it has an entry.
 fn vector_neighbor_line(n: &Value) -> String {
@@ -429,7 +432,8 @@ pub fn header(briefing: &Value) -> String {
     if !by_doc.is_empty() {
         section(&mut out, "neighbors by doc", by_doc.into_iter());
     }
-    // D-Y1WEY: advice after the neighbors, only when there are rows or skipped sources (D-0ZPAP)
+    // D-Y1WEY: advice after the neighbors, only when there are rows or skipped sources (D-0ZPAP);
+    // a skipped source points to like search (D-5BM47)
     let mut vectors = list("vector_neighbors")
         .map(vector_neighbor_line)
         .collect::<Vec<_>>();
@@ -438,6 +442,7 @@ pub fn header(briefing: &Value) -> String {
         .filter(|n| *n > 0)
     {
         vectors.push(format!("{n} source(s) not scored"));
+        vectors.push(SIMILAR_BLOCKS.to_string());
     }
     if !vectors.is_empty() {
         section(&mut out, "vector neighbors", vectors.into_iter());
