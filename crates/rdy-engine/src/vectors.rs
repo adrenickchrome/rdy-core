@@ -301,10 +301,15 @@ impl VectorWeights {
     }
 
     /// D-RY7B5: whether `word` is a corpus word that seeds candidates ([`is_seed`] of `df` and
-    /// `N`).
+    /// `N`). D-ZDM0G: a numeric word never seeds. A word is numeric when each of its characters
+    /// is a numeric character (`char::is_numeric`), `.` or `-`, and at least one is numeric; the
+    /// tokenizer puts a `.` or `-` only between two runs, so this is `12.5`, `2026-11-20` or
+    /// `1.2.3`, never `v2` or `x_1`. A numeric word still counts in weights, norms and scores.
     pub fn word_is_seed(&self, word: &str) -> bool {
+        let numeric = word.chars().any(char::is_numeric)
+            && word.chars().all(|c| c.is_numeric() || c == '.' || c == '-');
         let df = self.df(word);
-        df > 0 && is_seed(df, self.corpus_words())
+        !numeric && df > 0 && is_seed(df, self.corpus_words())
     }
 
     /// D-RY7B5: whether `target` is a corpus target that seeds candidates ([`is_seed`] of
