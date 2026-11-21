@@ -5429,6 +5429,8 @@ fn packs_row() -> Value {
 const WASM_PASS: &str = include_str!("../../fixtures/wasm/pass.b64");
 const WASM_FAIL_TEXT: &str = include_str!("../../fixtures/wasm/fail-text.b64");
 const WASM_TRAP: &str = include_str!("../../fixtures/wasm/trap.b64");
+/// wck8: the example pack, with its module inline.
+const WASM_EXAMPLE_PACK: &str = include_str!("../../fixtures/wasm/body-required.yaml");
 
 /// wck6 (D-ZRXY0, D-N1GG5): the structure of a module rule and every refusal of a pack load. The
 /// structure is a resolved pack's rules: a filter rule, a module rule that sets neither `args`
@@ -5457,10 +5459,10 @@ fn module_rule_probes() -> (Value, Value) {
     let std_pack = set
         .resolve("rdy-standard")
         .expect("the built-in pack resolves");
-    let pack_check = {
+    let pack_check = |yaml: &str| {
         let (d, r) = project();
         drop(r);
-        rdy_qa::packs::use_pack(d.path(), "probe", &yaml, "");
+        rdy_qa::packs::use_pack(d.path(), "probe", yaml, "");
         let (cfg, env) = rdy_qa::fixtures::human_env("human:qa");
         let (code, text, err) = rdy_in(d.path(), &env, &["pack", "check"]);
         assert_eq!(code, 0, "{err}");
@@ -5471,10 +5473,22 @@ fn module_rule_probes() -> (Value, Value) {
         let rule_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("rule ")).collect();
         json!({"text_rule_lines": rule_lines, "modules": v["modules"]})
     };
+    // wck8: the example pack (body-required), its module rule's metadata and `rdy pack check`
+    let example = {
+        let mut set = PackSet::with_builtin();
+        set.add_yaml(WASM_EXAMPLE_PACK)
+            .expect("the example pack parses");
+        let pack = set.resolve("body-required").expect("it resolves");
+        let mut probe_pack =
+            pack_check(&WASM_EXAMPLE_PACK.replace("name: body-required", "name: probe"));
+        probe_pack["metadata"] = metadata(&pack);
+        probe_pack
+    };
     let structure = json!({
         "metadata": metadata(&probe),
         "metadata_no_module": metadata(&std_pack),
-        "pack_check": pack_check,
+        "pack_check": pack_check(&yaml),
+        "example": example,
         "rules": serde_json::to_value(&probe.rules).expect("the rules serialize"),
         "limits": {
             "max_module_bytes": rdy_schema::MAX_MODULE_BYTES,

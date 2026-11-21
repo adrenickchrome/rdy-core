@@ -23,8 +23,8 @@ const PREDECESSOR_SHA: &str = "e65653b123aea1307a9e2ab9728f3b5d18e25b33b8f7ca8aa
 /// The current fixture, which every selector names.
 const CURRENT: &str = "m5b-v1.json";
 
-/// The sha256 of [`CURRENT`] since the module metadata capture (wck7, D-ZRXY0, D-WV7ZS).
-const CURRENT_SHA: &str = "7bd4cc1634540324e69695a4881e4437df852d258c4be340042accdc62aa909e";
+/// The sha256 of [`CURRENT`] since the example pack metadata capture (wck8).
+const CURRENT_SHA: &str = "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d26256d2fb41";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [

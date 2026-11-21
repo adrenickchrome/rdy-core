@@ -1,0 +1,20 @@
+# The guest of the body-required example check module. It is built by hand for
+# wasm32-unknown-unknown and is not part of rdy's workspace: it has its own workspace table, so
+# rdy's lints and unsafe policy do not apply to it, and no build step of the product runs it.
+[package]
+name = "body-required"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true
+
+[workspace]
