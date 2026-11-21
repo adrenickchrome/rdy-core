@@ -18,7 +18,7 @@ use super::group::{self, PlanGroup};
 use super::page;
 use crate::brief::is_lower_hex;
 use crate::code_index::{check_top, code_repos, head_of};
-use crate::consequence::Consequences;
+use crate::consequence::{Consequence, Consequences};
 use crate::error::{E_BAD_INPUT, E_LIMIT, E_PERMISSION, E_PLAN_ITEM};
 use crate::history::{Author, role_str};
 use crate::{Delta, OpInput, Rdy, RdyError, ReadState, Scope, Session, WriteRequest};
@@ -31,7 +31,7 @@ use rdy_model::{BlockId, Hash, Proposal, Provenance};
 use rdy_store::StoreReader;
 use rdy_store::plan::PLAN_REF;
 use serde::{Deserialize, Serialize};
-use std::cell::OnceCell;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A recorded answer whose subject or cause changed after it (p-5TZ28).
@@ -986,15 +986,14 @@ fn not_an_item(text: &str, scope: &str) -> RdyError {
 }
 
 /// The candidate `text` names in `computed`: a `pi-` prefix of exactly one item, a `tn-` id
-/// (12 to 64 hex) that starts the subject of exactly one tension item (O5), or a `cq-` id of the
-/// view's current consequence report (`report` reads it on first use) whose subject, cause and
-/// kind match exactly one item. Anything else is `E_PLAN_ITEM`.
+/// (12 to 64 hex) that starts the subject of exactly one tension item (O5), or a `cq-` id that
+/// `find` finds in a consequence report of the view whose subject, cause and kind match exactly
+/// one item. Anything else is `E_PLAN_ITEM`.
 fn resolve_item<'c>(
     computed: &'c ComputedPlan,
     text: &str,
     scope: &str,
-    report: &dyn Fn() -> Result<Consequences, RdyError>,
-    held: &OnceCell<Consequences>,
+    find: &dyn Fn(&str) -> Result<Option<Consequence>, RdyError>,
 ) -> Result<&'c PlanCandidate, RdyError> {
     let miss = || not_an_item(text, scope);
     if let Some(hex) = text.strip_prefix(ITEM_DISPLAY_PREFIX) {
@@ -1028,14 +1027,7 @@ fn resolve_item<'c>(
     if !text.starts_with("cq-") {
         return Err(miss());
     }
-    let report = match held.get() {
-        Some(r) => r,
-        None => {
-            let r = report()?;
-            held.get_or_init(|| r)
-        }
-    };
-    let Some(cq) = report.items.iter().find(|c| c.id == text) else {
+    let Some(cq) = find(text)? else {
         return Err(miss());
     };
     let kinds: &[PlanKind] = match cq.follow_up {
@@ -1119,16 +1111,31 @@ pub(crate) fn prepare_plan_answers(
         return Err(answers_limit());
     }
     let scope = format!("view:{view}");
-    let report = || -> Result<Consequences, RdyError> {
-        match st.included(view).last() {
-            Some(last) => st.consequences(&Scope::View(view.to_string()), last, Some(usize::MAX)),
-            None => Ok(Consequences::default()),
+    // a cq- id names an entry of the report of the change that wrote it (its id hashes that
+    // change), so each of the view's changes is read again at this state, newest first, each on
+    // first use and once per call: a write's or a decide's id still names its item after later
+    // writes in the view
+    let included = st.included(view);
+    let view_scope = Scope::View(view.to_string());
+    let held: RefCell<Vec<Consequences>> = RefCell::default();
+    let find = |id: &str| -> Result<Option<Consequence>, RdyError> {
+        let mut held = held.borrow_mut();
+        if let Some(c) = held.iter().flat_map(|r| &r.items).find(|c| c.id == id) {
+            return Ok(Some(c.clone()));
         }
+        for change in included.iter().rev().skip(held.len()) {
+            let r = st.consequences(&view_scope, change, Some(usize::MAX))?;
+            let hit = r.items.iter().find(|c| c.id == id).cloned();
+            held.push(r);
+            if hit.is_some() {
+                return Ok(hit);
+            }
+        }
+        Ok(None)
     };
-    let held = OnceCell::new();
     let mut fresh: BTreeMap<Hash, PlanAnswer> = BTreeMap::new();
     for input in inputs {
-        let c = resolve_item(computed, &input.item, &scope, &report, &held)?;
+        let c = resolve_item(computed, &input.item, &scope, &find)?;
         if fresh.contains_key(&c.id) {
             return Err(bad(
                 &format!(
@@ -1529,9 +1536,8 @@ mod tests {
     #[test]
     fn cp8_pi_prefixes_resolve_one_item_or_refuse() {
         let plan = plan_of(&[Hash([0x11; 32]), Hash([0x12; 32]), Hash([0x21; 32])]);
-        let none = || Ok(Consequences::default());
-        let held = OnceCell::new();
-        let get = |t: &str| resolve_item(&plan, t, "view:w", &none, &held).map(|c| c.id);
+        let none = |_: &str| Ok(None);
+        let get = |t: &str| resolve_item(&plan, t, "view:w", &none).map(|c| c.id);
         assert_eq!(get("pi-12").unwrap(), Hash([0x12; 32]));
         assert_eq!(get("pi-2").unwrap(), Hash([0x21; 32]));
         let full = format!("pi-{}", Hash([0x11; 32]));

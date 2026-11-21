@@ -939,3 +939,191 @@ fn hpb9_error_line_is_one_bounded_json_line() {
         "{\"code\":\"E_LIMIT\",\"message\":\"render error exceeds 8388608 bytes\",\"fix\":\"reduce the input and render again\",\"issues\":[]}\n"
     );
 }
+
+// --- cra5: scope requests (D-CST6K) -------------------------------------------------------------
+
+/// The canon history of `landing` in `p`'s store, rooted at that landing with nothing known.
+fn canon_stream(p: &Project, landing: Hash) -> Vec<u8> {
+    let mut out = Vec::new();
+    rdy_engine::stream_export::write_history(
+        &p.r.read(),
+        rdy_store::sync_stream::StreamPurpose::CanonHistory,
+        landing,
+        None,
+        &BTreeSet::new(),
+        &mut out,
+    )
+    .unwrap();
+    out
+}
+
+/// A scope request: the prelude `value`, then each stream after its u64 little-endian length.
+fn scoped(value: &Value, streams: &[&[u8]]) -> Vec<u8> {
+    let mut out = framed(value, &[]);
+    for s in streams {
+        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        out.extend_from_slice(s);
+    }
+    out
+}
+
+#[test]
+fn cra5_scope_request_refusals_write_no_byte() {
+    let p = project("Scope project", "SCOPECANARY", [31, 32, 33]);
+    let l2 = p.landing;
+    let l1 = p.r.store().reader().landing(&l2).unwrap().prev.unwrap();
+    let (s2, s1) = (canon_stream(&p, l2), canon_stream(&p, l1));
+    let inputs = serde_json::to_value(p.inputs()).unwrap();
+    let at = |h: &Hash| format!("landing:{h}");
+    let request = |scope: Option<&str>, against: Option<&str>, format: &str| {
+        let mut v = json!({"profile": IMPLICIT_ORG, "format": format, "render_inputs": inputs});
+        if let Some(s) = scope {
+            v["scope"] = json!(s);
+        }
+        if let Some(a) = against {
+            v["against"] = json!(a);
+        }
+        v
+    };
+    let pair = request(Some(&at(&l2)), Some(&at(&l1)), "site");
+    let alone = request(Some(&at(&l2)), None, "site");
+    // the requests the refusals vary render
+    process(&scoped(&alone, &[&s2]));
+    process(&scoped(&request(Some(&at(&l2)), None, "markdown"), &[&s2]));
+    process(&scoped(&pair, &[&s2, &s1]));
+
+    // against with no scope
+    assert_refusal(
+        &refused(&scoped(&request(None, Some(&at(&l1)), "site"), &[&s1])),
+        E_BAD_INPUT,
+        (
+            "render request names against with no scope",
+            "add scope, or omit against",
+        ),
+    );
+    // a scope that is not landing:<64 hex digits> or view:<name>@<64 hex digits> (D-V9RF5), and
+    // an against that is not landing:<64 hex digits>: against stays a landing
+    let short = format!("landing:{}", &l2.to_string()[..63]);
+    let short_op = format!("view:draft@{}", &l2.to_string()[..63]);
+    let view = format!("view:draft@{l2}");
+    for text in [
+        "landing:abc",
+        "tag:1.0.0",
+        "canon",
+        short.as_str(),
+        "view:draft",
+        short_op.as_str(),
+    ] {
+        let want = format!(
+            "render request scope {text:?} is not landing:<64 hex digits> or view:<name>@<64 hex digits>"
+        );
+        let fix = "name the landing or the view head by its full hash";
+        assert_refusal(
+            &refused(&scoped(&request(Some(text), None, "site"), &[&s2])),
+            E_BAD_INPUT,
+            (&want, fix),
+        );
+    }
+    for text in [
+        "landing:abc",
+        "tag:1.0.0",
+        "canon",
+        short.as_str(),
+        view.as_str(),
+    ] {
+        let want = format!("render request scope {text:?} is not landing:<64 hex digits>");
+        let fix = "name the landing by its full hash";
+        assert_refusal(
+            &refused(&scoped(
+                &request(Some(&at(&l2)), Some(text), "site"),
+                &[&s2, &s1],
+            )),
+            E_BAD_INPUT,
+            (&want, fix),
+        );
+    }
+    // a stream whose root is not its prelude landing: another landing, or a tag
+    let wrong = |n: u8, found: &Hash, want: &Hash| {
+        (
+            format!("render request stream {n} has root {found}, not {want}"),
+            "write the request with the adapter's scope render request",
+        )
+    };
+    let (m, f) = wrong(1, &l1, &l2);
+    assert_refusal(&refused(&scoped(&alone, &[&s1])), E_BAD_INPUT, (&m, f));
+    let (m, f) = wrong(2, &l2, &l1);
+    assert_refusal(&refused(&scoped(&pair, &[&s2, &s2])), E_BAD_INPUT, (&m, f));
+    let (m, f) = wrong(1, &p.tag, &l2);
+    assert_refusal(
+        &refused(&scoped(&alone, &[&p.stream()])),
+        E_BAD_INPUT,
+        (&m, f),
+    );
+    // a view scope's stream must be a view history rooted at the op
+    let op = Hash::of(b"op");
+    let (m, f) = wrong(1, &l2, &op);
+    assert_refusal(
+        &refused(&scoped(
+            &request(Some(&format!("view:draft@{op}")), None, "site"),
+            &[&s2],
+        )),
+        E_BAD_INPUT,
+        (&m, f),
+    );
+    // a review request builds a site only
+    for format in ["markdown", "techdocs"] {
+        assert_refusal(
+            &refused(&scoped(
+                &request(Some(&at(&l2)), Some(&at(&l1)), format),
+                &[&s2, &s1],
+            )),
+            E_BAD_INPUT,
+            (
+                "a review render request builds a site only",
+                "use format site, or omit against",
+            ),
+        );
+    }
+    // a length over the bound, before any byte of its stream is read
+    let over = 2_147_483_649u64.to_le_bytes();
+    let limit = |n: u8| {
+        (
+            format!("render request stream {n} declares 2147483649 bytes, over 2147483648"),
+            "render a smaller scope",
+        )
+    };
+    let mut first = framed(&alone, &[]);
+    first.extend_from_slice(&over);
+    let (m, f) = limit(1);
+    assert_refusal(&refused(&first), E_LIMIT, (&m, f));
+    let mut second = scoped(&pair, &[&s2]);
+    second.extend_from_slice(&over);
+    let (m, f) = limit(2);
+    assert_refusal(&refused(&second), E_LIMIT, (&m, f));
+    // bytes that frame no stream: a third stream, a trailing byte, a missing second frame, a
+    // frame that declares more bytes than follow
+    assert_refusal(
+        &refused(&scoped(&pair, &[&s2, &s1, &s1])),
+        E_BAD_INPUT,
+        BAD_INPUT,
+    );
+    assert_refusal(
+        &refused(&scoped(&alone, &[&s2, &s1])),
+        E_BAD_INPUT,
+        BAD_INPUT,
+    );
+    let mut trailing = scoped(&alone, &[&s2]);
+    trailing.push(0);
+    assert_refusal(&refused(&trailing), E_BAD_INPUT, BAD_INPUT);
+    assert_refusal(&refused(&scoped(&pair, &[&s2])), E_BAD_INPUT, BAD_INPUT);
+    let mut long = framed(&alone, &[]);
+    long.extend_from_slice(&(s2.len() as u64 + 1).to_le_bytes());
+    long.extend_from_slice(&s2);
+    assert_refusal(&refused(&long), E_BAD_INPUT, BAD_INPUT);
+    // a frame shorter than its stream cuts the stream
+    let mut cut = framed(&alone, &[]);
+    cut.extend_from_slice(&(s2.len() as u64 - 1).to_le_bytes());
+    cut.extend_from_slice(&s2[..s2.len() - 1]);
+    let e = refused(&cut);
+    assert_eq!(e.code, E_STREAM_TRUNCATED, "{e}");
+}

@@ -63,12 +63,14 @@ pub(crate) fn holder_error(e: StoreError) -> RdyError {
     }
 }
 
-/// A holder's context: the built-in pack and its lineage, a config with that pack and every
-/// other setting absent, and a fingerprint of no file. Reads no file.
+/// A holder's context: the built-in pack and its lineage, no compiled project rules, a config with
+/// that pack and every other setting absent, and a fingerprint of no file. Reads no file and
+/// compiles nothing.
 pub(crate) fn holder_context() -> Result<Context, RdyError> {
     let (pack, lineage) = load_pack_from(&[], HOLDER_PACK)?;
     Ok(Context {
         pack,
+        rules: std::sync::Arc::new(crate::check::rules::CompiledRules::empty()),
         lineage,
         fingerprint: PackFingerprint {
             files: vec![],

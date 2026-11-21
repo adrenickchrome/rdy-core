@@ -1,0 +1,32 @@
+{
+  "default_severity": "advisory",
+  "grammar": "filter",
+  "max": 64,
+  "module": {
+    "args_bytes": 8192,
+    "call_depth": 1024,
+    "depth_default": 1,
+    "depth_max": 3,
+    "depth_min": 0,
+    "fuel_per_block": 10000000,
+    "fuel_per_rule": 1000000000,
+    "input_bytes": 1048576,
+    "interface": 1,
+    "memories": 1,
+    "memory_bytes": 16777216,
+    "module_bytes": 1048576,
+    "output_bytes": 65536,
+    "pack_bytes": 8388608,
+    "table_elements": 10000,
+    "tables": 1,
+    "value_stack_bytes": 524288
+  },
+  "severity": [
+    "advisory",
+    "blocking"
+  ],
+  "tests": [
+    "filter",
+    "module"
+  ]
+}

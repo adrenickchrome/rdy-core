@@ -1,5 +1,5 @@
 //! vxs1 (D-TXFHR): the M5a contract fixture. `m5a-v1.json` is the current fixture: it starts as a
-//! byte copy of the integrated predecessor `sync-client-b-v1.json`, which is frozen from here on,
+//! byte copy of the integrated predecessor `m5b-v1.json`, which is frozen from here on,
 //! and later captures add M5a's surfaces to it. [`m5a_changes`] lists every member where the
 //! successor differs from that predecessor, so a closed list of M5a's changes can be checked
 //! against it; this file pins only where the successor starts: the predecessor's bytes, the
@@ -10,18 +10,17 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// The integrated predecessor of the current fixture. It is frozen.
-const PREDECESSOR: &str = "sync-client-b-v1.json";
+const PREDECESSOR: &str = "m5b-v1.json";
 
-/// The sha256 of [`PREDECESSOR`] as the base shipped it. It never moves: a later contract change
+/// The sha256 of [`PREDECESSOR`] as the base froze it. It never moves: a later contract change
 /// is a successor fixture, never an edit of that file.
-const SYNC_CLIENT_B_V1_SHA: &str =
-    "4db01ca7269dd36ba6c8b03598d120ce78460235f6560408305f9f71b25b0e61";
+const M5B_V1_SHA: &str = "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d26256d2fb41";
 
 /// The current fixture, which every selector names.
 const CURRENT: &str = "m5a-v1.json";
 
 /// The contract fixtures in the order each succeeded the one before, ending in [`CURRENT`].
-const LINEAGE: [&str; 11] = [
+const LINEAGE: [&str; 12] = [
     "release-1.json",
     "repo-links-v1.json",
     "mcp-http-v1.json",
@@ -31,6 +30,7 @@ const LINEAGE: [&str; 11] = [
     "disclosure-review-v1.json",
     "sd1-v1.json",
     "sync-client-v1.json",
+    "sync-client-b-v1.json",
     PREDECESSOR,
     CURRENT,
 ];
@@ -128,7 +128,7 @@ fn m5a_changes() -> Vec<String> {
     found
 }
 
-/// vxs1: the successor starts from the integrated predecessor. `sync-client-b-v1.json` keeps its
+/// vxs1: the successor starts from the integrated predecessor. `m5b-v1.json` keeps its
 /// bytes, the contracts folder holds the lineage and nothing else, every selector names
 /// `m5a-v1.json` and none names the predecessor, and the successor removes no member or row of
 /// the predecessor. Later captures may add to the successor.
@@ -136,7 +136,7 @@ fn m5a_changes() -> Vec<String> {
 fn vxs1_successor_starts_from_the_integrated_fixture() {
     assert_eq!(
         sha(&bytes(PREDECESSOR)),
-        SYNC_CLIENT_B_V1_SHA,
+        M5B_V1_SHA,
         "{PREDECESSOR} is frozen"
     );
     let mut names: Vec<String> = std::fs::read_dir(contracts())

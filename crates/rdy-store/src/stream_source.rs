@@ -32,7 +32,9 @@ use crate::plan::Place as PlanPlace;
 use crate::segment::HEADER;
 use crate::stream_error::{LIMIT_GRAPH_EDGES, LIMIT_OBJECT_RECORDS, Reason, StreamError};
 use crate::sync_proof::{self, ObjectSource, PortableRemoval, RemovalObject};
-use crate::sync_stream::{MAX_EDGES, MAX_RECORDS, StreamHeader, StreamRecord, check_batch_with};
+use crate::sync_stream::{
+    MAX_EDGES, MAX_RECORDS, StreamHeader, StreamPurpose, StreamRecord, check_batch_with,
+};
 use crate::take_batch::UploadFacts;
 use rdy_model::redaction::{Redaction, RedactionApply, RedactionResidue};
 use rdy_model::signature::Signature;
@@ -1031,9 +1033,54 @@ pub(crate) fn uncovered_change(
 /// What the checks of a complete upload with nothing held found: its facts, every apply's
 /// validated removal and the approved tuples of each key.
 pub(crate) struct Complete {
-    pub(crate) facts: UploadFacts,
+    pub(crate) facts: RootedFacts,
+    /// The root TAG, for a stream rooted at one.
+    pub(crate) tag: Option<Tag>,
     pub(crate) incoming: BTreeMap<Hash, PortableRemoval>,
     pub(crate) approved: BTreeMap<ObjectKey, Vec<(Hash, RemovalObject)>>,
+}
+
+impl Complete {
+    /// The facts of a stream rooted at a TAG.
+    fn upload_facts(&self) -> Result<UploadFacts, StreamError> {
+        let root_key = self.facts.root;
+        let root = self.tag.clone().ok_or_else(|| missing(root_key))?;
+        Ok(UploadFacts {
+            repo_id: self.facts.repo_id,
+            root_hash: root_key.hash,
+            root,
+            objects: self.facts.objects.clone(),
+            relay_answers: self.facts.relay_answers.clone(),
+            features: self.facts.features.clone(),
+        })
+    }
+}
+
+/// What the checks of a history stream rooted at a LANDING found ([`CheckedStream::open_rooted`]):
+/// the repo, the root's key, every key (sorted), the relay answers and the features the header
+/// declares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootedFacts {
+    pub repo_id: rdy_model::RepoId,
+    pub root: ObjectKey,
+    pub objects: Vec<ObjectKey>,
+    pub relay_answers: BTreeMap<Hash, Hash>,
+    pub features: StoreFeatures,
+}
+
+/// Why [`CheckedStream::open_rooted`] refused a stream.
+#[derive(Debug)]
+pub enum RootedError {
+    /// The header is not a canon history rooted at the landing asked for: the root it names.
+    Root(ObjectKey),
+    /// Any refusal of the stream's checks.
+    Stream(StreamError),
+}
+
+impl From<StreamError> for RootedError {
+    fn from(e: StreamError) -> RootedError {
+        RootedError::Stream(e)
+    }
 }
 
 /// How [`complete`] reads the dropped representations of one incoming key.
@@ -1046,6 +1093,7 @@ fn complete(
     headers: &[StreamHeader],
     input_keys: &[ObjectKey],
     drops: &mut DropsOf<'_>,
+    tag_root: bool,
 ) -> Result<Complete, StreamError> {
     let Some(header) = headers.first() else {
         return Err(StreamError::bad_record(0, 0, Reason::NoBatchFiles));
@@ -1070,10 +1118,13 @@ fn complete(
         .flat_map(|h| h.prerequisites.iter().copied())
         .collect();
     check_prerequisites(rec, &prerequisites)?;
-    // the root, and the closure
+    // the root, and the closure: a TAG decodes; a landing root is a record of the closure
     let root_key = header.root();
-    let root = root_tag(rec, root_key)?;
-    check_closure(rec, root_key, Some(&root), &keys)?;
+    let root = match tag_root {
+        true => Some(root_tag(rec, root_key)?),
+        false => None,
+    };
+    check_closure(rec, root_key, root.as_ref(), &keys)?;
     check_snapshot_deltas(rec, &header.features, &keys)?;
     // the typed context of the plans and plan answers
     check_typed_context(rec, None, &keys)?;
@@ -1118,14 +1169,14 @@ fn complete(
     }
     let relay = relay_answers(rec, &keys)?;
     Ok(Complete {
-        facts: UploadFacts {
+        facts: RootedFacts {
             repo_id: header.repo_id,
-            root_hash: root_key.hash,
-            root,
+            root: root_key,
             objects: keys,
             relay_answers: relay,
             features: header.features.clone(),
         },
+        tag: root,
         incoming,
         approved,
     })
@@ -1168,7 +1219,7 @@ pub fn check_complete(
             }]),
             _ => Ok(vec![]),
         };
-    Ok(complete(&mut rec, headers, input_keys, &mut drops)?.facts)
+    complete(&mut rec, headers, input_keys, &mut drops, true)?.upload_facts()
 }
 
 /// Where a stream holds one record: a present record's number, frame offset and payload length,
@@ -1348,13 +1399,178 @@ impl<R: Read + Seek> Records for Indexed<R> {
 
 /// One sync batch, checked whole before anything reads it, as a take checks an upload with
 /// nothing held (see the module docs), and then a source of its records. The input is read
-/// again, a record at a time, whenever a read needs a payload.
-pub struct CheckedStream<R: Read + Seek> {
+/// again, a record at a time, whenever a read needs a payload. `F` is what the checks found: a
+/// tag history's [`UploadFacts`] ([`CheckedStream::open`]), or a canon history's
+/// [`RootedFacts`] ([`CheckedStream::open_rooted`]).
+pub struct CheckedStream<R: Read + Seek, F = UploadFacts> {
     records: Indexed<R>,
-    facts: UploadFacts,
+    facts: F,
     /// The first present change that embeds an approved block version and that no approval
     /// covers (the take's step 7).
     uncovered: Option<Hash>,
+}
+
+impl<R: Read + Seek> CheckedStream<R, RootedFacts> {
+    /// [`CheckedStream::open`] of a canon history stream rooted at `landing`, with nothing
+    /// known: the header must be a `canon_history` header whose root is `landing`, else
+    /// [`RootedError::Root`] with the root the header names, before any object record is read.
+    /// Then every check of [`CheckedStream::open`], with the landing as the closure's root.
+    pub fn open_rooted(input: R, landing: Hash) -> Result<Self, RootedError> {
+        Self::open_history(input, StreamPurpose::CanonHistory, landing)
+    }
+
+    /// [`CheckedStream::open_rooted`] of a view history stream rooted at the view op `op`, with
+    /// nothing known (D-V9RF5): the header must be a `view_history` header whose root is `op`,
+    /// else [`RootedError::Root`] with the root the header names, before any object record is
+    /// read. Then every check of [`CheckedStream::open`], with the op as the closure's root.
+    pub fn open_view_rooted(input: R, op: Hash) -> Result<Self, RootedError> {
+        Self::open_history(input, StreamPurpose::ViewHistory, op)
+    }
+
+    /// The history stream of `purpose` rooted at `root` (see [`CheckedStream::open_rooted`]).
+    fn open_history(input: R, purpose: StreamPurpose, root: Hash) -> Result<Self, RootedError> {
+        let want = ObjectKey {
+            kind: purpose.root_kind(),
+            hash: root,
+        };
+        let opened = open_checked(input, false, |h: &StreamHeader| {
+            if h.purpose == purpose && h.root() == want {
+                Ok(())
+            } else {
+                Err(RootedError::Root(h.root()))
+            }
+        })?;
+        Ok(CheckedStream {
+            records: opened.records,
+            facts: opened.done.facts,
+            uncovered: opened.uncovered,
+        })
+    }
+
+    /// The state of the root landing: its snapshot and each of its blocks by id, as
+    /// [`CheckedStream::materialize_tag`] reads a tag's.
+    pub fn materialize_root(
+        &self,
+    ) -> Result<(StateSnapshot, BTreeMap<BlockId, Block>), StreamError> {
+        self.materialize_at(self.facts.root.hash)
+    }
+
+    /// Whether the stream holds block version `version`: a record of the batch, present or
+    /// dropped.
+    pub fn holds_version(&self, version: &Hash) -> bool {
+        let key = ObjectKey {
+            kind: kinds::BLOCK,
+            hash: *version,
+        };
+        self.facts.objects.binary_search(&key).is_ok()
+    }
+
+    /// The state of landing `base`'s snapshot (an empty state for none) with each row of `rows`
+    /// applied: a version sets its block's version, none removes the block (D-V9RF5). Each
+    /// block reads as [`CheckedStream::materialize_tag`] reads a tag's; a version of another
+    /// block is E_BAD_RECORD.
+    pub fn materialize_rows(
+        &self,
+        base: Option<Hash>,
+        rows: &BTreeMap<BlockId, Option<Hash>>,
+    ) -> Result<(StateSnapshot, BTreeMap<BlockId, Block>), StreamError> {
+        let mut snapshot = match base {
+            Some(landing) => self.landing_snapshot(landing)?.0,
+            None => StateSnapshot::default(),
+        };
+        for (id, version) in rows {
+            match version {
+                Some(v) => snapshot.blocks.insert(id.clone(), *v),
+                None => snapshot.blocks.remove(id),
+            };
+        }
+        let state = snapshot.id();
+        let blocks = self.blocks_of(&snapshot, state)?;
+        Ok((snapshot, blocks))
+    }
+}
+
+/// One batch [`open_checked`] checked: its records, masked; the take's step 7 finding; and what
+/// the checks found.
+struct Opened<R> {
+    records: Indexed<R>,
+    uncovered: Option<Hash>,
+    done: Complete,
+}
+
+/// Opens and checks the batch `input` holds (see [`CheckedStream::open`]), its root a TAG when
+/// `tag_root`: `on_header` runs once the header is read, before any object record.
+fn open_checked<R: Read + Seek, E: From<StreamError>>(
+    mut input: R,
+    tag_root: bool,
+    on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
+) -> Result<Opened<R>, E> {
+    input
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| StreamError::io(Some(0), 0, &e))?;
+    let mut index: BTreeMap<ObjectKey, Place> = BTreeMap::new();
+    let report = check_batch_with(&mut input, on_header, |n, offset, r| {
+        let place = match r {
+            StreamRecord::Present {
+                payload, encoding, ..
+            } => Place::Present {
+                record: n,
+                offset,
+                len: payload.len() as u32,
+                encoding: *encoding,
+            },
+            StreamRecord::Dropped {
+                encoding,
+                original_len,
+                apply,
+                residue,
+                ..
+            } => Place::Dropped(Drop {
+                encoding: *encoding,
+                original_len: *original_len,
+                apply: *apply,
+                residue: *residue,
+            }),
+        };
+        index.insert(r.key(), place);
+        Ok::<(), E>(())
+    })?;
+    let keys: Vec<ObjectKey> = index.keys().copied().collect();
+    let mut records = Indexed {
+        input: RefCell::new(input),
+        index,
+        masked: BTreeMap::new(),
+        removed: BTreeMap::new(),
+        deltas: RefCell::new(None),
+        features: report.header.features.clone(),
+    };
+    // the index answers the dropped representations, with no read
+    let dropped: BTreeMap<ObjectKey, Drop> = records
+        .index
+        .iter()
+        .filter_map(|(k, p)| match p {
+            Place::Dropped(d) => Some((*k, *d)),
+            Place::Present { .. } => None,
+        })
+        .collect();
+    let mut from_index =
+        |_: &mut dyn Records, key: &ObjectKey| Ok(dropped.get(key).copied().into_iter().collect());
+    let done = complete(
+        &mut records,
+        std::slice::from_ref(&report.header),
+        &keys,
+        &mut from_index,
+        tag_root,
+    )?;
+    // the take's step 7 over the incoming records; it reads no key an approval covers
+    let uncovered = uncovered_change(&mut records, &done.approved, &keys)?;
+    drop(keys);
+    records.mask(&done)?;
+    Ok(Opened {
+        records,
+        uncovered,
+        done,
+    })
 }
 
 impl<R: Read + Seek> CheckedStream<R> {
@@ -1366,82 +1582,30 @@ impl<R: Read + Seek> CheckedStream<R> {
     ///
     /// The take's step 7 is not a stream error: `open` records it, and a caller that reads the
     /// stream must refuse it as a take does ([`CheckedStream::uncovered_change`]).
-    pub fn open(mut input: R) -> Result<CheckedStream<R>, StreamError> {
-        input
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| StreamError::io(Some(0), 0, &e))?;
-        let mut index: BTreeMap<ObjectKey, Place> = BTreeMap::new();
-        let report = check_batch_with(
-            &mut input,
-            |_| Ok::<(), StreamError>(()),
-            |n, offset, r| {
-                let place = match r {
-                    StreamRecord::Present {
-                        payload, encoding, ..
-                    } => Place::Present {
-                        record: n,
-                        offset,
-                        len: payload.len() as u32,
-                        encoding: *encoding,
-                    },
-                    StreamRecord::Dropped {
-                        encoding,
-                        original_len,
-                        apply,
-                        residue,
-                        ..
-                    } => Place::Dropped(Drop {
-                        encoding: *encoding,
-                        original_len: *original_len,
-                        apply: *apply,
-                        residue: *residue,
-                    }),
-                };
-                index.insert(r.key(), place);
-                Ok(())
-            },
-        )?;
-        let keys: Vec<ObjectKey> = index.keys().copied().collect();
-        let mut records = Indexed {
-            input: RefCell::new(input),
-            index,
-            masked: BTreeMap::new(),
-            removed: BTreeMap::new(),
-            deltas: RefCell::new(None),
-            features: report.header.features.clone(),
-        };
-        // the index answers the dropped representations, with no read
-        let dropped: BTreeMap<ObjectKey, Drop> = records
-            .index
-            .iter()
-            .filter_map(|(k, p)| match p {
-                Place::Dropped(d) => Some((*k, *d)),
-                Place::Present { .. } => None,
-            })
-            .collect();
-        let mut from_index = |_: &mut dyn Records, key: &ObjectKey| {
-            Ok(dropped.get(key).copied().into_iter().collect())
-        };
-        let done = complete(
-            &mut records,
-            std::slice::from_ref(&report.header),
-            &keys,
-            &mut from_index,
-        )?;
-        // the take's step 7 over the incoming records; it reads no key an approval covers
-        let uncovered = uncovered_change(&mut records, &done.approved, &keys)?;
-        drop(keys);
-        records.mask(&done)?;
+    pub fn open(input: R) -> Result<CheckedStream<R>, StreamError> {
+        let opened = open_checked(input, true, |_: &StreamHeader| Ok::<(), StreamError>(()))?;
+        let facts = opened.done.upload_facts()?;
         Ok(CheckedStream {
-            records,
-            facts: done.facts,
-            uncovered,
+            records: opened.records,
+            facts,
+            uncovered: opened.uncovered,
         })
     }
 
-    /// What the checks found: the repo, the root TAG and its hash, every key (sorted) and the
-    /// relay answers.
-    pub fn facts(&self) -> &UploadFacts {
+    /// The state the root TAG names: its landing's snapshot and each of its blocks by id. A
+    /// removed block version reads as the stub its approved residue gives, with its original
+    /// version hash; one no residue describes reads as nothing.
+    pub fn materialize_tag(
+        &self,
+    ) -> Result<(StateSnapshot, BTreeMap<BlockId, Block>), StreamError> {
+        self.materialize_at(self.facts.root.landing)
+    }
+}
+
+impl<R: Read + Seek, F> CheckedStream<R, F> {
+    /// What the checks found: the repo, the root and its hash (a tag history's root TAG), every
+    /// key (sorted) and the relay answers.
+    pub fn facts(&self) -> &F {
         &self.facts
     }
 
@@ -1472,31 +1636,49 @@ impl<R: Read + Seek> CheckedStream<R> {
         self.records.removed.get(key).copied()
     }
 
-    /// The state the root TAG names: its landing's snapshot and each of its blocks by id. A
-    /// removed block version reads as the stub its approved residue gives, with its original
-    /// version hash; one no residue describes reads as nothing.
-    pub fn materialize_tag(
+    /// The state landing `landing` of the stream names: its snapshot and each of its blocks by
+    /// id. A removed block version reads as the stub its approved residue gives, with its
+    /// original version hash; one no residue describes reads as nothing.
+    fn materialize_at(
         &self,
+        landing: Hash,
     ) -> Result<(StateSnapshot, BTreeMap<BlockId, Block>), StreamError> {
+        let (snapshot, state) = self.landing_snapshot(landing)?;
+        let blocks = self.blocks_of(&snapshot, state)?;
+        Ok((snapshot, blocks))
+    }
+
+    /// The snapshot of landing `landing` of the stream, with its state hash: the held
+    /// SNAPSHOT, or the fold of the stream's deltas (`crate::snapshot`).
+    fn landing_snapshot(&self, landing: Hash) -> Result<(StateSnapshot, Hash), StreamError> {
         let landing_key = ObjectKey {
             kind: kinds::LANDING,
-            hash: self.facts.root.landing,
+            hash: landing,
         };
         let landing: LandingRecord = self
             .typed(landing_key)?
             .ok_or_else(|| StreamError::unresolved(0, 0, landing_key))?;
-        let snapshot_key = ObjectKey {
-            kind: kinds::SNAPSHOT,
-            hash: landing.state,
-        };
-        // the held SNAPSHOT, or the fold of the stream's deltas (`crate::snapshot`)
-        let mut records: &CheckedStream<R> = self;
+        let mut records: &CheckedStream<R, F> = self;
         let snapshot = crate::snapshot::read_landing_snapshot(
             &mut crate::snapshot::RecordSnapshots::new(&mut records),
             None,
             &landing_key.hash,
             &landing,
         )?;
+        Ok((snapshot, landing.state))
+    }
+
+    /// Each block of `snapshot` (state `state`) by id, as a read sees it: a removed version as
+    /// its stub, one no residue describes left out.
+    fn blocks_of(
+        &self,
+        snapshot: &StateSnapshot,
+        state: Hash,
+    ) -> Result<BTreeMap<BlockId, Block>, StreamError> {
+        let snapshot_key = ObjectKey {
+            kind: kinds::SNAPSHOT,
+            hash: state,
+        };
         let mut blocks: BTreeMap<BlockId, Block> = BTreeMap::new();
         for (id, version) in &snapshot.blocks {
             let Some(block) = self.block(*version)? else {
@@ -1506,8 +1688,8 @@ impl<R: Read + Seek> CheckedStream<R> {
                 return Err(StreamError {
                     code: "E_BAD_RECORD",
                     message: format!(
-                        "snapshot {}: block {id} names version {version}, which is a version of {}",
-                        landing.state, block.id
+                        "snapshot {state}: block {id} names version {version}, which is a version of {}",
+                        block.id
                     ),
                     fix: "upload the history as its source project exported it".into(),
                     record: None,
@@ -1517,7 +1699,7 @@ impl<R: Read + Seek> CheckedStream<R> {
             }
             blocks.insert(id.clone(), block);
         }
-        Ok((snapshot, blocks))
+        Ok(blocks)
     }
 
     /// Block version `version` as a read sees it: its record, or for a removed version the stub
@@ -1639,7 +1821,7 @@ impl<R: Read + Seek> Indexed<R> {
     }
 }
 
-impl<R: Read + Seek> ObjectSource for CheckedStream<R> {
+impl<R: Read + Seek, F> ObjectSource for CheckedStream<R, F> {
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
         self.records.read(key)
     }
@@ -1650,7 +1832,7 @@ impl<R: Read + Seek> ObjectSource for CheckedStream<R> {
 }
 
 /// A shared checked stream reads as a record source too: every read is through `&self`.
-impl<R: Read + Seek> ObjectSource for &CheckedStream<R> {
+impl<R: Read + Seek, F> ObjectSource for &CheckedStream<R, F> {
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
         self.records.read(key)
     }

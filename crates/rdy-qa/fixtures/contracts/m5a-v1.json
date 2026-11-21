@@ -33,7 +33,6 @@
         "new profile": "needs a publication profile",
         "new repo-link": "writes a repo_link block; cli_repo_links pins its replies",
         "new source": "needs a source file",
-        "pack": "checks a pack file; the schema_packs row covers it",
         "plan confirm": "needs an open plan item",
         "plan defer": "needs an open plan item",
         "plan dismiss": "needs an open plan item",
@@ -1213,6 +1212,70 @@
             2
           ],
           "stderr_text": "string"
+        },
+        "pack check": {
+          "exits": [
+            0,
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          },
+          "stdout": {
+            "areas": [
+              {
+                "description": "string",
+                "name": "string",
+                "paths": [
+                  "string"
+                ]
+              }
+            ],
+            "classes": {
+              "actor": "string",
+              "authority_policy": "string",
+              "claim": "string",
+              "code": "string",
+              "component": "string",
+              "constraint": "string",
+              "decision": "string",
+              "diagram": "string",
+              "doc": "string",
+              "entity": "string",
+              "example": "string",
+              "figure": "string",
+              "finding": "string",
+              "flow": "string",
+              "folder": "string",
+              "instruction": "string",
+              "interface": "string",
+              "note": "string",
+              "prose": "string",
+              "publication_profile": "string",
+              "question": "string",
+              "rationale": "string",
+              "repo_link": "string",
+              "requirement": "string",
+              "section": "string",
+              "source": "string",
+              "table": "string",
+              "term": "string",
+              "value": "string"
+            },
+            "modules": [
+              {
+                "bytes": "number",
+                "interface": "number",
+                "rule": "string",
+                "sha256": "string"
+              }
+            ],
+            "pack": "string",
+            "types": "number",
+            "version": "string"
+          }
         },
         "pending": {
           "exits": [
@@ -24792,7 +24855,29 @@
               "default_severity": "string",
               "grammar": "string",
               "max": "number",
+              "module": {
+                "args_bytes": "number",
+                "call_depth": "number",
+                "depth_default": "number",
+                "depth_max": "number",
+                "depth_min": "number",
+                "fuel_per_block": "number",
+                "fuel_per_rule": "number",
+                "input_bytes": "number",
+                "interface": "number",
+                "memories": "number",
+                "memory_bytes": "number",
+                "module_bytes": "number",
+                "output_bytes": "number",
+                "pack_bytes": "number",
+                "table_elements": "number",
+                "tables": "number",
+                "value_stack_bytes": "number"
+              },
               "severity": [
+                "string"
+              ],
+              "tests": [
                 "string"
               ]
             },
@@ -25437,6 +25522,40 @@
           "views?": "string"
         }
       },
+      "rdy_schema checks.rules": {
+        "exact": {
+          "default_severity": "advisory",
+          "grammar": "filter",
+          "max": 64,
+          "module": {
+            "args_bytes": 8192,
+            "call_depth": 1024,
+            "depth_default": 1,
+            "depth_max": 3,
+            "depth_min": 0,
+            "fuel_per_block": 10000000,
+            "fuel_per_rule": 1000000000,
+            "input_bytes": 1048576,
+            "interface": 1,
+            "memories": 1,
+            "memory_bytes": 16777216,
+            "module_bytes": 1048576,
+            "output_bytes": 65536,
+            "pack_bytes": 8388608,
+            "table_elements": 10000,
+            "tables": 1,
+            "value_stack_bytes": 524288
+          },
+          "severity": [
+            "advisory",
+            "blocking"
+          ],
+          "tests": [
+            "filter",
+            "module"
+          ]
+        }
+      },
       "rdy_search": {
         "ok": {
           "ignore_case": "bool",
@@ -25979,6 +26098,21 @@
             }
           ],
           "warnings_repeated?": "number"
+        }
+      },
+      "rdy_write module rules": {
+        "ok": {
+          "on_change": {
+            "checks": [
+              {
+                "block": "string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "rule": "string"
+              }
+            ]
+          }
         }
       }
     },
@@ -28334,7 +28468,7 @@
               ]
             },
             "strict": {
-              "description": "true stops a replay at its first conflict. Not with take and no views.",
+              "description": "true replays none of the unpushed landings: canon takes the hub tip and they go into a new view pull-<n>. Not with take and no views.",
               "type": [
                 "boolean",
                 "null"
@@ -30427,6 +30561,108 @@
       "tensions",
       "version"
     ],
+    "module_rules": {
+      "example": {
+        "metadata": [
+          {
+            "bytes": 15362,
+            "interface": 1,
+            "rule": "section-needs-body",
+            "sha256": "d229fc2df9cd703dca01b429c1c574bcfcf31ba2c9210f284d872c12fa8846e5"
+          }
+        ],
+        "modules": [
+          {
+            "bytes": 15362,
+            "interface": 1,
+            "rule": "section-needs-body",
+            "sha256": "d229fc2df9cd703dca01b429c1c574bcfcf31ba2c9210f284d872c12fa8846e5"
+          }
+        ],
+        "text_rule_lines": [
+          "rule section-needs-body module sha256:d229fc2df9cd703dca01b429c1c574bcfcf31ba2c9210f284d872c12fa8846e5 15362 bytes, interface 1"
+        ]
+      },
+      "limits": {
+        "default_depth": 1,
+        "max_args_bytes": 8192,
+        "max_args_int": 9007199254740992,
+        "max_depth": 3,
+        "max_module_bytes": 1048576,
+        "max_pack_module_bytes": 8388608
+      },
+      "metadata": [
+        {
+          "bytes": 106,
+          "interface": 1,
+          "rule": "plain",
+          "sha256": "05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99"
+        },
+        {
+          "bytes": 106,
+          "interface": 1,
+          "rule": "set",
+          "sha256": "05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99"
+        }
+      ],
+      "metadata_no_module": [],
+      "pack_check": {
+        "modules": [
+          {
+            "bytes": 106,
+            "interface": 1,
+            "rule": "plain",
+            "sha256": "05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99"
+          },
+          {
+            "bytes": 106,
+            "interface": 1,
+            "rule": "set",
+            "sha256": "05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99"
+          }
+        ],
+        "text_rule_lines": [
+          "rule plain module sha256:05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99 106 bytes, interface 1",
+          "rule set module sha256:05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99 106 bytes, interface 1"
+        ]
+      },
+      "rules": [
+        {
+          "fix": "f",
+          "message": "m",
+          "name": "filter",
+          "require": "type = claim",
+          "select": "type = note",
+          "severity": "advisory"
+        },
+        {
+          "fix": "f",
+          "message": "m",
+          "module": "AGFzbQEAAAABDAJgAX8Bf2ACf38BfgMDAgABBQMBACAHJQMGbWVtb3J5AgAJcmR5X2FsbG9jAAAMcmR5X2NoZWNrX3YxAAEKDAIFAEGAIAsEAEINCwsTAQBBAAsNeyJwYXNzIjp0cnVlfQ==",
+          "name": "plain",
+          "select": "type = note",
+          "severity": "advisory"
+        },
+        {
+          "args": {
+            "flag": true,
+            "limit": 3,
+            "word": "w",
+            "words": [
+              "a",
+              "b"
+            ]
+          },
+          "depth": 3,
+          "fix": "f",
+          "message": "m",
+          "module": "AGFzbQEAAAABDAJgAX8Bf2ACf38BfgMDAgABBQMBACAHJQMGbWVtb3J5AgAJcmR5X2FsbG9jAAAMcmR5X2NoZWNrX3YxAAEKDAIFAEGAIAsEAEINCwsTAQBBAAsNeyJwYXNzIjp0cnVlfQ==",
+          "name": "set",
+          "select": "type = note",
+          "severity": "blocking"
+        }
+      ]
+    },
     "rdy_standard": {
       "areas": {},
       "block_types": {
@@ -31793,6 +32029,83 @@
         ],
         "light_only": [],
         "pair": []
+      },
+      "module_rules": {
+        "args_on_filter_rule": [
+          "E_CONFIG",
+          "<path>: invalid pack: rule r args applies to module rules only",
+          "fix the pack file"
+        ],
+        "depth_on_filter_rule": [
+          "E_CONFIG",
+          "<path>: invalid pack: rule r depth applies to module rules only",
+          "fix the pack file"
+        ],
+        "depth_too_deep": [
+          "E_CONFIG",
+          "<path>: invalid pack: rule r depth must be 0 to 3",
+          "fix the pack file"
+        ],
+        "module_imports": [
+          "E_CONFIG",
+          "invalid pack: rule r module imports env.clock; a check module imports nothing",
+          "fix the pack file"
+        ],
+        "module_invalid": [
+          "E_CONFIG",
+          "invalid pack: rule r module: type mismatch: expected i32, found i64 (at offset 0x5a)",
+          "fix the pack file"
+        ],
+        "module_lacks_export": [
+          "E_CONFIG",
+          "invalid pack: rule r module lacks the export rdy_alloc of type (i32) -> i32",
+          "fix the pack file"
+        ],
+        "module_memory": [
+          "E_CONFIG",
+          "invalid pack: rule r module memory starts above 256 pages",
+          "fix the pack file"
+        ],
+        "module_not_base64": [
+          "E_CONFIG",
+          "<path>: invalid pack: rule r module: not base64",
+          "fix the pack file"
+        ],
+        "module_null": [
+          "E_CONFIG",
+          "<path>: invalid pack: rule r module: null is not allowed",
+          "fix the pack file"
+        ],
+        "module_start": [
+          "E_CONFIG",
+          "invalid pack: rule r module has a start function; a check module has none",
+          "fix the pack file"
+        ],
+        "module_table_size": [
+          "E_CONFIG",
+          "invalid pack: rule r module table exceeds 10000 elements",
+          "fix the pack file"
+        ],
+        "module_two_tables": [
+          "E_CONFIG",
+          "invalid pack: rule r module has more than one table",
+          "fix the pack file"
+        ],
+        "no_test": [
+          "E_CONFIG",
+          "<path>: invalid pack: rule r needs require or module",
+          "fix the pack file"
+        ],
+        "pack_module_total": [
+          "E_CONFIG",
+          "invalid pack: the pack's modules hold 8999991 bytes; a pack takes at most 8388608",
+          "fix the pack file"
+        ],
+        "require_and_module": [
+          "E_CONFIG",
+          "<path>: invalid pack: rule r takes require or module, not both",
+          "fix the pack file"
+        ]
       },
       "policy_rules_from_chat_bad_kind": {
         "issues": [

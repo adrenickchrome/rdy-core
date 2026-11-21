@@ -1418,7 +1418,7 @@ pub(crate) fn rule_inputs_of(
     c: &Candidate,
 ) -> Result<crate::readiness::RuleInputs, RdyError> {
     let v = Version::read_for(st, c, Removal::Skip)?;
-    let compiled = crate::check::rules::compiled(st.pack())?;
+    let handle = st.compiled_rules()?;
     let projection = crate::check::landing_projection(st, &v.pref, &v.p, &v.next)?;
     let built = v.built.after(&projection.updates, st.pack());
     let graph = Arc::clone(built.graph.get_or_init(|| {
@@ -1427,18 +1427,17 @@ pub(crate) fn rule_inputs_of(
             Arc::clone(st.reader().tracking()),
         ))
     }));
-    let all = compiled
-        .into_iter()
-        .map(|mut r| {
-            // every set, whatever the pack's rules need
-            r.require = rdy_schema::filter::parse(
-                "suspect = true or tension = true or coverage >= 0",
-                st.pack(),
-            )
-            .expect("the test filter parses");
-            r
-        })
-        .collect::<Vec<_>>();
+    // every set, whatever the pack's rules need, when there is a rule
+    let every = rdy_schema::filter::parse(
+        "suspect = true or tension = true or coverage >= 0",
+        st.pack(),
+    )
+    .expect("the test filter parses");
+    let all: Vec<&rdy_schema::filter::Filter> = if handle.is_empty() {
+        vec![]
+    } else {
+        vec![&every]
+    };
     let (suspects, tensions, coverage) = v.rule_sets(st, &built, &graph, &all)?;
     Ok(crate::readiness::RuleInputs {
         suspects,
@@ -1633,9 +1632,9 @@ impl Version {
     /// suspects, tensions and intrinsic coverage of that canon (only the sets a rule needs), and
     /// the reach the rules add from canon to it.
     fn compute_checks(&self, st: &ReadState) -> Result<Checks, RdyError> {
-        use crate::check::{Stage, evaluate_rules, rules};
+        use crate::check::{Stage, rules};
         let pack = st.pack();
-        let compiled = rules::compiled(pack)?;
+        let compiled = st.compiled_rules()?;
         if compiled.is_empty() && self.p.alternative.is_none() {
             return Ok(Checks {
                 keys: crate::check::options::assigned_keys(st, &self.p, &self.next)?,
@@ -1690,7 +1689,8 @@ impl Version {
                 Arc::clone(st.reader().tracking()),
             ))
         }));
-        let (suspects, tensions, scores) = self.rule_sets(st, &built, &graph, &compiled)?;
+        let (suspects, tensions, scores) =
+            self.rule_sets(st, &built, &graph, &compiled.filters())?;
         let inputs = crate::filter::FilterInputs {
             pack,
             m: &built.m,
@@ -1700,12 +1700,12 @@ impl Version {
             tensions: &tensions,
             coverage: &scores,
         };
-        let scan = evaluate_rules(pack, inputs, built.m.ids().cloned(), Stage::Propose)?;
+        let scan = rules::evaluate(&compiled, inputs, built.m.ids().cloned(), Stage::Propose)?;
         let (canon, canon_g) = (st.materialized(&Scope::Canon)?, st.graph(&Scope::Canon)?);
         let reach = rules::rule_reach(
             &self.pref,
             pack,
-            &compiled,
+            compiled.rules(),
             (&canon, &canon_g),
             (&built.m, &graph),
             &self.touched,
@@ -1722,8 +1722,8 @@ impl Version {
         })
     }
 
-    /// The derived sets the rules of `compiled` read in the projected canon `built` (graph
-    /// `graph`), only those a rule needs (`Filter::needs`): its suspects (presentational sources
+    /// The derived sets the rules' `filters` read in the projected canon `built` (graph
+    /// `graph`), only those a filter needs (`Filter::needs`): its suspects (presentational sources
     /// left out, as a scope's suspects are), the blocks of the candidate's open tensions
     /// ([`Version::candidate_tension_blocks`]), and each block's intrinsic coverage score. No
     /// machine-local source fact enters them.
@@ -1732,10 +1732,10 @@ impl Version {
         st: &ReadState,
         built: &Built,
         graph: &Graph,
-        compiled: &[rdy_schema::CompiledRule],
+        filters: &[&rdy_schema::filter::Filter],
     ) -> Result<RuleSets, RdyError> {
         let (mut suspect, mut tension, mut coverage) = (false, false, false);
-        for f in compiled.iter().flat_map(|r| [&r.select, &r.require]) {
+        for f in filters {
             let n = f.needs();
             suspect |= n.suspect;
             tension |= n.tension;

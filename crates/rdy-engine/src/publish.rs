@@ -2,7 +2,7 @@
 
 use crate::config::site_identity;
 use crate::handle::EpochCaches;
-use crate::read_state::{self, CoordHeads, Entry, InflightCell};
+use crate::read_state::{self, CoordHeads, Entry, InflightCell, StateRules};
 use crate::semantic::state::SemanticState;
 use crate::tensions::set::TensionCell;
 use crate::{Delta, Event, Rdy, RdyError, ReadState, events, transitions};
@@ -72,6 +72,7 @@ impl Rdy {
                     tags: Arc::clone(&prev.tags),
                     pack: Arc::clone(&self.pack),
                     areas: Arc::clone(&self.areas),
+                    rules: StateRules::Loaded(Arc::clone(&self.rules)),
                     root: Arc::clone(&prev.root),
                     reads_files: prev.reads_files,
                     explicit_base: prev.explicit_base,
@@ -660,6 +661,7 @@ impl Rdy {
             tags,
             pack: Arc::clone(&self.pack),
             areas: Arc::clone(&self.areas),
+            rules: StateRules::Loaded(Arc::clone(&self.rules)),
             root: Arc::clone(&prev.root),
             reads_files: prev.reads_files,
             explicit_base: prev.explicit_base,
@@ -979,6 +981,7 @@ impl Rdy {
             tags: Arc::new(tags),
             pack: Arc::clone(&self.pack),
             areas: Arc::clone(&self.areas),
+            rules: StateRules::Loaded(Arc::clone(&self.rules)),
             root: Arc::clone(&prev.root),
             reads_files: prev.reads_files,
             explicit_base: prev.explicit_base,
@@ -1128,6 +1131,7 @@ impl Rdy {
             tags: Arc::new(vec![]),
             pack: Arc::clone(&self.pack),
             areas: Arc::clone(&self.areas),
+            rules: StateRules::Loaded(Arc::clone(&self.rules)),
             root: Arc::clone(&prev.root),
             reads_files: prev.reads_files,
             explicit_base: prev.explicit_base,

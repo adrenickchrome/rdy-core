@@ -1,0 +1,111 @@
+{
+  "assessment": "4cc503bbcfa2dca1a592a995814d427044d6517758c96de466952ec1b8172dde",
+  "blocking": [],
+  "canon_at": "2c136586a93659f32d663d65069fe89a83563af5bee2d40e03399532a3d88fa4",
+  "changes": 1,
+  "conflicts": [],
+  "consequences": [],
+  "coverage": {
+    "after": 63,
+    "before": 62,
+    "pages": [
+      {
+        "after": 63,
+        "before": 62,
+        "doc": "d-7J1NA",
+        "path": "notes"
+      }
+    ]
+  },
+  "id": "869c5f57a987c2fb548505c614f616622126a37857fd8f12a636891532299811",
+  "issues": [],
+  "plan": {
+    "by_kind": {
+      "confirm": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      },
+      "reaffirm": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      },
+      "rejustify": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      },
+      "tension": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      },
+      "update": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      },
+      "update_implementation": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      }
+    },
+    "closed": 0,
+    "code": {
+      "files": 0,
+      "unavailable": true
+    },
+    "deferred": 0,
+    "items": [],
+    "open": 0
+  },
+  "policy": {
+    "block": null,
+    "reasons": [
+      "no authority policy is set"
+    ],
+    "role": null,
+    "rule": null,
+    "verdict": "needs_person",
+    "version": null
+  },
+  "ready": true,
+  "ref": "P-869c5f57a987@1",
+  "stable": "869c5f57a987c2fb548505c614f616622126a37857fd8f12a636891532299811",
+  "summary": "test summary",
+  "tensions": [],
+  "title": "A claim",
+  "version": 1,
+  "warnings": [
+    {
+      "block": "c-4DH8Z",
+      "code": "W_RULE_CHECK",
+      "fix": "ask the module",
+      "message": "rule a-text fails on c-4DH8Z: the module says no",
+      "severity": "warning"
+    },
+    {
+      "block": "c-4DH8Z",
+      "code": "W_RULE_CHECK",
+      "fix": "fix the module of rule b-traps in the pack file, or make the rule advisory",
+      "message": "rule b-traps could not judge c-4DH8Z: the module trapped: wasm `unreachable` instruction executed",
+      "severity": "warning"
+    },
+    {
+      "block": "c-4DH8Z",
+      "code": "W_RULE_CHECK",
+      "fix": "c-default fix",
+      "message": "rule c-default fails on c-4DH8Z: c-default message",
+      "severity": "warning"
+    },
+    {
+      "block": "c-4DH8Z",
+      "code": "W_RULE_CHECK",
+      "fix": "d-filter fix",
+      "message": "rule d-filter fails on c-4DH8Z: d-filter message",
+      "severity": "warning"
+    }
+  ]
+}

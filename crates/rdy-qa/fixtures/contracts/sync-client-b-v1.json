@@ -28266,7 +28266,7 @@
               ]
             },
             "strict": {
-              "description": "true stops a replay at its first conflict. Not with take and no views.",
+              "description": "true replays none of the unpushed landings: canon takes the hub tip and they go into a new view pull-<n>. Not with take and no views.",
               "type": [
                 "boolean",
                 "null"

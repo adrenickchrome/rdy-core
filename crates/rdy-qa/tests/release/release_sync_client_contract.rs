@@ -28,12 +28,11 @@ const PREDECESSOR: &str = "sd1-v1.json";
 /// change is a successor fixture, never an edit of that file.
 const PREDECESSOR_SHA: &str = "012ff9ed50f654618517e629e3dcfa6c8e28935bf311c880de2faaa40576aea2";
 
-/// This plan's fixture: the current one until Sync client B's successor, frozen since.
+/// This plan's fixture, which every selector named until its successors.
 const CURRENT: &str = "sync-client-v1.json";
 
-/// The successors of [`CURRENT`] in order: Sync client B's, then M5a's, which every selector
-/// names since.
-const SUCCESSORS: [&str; 2] = ["sync-client-b-v1.json", "m5a-v1.json"];
+/// The successors of [`CURRENT`], in order; the last is the fixture the selectors name now.
+const LATER: [&str; 3] = ["sync-client-b-v1.json", "m5b-v1.json", "m5a-v1.json"];
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -513,11 +512,12 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     for file in SELECTORS {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
-        // ruling R-F2: a successor of `sync-client-v1.json` is the selected file
+        // ruling R-F2: a later successor (`sync-client-b-v1.json`, `m5b-v1.json`, then
+        // `m5a-v1.json`) is the selected file
         let selects = |name: &str| text.contains(&format!("fixtures/contracts/{name}\""));
         assert!(
-            selects(CURRENT) || SUCCESSORS.iter().any(|s| selects(s)),
-            "{file} selects {CURRENT} or a successor"
+            selects(CURRENT) || LATER.iter().any(|n| selects(n)),
+            "{file} selects {CURRENT} or a later successor"
         );
         assert!(
             !text.contains(&format!("contracts/{PREDECESSOR}\"")),
@@ -1043,17 +1043,17 @@ fn scc7_predecessor_fixtures_keep_their_bytes() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    // ruling R-F2: the folder also holds the successors
+    // ruling R-F2: the folder also holds the later successors
     let mut want: Vec<&str> = FROZEN
         .iter()
         .map(|(n, _)| *n)
         .chain([CURRENT])
-        .chain(SUCCESSORS)
+        .chain(LATER)
         .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds the frozen fixtures, {CURRENT} and {SUCCESSORS:?}"
+        "the folder holds the frozen fixtures, {CURRENT} and {LATER:?}"
     );
     assert!(
         FROZEN.iter().any(|(n, _)| *n == "sd1-v1.json"),

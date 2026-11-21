@@ -1196,6 +1196,18 @@ impl StoreReader {
         Ok(chain.last().map(|(h, _)| *h).unwrap_or(*head))
     }
 
+    /// View `name`'s head at `op`, an op of the chain from `head` back (D-00ZG2): the base, the
+    /// included changes' count, whether it is closed and its last write that the view had at
+    /// that op, with no owner and no pin, as a hub's head reads them ([`Self::chain_view_head`]).
+    /// An `op` that the chain from `head` does not hold is `NotFound(op)`; a broken chain is
+    /// [`Self::view_chain`]'s refusal. At most `MAX_HISTORY_DEPTH` ops are read.
+    pub fn view_head_at(&self, name: &str, head: &Hash, op: &Hash) -> Result<ViewHead, StoreError> {
+        if !self.view_chain(name, head)?.iter().any(|(h, _)| h == op) {
+            return Err(StoreError::NotFound(*op));
+        }
+        self.chain_view_head(name, op, None, false)
+    }
+
     /// View `name`'s head at op `head`, its facts derived from the chain alone: the base, the
     /// included changes' count, whether it is closed and its last write, as a hub's head reads
     /// them. A chain's ops never give the owner or the pin of this machine (D-4E32E): the head

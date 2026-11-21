@@ -117,6 +117,7 @@ pub mod reflects;
 pub mod related;
 pub mod render_inputs;
 pub mod render_source;
+pub mod replay_test;
 pub mod repo;
 pub mod rule_types;
 pub mod rules;
@@ -155,6 +156,7 @@ mod tree_io;
 pub mod vector_neighbors;
 pub mod vectors;
 mod version;
+pub mod version_tests;
 pub mod view_api;
 pub mod view_query;
 pub mod views;
@@ -236,7 +238,7 @@ pub use engine::{Engine, Local, ReadFn, WriteFn};
 pub use fsck::FsckReport;
 pub use pack_load::{
     FileStamp, PackFingerprint, ReloadOutcome, pack_fingerprint, pack_source_reads,
-    pack_source_reads_on_this_thread, project_pack, resolve_pack,
+    pack_source_reads_on_this_thread, project_pack, project_pack_compiled, resolve_pack,
 };
 pub use rdy_store::BlobState;
 pub use rdy_store::OpenReport;
@@ -285,6 +287,9 @@ pub struct Rdy {
     pack: Arc<Pack>,
     /// `pack`'s areas, compiled once (arn1).
     areas: Arc<AreaMatcher>,
+    /// `pack`'s rules, compiled once when it was loaded, with its verdict cache; replaced with
+    /// the pack, never carried to another.
+    rules: Arc<check::rules::CompiledRules>,
     /// The project's pack followed by every pack it extends, nearest first.
     lineage: Vec<String>,
     /// The pack files as they were when `pack` was last loaded.

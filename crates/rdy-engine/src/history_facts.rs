@@ -137,7 +137,7 @@ fn landing_key(hash: Hash) -> ObjectKey {
 
 /// The landings of the history that starts at `start`, newest first: `start`, then each `prev`.
 /// More than [`MAX_LANDINGS`] is `E_LIMIT`; a landing met twice is the dependency-cycle error.
-fn walk(read: &ReadState, start: Hash) -> Result<Vec<Hash>, RdyError> {
+pub(crate) fn walk(read: &ReadState, start: Hash) -> Result<Vec<Hash>, RdyError> {
     let reader = read.reader();
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -301,6 +301,143 @@ pub fn reachable(read: &ReadState, heads: &[Hash], hash: Hash) -> Result<bool, R
     before_last_check();
     read.ensure_current_epoch()?;
     Ok(found)
+}
+
+/// D-Y32MN's reach: for each hash of `hashes`, in input order, whether a stored landing of that
+/// hash lies in the history of one of `heads`. The walk follows each met landing's `prev` and
+/// each of its `rebased_from` sources, so a replay's source counts. A landing the store does not
+/// hold is passed over, as is the rest of the history behind it. Each landing is read once, and
+/// one budget of [`MAX_LANDINGS`] covers the distinct landings met; the landing that would pass
+/// it is `E_LIMIT`. The walk ends when every hash is found. More than [`MAX_KEYS`] hashes is
+/// `E_LIMIT` before anything is read.
+pub fn reached(read: &ReadState, heads: &[Hash], hashes: &[Hash]) -> Result<Vec<bool>, RdyError> {
+    if hashes.len() > MAX_KEYS {
+        return Err(landings_limit());
+    }
+    read.ensure_current_epoch()?;
+    let reader = read.reader();
+    let mut missing: HashSet<Hash> = hashes.iter().copied().collect();
+    let mut seen: HashSet<Hash> = HashSet::new();
+    let mut todo: Vec<Hash> = heads.iter().rev().copied().collect();
+    while let Some(h) = todo.pop() {
+        if missing.is_empty() {
+            break;
+        }
+        if seen.contains(&h) || !reader.has_kind(kinds::LANDING, &h)? {
+            continue;
+        }
+        if seen.len() == MAX_LANDINGS {
+            return Err(history_limit());
+        }
+        seen.insert(h);
+        missing.remove(&h);
+        let rec = reader.landing(&h)?;
+        // `prev` is walked first; the sources wait under it
+        todo.extend(rec.rebased_from.iter().rev());
+        todo.extend(rec.prev);
+    }
+    before_last_check();
+    read.ensure_current_epoch()?;
+    Ok(hashes.iter().map(|h| !missing.contains(h)).collect())
+}
+
+/// Where a landing sits in a store (D-H1SHC).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandingPlace {
+    /// Canon's chain holds it.
+    InCanon,
+    /// D-Y32MN's reach finds it, and canon's chain does not hold it.
+    OffCanon,
+    /// Any other hash: a landing the store does not hold, a stored landing the reach does not
+    /// find, or a hash of another kind of object.
+    NotStored,
+}
+
+/// The place of one landing hash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LandingPlaceFact {
+    pub hash: Hash,
+    pub place: LandingPlace,
+}
+
+/// `E_LIMIT` for a landing place query over [`MAX_KEYS`] hashes.
+fn places_limit() -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("landing place query exceeds {MAX_KEYS} hashes"),
+        format!("request at most {MAX_KEYS} landing hashes"),
+    )
+}
+
+/// D-H1SHC: the place of each landing of `hashes`, one per distinct hash, in the order each first
+/// occurs. `InCanon` when the chain of `canon` (by `prev`) holds it; `OffCanon` when [`reached`]
+/// finds it from `heads` and canon's chain does not hold it; `NotStored` otherwise, a hash of
+/// another kind of object included. The input counts before its repeats collapse, and more than
+/// [`MAX_KEYS`] hashes is `E_LIMIT` before anything is read. Canon's chain is walked once, under
+/// one budget of [`MAX_LANDINGS`], until every hash is found; the reach walk runs once for the
+/// rest.
+pub fn places(
+    read: &ReadState,
+    canon: Option<Hash>,
+    heads: &[Hash],
+    hashes: &[Hash],
+) -> Result<Vec<LandingPlaceFact>, RdyError> {
+    if hashes.len() > MAX_KEYS {
+        return Err(places_limit());
+    }
+    read.ensure_current_epoch()?;
+    let mut order = Vec::new();
+    let mut left = HashSet::new();
+    for h in hashes {
+        if left.insert(*h) {
+            order.push(*h);
+        }
+    }
+    let mut in_canon = HashSet::new();
+    if let Some(head) = canon
+        && !left.is_empty()
+    {
+        let reader = read.reader();
+        walk_heads(
+            &[head],
+            |h| Ok(reader.landing(h)?.prev),
+            |h| {
+                if left.remove(&h) {
+                    in_canon.insert(h);
+                }
+                left.is_empty()
+            },
+        )?;
+    }
+    let rest: Vec<Hash> = order
+        .iter()
+        .filter(|h| !in_canon.contains(*h))
+        .copied()
+        .collect();
+    let mut off_canon = HashSet::new();
+    if !rest.is_empty() {
+        for (h, found) in rest.iter().zip(reached(read, heads, &rest)?) {
+            if found {
+                off_canon.insert(*h);
+            }
+        }
+    }
+    before_last_check();
+    read.ensure_current_epoch()?;
+    Ok(order
+        .into_iter()
+        .map(|hash| LandingPlaceFact {
+            hash,
+            place: if in_canon.contains(&hash) {
+                LandingPlace::InCanon
+            } else if off_canon.contains(&hash) {
+                LandingPlace::OffCanon
+            } else {
+                LandingPlace::NotStored
+            },
+        })
+        .collect())
 }
 
 /// `E_LIMIT` for a landing facts query over [`MAX_KEYS`] hashes.

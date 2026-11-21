@@ -10,6 +10,8 @@ rdy-model.workspace = true
 rdy-schema.workspace = true
 rdy-store.workspace = true
 rdy-graph.workspace = true
+# Check modules: the interpreter boundary, the one crate that links the interpreter.
+rdy-check-wasm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true

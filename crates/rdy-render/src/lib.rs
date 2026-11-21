@@ -50,6 +50,7 @@ pub mod refusal;
 pub mod render_input;
 pub mod retained;
 pub mod review;
+mod review_publication;
 mod search;
 mod site;
 mod toc;
@@ -61,6 +62,7 @@ pub use not_found::{NotFoundKind, NotFoundPage};
 pub use one_page::{RenderedPage, render_publication_page};
 /// Diagrams drawn as SVG, behind the one pinned crate (D-FY4VF).
 pub use rdy_diagram as diagram;
+pub use review_publication::build_review_publication;
 
 /// The diagram cache's key of `source`, a Mermaid diagram's resolved plain source (D-XM8MP):
 /// the key of its admitted drawing input; none when a pre-draw refusal refuses it.
@@ -1715,7 +1717,9 @@ fn with_inputs<R>(
         blob_lens: &blobs.lens,
         removed_blobs: &blobs.removed,
         review,
-        listed: listed.as_ref(),
+        // the list of changes names what it reviews: a review with no view or proposal shows
+        // only its marks
+        listed: listed.as_ref().filter(|_| reviewed.is_some()),
         reviewed: reviewed.clone(),
         header,
         headers: Default::default(),

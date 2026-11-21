@@ -1,5 +1,6 @@
 //! Loading and reloading the project's pack, and the fingerprint of its files.
 
+use crate::check::rules::{CompiledRules, compile_pack_rules};
 use crate::config::{Config, parse_config, read_config};
 use crate::config_levels;
 use crate::handle::io;
@@ -183,10 +184,20 @@ pub fn resolve_pack(project: &Path, name: &str) -> Result<Pack, RdyError> {
 
 /// The pack the project at `project` names in `.rdy.yaml`, resolved without opening its
 /// store (so it works while another process holds the store). A missing or unreadable config is
-/// the same error `Rdy::open` gives.
+/// the same error `Rdy::open` gives. A structural read: it compiles no module, so a warning read
+/// costs no compilation.
 pub fn project_pack(project: &Path) -> Result<Pack, RdyError> {
     let cfg = read_config(project)?;
     resolve_pack(project, &cfg.pack)
+}
+
+/// [`project_pack`] with its rules compiled as `Rdy::open` compiles them, every module
+/// validated and translated, none run: `rdy pack check`. A pack that does not compile is the
+/// refusal the open gives.
+pub fn project_pack_compiled(project: &Path) -> Result<(Pack, Arc<CompiledRules>), RdyError> {
+    let pack = project_pack(project)?;
+    let rules = compile_pack_rules(&pack)?;
+    Ok((pack, rules))
 }
 
 /// A pack lowers a tension kind that blocks in stable content (D-ME2HD); rdy keeps it blocking.
@@ -274,12 +285,14 @@ pub(crate) fn load_pack_from(
 
 impl Rdy {
     /// Re-reads the config and packs if their bytes changed since they were loaded. A config or
-    /// pack that does not resolve is `Invalid`: the loaded pack, lineage and fingerprint stay, so
-    /// a later fix counts as a change and a still-invalid state is reported again. On success the
-    /// state is republished with the new pack. `Err` is only an I/O error reading the
-    /// fingerprint, or a failed republish. A republish that fails or panics restores the
-    /// previous pack, config and fingerprint before it returns its error or resumes its panic,
-    /// so the previous pack stays loaded and the next reload sees the files as changed.
+    /// pack that does not resolve, or whose rules do not compile, is `Invalid`: the loaded pack,
+    /// its compiled rules, lineage and fingerprint stay, so a later fix counts as a change and a
+    /// still-invalid state is reported again. On success the state is republished with the new
+    /// pack and its newly compiled rules. `Err` is only an I/O error reading the fingerprint, or
+    /// a failed republish. A republish that fails or panics restores the previous pack, its
+    /// compiled rules, config and fingerprint together before it returns its error or resumes
+    /// its panic, so the previous pack stays loaded and the next reload sees the files as
+    /// changed.
     ///
     /// A holder has no config or pack files (D-BPYN8): its reload reads nothing and is
     /// `Unchanged`, so its fixed context and fingerprint stay.
@@ -292,10 +305,13 @@ impl Rdy {
         if fp.hash == self.fingerprint.hash {
             return Ok(ReloadOutcome::Unchanged);
         }
-        // parsed from the bytes `fp` hashed: what is loaded (or found invalid) is what is seen
+        // parsed from the bytes `fp` hashed: what is loaded (or found invalid) is what is seen;
+        // the rules compile before anything is swapped, so a pack that does not compile leaves
+        // the loaded pack and its compiled rules in place
         let loaded = parse_config(&self.root, &sources.config, sources.local.as_deref())
-            .and_then(|cfg| load_pack_from(&sources.packs, &cfg.pack).map(|(p, l)| (cfg, p, l)));
-        let (cfg, pack, lineage) = match loaded {
+            .and_then(|cfg| load_pack_from(&sources.packs, &cfg.pack).map(|(p, l)| (cfg, p, l)))
+            .and_then(|(cfg, p, l)| compile_pack_rules(&p).map(|r| (cfg, p, r, l)));
+        let (cfg, pack, rules, lineage) = match loaded {
             Ok(v) => v,
             Err(error) => {
                 return Ok(ReloadOutcome::Invalid {
@@ -308,6 +324,7 @@ impl Rdy {
         let previous = Loaded {
             areas: Arc::clone(&self.areas),
             pack: Arc::clone(&self.pack),
+            rules: Arc::clone(&self.rules),
             lineage: self.lineage.clone(),
             serve: self.serve,
             fingerprint: self.fingerprint.clone(),
@@ -316,6 +333,7 @@ impl Rdy {
         self.swap_loaded(Loaded {
             areas: Arc::new(pack.area_matcher()),
             pack: Arc::new(pack),
+            rules,
             lineage,
             serve: cfg.serve.resolve(),
             fingerprint: fp,
@@ -340,12 +358,14 @@ impl Rdy {
         }
     }
 
-    /// Puts `loaded` in place of the loaded pack and config, and drops the cached entries
-    /// built under the pack it replaces.
+    /// Puts `loaded` in place of the loaded pack, its compiled rules and the config, and drops
+    /// the cached entries built under the pack it replaces. The compiled rules and their verdict
+    /// cache move with the pack: neither serves another pack.
     fn swap_loaded(&mut self, loaded: Loaded) {
         self.store.set_tracking(loaded.pack.tracking());
         self.areas = loaded.areas;
         self.pack = loaded.pack;
+        self.rules = loaded.rules;
         self.lineage = loaded.lineage;
         self.serve = loaded.serve;
         self.fingerprint = loaded.fingerprint;
@@ -360,6 +380,7 @@ impl Rdy {
 struct Loaded {
     areas: Arc<AreaMatcher>,
     pack: Arc<Pack>,
+    rules: Arc<CompiledRules>,
     lineage: Vec<String>,
     serve: ServeConfig,
     fingerprint: PackFingerprint,

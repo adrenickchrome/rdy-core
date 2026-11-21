@@ -18,9 +18,10 @@ use rdy_adapter::{Hash, RdyError, RepoId, Snapshot, StoreHandle};
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::{Rdy, Scope, Session, SessionKind, WriteRequest};
 use rdy_model::{Provenance, Role};
+use rdy_schema::{ArgValue, ModuleTest, RuleInput, RuleSeverity, RuleTestSpec};
 use rdy_store::LandRequest;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -906,6 +907,173 @@ fn scc6_check_landing_uses_prev_pack_and_settings() {
     // a holder captures no gate inputs: they are the pushing project's
     assert_eq!(hs.capture_gate_inputs().unwrap_err().code, "E_BAD_INPUT");
     h.close().unwrap();
+}
+
+/// The check module of the `body-required` fixture: it compiles, and passes a block with a body.
+const CHECK_MODULE: &[u8] = include_bytes!("../../../rdy-qa/fixtures/wasm/body-required.wasm");
+
+/// [`CHECK_MODULE`] with a custom section appended, `len` bytes in all: a module that compiles.
+fn padded_module(len: usize) -> Vec<u8> {
+    // id 0, the section size as 5-byte LEB128, then the name "x" and its payload
+    let size = len - CHECK_MODULE.len() - 6;
+    let mut m = CHECK_MODULE.to_vec();
+    m.push(0);
+    let mut n = u32::try_from(size).unwrap();
+    for i in 0..5 {
+        let byte = (n & 0x7f) as u8;
+        n >>= 7;
+        m.push(if i < 4 { byte | 0x80 } else { byte });
+    }
+    m.extend_from_slice(&[1, b'x']);
+    m.resize(len, 0);
+    m
+}
+
+/// A select that matches no block of these projects.
+pub(crate) const SELECTS_NOTHING: &str = "type = doc and fields.name = no-such-doc";
+
+/// `base` with one typed module rule `name` added, selecting `select`, with `test`.
+fn with_module(base: &CheckInputs, name: &str, select: &str, test: ModuleTest) -> CheckInputs {
+    let mut inputs = base.clone();
+    inputs.pack.rules.push(RuleInput {
+        name: name.to_string(),
+        select: select.to_string(),
+        test: RuleTestSpec::Module(test),
+        severity: RuleSeverity::Blocking,
+        message: "m".to_string(),
+        fix: "f".to_string(),
+    });
+    inputs
+}
+
+/// The typed module rules over a limit a pack file's rule meets, each on `base` and selecting
+/// `select`, with the refusal message a caller gets: a module of 1 MiB and one byte, depth 4,
+/// args of 8193 bytes, and an args integer past 2^53.
+pub(crate) fn over_limit_module_inputs(
+    base: &CheckInputs,
+    select: &str,
+) -> Vec<(CheckInputs, &'static str)> {
+    let ok = ModuleTest {
+        module: CHECK_MODULE.to_vec(),
+        args: None,
+        depth: None,
+    };
+    vec![
+        (
+            with_module(
+                base,
+                "big",
+                select,
+                ModuleTest {
+                    module: padded_module(rdy_schema::MAX_MODULE_BYTES + 1),
+                    ..ok.clone()
+                },
+            ),
+            "invalid pack: rule big module is 1048577 bytes; a module takes at most 1048576",
+        ),
+        (
+            with_module(
+                base,
+                "deep",
+                select,
+                ModuleTest {
+                    depth: Some(4),
+                    ..ok.clone()
+                },
+            ),
+            "invalid pack: rule deep depth must be 0 to 3",
+        ),
+        (
+            with_module(
+                base,
+                "wide",
+                select,
+                ModuleTest {
+                    args: Some(BTreeMap::from([(
+                        "k".to_string(),
+                        ArgValue::Str("x".repeat(rdy_schema::MAX_ARGS_BYTES)),
+                    )])),
+                    ..ok.clone()
+                },
+            ),
+            "invalid pack: rule wide args: at most 8192 bytes",
+        ),
+        (
+            with_module(
+                base,
+                "huge",
+                select,
+                ModuleTest {
+                    args: Some(BTreeMap::from([(
+                        "k".to_string(),
+                        ArgValue::Int(rdy_schema::MAX_ARGS_INT + 1),
+                    )])),
+                    ..ok.clone()
+                },
+            ),
+            "invalid pack: rule huge args: only strings, integers, booleans, null, lists and mappings",
+        ),
+    ]
+}
+
+/// The valid form of [`over_limit_module_inputs`]'s rules: a module, depth 3 and args each at
+/// the limit, selecting `select`.
+pub(crate) fn at_limit_module_inputs(base: &CheckInputs, select: &str) -> CheckInputs {
+    with_module(
+        base,
+        "at-limit",
+        select,
+        ModuleTest {
+            module: padded_module(rdy_schema::MAX_MODULE_BYTES),
+            args: Some(BTreeMap::from([(
+                "k".to_string(),
+                ArgValue::Str("x".repeat(rdy_schema::MAX_ARGS_BYTES - 8)),
+            )])),
+            depth: Some(3),
+        },
+    )
+}
+
+/// D-WV7ZS: a typed module rule a caller builds keeps the limits of a pack file's rule. The
+/// landing check refuses it before any rule is copied or compiled, whatever its select matches,
+/// with the pack file's words; core's evaluator refuses it as the pack's `E_CONFIG`.
+#[test]
+fn scc6_check_landing_refuses_over_limit_module_rules() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let c = checked();
+    let p = StoreHandle::open(c.dir.path()).unwrap();
+    let snap = p.snapshot().unwrap();
+    // the limits themselves pass, on a rule that selects nothing and one that selects the doc
+    for select in [SELECTS_NOTHING, "type = doc"] {
+        let ok = at_limit_module_inputs(&c.advisory, select);
+        snap.check_landing(c.l2, &ok).unwrap();
+    }
+    for select in [SELECTS_NOTHING, "type = claim"] {
+        for (inputs, want) in over_limit_module_inputs(&c.advisory, select) {
+            let e = snap.check_landing(c.l2, &inputs).unwrap_err();
+            assert_eq!(
+                (e.code, e.message.as_str(), e.fix.as_str()),
+                (
+                    "E_BAD_INPUT",
+                    want,
+                    "pass a pack whose module rules are within the limits"
+                ),
+                "{select}"
+            );
+        }
+    }
+    drop(snap);
+    p.close().unwrap();
+    // core's evaluator, which takes no adapter check, refuses the same rules at compile
+    let r = Rdy::open(c.dir.path()).unwrap();
+    let st = r.read();
+    let record = st.reader().landing(&c.l2).unwrap();
+    for select in [SELECTS_NOTHING, "type = claim"] {
+        for (inputs, want) in over_limit_module_inputs(&c.advisory, select) {
+            let e = rdy_engine::landing_check::check_landing(&st, &record, &inputs).unwrap_err();
+            assert_eq!((e.code, e.message.as_str()), ("E_CONFIG", want), "{select}");
+        }
+    }
 }
 
 /// Writes the canon history of the project at `dir` at `root`, less `base`'s closure, to `out`.

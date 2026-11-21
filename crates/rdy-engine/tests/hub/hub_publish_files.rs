@@ -259,6 +259,8 @@ struct Published {
 type KnownFn = Box<dyn Fn(&[FileIdentity]) -> Result<Vec<Hash>, RdyError> + Send + Sync>;
 type PutFn = Box<dyn Fn(usize, &FileIdentity) -> Result<FileIdentity, RdyError> + Send + Sync>;
 type PublishFn = Box<dyn Fn() -> Result<Candidate, RdyError> + Send + Sync>;
+type Answers = Vec<Result<FileIdentity, RdyError>>;
+type BatchFn = Box<dyn Fn(Answers) -> Result<Answers, RdyError> + Send + Sync>;
 
 /// A wire that answers from closures and records every request. A body that cannot be read
 /// to its end is a lost write: `E_UPSTREAM_UNCERTAIN`.
@@ -266,7 +268,11 @@ struct Fake {
     on_known: KnownFn,
     on_put: PutFn,
     on_publish: PublishFn,
+    /// A tar request's answers, from the one-file answers of its files.
+    on_batch: BatchFn,
     known: Mutex<Vec<Vec<FileIdentity>>>,
+    /// The files of each tar request, in body order.
+    batches: Mutex<Vec<Vec<FileIdentity>>>,
     puts: Mutex<Vec<Put>>,
     published: Mutex<Vec<Published>>,
 }
@@ -277,7 +283,9 @@ fn fake() -> Fake {
         on_known: Box::new(|files| Ok(files.iter().map(|f| f.hash).collect())),
         on_put: Box::new(|_, file| Ok(*file)),
         on_publish: Box::new(|| Ok(candidate())),
+        on_batch: Box::new(Ok),
         known: Mutex::new(vec![]),
+        batches: Mutex::new(vec![]),
         puts: Mutex::new(vec![]),
         published: Mutex::new(vec![]),
     }
@@ -292,6 +300,9 @@ impl Fake {
     }
     fn published(&self) -> Vec<Published> {
         self.published.lock().unwrap().clone()
+    }
+    fn batches(&self) -> Vec<Vec<FileIdentity>> {
+        self.batches.lock().unwrap().clone()
     }
     fn requests(&self) -> usize {
         self.known().len() + self.puts().len() + self.published().len()
@@ -375,6 +386,17 @@ impl PublishWire for Fake {
             return Err(upstream_uncertain());
         }
         (self.on_put)(index, file)
+    }
+
+    /// Records the tar request, then reads each file as the one-file form would.
+    fn put_files(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        batch: &mut dyn FileBatch,
+    ) -> Result<Answers, RdyError> {
+        self.batches.lock().unwrap().push(batch.files().to_vec());
+        (self.on_batch)(put_each(self, cx, push, batch)?)
     }
 
     fn publish(
@@ -566,7 +588,11 @@ fn hpb12_files_known_deduplicates_hashes_and_keeps_paths() {
             bytes: total
         }
     );
-    assert_eq!(asked, 1 + 3, "one context per request");
+    assert_eq!(
+        asked,
+        1 + 1,
+        "one context per request: files/known, then one tar body"
+    );
 
     // The manifest is unchanged, and the publish request carries both paths.
     assert_eq!(src.manifest(), &before);
@@ -663,7 +689,7 @@ fn hpb12_only_missing_files_are_sent_in_hash_order() {
     }
     let bytes = order[1].size + order[3].size + order[4].size;
     assert_eq!(sent, FilesSent { files: 3, bytes });
-    assert_eq!(asked, 4);
+    assert_eq!(asked, 2);
 
     // The hub holds everything: one files/known request and nothing else.
     let mut wire = fake();
@@ -857,7 +883,8 @@ fn hpb12_full_supported_manifest_and_artifact_fit() {
             bytes: HUB_BYTES
         }
     );
-    assert_eq!(asked, 1 + HUB_FILES as usize);
+    assert_eq!(asked, 1 + 1, "every file fits one tar body");
+    assert_eq!(wire.batches().len(), 1);
     let known = wire.known();
     assert_eq!((known.len(), known[0].len()), (1, HUB_FILES as usize));
     let puts = wire.puts();
@@ -1014,7 +1041,8 @@ fn hpb12_file_or_publish_failure_never_retries() {
     });
     let e = err(upload(&small_site(), limits(), &wire).0);
     same(&e, &upstream_uncertain());
-    assert_eq!(wire.puts().len(), 1);
+    // one tar body carried all three
+    assert_eq!((wire.batches().len(), wire.puts().len()), (1, 3));
 
     // A refusal passes through unchanged.
     let mut wire = fake();
@@ -1063,4 +1091,154 @@ fn hpb12_file_or_publish_failure_never_retries() {
         assert_eq!(wire.published().len(), 1);
         assert_eq!(wire.requests(), 1);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tar bodies
+// ---------------------------------------------------------------------------------------------
+
+fn identities(src: &Mem) -> Vec<FileIdentity> {
+    let mut ids: Vec<FileIdentity> = src
+        .manifest()
+        .files
+        .iter()
+        .map(|e| FileIdentity {
+            hash: e.hash,
+            size: e.size,
+        })
+        .collect();
+    ids.sort_by_key(|a| a.hash.0);
+    ids.dedup();
+    ids
+}
+
+/// Two or more missing files go in one tar request, in hash order; the batch reads each file
+/// through the same checks.
+#[test]
+fn crbp_missing_files_go_in_one_tar_body_in_hash_order() {
+    let src = small_site();
+    let wire = fake();
+    let (sent, asked) = upload(&src, limits(), &wire);
+    let want = identities(&src);
+    assert_eq!(sent.unwrap().files, 3);
+    assert_eq!(wire.batches(), vec![want.clone()]);
+    let puts: Vec<FileIdentity> = wire.puts().iter().map(|p| p.file).collect();
+    assert_eq!(puts, want, "every file read whole, in body order");
+    assert_eq!(asked, 2);
+}
+
+/// One missing file keeps the one-file form, with its media type.
+#[test]
+fn crbp_one_missing_file_keeps_the_one_file_form() {
+    let src = small_site();
+    let lone = src
+        .manifest()
+        .files
+        .iter()
+        .find(|e| e.path == "logo.png")
+        .unwrap()
+        .clone();
+    let mut wire = fake();
+    wire.on_known = Box::new(move |_| Ok(vec![lone.hash]));
+    let (sent, asked) = upload(&src, limits(), &wire);
+    assert_eq!(sent.unwrap().files, 1);
+    assert!(wire.batches().is_empty());
+    let puts = wire.puts();
+    assert_eq!(puts.len(), 1);
+    assert_eq!(puts[0].media, "image/png");
+    assert_eq!(asked, 2);
+}
+
+/// Bodies split at the negotiated file count and content bytes, each first held to core's
+/// caps, and at the longest upload body; a file that alone passes a bound is a body of its own.
+#[test]
+fn crbp_file_batches_split_at_the_count_and_size_bounds() {
+    let lim = |bytes: u64, files: u32| ArtifactLimits { bytes, files };
+    assert!(file_batches(&[], lim(100, 2)).is_empty());
+    // the count
+    assert_eq!(
+        file_batches(&[1, 2, 3, 4, 5], lim(100, 2)),
+        vec![0..2, 2..4, 4..5]
+    );
+    // the content bytes, at and past the bound
+    assert_eq!(file_batches(&[50, 50], lim(100, 10)), vec![0..2]);
+    assert_eq!(
+        file_batches(&[40, 40, 40, 10], lim(100, 10)),
+        vec![0..2, 2..4]
+    );
+    assert_eq!(file_batches(&[150, 1], lim(100, 10)), vec![0..1, 1..2]);
+    // core's file cap holds a larger negotiated count
+    let zeros = vec![0u64; CORE_ARTIFACT_FILES as usize + 1];
+    assert_eq!(
+        file_batches(&zeros, lim(100, u32::MAX)),
+        vec![
+            0..CORE_ARTIFACT_FILES as usize,
+            CORE_ARTIFACT_FILES as usize..zeros.len()
+        ]
+    );
+    // the content fits core's byte cap, but the tar framing passes the longest upload body
+    let half = CORE_ARTIFACT_BYTES / 2;
+    assert_eq!(
+        file_batches(&[half, half], lim(u64::MAX, 10)),
+        vec![0..1, 1..2]
+    );
+    let framed = tar_len(&[
+        FileIdentity {
+            hash: h(1),
+            size: half,
+        },
+        FileIdentity {
+            hash: h(2),
+            size: half - 2048,
+        },
+    ])
+    .unwrap();
+    assert!(framed <= CORE_ARTIFACT_BYTES);
+    assert_eq!(
+        file_batches(&[half, half - 2048], lim(u64::MAX, 10)),
+        vec![0..2]
+    );
+}
+
+/// A refused entry ends the upload with the hub's code; an answer that names another file, or
+/// a missing answer, is uncertain.
+#[test]
+fn crbp_tar_answers_are_checked_file_by_file() {
+    let mut wire = fake();
+    wire.on_batch = Box::new(|mut a| {
+        a[1] = Err(upstream_refused());
+        Ok(a)
+    });
+    let e = err(upload(&small_site(), limits(), &wire).0);
+    same(&e, &upstream_refused());
+    assert_eq!(wire.batches().len(), 1);
+
+    let mut wire = fake();
+    wire.on_batch = Box::new(|mut a| {
+        a.pop();
+        Ok(a)
+    });
+    same(
+        &err(upload(&small_site(), limits(), &wire).0),
+        &upstream_uncertain(),
+    );
+
+    let mut wire = fake();
+    wire.on_batch = Box::new(|mut a| {
+        a.swap(0, 1);
+        Ok(a)
+    });
+    same(
+        &err(upload(&small_site(), limits(), &wire).0),
+        &upstream_uncertain(),
+    );
+
+    // a lost tar reply is uncertain and nothing is sent again
+    let mut wire = fake();
+    wire.on_batch = Box::new(|_| Err(upstream_uncertain()));
+    same(
+        &err(upload(&small_site(), limits(), &wire).0),
+        &upstream_uncertain(),
+    );
+    assert_eq!(wire.batches().len(), 1);
 }
