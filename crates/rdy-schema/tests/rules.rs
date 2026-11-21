@@ -1081,3 +1081,154 @@ fn wck2_unset_module_keys_preserve_pack_bytes_and_digest() {
     let deeper = input(&module_yaml("r", MAGIC, "depth: 2\n")).unwrap();
     assert_ne!(bytes(&deeper), bytes(&only_depth));
 }
+
+/// A global allocator that records the allocation requests of the observing thread, so a test
+/// can see what a call allocates before it returns an error. Other threads, and the observing
+/// thread outside [`alloc_probe::observe`], allocate as usual and are not recorded.
+mod alloc_probe {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub struct Probe;
+
+    thread_local! {
+        /// Whether this thread's requests are recorded.
+        static ON: Cell<bool> = const { Cell::new(false) };
+        /// The largest single request (bytes) while recording.
+        static LARGEST: Cell<usize> = const { Cell::new(0) };
+        /// The sum of every request (bytes) while recording.
+        static TOTAL: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn note(size: usize) {
+        let _ = ON.try_with(|on| {
+            if on.get() {
+                LARGEST.with(|l| l.set(l.get().max(size)));
+                TOTAL.with(|t| t.set(t.get().saturating_add(size)));
+            }
+        });
+    }
+
+    // SAFETY: every call goes to `System` with the caller's arguments unchanged; recording only
+    // touches const-initialised thread-locals, which never allocate.
+    #[allow(unsafe_code)]
+    unsafe impl GlobalAlloc for Probe {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc` requires.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc_zeroed` requires.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from `System` with `layout` (every allocation here is System's).
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note(new_size);
+            // SAFETY: `ptr` came from `System` with `layout`; the caller's new size.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// What one observed call requested: the largest single request and the sum, in bytes.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Seen {
+        pub largest: usize,
+        pub total: usize,
+    }
+
+    /// Runs `f` with this thread's requests recorded.
+    pub fn observe<T>(f: impl FnOnce() -> T) -> (T, Seen) {
+        LARGEST.with(|l| l.set(0));
+        TOTAL.with(|t| t.set(0));
+        ON.with(|on| on.set(true));
+        let out = f();
+        ON.with(|on| on.set(false));
+        let seen = Seen {
+            largest: LARGEST.with(Cell::get),
+            total: TOTAL.with(Cell::get),
+        };
+        (out, seen)
+    }
+}
+
+#[global_allocator]
+static ALLOC: alloc_probe::Probe = alloc_probe::Probe;
+
+/// The most any refusal below may request in one allocation: far under each oversized input.
+const SMALL: usize = 64 * 1024;
+
+#[test]
+fn wck2_module_and_args_bounds_refuse_before_copying() {
+    // a module text past the size bound: its length is checked on the borrowed text
+    let long = "A".repeat(4_000_000);
+    let rule = module_value("r", &long, vec![]);
+    let (got, seen) = alloc_probe::observe(|| validate_rule_input(&rule));
+    assert_eq!(
+        got,
+        Err(SchemaError::Invalid(
+            "rule r module is 3000000 bytes; a module takes at most 1048576".to_string()
+        ))
+    );
+    assert!(seen.largest < SMALL && seen.total < SMALL, "{seen:?}");
+
+    // args past the byte bound: a long string, a long list and a wide mapping
+    let mut wide = Mapping::new();
+    for i in 0..200_000 {
+        wide.insert(Value::String(format!("k{i}")), Value::Null);
+    }
+    for args in [
+        Value::Mapping(Mapping::from_iter([(
+            Value::String("k".into()),
+            Value::String("x".repeat(4_000_000)),
+        )])),
+        Value::Mapping(Mapping::from_iter([(
+            Value::String("k".into()),
+            Value::Sequence(vec![Value::Null; 1_000_000]),
+        )])),
+        Value::Mapping(wide),
+    ] {
+        let rule = module_value("r", MAGIC, vec![("args", args)]);
+        let (got, seen) = alloc_probe::observe(|| validate_rule_input(&rule));
+        assert_eq!(
+            got,
+            Err(SchemaError::Invalid(
+                "rule r args: at most 8192 bytes".to_string()
+            ))
+        );
+        assert!(seen.largest < SMALL && seen.total < SMALL, "{seen:?}");
+    }
+}
+
+#[test]
+fn wck2_rule_count_and_texts_refuse_before_copying() {
+    let base = resolve(&rule("r", ANY, ANY)).unwrap();
+    let long = Rule {
+        message: "m".repeat(1_000_000),
+        ..base.rules[0].clone()
+    };
+    // 65 rules: the count is refused before any rule is read
+    let mut many = base.clone();
+    many.rules = (0..65)
+        .map(|i| Rule {
+            name: format!("r{i:03}"),
+            ..long.clone()
+        })
+        .collect();
+    let (got, seen) = alloc_probe::observe(|| compile_rules(&many));
+    assert_eq!(got, Err("a pack takes at most 64 rules".to_string()));
+    assert!(seen.largest < SMALL && seen.total < SMALL, "{seen:?}");
+    // one rule with a long message: its texts are checked on the borrowed rule
+    let mut one = base.clone();
+    one.rules = vec![long];
+    let (got, seen) = alloc_probe::observe(|| compile_rules(&one));
+    assert_eq!(
+        got,
+        Err("rule r: message must have 1 to 2000 characters".to_string())
+    );
+    assert!(seen.largest < SMALL && seen.total < SMALL, "{seen:?}");
+}

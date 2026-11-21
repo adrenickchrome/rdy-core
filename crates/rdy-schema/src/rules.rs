@@ -14,10 +14,12 @@ use crate::resolve::SchemaError;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use rdy_model::did_you_mean::nearest;
+use serde::de::{self, IgnoredAny, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_yaml_ng::Value;
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// The most rules a resolved pack holds, its parents' rules included.
 pub const MAX_RULES: usize = 64;
@@ -188,19 +190,21 @@ impl From<&Rule> for RuleInput {
 }
 
 /// A rule's keys as serde reads them. `Some(None)` is a key set to null, `None` a key left out.
+/// `module` borrows its text from the input, and `args` and `depth` are read in place, so nothing
+/// of theirs is copied before its bound is checked.
 #[derive(Deserialize)]
 #[serde(rename = "Rule", deny_unknown_fields)]
-struct RawRule {
+struct RawRule<'a> {
     name: String,
     select: String,
     #[serde(default, deserialize_with = "present")]
     require: Option<Option<String>>,
+    #[serde(default, borrow, deserialize_with = "present_text")]
+    module: Option<Option<&'a str>>,
     #[serde(default, deserialize_with = "present")]
-    module: Option<Option<String>>,
+    args: Option<Option<IgnoredAny>>,
     #[serde(default, deserialize_with = "present")]
-    args: Option<Option<Value>>,
-    #[serde(default, deserialize_with = "present")]
-    depth: Option<Option<Value>>,
+    depth: Option<Option<IgnoredAny>>,
     #[serde(default)]
     severity: RuleSeverity,
     message: String,
@@ -214,6 +218,30 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(d).map(Some)
+}
+
+/// A text key that is present, borrowed from the input: `Some`, holding `None` when it is null.
+fn present_text<'de, D>(d: D) -> Result<Option<Option<&'de str>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Text;
+    impl<'de> Visitor<'de> for Text {
+        type Value = Option<&'de str>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a string")
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            d.deserialize_str(self)
+        }
+        fn visit_borrowed_str<E: de::Error>(self, v: &'de str) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+    }
+    d.deserialize_option(Text).map(Some)
 }
 
 /// The structure of the rule `input`, one entry of a pack's `rules`. Err: serde's words for a
@@ -236,7 +264,10 @@ pub fn validate_rule_input(input: &Value) -> Result<RuleInput, SchemaError> {
         }
     }
     let (require, module) = (raw.require.flatten(), raw.module.flatten());
-    let (args, depth) = (raw.args.flatten(), raw.depth.flatten());
+    // the nodes themselves, read where they are
+    let node = |key: &str, set: bool| set.then(|| input.get(key).unwrap_or(&Value::Null));
+    let args = node("args", raw.args.is_some());
+    let depth = node("depth", raw.depth.is_some());
     let test = match (require, module) {
         (Some(_), Some(_)) => {
             return Err(invalid(format!(
@@ -256,13 +287,13 @@ pub fn validate_rule_input(input: &Value) -> Result<RuleInput, SchemaError> {
             RuleTestSpec::Filter { require }
         }
         (None, Some(text)) => RuleTestSpec::Module(ModuleTest {
-            module: decode_module(name, &text).map_err(invalid)?,
+            module: decode_module(name, text).map_err(invalid)?,
             args: args
-                .map(|a| check_args(name, &a))
+                .map(|a| check_args(name, a))
                 .transpose()
                 .map_err(invalid)?,
             depth: depth
-                .map(|d| check_depth(name, &d))
+                .map(|d| check_depth(name, d))
                 .transpose()
                 .map_err(invalid)?,
         }),
@@ -453,14 +484,12 @@ pub(crate) fn text_fits(text: &str) -> bool {
 /// first refusal, in the pack's order of rules. `PackSet::resolve` runs this, so a pack that
 /// resolves always compiles. The checks are [`crate::check_resolved_rules`]'s.
 pub fn compile_rules(pack: &Pack) -> Result<Vec<CompiledRule>, String> {
-    let inputs: Vec<RuleInput> = pack.rules.iter().map(RuleInput::from).collect();
-    let checked = crate::resolve::checked_rules(pack, &inputs)?;
-    let mut compiled = Vec::with_capacity(checked.len());
-    for (rule, c) in pack.rules.iter().zip(checked) {
+    let parsed = crate::resolve::checked_rules(pack, pack.rules.iter().map(RuleView::from))?;
+    let mut compiled = Vec::with_capacity(parsed.len());
+    for (rule, (select, require)) in pack.rules.iter().zip(parsed) {
         compiled.push(CompiledRule {
-            select: c.select,
-            require: c
-                .require
+            select,
+            require: require
                 .ok_or_else(|| format!("rule {} needs require or module", rule.name))?,
             rule: rule.clone(),
         });
@@ -478,10 +507,56 @@ pub struct CheckedRule {
     pub require: Option<Filter>,
 }
 
-/// The texts of `rule`, then its filters, parsed with `pack`. Its name is checked first, by
-/// [`check_name`].
-pub(crate) fn check_rule(pack: &Pack, rule: &RuleInput) -> Result<CheckedRule, String> {
-    for (field, text) in [("message", &rule.message), ("fix", &rule.fix)] {
+/// What the resolved-rule checks read of one rule of either kind, borrowed, so a rule is copied
+/// only after every check passes.
+pub(crate) struct RuleView<'a> {
+    pub name: &'a str,
+    pub select: &'a str,
+    /// The `require` filter of a filter rule; `None` for a module rule.
+    pub require: Option<&'a str>,
+    /// The decoded bytes of a module rule's module; 0 for a filter rule.
+    pub module_bytes: usize,
+    pub message: &'a str,
+    pub fix: &'a str,
+}
+
+impl<'a> From<&'a Rule> for RuleView<'a> {
+    fn from(rule: &'a Rule) -> RuleView<'a> {
+        RuleView {
+            name: &rule.name,
+            select: &rule.select,
+            require: Some(&rule.require),
+            module_bytes: 0,
+            message: &rule.message,
+            fix: &rule.fix,
+        }
+    }
+}
+
+impl<'a> From<&'a RuleInput> for RuleView<'a> {
+    fn from(rule: &'a RuleInput) -> RuleView<'a> {
+        let (require, module_bytes) = match &rule.test {
+            RuleTestSpec::Filter { require } => (Some(require.as_str()), 0),
+            RuleTestSpec::Module(m) => (None, m.module.len()),
+        };
+        RuleView {
+            name: &rule.name,
+            select: &rule.select,
+            require,
+            module_bytes,
+            message: &rule.message,
+            fix: &rule.fix,
+        }
+    }
+}
+
+/// The texts of `rule`, then its filters, parsed with `pack`: its `select` and its `require`, if
+/// any. Its name is checked first, by [`check_name`].
+pub(crate) fn check_rule(
+    pack: &Pack,
+    rule: &RuleView<'_>,
+) -> Result<(Filter, Option<Filter>), String> {
+    for (field, text) in [("message", rule.message), ("fix", rule.fix)] {
         if !text_fits(text) {
             return Err(format!(
                 "rule {}: {field} must have 1 to {MAX_TEXT_CHARS} characters",
@@ -489,18 +564,12 @@ pub(crate) fn check_rule(pack: &Pack, rule: &RuleInput) -> Result<CheckedRule, S
             ));
         }
     }
-    let select = compile_filter(pack, &rule.name, "select", &rule.select)?;
-    let require = match &rule.test {
-        RuleTestSpec::Filter { require } => {
-            Some(compile_filter(pack, &rule.name, "require", require)?)
-        }
-        RuleTestSpec::Module(_) => None,
+    let select = compile_filter(pack, rule.name, "select", rule.select)?;
+    let require = match rule.require {
+        Some(require) => Some(compile_filter(pack, rule.name, "require", require)?),
+        None => None,
     };
-    Ok(CheckedRule {
-        input: rule.clone(),
-        select,
-        require,
-    })
+    Ok((select, require))
 }
 
 pub(crate) fn check_name(name: &str) -> Result<(), String> {

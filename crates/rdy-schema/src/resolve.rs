@@ -976,42 +976,49 @@ pub fn check_resolved_rules(
     pack: &Pack,
     rules: &[crate::RuleInput],
 ) -> Result<Vec<crate::CheckedRule>, SchemaError> {
-    let mut checked = checked_rules(pack, rules).map_err(SchemaError::Invalid)?;
+    let parsed = checked_rules(pack, rules.iter().map(crate::rules::RuleView::from))
+        .map_err(SchemaError::Invalid)?;
+    let mut checked: Vec<crate::CheckedRule> = rules
+        .iter()
+        .zip(parsed)
+        .map(|(input, (select, require))| crate::CheckedRule {
+            input: input.clone(),
+            select,
+            require,
+        })
+        .collect();
     checked.sort_by(|a, b| a.input.name.cmp(&b.input.name));
     Ok(checked)
 }
 
-/// [`check_resolved_rules`] in the order of `rules`, its refusal as the detail.
-pub(crate) fn checked_rules(
+/// The checks of [`check_resolved_rules`] over borrowed `rules`, the count first, before any rule
+/// is read: each rule's parsed `select` and `require`, in the order of `rules`, its refusal as the
+/// detail.
+pub(crate) fn checked_rules<'a>(
     pack: &Pack,
-    rules: &[crate::RuleInput],
-) -> Result<Vec<crate::CheckedRule>, String> {
+    rules: impl ExactSizeIterator<Item = crate::rules::RuleView<'a>>,
+) -> Result<Vec<(crate::filter::Filter, Option<crate::filter::Filter>)>, String> {
     if rules.len() > crate::MAX_RULES {
         return Err(format!("a pack takes at most {} rules", crate::MAX_RULES));
     }
     let mut names = BTreeSet::new();
-    let mut checked = Vec::with_capacity(rules.len());
+    let mut parsed = Vec::with_capacity(rules.len());
+    let mut total = 0usize;
     for rule in rules {
-        crate::rules::check_name(&rule.name)?;
-        if !names.insert(rule.name.as_str()) {
+        crate::rules::check_name(rule.name)?;
+        if !names.insert(rule.name) {
             return Err(format!("rule {} is declared more than once", rule.name));
         }
-        checked.push(crate::rules::check_rule(pack, rule)?);
+        parsed.push(crate::rules::check_rule(pack, &rule)?);
+        total = total.saturating_add(rule.module_bytes);
     }
-    let total = rules
-        .iter()
-        .filter_map(|r| match &r.test {
-            crate::RuleTestSpec::Module(m) => Some(m.module.len()),
-            crate::RuleTestSpec::Filter { .. } => None,
-        })
-        .fold(0usize, usize::saturating_add);
     if total > crate::MAX_PACK_MODULE_BYTES {
         return Err(format!(
             "the pack's modules hold {total} bytes; a pack takes at most {}",
             crate::MAX_PACK_MODULE_BYTES
         ));
     }
-    Ok(checked)
+    Ok(parsed)
 }
 
 /// The ranges of the pack's `coverage:` numbers, and at least one dimension with a weight.
