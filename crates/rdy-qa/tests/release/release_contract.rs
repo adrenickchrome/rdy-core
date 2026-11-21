@@ -1672,8 +1672,19 @@ struct Rich {
 
 /// The pack of the probes: one area, so the coverage areas hold an entry.
 /// One advisory rule that only a note can fail, so one probe write carries a failure row in
-/// `on_change.checks` and no other probe meets it (ck8, D-JQD5X).
+/// `on_change.checks` and no other probe meets it (ck8, D-JQD5X). Two module rules of a note
+/// (wck6, D-ZRXY0): one whose module fails it with its own text, and one whose module traps, so
+/// the probe write gives a module failure row and a cannot-judge row too.
 const RICH_PACK: &str = "name: rdy-release\nversion: \"1\"\nextends: rdy-standard\nareas:\n  spec:\n    description: the spec doc\n    paths: [spec, spec/**]\nrules:\n  - name: notes-are-claims\n    select: type = note\n    require: type = claim\n    severity: advisory\n    message: a note is not a claim\n    fix: write it as a claim\n";
+
+/// [`RICH_PACK`] with its two module rules.
+fn rich_pack() -> String {
+    format!(
+        "{RICH_PACK}  - name: notes-module\n    select: type = note\n    module: {}\n    severity: advisory\n    message: the module fails a note\n    fix: write it as a claim\n  - name: notes-module-traps\n    select: type = note\n    module: {}\n    severity: advisory\n    message: the module traps\n    fix: write it as a claim\n",
+        WASM_FAIL_TEXT.trim(),
+        WASM_TRAP.trim()
+    )
+}
 
 fn rich_project() -> Rich {
     use rdy_qa::tensions::{put, upd};
@@ -1733,7 +1744,7 @@ fn rich_project() -> Rich {
     // a view that gives the reviewers a request
     put(&mut r, "a", upd(&batch.spec.c, "C contradicts B."));
     r.close().expect("close");
-    rdy_qa::packs::use_pack(dir.path(), "rdy-release", RICH_PACK, "");
+    rdy_qa::packs::use_pack(dir.path(), "rdy-release", &rich_pack(), "");
     std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").expect("the person");
     rdy_model::unseed_ids_for_tests();
     Rich {
@@ -3786,6 +3797,39 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         note["on_change"]["checks"][0]["rule"] == "notes-are-claims",
         "the note fails the pack rule in on_change.checks: {note}"
     );
+    // wck6 (D-ZRXY0): the module rules give a failure row with the module's text and a
+    // cannot-judge row, each advisory, in the filter rule's row shape; their member pins the
+    // rows alone
+    let rows = note["on_change"]["checks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let row = |rule: &str| {
+        rows.iter()
+            .find(|r| r["rule"] == rule)
+            .unwrap_or_else(|| panic!("a row of {rule}: {note}"))
+            .clone()
+    };
+    let (fails, traps) = (row("notes-module"), row("notes-module-traps"));
+    assert_eq!(fails["code"], "W_RULE_CHECK", "{fails}");
+    assert!(
+        fails["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("rule notes-module fails on ")),
+        "{fails}"
+    );
+    assert_eq!(traps["code"], "W_RULE_CHECK", "{traps}");
+    assert!(
+        traps["message"].as_str().is_some_and(|m| m
+            .starts_with("rule notes-module-traps could not judge ")
+            && m.contains(": the module trapped: ")),
+        "{traps}"
+    );
+    seen.note(
+        "rdy_write module rules",
+        "ok",
+        shape(&json!({"on_change": {"checks": rows}})),
+    );
     // the decision is written without a probe: the other views' decisions pin that reply's shape,
     // and this one would only fill their empty arrays
     let briefed_ids = vec![c.clone(), section.clone()];
@@ -5294,6 +5338,7 @@ fn packs_row() -> Value {
         json!(issues)
     };
     let dark = || Some(rdy_model::FieldValue::Str("b".repeat(64)));
+    let (module_structure, module_refusals) = module_rule_probes();
     json!({
         "sources": ["rdy_schema::Pack", "rdy_schema::PackSet", "crates/rdy-schema/packs"],
         "manifest_keys": pack_keys,
@@ -5316,6 +5361,7 @@ fn packs_row() -> Value {
             "max_glob_len": rdy_schema::MAX_GLOB_LEN,
             "max_path_segments": rdy_schema::MAX_PATH_SEGMENTS,
         },
+        "module_rules": module_structure,
         "coverage_settings": {
             "pack": coverage_pack.coverage,
             "max_docs_per_level_default": std_pack.max_docs_per_level(),
@@ -5345,8 +5391,112 @@ fn packs_row() -> Value {
                 "dark_media_type_only": figure_dark_probe(None, Some("image/png")),
                 "bad_kind": figure_dark_probe(Some(rdy_model::FieldValue::Int(3)), Some("image/png")),
             },
+            "module_rules": module_refusals,
         },
     })
+}
+
+/// The check modules of the contract probes (D-ZRXY0): small modules kept as base64 files.
+const WASM_PASS: &str = include_str!("../../fixtures/wasm/pass.b64");
+const WASM_FAIL_TEXT: &str = include_str!("../../fixtures/wasm/fail-text.b64");
+const WASM_TRAP: &str = include_str!("../../fixtures/wasm/trap.b64");
+
+/// wck6 (D-ZRXY0, D-N1GG5): the structure of a module rule and every refusal of a pack load. The
+/// structure is a resolved pack's rules: a filter rule, a module rule that sets neither `args`
+/// nor `depth`, and one that sets both. Each refusal is the `[code, message, fix]` of the
+/// compiled pack read, the read that `rdy pack check` and a project open make; the pack file's
+/// path reads `<path>`.
+fn module_rule_probes() -> (Value, Value) {
+    let pass = WASM_PASS.trim();
+    let mut set = PackSet::with_builtin();
+    set.add_yaml(&format!(
+        "name: probe\nversion: \"1\"\nextends: rdy-standard\nrules:\n  - name: filter\n    select: type = note\n    require: type = claim\n    message: m\n    fix: f\n  - name: plain\n    select: type = note\n    module: {pass}\n    message: m\n    fix: f\n  - name: set\n    select: type = note\n    module: {pass}\n    args:\n      flag: true\n      limit: 3\n      word: w\n      words: [a, b]\n    depth: 3\n    severity: blocking\n    message: m\n    fix: f\n"
+    ))
+    .expect("a pack with module rules parses");
+    let probe = set.resolve("probe").expect("it resolves");
+    let structure = json!({
+        "rules": serde_json::to_value(&probe.rules).expect("the rules serialize"),
+        "limits": {
+            "max_module_bytes": rdy_schema::MAX_MODULE_BYTES,
+            "max_pack_module_bytes": rdy_schema::MAX_PACK_MODULE_BYTES,
+            "max_args_bytes": rdy_schema::MAX_ARGS_BYTES,
+            "max_args_int": rdy_schema::MAX_ARGS_INT,
+            "max_depth": rdy_schema::MAX_DEPTH,
+            "default_depth": rdy_schema::DEFAULT_DEPTH,
+        },
+    });
+    let rule = |test: &str| {
+        format!("  - name: r\n    select: type = section\n{test}    message: m\n    fix: f\n")
+    };
+    let module = |name: &str| rule(&format!("    module: {}\n", wasm_fixture(name).trim()));
+    // nine modules of 999,999 zero bytes each are over the pack's total
+    let zeros = "AAAA".repeat(333_333);
+    let nine: String = (0..9)
+        .map(|k| {
+            format!("  - name: r{k}\n    select: type = section\n    module: {zeros}\n    message: m\n    fix: f\n")
+        })
+        .collect();
+    let cases = [
+        ("module_null", rule("    module: null\n")),
+        (
+            "require_and_module",
+            rule(&format!(
+                "    require: type = section\n    module: {pass}\n"
+            )),
+        ),
+        ("no_test", rule("")),
+        (
+            "args_on_filter_rule",
+            rule("    require: type = section\n    args:\n      k: v\n"),
+        ),
+        (
+            "depth_on_filter_rule",
+            rule("    require: type = section\n    depth: 1\n"),
+        ),
+        (
+            "depth_too_deep",
+            rule(&format!("    module: {pass}\n    depth: 4\n")),
+        ),
+        ("module_not_base64", rule("    module: AAA*\n")),
+        ("pack_module_total", nine),
+        ("module_invalid", module("invalid-unused")),
+        ("module_imports", module("imports")),
+        ("module_lacks_export", module("no-alloc")),
+        ("module_start", module("start")),
+        ("module_memory", module("memory-257")),
+        ("module_two_tables", module("two-tables")),
+        ("module_table_size", module("table-10001")),
+    ];
+    let mut refusals = Map::new();
+    for (name, rules) in cases {
+        let (d, r) = project();
+        drop(r);
+        rdy_qa::packs::use_pack(
+            d.path(),
+            "probe",
+            &format!("name: probe\nversion: \"1\"\nextends: rdy-standard\nrules:\n{rules}"),
+            "",
+        );
+        let file = d.path().join(".rdy/packs/probe.yaml");
+        let e = rdy_engine::project_pack_compiled(d.path())
+            .err()
+            .unwrap_or_else(|| panic!("{name}: the compiled read refuses"));
+        refusals.insert(
+            name.into(),
+            json!([
+                e.code,
+                normalize(&e.message, &[file.as_path(), d.path()]),
+                e.fix
+            ]),
+        );
+    }
+    (structure, Value::Object(refusals))
+}
+
+/// A check module of `fixtures/wasm`, as base64 text.
+fn wasm_fixture(name: &str) -> String {
+    let path = qa_root().join(format!("fixtures/wasm/{name}.b64"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
 // ---- markdown exports ----
