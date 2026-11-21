@@ -1011,8 +1011,6 @@ impl ReadState {
     /// The vector weights of `ws` (D-ZX5S6), nothing computed until a read asks. A read scope's
     /// weights are made once per build and kept on it, over the scope's lexicon: a floating view
     /// shares canon's, a write starts the next state's afresh, and a held state keeps its own.
-    /// Review's (D-R2CDN) are canon's lexicon at this state's landing plus the source block, made
-    /// for each call and never cached, since they depend on the source's content.
     pub fn vector_weights(&self, ws: WeightScope<'_>) -> Result<Arc<VectorWeights>, RdyError> {
         match ws {
             WeightScope::Read(scope) => {
@@ -1027,10 +1025,6 @@ impl ReadState {
                         .get_or_init(|| Arc::new(VectorWeights::of(lexicon))),
                 ))
             }
-            WeightScope::Review(source) => Ok(Arc::new(VectorWeights::review(
-                self.lexicon(&Scope::Canon)?,
-                source,
-            ))),
         }
     }
 
