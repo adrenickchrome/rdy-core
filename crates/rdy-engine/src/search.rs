@@ -8,6 +8,8 @@ use crate::lexicon::{link_kind_for, tied};
 use crate::materialize::Materialized;
 use crate::suggest::{Suggestion, suggestion_id};
 use crate::tensions::index::is_deprecated;
+use crate::vectors::{Doc, Operand, VectorBudget, VectorWeights, WeightScope, WordCounts};
+use crate::vectors::{round3, score_operands, tf};
 use crate::{ReadState, Scope, now_ms};
 use rdy_graph::{EdgeKind, GoverningCache, GoverningStatuses};
 use rdy_model::decision::{DECISION, DESCRIBES};
@@ -105,6 +107,8 @@ pub struct SearchFilters {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_below: Option<u32>,
     /// `coverage`: list the lowest block score first, the default order between equal scores.
+    /// `relevance` (D-76Y9H): inside the phrase tier and the all-words tier, the highest lexical
+    /// score against the query first, then reading order. `reading`: the default order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
 }
@@ -157,8 +161,13 @@ pub struct SearchMatch {
     /// sord1 (FW-SR1): no line holds the phrase; the block holds every word of it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub all_words: bool,
+    /// vxs6 (D-76Y9H): with `sort: relevance`, the block's lexical score against the query,
+    /// rounded to three decimals. Absent in every other order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
     /// scol1 (FW-SR3): later hits with the same type, lines, `more_lines`, `all_words` and
-    /// `history`, in result order. Never cut.
+    /// `history`, in result order. Never cut. A ranked entry stands in its best member's place
+    /// (D-5VGAS).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<SearchAlso>,
     /// esrch1: a link from this block to each entity the query names, when the block holds the
@@ -184,6 +193,9 @@ pub struct SearchMatch {
 pub struct SearchAlso {
     pub id: String,
     pub path: Option<String>,
+    /// vxs6 (D-5VGAS): the member's own score, in a ranked order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<Suggestion>,
 }
@@ -227,6 +239,21 @@ impl ReadState {
         page: Option<&str>,
         max_tokens: Option<usize>,
     ) -> Result<SearchResult, RdyError> {
+        // vxs6 (D-76Y9H, D-5VGAS): a pattern has no words, and ranking reads the current state
+        // only; both refusals come before anything is read
+        let relevance = q.filters.sort.as_deref() == Some(SORT_RELEVANCE);
+        let weigh = if relevance {
+            if q.regex {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "sort relevance needs a literal query",
+                    "drop regex, or drop sort",
+                ));
+            }
+            Some(self.ranked_scope(scope, "sort relevance")?)
+        } else {
+            None
+        };
         let (re, words) = compile(q)?;
         // 3b (esrch1): a literal that names entities starts from them, and reads text the way
         // resolution does (any case, any spacing), so every unlinked mention is a match
@@ -295,6 +322,7 @@ impl ReadState {
                         history: early.unwrap_or_else(|| history_of(b)),
                         all_words: words,
                         cov: None,
+                        score: None,
                         suggestions: vec![],
                     };
                     if words {
@@ -386,7 +414,16 @@ impl ReadState {
         token.push(0);
         token.push(u8::from(q.regex));
         token.push(u8::from(q.ignore_case));
-        token.extend(serde_json::to_vec(&q.filters).unwrap_or_default());
+        // `sort: reading` is the default order, so it pages as an absent sort does
+        if q.filters.sort.as_deref() == Some(SORT_READING) {
+            let reading = SearchFilters {
+                sort: None,
+                ..q.filters.clone()
+            };
+            token.extend(serde_json::to_vec(&reading).unwrap_or_default());
+        } else {
+            token.extend(serde_json::to_vec(&q.filters).unwrap_or_default());
+        }
         token.push(0);
         let mut hits: Vec<Hit> = phrase.into_iter().chain(all_words).collect();
         // cc14 (FW-SR1, FW-SR4): `coverage_below` drops the hits at or over the bound and
@@ -394,7 +431,8 @@ impl ReadState {
         // before the page cut, and only they put it in the page token (membership and order
         // depend on it). Any other search gives coverage to the entries of its page only. A
         // past landing or a proposal version has no coverage, so a search there carries none.
-        let wants_coverage = q.filters.coverage_below.is_some() || q.filters.sort.is_some();
+        let by_coverage = q.filters.sort.as_deref() == Some(SORT_COVERAGE);
+        let wants_coverage = q.filters.coverage_below.is_some() || by_coverage;
         // A filter or sort on coverage at a past landing or in a proposal version is refused. A
         // coverage read error never fails a search: the hits carry no coverage (so
         // `coverage_below` keeps none) and `coverage_error` says why.
@@ -423,9 +461,21 @@ impl ReadState {
         if let Some(n) = q.filters.coverage_below {
             hits.retain(|h| h.cov.as_ref().is_some_and(|c| c.score < n));
         }
-        if q.filters.sort.is_some() {
+        if by_coverage {
             // stable: equal scores keep the default order
             hits.sort_by_key(|h| h.cov.as_ref().map_or(100, |c| c.score));
+        }
+        if let Some(weigh) = &weigh {
+            // D-J5FWG: every kept hit against the query's whole lexical vector, no seed or cap.
+            // Stable: the phrase tier stays before the all-words tier, and equal scores keep
+            // reading order.
+            let w = self.vector_weights(WeightScope::Read(weigh))?;
+            relevance_scores(&w, &q.text, &mut hits)?;
+            hits.sort_by(|a, b| {
+                a.all_words
+                    .cmp(&b.all_words)
+                    .then_with(|| b.score.unwrap_or(0.0).total_cmp(&a.score.unwrap_or(0.0)))
+            });
         }
         // every collapse-key input the version does not cover goes in too: `history` comes from
         // other decisions, so a supersede can regroup the entries without moving any version
@@ -479,7 +529,9 @@ impl ReadState {
                 all_words: h.all_words,
                 history: h.history,
             };
-            if let Some(&at) = seen.get(&key) {
+            // D-5VGAS: in a ranked order, hits with no matching line never collapse
+            let joins = !(relevance && key.lines.is_empty());
+            if joins && let Some(&at) = seen.get(&key) {
                 if let (Some(have), Some(c)) = (&mut entries[at].confidence, &h.cov) {
                     // the entry takes the lowest level of its blocks
                     if level_rank(c.level) > level_rank(*have) {
@@ -489,6 +541,7 @@ impl ReadState {
                 entries[at].also.push(SearchAlso {
                     id: h.block.id.to_string(),
                     path,
+                    score: h.score.map(round3),
                     suggestions: h.suggestions,
                 });
                 continue;
@@ -501,13 +554,16 @@ impl ReadState {
                 more_lines: key.more_lines,
                 history: key.history,
                 all_words: key.all_words,
+                score: h.score.map(round3),
                 also: vec![],
                 suggestions: h.suggestions,
                 coverage: h.cov.as_ref().map(|c| c.score),
                 issues: h.cov.as_ref().map(|c| c.issues),
                 confidence: h.cov.as_ref().map(|c| c.level),
             });
-            seen.insert(key, entries.len() - 1);
+            if joins {
+                seen.insert(key, entries.len() - 1);
+            }
         }
         let totals = totals_of(types, docs);
 
@@ -573,6 +629,88 @@ impl ReadState {
     }
 }
 
+impl ReadState {
+    /// vxs6 (D-76Y9H, D-5VGAS): the scope a ranked mode `p` (`sort relevance`, `like` or
+    /// `like_text`) weighs its vectors in. Canon's head is canon. `E_BAD_INPUT` for a past
+    /// landing (ranking over time is not core, FW-H7) and for a proposal version.
+    pub(crate) fn ranked_scope(&self, scope: &Scope, p: &str) -> Result<Scope, RdyError> {
+        match scope {
+            Scope::Proposal(v) => Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{p} ranks canon and views only, not proposal:{}", v.short()),
+                "ask for the proposal's view, or canon",
+            )),
+            Scope::At(h) if self.is_past_landing(scope) => Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{p} ranks the current state only, not landing:{h}"),
+                "ask for canon or a view; ranking over time is not part of rdy core",
+            )),
+            Scope::At(_) => Ok(Scope::Canon),
+            other => Ok(other.clone()),
+        }
+    }
+}
+
+/// The `sort` values: the default reading order named, coverage and relevance.
+const SORT_READING: &str = "reading";
+const SORT_COVERAGE: &str = "coverage";
+const SORT_RELEVANCE: &str = "relevance";
+
+/// The refusal of a ranked search that passes its vector work or weight limit.
+fn vector_work_refused() -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        "vector search exceeds its work limit",
+        "use query without sort relevance",
+    )
+}
+
+/// D-76Y9H, D-J5FWG: gives each hit its exact lexical score against `text`. The query's lexical
+/// vector holds every word of `text` that a block of the scope holds, `tf × idf` under `w`, by
+/// word, divided by its length; a query has no link vector. A hit's score is the dot product
+/// with its own lexical vector: 0 for a hit that shares no whole word. The products and lazy
+/// weights are charged to one search budget first; a guard refuses the search.
+fn relevance_scores(w: &VectorWeights, text: &str, hits: &mut [Hit<'_>]) -> Result<(), RdyError> {
+    let counts = WordCounts::of(rdy_model::entity::words(text).into_iter().map(|w| w.folded));
+    let mut lexical: Vec<(&str, f64)> = Vec::with_capacity(counts.len());
+    for (word, count) in counts.iter() {
+        if let Some(idf) = w.idf(word).map_err(|_| vector_work_refused())? {
+            lexical.push((word, tf(count) * idf));
+        }
+    }
+    // the length, summed in word order as a block's norm is
+    let mut sum = 0.0;
+    for (_, x) in &lexical {
+        sum += x * x;
+    }
+    let norm = sum.sqrt();
+    if norm > 0.0 {
+        for (_, x) in &mut lexical {
+            *x /= norm;
+        }
+    } else {
+        lexical.clear();
+    }
+    let query = Operand {
+        lexical,
+        link: vec![],
+    };
+    let mut budget = VectorBudget::search();
+    budget.begin_source();
+    for h in hits {
+        let block = Operand {
+            lexical: w
+                .lexical(Doc::Block(&h.block.id))
+                .map_err(|_| vector_work_refused())?,
+            link: vec![],
+        };
+        let score =
+            score_operands(&query, &block, &mut budget).map_err(|_| vector_work_refused())?;
+        h.score = Some(score);
+    }
+    Ok(())
+}
+
 /// One matching block before collapse.
 struct Hit<'a> {
     block: &'a Block,
@@ -583,6 +721,8 @@ struct Hit<'a> {
     all_words: bool,
     /// cc14: the block's coverage; none at a past landing.
     cov: Option<HitCoverage>,
+    /// vxs6: the exact lexical score against the query, with `sort: relevance` only.
+    score: Option<f64>,
     /// esrch1: link suggestions; not part of the collapse key.
     suggestions: Vec<Suggestion>,
 }
@@ -903,12 +1043,12 @@ impl ReadState {
             allowed.push(set);
         }
         if let Some(s) = &f.sort
-            && s != "coverage"
+            && ![SORT_COVERAGE, SORT_RELEVANCE, SORT_READING].contains(&s.as_str())
         {
             return Err(RdyError::new(
                 E_BAD_INPUT,
-                format!("sort takes coverage, not {s}"),
-                "pass sort: coverage, or leave sort out for the default order",
+                format!("sort takes coverage, relevance or reading, not {s}"),
+                "pass coverage, relevance or reading, or omit sort",
             ));
         }
         if let Some(n) = f.coverage_below
