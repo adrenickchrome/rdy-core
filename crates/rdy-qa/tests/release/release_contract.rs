@@ -5551,7 +5551,8 @@ fn module_rule_probes() -> (Value, Value) {
             &format!("name: probe\nversion: \"1\"\nextends: rdy-standard\nrules:\n{rules}"),
             "",
         );
-        let file = d.path().join(".rdy/packs/probe.yaml");
+        // joined part by part, as rdy builds it: a "/" in the join stays as is on Windows
+        let file = d.path().join(".rdy").join("packs").join("probe.yaml");
         let e = rdy_engine::project_pack_compiled(d.path())
             .err()
             .unwrap_or_else(|| panic!("{name}: the compiled read refuses"));
