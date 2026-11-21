@@ -74,7 +74,8 @@ pub(crate) fn pack(env: &Env, cmd: PackCmd) -> Result<(Value, String), ErrorRepl
     let PackCmd::Check = cmd;
     // the rules compile as the open compiles them: a module that does not load fails here, and
     // none runs
-    let (pack, _rules) = project_pack_compiled(&env.project)?;
+    let (pack, rules) = project_pack_compiled(&env.project)?;
+    let modules = rdy_engine::check::rules::module_metadata(&rules);
     let classes: serde_json::Map<String, Value> = pack
         .block_types
         .keys()
@@ -95,8 +96,15 @@ pub(crate) fn pack(env: &Env, cmd: PackCmd) -> Result<(Value, String), ErrorRepl
             text.push_str(&format!(" ({})", a.description));
         }
     }
+    // D-ZRXY0: one line per module rule, in rule name order
+    for m in &modules {
+        text.push_str(&format!(
+            "\nrule {} module sha256:{} {} bytes, interface {}",
+            m.rule, m.sha256, m.bytes, m.interface
+        ));
+    }
     Ok((
-        json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len(), "classes": classes, "areas": areas}),
+        json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len(), "classes": classes, "areas": areas, "modules": modules}),
         text,
     ))
 }

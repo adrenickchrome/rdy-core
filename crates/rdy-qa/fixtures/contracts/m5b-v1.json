@@ -33,7 +33,6 @@
         "new profile": "needs a publication profile",
         "new repo-link": "writes a repo_link block; cli_repo_links pins its replies",
         "new source": "needs a source file",
-        "pack": "checks a pack file; the schema_packs row covers it",
         "plan confirm": "needs an open plan item",
         "plan defer": "needs an open plan item",
         "plan dismiss": "needs an open plan item",
@@ -1179,6 +1178,70 @@
             2
           ],
           "stderr_text": "string"
+        },
+        "pack check": {
+          "exits": [
+            0,
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          },
+          "stdout": {
+            "areas": [
+              {
+                "description": "string",
+                "name": "string",
+                "paths": [
+                  "string"
+                ]
+              }
+            ],
+            "classes": {
+              "actor": "string",
+              "authority_policy": "string",
+              "claim": "string",
+              "code": "string",
+              "component": "string",
+              "constraint": "string",
+              "decision": "string",
+              "diagram": "string",
+              "doc": "string",
+              "entity": "string",
+              "example": "string",
+              "figure": "string",
+              "finding": "string",
+              "flow": "string",
+              "folder": "string",
+              "instruction": "string",
+              "interface": "string",
+              "note": "string",
+              "prose": "string",
+              "publication_profile": "string",
+              "question": "string",
+              "rationale": "string",
+              "repo_link": "string",
+              "requirement": "string",
+              "section": "string",
+              "source": "string",
+              "table": "string",
+              "term": "string",
+              "value": "string"
+            },
+            "modules": [
+              {
+                "bytes": "number",
+                "interface": "number",
+                "rule": "string",
+                "sha256": "string"
+              }
+            ],
+            "pack": "string",
+            "types": "number",
+            "version": "string"
+          }
         },
         "pending": {
           "exits": [
@@ -24724,7 +24787,29 @@
               "default_severity": "string",
               "grammar": "string",
               "max": "number",
+              "module": {
+                "args_bytes": "number",
+                "call_depth": "number",
+                "depth_default": "number",
+                "depth_max": "number",
+                "depth_min": "number",
+                "fuel_per_block": "number",
+                "fuel_per_rule": "number",
+                "input_bytes": "number",
+                "interface": "number",
+                "memories": "number",
+                "memory_bytes": "number",
+                "module_bytes": "number",
+                "output_bytes": "number",
+                "pack_bytes": "number",
+                "table_elements": "number",
+                "tables": "number",
+                "value_stack_bytes": "number"
+              },
               "severity": [
+                "string"
+              ],
+              "tests": [
                 "string"
               ]
             },
@@ -25367,6 +25452,40 @@
             }
           ],
           "views?": "string"
+        }
+      },
+      "rdy_schema checks.rules": {
+        "exact": {
+          "default_severity": "advisory",
+          "grammar": "filter",
+          "max": 64,
+          "module": {
+            "args_bytes": 8192,
+            "call_depth": 1024,
+            "depth_default": 1,
+            "depth_max": 3,
+            "depth_min": 0,
+            "fuel_per_block": 10000000,
+            "fuel_per_rule": 1000000000,
+            "input_bytes": 1048576,
+            "interface": 1,
+            "memories": 1,
+            "memory_bytes": 16777216,
+            "module_bytes": 1048576,
+            "output_bytes": 65536,
+            "pack_bytes": 8388608,
+            "table_elements": 10000,
+            "tables": 1,
+            "value_stack_bytes": 524288
+          },
+          "severity": [
+            "advisory",
+            "blocking"
+          ],
+          "tests": [
+            "filter",
+            "module"
+          ]
         }
       },
       "rdy_search": {
@@ -30382,6 +30501,41 @@
         "max_depth": 3,
         "max_module_bytes": 1048576,
         "max_pack_module_bytes": 8388608
+      },
+      "metadata": [
+        {
+          "bytes": 106,
+          "interface": 1,
+          "rule": "plain",
+          "sha256": "05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99"
+        },
+        {
+          "bytes": 106,
+          "interface": 1,
+          "rule": "set",
+          "sha256": "05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99"
+        }
+      ],
+      "metadata_no_module": [],
+      "pack_check": {
+        "modules": [
+          {
+            "bytes": 106,
+            "interface": 1,
+            "rule": "plain",
+            "sha256": "05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99"
+          },
+          {
+            "bytes": 106,
+            "interface": 1,
+            "rule": "set",
+            "sha256": "05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99"
+          }
+        ],
+        "text_rule_lines": [
+          "rule plain module sha256:05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99 106 bytes, interface 1",
+          "rule set module sha256:05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99 106 bytes, interface 1"
+        ]
       },
       "rules": [
         {

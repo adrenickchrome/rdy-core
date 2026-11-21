@@ -130,6 +130,26 @@ fn ck8_mcp_catalogue_and_schema_agree() {
             "grammar": "filter",
             "severity": ["advisory", "blocking"],
             "default_severity": "advisory",
+            "tests": ["filter", "module"],
+            "module": {
+                "interface": 1,
+                "module_bytes": 1_048_576,
+                "pack_bytes": 8_388_608,
+                "args_bytes": 8192,
+                "depth_min": 0,
+                "depth_max": 3,
+                "depth_default": 1,
+                "memory_bytes": 16_777_216,
+                "memories": 1,
+                "tables": 1,
+                "table_elements": 10_000,
+                "call_depth": 1024,
+                "value_stack_bytes": 524_288,
+                "input_bytes": 1_048_576,
+                "output_bytes": 65_536,
+                "fuel_per_block": 10_000_000,
+                "fuel_per_rule": 1_000_000_000_u64,
+            },
         })
     );
     // the decision type's field list discovers confirmation from the schema

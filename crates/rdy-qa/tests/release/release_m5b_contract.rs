@@ -3,9 +3,9 @@
 //!
 //! `m5b-v1.json` is the current fixture: it started as a byte copy of `sync-client-b-v1.json`,
 //! which is frozen from here on, and every selector moves to it. The module rule capture
-//! (wck6) is its first change. The interpreter is linked
-//! through `rdy-check-wasm` alone: no other package of the workspace depends on it, the boundary
-//! depends on no rdy crate, and the engine depends on the boundary.
+//! (wck6) is its first change, and the module metadata capture (wck7) its second. The
+//! interpreter is linked through `rdy-check-wasm` alone: no other package of the workspace
+//! depends on it, the boundary depends on no rdy crate, and the engine depends on the boundary.
 use rdy_qa::fixtures::output_within;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -23,8 +23,8 @@ const PREDECESSOR_SHA: &str = "e65653b123aea1307a9e2ab9728f3b5d18e25b33b8f7ca8aa
 /// The current fixture, which every selector names.
 const CURRENT: &str = "m5b-v1.json";
 
-/// The sha256 of [`CURRENT`] since the module rule capture (wck6, D-ZRXY0).
-const CURRENT_SHA: &str = "66d821c87a452be67ed1411dce29f54996205032219245cb77fe0668e156d5a3";
+/// The sha256 of [`CURRENT`] since the module metadata capture (wck7, D-ZRXY0, D-WV7ZS).
+const CURRENT_SHA: &str = "7bd4cc1634540324e69695a4881e4437df852d258c4be340042accdc62aa909e";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
