@@ -320,6 +320,22 @@ pub fn vector_neighbors_in(
     cut: AdviceCut,
     budget: &mut VectorBudget,
 ) -> Advice {
+    vector_neighbors_except(m, g, pack, w, sources, cut, budget, &|_| false)
+}
+
+/// [`vector_neighbors_in`], with no block that `except` names as a candidate: a write receipt
+/// (D-Y1WEY) leaves out every block the write creates or changes before a source's row cap.
+#[allow(clippy::too_many_arguments)]
+pub fn vector_neighbors_except(
+    m: &Materialized,
+    g: &Graph,
+    pack: &Pack,
+    w: &VectorWeights,
+    sources: &[BlockId],
+    cut: AdviceCut,
+    budget: &mut VectorBudget,
+    except: &dyn Fn(&BlockId) -> bool,
+) -> Advice {
     let eligible: Vec<(usize, &Block)> = sources
         .iter()
         .enumerate()
@@ -345,6 +361,7 @@ pub fn vector_neighbors_in(
         let mut kept: Vec<&Block> = Vec::new();
         let keep = |id: &BlockId| {
             *id != src.id
+                && !except(id)
                 && m.get(id).is_some_and(|b| {
                     let ok = reader.eligible_target(g, pack, b) && !relation.relates(b);
                     if ok {

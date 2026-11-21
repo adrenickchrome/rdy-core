@@ -69,6 +69,12 @@ const SIMILAR_BLOCKS: &str = "For similar blocks, use rdy_search with like.";
 /// D-Y1WEY: one vector neighbor row: `<block> (vector neighbor of <for>, score <score>[; words
 /// <words>][; links <links>]; doc <doc>) <summary>`, each list only when it has an entry.
 fn vector_neighbor_line(n: &Value) -> String {
+    format!("{} {}", vector_neighbor_head(n), s(n, "summary"))
+}
+
+/// A vector neighbor row without its summary: `<block> (vector neighbor of <for>, score
+/// <score>[; words <words>][; links <links>]; doc <doc>)`. A write result's rows have no summary.
+fn vector_neighbor_head(n: &Value) -> String {
     let list = |k: &str| {
         let items: Vec<&str> = n[k]
             .as_array()
@@ -83,14 +89,13 @@ fn vector_neighbor_line(n: &Value) -> String {
         }
     };
     format!(
-        "{} (vector neighbor of {}, score {}{}{}; doc {}) {}",
+        "{} (vector neighbor of {}, score {}{}{}; doc {})",
         s(n, "block"),
         s(n, "for"),
         n["score"],
         list("words"),
         list("links"),
-        s(n, "doc"),
-        s(n, "summary")
+        s(n, "doc")
     )
 }
 
@@ -579,7 +584,29 @@ pub fn consequences_text(reply: &Value) -> String {
     t.push_str(&coverage_part(reply));
     t.push_str(&suggestions_part(reply));
     t.push_str(&related_part(reply));
+    t.push_str(&vector_neighbors_part(reply));
     t.push_str(&errors_part(reply));
+    t
+}
+
+/// D-Y1WEY, D-0ZPAP: the vector neighbors of the blocks the write created, after the related
+/// decisions: `\nvector neighbors:`, one line per row and a line for the created blocks that were
+/// not scored; nothing when the reply has neither.
+fn vector_neighbors_part(reply: &Value) -> String {
+    let rows = reply["vector_neighbors"].as_array().map_or(&[][..], |a| a);
+    let skipped = reply["vector_neighbors_skipped"]
+        .as_u64()
+        .filter(|n| *n > 0);
+    if rows.is_empty() && skipped.is_none() {
+        return String::new();
+    }
+    let mut t = String::from("\nvector neighbors:");
+    for r in rows {
+        t.push_str(&format!("\n  {}", one_line(&vector_neighbor_head(r))));
+    }
+    if let Some(n) = skipped {
+        t.push_str(&format!("\n  {n} source(s) not scored"));
+    }
     t
 }
 
@@ -1402,6 +1429,40 @@ mod tests {
         let none =
             header(&json!({"base": {"token": "t"}, "neighbors": [], "neighbors_by_doc": []}));
         assert!(!none.contains("neighbors"), "{none}");
+    }
+
+    #[test]
+    fn vxs4_write_text_lists_vector_neighbors_without_a_summary() {
+        let reply = json!({
+            "consequences": [],
+            "related_decisions": [{"decision": "D-1", "status": "live", "relation": "governs", "entities": [], "statement": "Keep A"}],
+            "vector_neighbors": [
+                {"for": "c-NEW", "block": "c-OLD", "score": 0.5, "words": ["bison", "herd"], "links": [], "doc": "d-A"},
+                {"for": "c-NEW", "block": "c-LNK", "score": 0.25, "words": [], "links": ["c-T"], "doc": "d-B"}
+            ],
+            "vector_neighbors_skipped": 2,
+        });
+        let t = consequences_text(&reply);
+        assert!(
+            t.ends_with(
+                "\nvector neighbors:\n  c-OLD (vector neighbor of c-NEW, score 0.5; words bison, herd; doc d-A)\n  c-LNK (vector neighbor of c-NEW, score 0.25; links c-T; doc d-B)\n  2 source(s) not scored"
+            ),
+            "{t}"
+        );
+        assert!(
+            t.find("related decisions:") < t.find("vector neighbors:"),
+            "{t}"
+        );
+        // skipped sources alone print their line; neither member prints nothing
+        let only = consequences_text(&json!({"vector_neighbors_skipped": 1}));
+        assert_eq!(only, "\nvector neighbors:\n  1 source(s) not scored");
+        assert_eq!(consequences_text(&json!({"consequences": []})), "");
+        // a briefing row keeps its summary after the same head
+        let row = json!({"for": "c-A", "block": "c-B", "score": 0.7, "words": ["w"], "links": [], "doc": "d-A", "summary": "B text"});
+        assert_eq!(
+            vector_neighbor_line(&row),
+            "c-B (vector neighbor of c-A, score 0.7; words w; doc d-A) B text"
+        );
     }
 
     #[test]
