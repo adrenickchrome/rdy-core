@@ -25604,6 +25604,109 @@
           }
         }
       },
+      "rdy_search like": {
+        "ok": {
+          "ignore_case": "bool",
+          "like": "string",
+          "matches": [
+            {
+              "confidence": "string",
+              "coverage": "number",
+              "id": "string",
+              "issues": "number",
+              "lines": [
+                {
+                  "field": "string",
+                  "line": "number",
+                  "text": "string"
+                }
+              ],
+              "links": [
+                "string"
+              ],
+              "path": "string",
+              "score": "number",
+              "type": "string",
+              "words": [
+                "string"
+              ]
+            }
+          ],
+          "query": "string",
+          "regex": "bool",
+          "total": "number",
+          "totals": {
+            "docs": [
+              {
+                "hits": "number",
+                "path": "string"
+              }
+            ],
+            "types": {
+              "claim": "number",
+              "term": "number"
+            }
+          }
+        }
+      },
+      "rdy_search like refused": {
+        "refusal_codes": [
+          "E_BAD_INPUT",
+          "E_LIMIT",
+          "E_UNKNOWN_BLOCK"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_search like_text": {
+        "ok": {
+          "ignore_case": "bool",
+          "like_text": "string",
+          "matches": [
+            {
+              "confidence": "string",
+              "coverage": "number",
+              "id": "string",
+              "issues": "number",
+              "lines": [
+                {
+                  "field": "string",
+                  "line": "number",
+                  "text": "string"
+                }
+              ],
+              "links": [
+                "string"
+              ],
+              "path": "string",
+              "score": "number",
+              "type": "string",
+              "words": [
+                "string"
+              ]
+            }
+          ],
+          "query": "string",
+          "regex": "bool",
+          "total": "number",
+          "totals": {
+            "docs": [
+              {
+                "hits": "number",
+                "path": "string"
+              }
+            ],
+            "types": {
+              "claim": "number",
+              "term": "number"
+            }
+          }
+        }
+      },
       "rdy_search refused": {
         "refusal_codes": [
           "E_BAD_INPUT"
@@ -29549,6 +29652,20 @@
                 "null"
               ]
             },
+            "like": {
+              "description": "A block id: rank the blocks of the scope, of every type the filters keep, by their similarity to it (shared words and links), from a score of 0.10 up. Each hit carries score, words and links. Takes no regex or sort.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "like_text": {
+              "description": "A text of at most 16384 bytes, such as a draft paragraph: rank the blocks of the scope by their similarity to its words and to the entities it names. Each hit carries score, words and links. Takes no regex or sort.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "linked_to": {
               "description": "Keep blocks with any link or reference to or from this block.",
               "type": [
@@ -29587,8 +29704,11 @@
               ]
             },
             "query": {
-              "description": "The text to find; with regex: true, a pattern (Rust regex syntax, at most 1024 bytes).",
-              "type": "string"
+              "description": "The text to find; with regex: true, a pattern (Rust regex syntax, at most 1024 bytes). Give exactly one of query, like and like_text.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "regex": {
               "description": "Treat query as a regular expression (default false: literal text).",
@@ -29605,7 +29725,7 @@
               ]
             },
             "sort": {
-              "description": "\"coverage\": list the hits with the lowest coverage first. Leave out for the default order.",
+              "description": "With query only. \"relevance\": inside the phrase tier and the all-words tier, the hits that score highest against the query's words first, each with its score. \"coverage\": the hits with the lowest coverage first. \"reading\": the default order, reading order.",
               "type": [
                 "string",
                 "null"
@@ -29646,9 +29766,6 @@
               ]
             }
           },
-          "required": [
-            "query"
-          ],
           "type": "object"
         }
       },

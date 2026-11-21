@@ -7,7 +7,7 @@ pub mod markdown;
 
 use crate::brief::BriefRegistry;
 use crate::error::{E_BAD_INPUT, E_INTERNAL, E_LIMIT, E_UNKNOWN_BLOCK};
-use crate::search::{DEFAULT_SEARCH_TOKENS, SearchQuery};
+use crate::search::{DEFAULT_SEARCH_TOKENS, SearchInput, SearchQuery};
 use crate::{
     Coverage, RdyError, ReadState, Scope, block_to_yaml, code_lines, compact_summary, proposal_text,
 };
@@ -687,6 +687,26 @@ pub fn search_reply(
     max_tokens: Option<usize>,
     brief: Option<&BriefRegistry>,
 ) -> Result<Value, RdyError> {
+    search_input_reply(
+        st_,
+        scope,
+        &SearchInput::from(query.clone()),
+        page,
+        max_tokens,
+        brief,
+    )
+}
+
+/// vxs7 (D-76Y9H): [`search_reply`] of any source: a query, `like` or `like_text`. Every mode
+/// shares the token budget and the briefing of the page's hits.
+pub fn search_input_reply(
+    st_: &ReadState,
+    scope: &Scope,
+    input: &SearchInput,
+    page: Option<&str>,
+    max_tokens: Option<usize>,
+    brief: Option<&BriefRegistry>,
+) -> Result<Value, RdyError> {
     // With a briefing the caller's budget covers both halves: the hits and the briefing.
     let total = max_tokens.unwrap_or(DEFAULT_SEARCH_TOKENS);
     let (search_tokens, briefing_tokens) = if brief.is_some() {
@@ -694,7 +714,7 @@ pub fn search_reply(
     } else {
         (max_tokens, None)
     };
-    let r = st_.search(scope, query, page, search_tokens)?;
+    let r = st_.search_input(scope, input, page, search_tokens)?;
     // The page's hits, and the blocks of each entity sheet: a call whose every hit is held by a
     // sheet still gets a briefing over the sheet's blocks.
     let mut ids: Vec<String> = Vec::new();

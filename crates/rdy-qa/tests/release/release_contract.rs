@@ -5095,6 +5095,67 @@ fn mcp_relevance_probes(
             "{reply:?}"
         );
     }
+    mcp_like_probes(seen, c, address, section);
+}
+
+/// vxs7 (D-76Y9H, D-5VGAS): `like` and `like_text` through MCP. Two tusk claims describe one
+/// term; the first is like its twin, whose hit carries `score`, `words` and `links`, and the
+/// result echoes the source; a text that names the term finds both. Two sources, a sort with a
+/// like mode, a long `like_text` and an unknown `like` id are refused.
+fn mcp_like_probes(seen: &mut Seen, c: &mut rdy_qa::mcp::McpClient, address: &str, section: &str) {
+    let b = ok_of(&c.call("rdy_brief", json!({"ids": [address]})));
+    let w = ok_of(&c.call(
+        "rdy_write",
+        json!({"brief": b["base"]["token"], "ops": [
+            {"op": "create", "type": "term", "id": "$t", "parent": section, "fields": {"name": "Tusk sensor"}, "body": "Senses the water."},
+            {"op": "create", "type": "claim", "id": "$a", "parent": section, "body": "Narwhal tusks sense the cold water.", "links": {"describes": [{"target": "$t"}]}},
+            {"op": "create", "type": "claim", "parent": section, "body": "Narwhal tusks sense the salt.", "links": {"describes": [{"target": "$t"}]}}
+        ]}),
+    ));
+    let source = w["created"]["$a"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the tusks: {w}"))
+        .to_string();
+    let source = source.as_str();
+    let like = ok_of(&mcp_probe(
+        seen,
+        c,
+        "rdy_search",
+        "rdy_search like",
+        json!({"like": source}),
+    ));
+    assert_eq!(like["like"], json!(source), "{like}");
+    let hit = &like["matches"][0];
+    assert!(hit["score"].is_number(), "{like}");
+    assert!(
+        hit["words"].as_array().is_some_and(|w| !w.is_empty()),
+        "{like}"
+    );
+    assert!(
+        hit["links"].as_array().is_some_and(|l| !l.is_empty()),
+        "{like}"
+    );
+    let text = ok_of(&mcp_probe(
+        seen,
+        c,
+        "rdy_search",
+        "rdy_search like_text",
+        json!({"like_text": "A Tusk sensor in narwhal tusks."}),
+    ));
+    assert!(text["like_text"].is_string(), "{text}");
+    assert!(text["total"].as_u64().is_some_and(|n| n >= 2), "{text}");
+    for args in [
+        json!({"query": "narwhal", "like": source}),
+        json!({"like_text": "narwhal", "sort": "relevance"}),
+        json!({"like_text": "w".repeat(16_385)}),
+        json!({"like": "c-ZZZZZ"}),
+    ] {
+        let reply = mcp_probe(seen, c, "rdy_search", "rdy_search like refused", args);
+        assert!(
+            matches!(reply, rdy_qa::mcp::Reply::ToolError(_)),
+            "{reply:?}"
+        );
+    }
 }
 
 fn cli_vector_probes(seen: &mut Seen, env: &[(String, String)]) {
@@ -7647,7 +7708,7 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// rows and dropped decisions are empty there; the review rows probe fills each of them.
 /// vxs4: the Markdown import creates content blocks, so its reply lists vector rows; its blocks
 /// link to nothing, so those rows share no link (the `rdy_write` rows show the links).
-/// vxs6: a search refusal has no issues.
+/// vxs6: a search refusal has no issues. vxs7: nor has a like-mode refusal.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -7897,6 +7958,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_schema/ok/children?",
     "mcp/rdy_schema/ok/fields?/planned/values",
     "mcp/rdy_schema/ok/fields?/since/values",
+    "mcp/rdy_search like refused/refused/issues",
     "mcp/rdy_search refused/refused/issues",
     "mcp/rdy_supersede/ok/consequences",
     "mcp/rdy_supersede/ok/on_change/checks",

@@ -37,6 +37,7 @@ mod engine_inflight;
 mod engine_instructions;
 mod engine_intents;
 mod engine_lexicon;
+mod engine_like_search;
 mod engine_links;
 mod engine_mcp_http_config;
 mod engine_mention_reviews;
