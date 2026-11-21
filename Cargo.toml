@@ -75,6 +75,8 @@ time = { version = "=0.3.55", features = ["parsing", "formatting"] }
 log = "=0.4.34"
 # Diagrams: Mermaid source drawn as SVG, behind rdy-diagram alone (D-FY4VF, D-KAGB2).
 mmdflux = { version = "=2.6.1", default-features = false }
+# Check modules: the standard base64 of a module rule's `module` key, in rdy-schema.
+base64 = "=0.22.1"
 # Check modules: the WebAssembly interpreter, behind rdy-check-wasm alone. No default features:
 # no text-format parser, no SIMD and no 64-bit memories; validation for eager compilation.
 wasmi = { version = "=2.0.2", default-features = false, features = ["std", "validate"] }
