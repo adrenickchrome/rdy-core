@@ -641,6 +641,20 @@ impl ReadState {
             token.extend_from_slice(&version.0);
             token.push(u8::from(h.history));
             token.push(u8::from(h.all_words));
+            // vxs7: a like hit's lines follow the words it shares with the source, which no hit
+            // version covers, and they are the rest of the collapse key: an edit of the source
+            // that regroups the entries moves the cursor; a drift of scores alone does not
+            if matches!(rank, Rank::Like) {
+                for l in &h.lines {
+                    token.extend_from_slice(l.field.as_bytes());
+                    token.push(0);
+                    token.extend_from_slice(&(l.line as u64).to_le_bytes());
+                    token.extend_from_slice(l.text.as_bytes());
+                    token.push(0);
+                }
+                token.extend_from_slice(&(h.more_lines as u64).to_le_bytes());
+                token.push(0xff);
+            }
             // coverage moves with other blocks' tensions and suspects, not with this version
             if let Some(c) = &h.cov {
                 token.extend_from_slice(&c.score.to_le_bytes());
