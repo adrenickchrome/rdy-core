@@ -1268,3 +1268,103 @@ fn wck2_rule_count_and_texts_refuse_before_copying() {
     );
     assert!(seen.largest < SMALL && seen.total < SMALL, "{seen:?}");
 }
+
+/// A module rule `name` built in memory, as a host builds typed rules: `test` as given, never
+/// read from a pack file.
+fn typed_module(name: &str, test: ModuleTest) -> RuleInput {
+    RuleInput {
+        name: name.to_string(),
+        select: "type = decision".to_string(),
+        test: RuleTestSpec::Module(test),
+        severity: RuleSeverity::Advisory,
+        message: "m".to_string(),
+        fix: "f".to_string(),
+    }
+}
+
+#[test]
+fn wck2_typed_module_rules_keep_the_pack_file_limits() {
+    use std::collections::BTreeMap;
+    let pack = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+    let ok = ModuleTest {
+        module: MAGIC_BYTES.to_vec(),
+        args: None,
+        depth: None,
+    };
+    let wide = BTreeMap::from([("k".to_string(), ArgValue::Str("x".repeat(MAX_ARGS_BYTES)))]);
+    let huge = BTreeMap::from([(
+        "k".to_string(),
+        ArgValue::List(vec![ArgValue::Int(rdy_schema::MAX_ARGS_INT + 1)]),
+    )]);
+    let cases = [
+        (
+            ModuleTest {
+                module: vec![0; MAX_MODULE_BYTES + 1],
+                ..ok.clone()
+            },
+            "rule r module is 1048577 bytes; a module takes at most 1048576",
+        ),
+        (
+            ModuleTest {
+                depth: Some(4),
+                ..ok.clone()
+            },
+            "rule r depth must be 0 to 3",
+        ),
+        (
+            ModuleTest {
+                args: Some(wide),
+                ..ok.clone()
+            },
+            "rule r args: at most 8192 bytes",
+        ),
+        (
+            ModuleTest {
+                args: Some(huge),
+                ..ok.clone()
+            },
+            "rule r args: only strings, integers, booleans, null, lists and mappings",
+        ),
+    ];
+    for (test, want) in cases {
+        assert_eq!(
+            rdy_schema::check_module_test("r", &test),
+            Err(want.to_string())
+        );
+        assert_eq!(
+            check_resolved_rules(&pack, &[typed_module("r", test)]),
+            Err(SchemaError::Invalid(want.to_string()))
+        );
+    }
+    // the limits themselves pass, with the same byte count a pack file's args get
+    let at = ModuleTest {
+        module: vec![0; MAX_MODULE_BYTES],
+        args: Some(BTreeMap::from([(
+            "k".to_string(),
+            ArgValue::Str("x".repeat(MAX_ARGS_BYTES - 8)),
+        )])),
+        depth: Some(3),
+    };
+    assert_eq!(rdy_schema::check_module_test("r", &at), Ok(()));
+    let text = module_yaml(
+        "r",
+        MAGIC,
+        &format!("args: {{k: {}}}\n", "x".repeat(MAX_ARGS_BYTES - 8)),
+    );
+    assert!(input(&text).is_ok());
+    let text = module_yaml(
+        "r",
+        MAGIC,
+        &format!("args: {{k: {}}}\n", "x".repeat(MAX_ARGS_BYTES - 7)),
+    );
+    assert_eq!(input_refused(&text), "rule r args: at most 8192 bytes");
+    let mut over = at.clone();
+    over.args = Some(BTreeMap::from([(
+        "k".to_string(),
+        ArgValue::Str("x".repeat(MAX_ARGS_BYTES - 7)),
+    )]));
+    assert_eq!(
+        rdy_schema::check_module_test("r", &over),
+        Err("rule r args: at most 8192 bytes".to_string())
+    );
+}
