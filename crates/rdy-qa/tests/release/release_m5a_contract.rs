@@ -36,9 +36,11 @@ const LINEAGE: [&str; 12] = [
 ];
 
 /// The members of the predecessor the successor may remove, each named exactly.
-const ALLOWED_REMOVALS: [&str; 1] = [
+const ALLOWED_REMOVALS: [&str; 2] = [
     // Task 7: like modes make query optional (D-5VGAS source-required grouping); the schema drops required.
     "removed /mcp/tools/rdy_search/input_schema/required",
+    // Task 8: the CLI query is optional with --like or --like-text.
+    "removed /cli/tree/subcommands/name=search/args/id=query/required",
 ];
 
 /// The source file of each current-fixture selector, from the workspace root.
