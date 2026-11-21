@@ -696,39 +696,68 @@ fn table_diff(old: Option<(&Block, &Site)>, new: Option<(&Block, &Site)>) -> Str
         .collect();
     let rows = places(og.rows.len(), &row_pair);
 
-    // each cell: the word diff of its old text (when its row and column are old) and its new text
-    let cell_html = |out: &mut String, o: Option<&str>, n: Option<&str>| {
-        let (o, n) = (o.unwrap_or(""), n.unwrap_or(""));
-        pieces_html(&worddiff::diff(o, n, Unit::Words), out);
-    };
     let mut out =
         String::from("<div class=\"table-wrap chg-diff\" data-rdy=\"content\"><table><thead><tr>");
-    for &(oi, ni) in &cols {
-        out.push_str("<th scope=\"col\">");
-        cell_html(
-            &mut out,
-            oi.and_then(|i| og.head.get(i)).map(String::as_str),
-            ni.and_then(|i| ng.head.get(i)).map(String::as_str),
-        );
-        out.push_str("</th>");
-    }
+    row_html(
+        &mut out,
+        "th scope=\"col\"",
+        "th",
+        &cols,
+        Some(&og.head),
+        Some(&ng.head),
+    );
     out.push_str("</tr></thead><tbody>");
     for &(or, nr) in &rows {
         out.push_str("<tr>");
         let (or, nr) = (or.map(|r| &og.rows[r]), nr.map(|r| &ng.rows[r]));
-        for &(oi, ni) in &cols {
-            out.push_str("<td>");
-            cell_html(
-                &mut out,
-                or.zip(oi).and_then(|(r, i)| r.get(i)).map(String::as_str),
-                nr.zip(ni).and_then(|(r, i)| r.get(i)).map(String::as_str),
-            );
-            out.push_str("</td>");
-        }
+        row_html(&mut out, "td", "td", &cols, or, nr);
         out.push_str("</tr>");
     }
     out.push_str("</tbody></table></div>");
     out
+}
+
+/// One row of a table diff (rule 9): a cell for each place in `cols` where the old row or the
+/// new row has one, the word diff of its old text and its new text. As a table's page writes
+/// it, a row ends at its last cell; a run of places inside the row that neither side has is one
+/// empty cell that spans them, so each later cell keeps its column. So a row's cells are at most
+/// twice the cells its two sides have.
+fn row_html(
+    out: &mut String,
+    open: &str,
+    close: &str,
+    cols: &[(Option<usize>, Option<usize>)],
+    old: Option<&Vec<String>>,
+    new: Option<&Vec<String>>,
+) {
+    let (old, new) = (
+        old.map_or(&[][..], Vec::as_slice),
+        new.map_or(&[][..], Vec::as_slice),
+    );
+    // every old (new) column is in `cols` once, so the row ends when each side's cells are seen
+    let (mut left_old, mut left_new) = (old.len(), new.len());
+    let mut gap = 0;
+    for &(oi, ni) in cols {
+        if left_old == 0 && left_new == 0 {
+            break;
+        }
+        let o = oi.and_then(|i| old.get(i));
+        let n = ni.and_then(|i| new.get(i));
+        if o.is_none() && n.is_none() {
+            gap += 1;
+            continue;
+        }
+        left_old -= usize::from(o.is_some());
+        left_new -= usize::from(n.is_some());
+        if gap > 0 {
+            out.push_str(&format!("<{open} colspan=\"{gap}\"></{close}>"));
+            gap = 0;
+        }
+        out.push_str(&format!("<{open}>"));
+        let (o, n) = (o.map_or("", String::as_str), n.map_or("", String::as_str));
+        pieces_html(&worddiff::diff(o, n, Unit::Words), out);
+        out.push_str(&format!("</{close}>"));
+    }
 }
 
 /// The element a diff is written in (rule 6): the block's own kind of text.
@@ -1054,6 +1083,12 @@ mod tests {
                     .flat_map(|c| c.split("</td>"))
                     .filter(|c| !c.is_empty())
                     .map(|c| {
+                        if let Some(span) = c
+                            .strip_prefix("<td colspan=\"")
+                            .or_else(|| c.strip_prefix("<th scope=\"col\" colspan=\""))
+                        {
+                            return format!("~{}", span.trim_end_matches("\">"));
+                        }
                         c.strip_prefix("<th scope=\"col\">")
                             .or_else(|| c.strip_prefix("<td>"))
                             .expect("a cell")
@@ -1281,5 +1316,46 @@ mod tests {
         let g = grid(&html);
         assert_eq!(g.len(), 1_001);
         assert!(g.iter().all(|r| r.len() == 3));
+    }
+
+    /// A row has a cell only where its old or new side has one (review F1): a short row ends at
+    /// its last cell, and a run of places inside it that neither side has is one spanning cell.
+    /// So a ragged table's diff grows with its cells, never with rows times columns.
+    #[test]
+    fn sr6_a_ragged_table_diff_grows_with_its_cells() {
+        let wide: Vec<String> = (0..1_000).map(|i| format!("w{i}")).collect();
+        let short: Vec<String> = (0..999).map(|i| format!("s{i}")).collect();
+        let mut rows: Vec<Vec<&str>> = vec![wide.iter().map(String::as_str).collect()];
+        rows.extend(short.iter().map(|s| vec![s.as_str()]));
+        let rows: Vec<&[&str]> = rows.iter().map(Vec::as_slice).collect();
+        let old = table(&["K"], &rows);
+        let mut new_rows = rows.clone();
+        let changed = ["w0", "changed"];
+        new_rows[0] = &changed;
+        let new = table(&["K"], &new_rows);
+        let html = diff_of(Some(&old), Some(&new));
+        // 1,999 cells on the old side and 1,001 on the new: about one <td> each, never 1,000,000
+        let tds = html.matches("<td").count();
+        eprintln!(
+            "ragged table diff: {tds} cells, {} bytes of HTML",
+            html.len()
+        );
+        assert!(tds <= 2 * (1_999 + 1_001), "{tds} cells");
+        assert!(html.len() < 200_000, "{} bytes", html.len());
+        let g = grid(&html);
+        // the header stops at its one cell; each short row at its one cell
+        assert_eq!(g[0], vec!["K".to_string()]);
+        assert!(g[2..].iter().all(|r| r.len() == 1));
+        // a gap inside a row is one spanning cell, so later cells keep their column
+        let old = table(&["A", "B", "C"], &[&["k", "1", "2"]]);
+        let new = table(&["A", "C"], &[&["k"], &["n", "3"]]);
+        assert_eq!(
+            tdiff(&old, &new),
+            cells(&[
+                &["A", "[-B-]", "C"],
+                &["k", "[-1-]", "[-2-]"],
+                &["{+n+}", "~1", "{+3+}"]
+            ])
+        );
     }
 }
