@@ -8,3 +8,4 @@ mod schema_check_fields;
 mod schema_class;
 mod schema_packs;
 mod schema_rules;
+mod schema_wasm_packs;

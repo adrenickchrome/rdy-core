@@ -18,9 +18,9 @@ pub use resolve::{
     source_form,
 };
 pub use rules::{
-    ArgValue, CheckedRule, CompiledRule, DEFAULT_DEPTH, MAX_ARGS_BYTES, MAX_ARGS_INT, MAX_DEPTH,
+    ArgValue, CompiledRule, DEFAULT_DEPTH, MAX_ARGS_BYTES, MAX_ARGS_INT, MAX_DEPTH,
     MAX_MODULE_BYTES, MAX_PACK_MODULE_BYTES, MAX_RULE_NAME_CHARS, MAX_RULES, MAX_TEXT_BYTES,
-    MAX_TEXT_CHARS, ModuleTest, Rule, RuleInput, RuleSeverity, RuleTestSpec, compile_rules,
+    MAX_TEXT_CHARS, ModuleTest, RuleInput, RuleSeverity, RuleTestSpec, compile_rules,
     validate_rule_input,
 };
 pub use validate::{

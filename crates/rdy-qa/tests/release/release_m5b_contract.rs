@@ -1,8 +1,9 @@
 //! wck1 (D-TXFHR; D-QVTJ9): the contract fixture of the check modules, and the interpreter
 //! boundary's place in the dependency graph.
 //!
-//! `m5b-v1.json` is the current fixture: it starts as a byte copy of `sync-client-b-v1.json`,
-//! which is frozen from here on, and every selector moves to it. The interpreter is linked
+//! `m5b-v1.json` is the current fixture: it started as a byte copy of `sync-client-b-v1.json`,
+//! which is frozen from here on, and every selector moves to it. The module rule capture
+//! (wck6) is its first change. The interpreter is linked
 //! through `rdy-check-wasm` alone: no other package of the workspace depends on it, the boundary
 //! depends on no rdy crate, and the engine depends on the boundary.
 use rdy_qa::fixtures::output_within;
@@ -22,8 +23,8 @@ const PREDECESSOR_SHA: &str = "e65653b123aea1307a9e2ab9728f3b5d18e25b33b8f7ca8aa
 /// The current fixture, which every selector names.
 const CURRENT: &str = "m5b-v1.json";
 
-/// The sha256 of [`CURRENT`]: the predecessor's bytes, copied.
-const CURRENT_SHA: &str = PREDECESSOR_SHA;
+/// The sha256 of [`CURRENT`] since the module rule capture (wck6, D-ZRXY0).
+const CURRENT_SHA: &str = "66d821c87a452be67ed1411dce29f54996205032219245cb77fe0668e156d5a3";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -50,14 +51,13 @@ fn sha(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// wck1: the current fixture starts as the integrated predecessor's exact bytes, and every
-/// selector names it and no earlier fixture.
+/// wck1: the integrated predecessor keeps its bytes, the current fixture has its captured
+/// bytes, and every selector names it and no earlier fixture.
 #[test]
 fn wck1_successor_starts_from_the_integrated_fixture() {
     let (old, new) = (bytes(PREDECESSOR), bytes(CURRENT));
     assert_eq!(sha(&old), PREDECESSOR_SHA, "{PREDECESSOR} is frozen");
-    assert_eq!(sha(&new), CURRENT_SHA, "{CURRENT} is the copy");
-    assert_eq!(old, new, "{CURRENT} starts as a byte copy of {PREDECESSOR}");
+    assert_eq!(sha(&new), CURRENT_SHA, "{CURRENT} has its captured bytes");
     for file in SELECTORS {
         let text =
             std::fs::read_to_string(root().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));

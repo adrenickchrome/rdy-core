@@ -195,7 +195,7 @@ pub struct Pack {
     /// Deterministic checks over blocks (D-JQD5X): a child's rules follow its parent's. Compiled
     /// by [`crate::compile_rules`]; an empty list stays out of the pack's serialized form.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rules: Vec<crate::rules::Rule>,
+    pub rules: Vec<crate::rules::RuleInput>,
 }
 
 /// The five tension kinds a citing pack may raise for cross-project tensions, in table order.
