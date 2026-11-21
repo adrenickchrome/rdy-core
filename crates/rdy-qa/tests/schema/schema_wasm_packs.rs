@@ -199,3 +199,45 @@ fn wck6_all_pack_entry_points_return_the_same_refusal() {
         }
     }
 }
+
+/// The example check module's checked-in bytes, and the pack that holds them inline.
+const EXAMPLE_WASM: &[u8] = include_bytes!("../../fixtures/wasm/body-required.wasm");
+const EXAMPLE_PACK: &str = include_str!("../../fixtures/wasm/body-required.yaml");
+
+/// The sha256 of the example module, built from `rdy-check-wasm/tests/fixtures/example-rust`.
+const EXAMPLE_SHA256: &str = "d229fc2df9cd703dca01b429c1c574bcfcf31ba2c9210f284d872c12fa8846e5";
+
+/// wck8: the example pack loads, its inline module is exactly the checked-in bytes, and the
+/// metadata of its one module rule names those bytes. No WebAssembly target is needed.
+#[test]
+fn wck8_example_bytes_match_the_inline_pack_and_metadata() {
+    use sha2::{Digest, Sha256};
+    let hex = |b: &[u8]| -> String {
+        Sha256::digest(b)
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect()
+    };
+    assert_eq!(hex(EXAMPLE_WASM), EXAMPLE_SHA256, "the module bytes");
+    assert_eq!(EXAMPLE_WASM.len(), 15_362, "the module size");
+    assert!(
+        EXAMPLE_WASM.starts_with(b"\0asm\x01\0\0\0"),
+        "a WebAssembly binary of version 1"
+    );
+    let (d, r) = project();
+    drop(r);
+    use_pack(d.path(), "body-required", EXAMPLE_PACK, "");
+    let (pack, rules) = project_pack_compiled(d.path()).expect("the example pack loads");
+    assert_eq!(pack.name, "body-required");
+    let metadata = serde_json::to_value(rdy_engine::check::rules::module_metadata(&rules))
+        .expect("the metadata serializes");
+    assert_eq!(
+        metadata,
+        serde_json::json!([{
+            "rule": "section-needs-body",
+            "sha256": EXAMPLE_SHA256,
+            "bytes": EXAMPLE_WASM.len(),
+            "interface": 1,
+        }])
+    );
+}

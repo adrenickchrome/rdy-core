@@ -30494,6 +30494,27 @@
       "version"
     ],
     "module_rules": {
+      "example": {
+        "metadata": [
+          {
+            "bytes": 15362,
+            "interface": 1,
+            "rule": "section-needs-body",
+            "sha256": "d229fc2df9cd703dca01b429c1c574bcfcf31ba2c9210f284d872c12fa8846e5"
+          }
+        ],
+        "modules": [
+          {
+            "bytes": 15362,
+            "interface": 1,
+            "rule": "section-needs-body",
+            "sha256": "d229fc2df9cd703dca01b429c1c574bcfcf31ba2c9210f284d872c12fa8846e5"
+          }
+        ],
+        "text_rule_lines": [
+          "rule section-needs-body module sha256:d229fc2df9cd703dca01b429c1c574bcfcf31ba2c9210f284d872c12fa8846e5 15362 bytes, interface 1"
+        ]
+      },
       "limits": {
         "default_depth": 1,
         "max_args_bytes": 8192,
