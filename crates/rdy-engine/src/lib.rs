@@ -207,7 +207,7 @@ pub use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpKind};
 pub use read_state::{
     AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState, inflight_builds,
 };
-pub use search::{SearchQuery, SearchResult};
+pub use search::{SearchInput, SearchQuery, SearchResult, SearchSource};
 pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
     human_actor_for, human_actor_for_env, now_ms, pin_clock, rfc3339, rfc3339_now,

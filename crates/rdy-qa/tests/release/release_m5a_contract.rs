@@ -35,6 +35,12 @@ const LINEAGE: [&str; 12] = [
     CURRENT,
 ];
 
+/// The members of the predecessor the successor may remove, each named exactly.
+const ALLOWED_REMOVALS: [&str; 1] = [
+    // Task 7: like modes make query optional (D-5VGAS source-required grouping); the schema drops required.
+    "removed /mcp/tools/rdy_search/input_schema/required",
+];
+
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
     "crates/rdy-qa/tests/release/release_contract.rs",
@@ -163,6 +169,7 @@ fn vxs1_successor_starts_from_the_integrated_fixture() {
     let removed: Vec<String> = m5a_changes()
         .into_iter()
         .filter(|c| c.starts_with("removed "))
+        .filter(|c| !ALLOWED_REMOVALS.contains(&c.as_str()))
         .collect();
     assert!(removed.is_empty(), "{removed:?}");
     let (Value::Object(was), Value::Object(now)) = (read(PREDECESSOR), read(CURRENT)) else {
