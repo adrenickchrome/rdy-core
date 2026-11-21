@@ -9,6 +9,7 @@ pub mod case;
 pub mod catalogue;
 pub mod code;
 pub mod module_input;
+pub mod module_run;
 pub mod options;
 mod recipes;
 pub mod requests;

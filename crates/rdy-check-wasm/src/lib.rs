@@ -7,8 +7,12 @@
 mod compile;
 pub mod config;
 mod instance;
+mod result;
+mod run;
 
 pub use compile::compile_module;
+pub use result::decode_result;
+pub use run::{TestPanic, panic_in_next_run_for_tests, run_block};
 
 /// The interface number of the exports a check module gives.
 pub const INTERFACE: u32 = 1;
@@ -37,7 +41,9 @@ impl CompiledModule {
     #[doc(hidden)]
     pub fn instance_setup_for_tests(&self) -> Result<(), RunFailure> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            instance::fresh_instance(&self.module, config::BLOCK_FUEL).map(drop)
+            instance::fresh_instance(&self.module, config::BLOCK_FUEL)
+                .map(drop)
+                .map_err(|n| n.failure)
         }))
         .unwrap_or(Err(RunFailure::HostFault))
     }
