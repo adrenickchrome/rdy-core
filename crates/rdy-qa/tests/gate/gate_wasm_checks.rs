@@ -798,13 +798,127 @@ fn wck6_depth_and_complete_inputs_bind_freshness() {
     // a landing of a block the inputs read stales the assessment
     land_edit(&mut w, "x", "n3");
     assert_moved_by(&mut w, &p, "n3");
-    // a landing outside the reach does not
+    // a landing outside the reach that keeps its edges does not
+    let mut w = world(&rules(1), None);
+    let p = propose_w(&mut w, "v");
+    land_field(&mut w, "x", "n4");
+    land_field(&mut w, "y", "o");
+    let l = approve(&mut w, &p).unwrap();
+    assert_eq!(l.approved, p.r#ref);
+    // a landing outside the reach that removes a reference to a block of the reach does: n4's
+    // new text drops its reference to n3
     let mut w = world(&rules(1), None);
     let p = propose_w(&mut w, "v");
     land_edit(&mut w, "x", "n4");
-    land_edit(&mut w, "y", "o");
+    assert_moved_by(&mut w, &p, "n4");
+}
+
+/// Lands an edit of `name`'s `checked` field through view `view`: its text, links and place
+/// stay.
+fn land_field(w: &mut World, view: &str, name: &str) {
+    let target = w.id(name);
+    write(
+        &mut w.r,
+        view,
+        json!([{"op": "update", "id": target, "fields": {"checked": true}}]),
+    )
+    .unwrap();
+    land(&mut w.r, view).unwrap();
+}
+
+/// A blocking module rule of depth 1 that fails a block whose input holds the mark `~!~`; a
+/// world with it, and the version that sets `w` to `ok: false`, ready: no input holds the mark
+/// yet.
+fn marked_world() -> (World, ProposalInfo) {
+    let rules = mrule(
+        "mark",
+        "type = claim and fields.ok = false",
+        MARKER,
+        "    depth: 1\n",
+        "blocking",
+    );
+    let mut w = world(&rules, None);
+    let p = propose_w(&mut w, "v");
+    let reach = reach_names(&w, &p);
+    assert!(
+        reach.contains("w") && reach.contains("sw") && !reach.contains("o"),
+        "{reach:?}"
+    );
+    (w, p)
+}
+
+#[test]
+fn wck6_new_reference_to_a_judged_block_moves_the_assessment() {
+    // a landing gives o, outside the reach, a reference to the judged block w, with the mark in
+    // its text: w's input now holds the mark, so the assessment moves
+    let (mut w, p) = marked_world();
+    let (o, wid) = (w.id("o"), w.id("w"));
+    write(
+        &mut w.r,
+        "x",
+        json!([{"op": "update", "id": o, "body": format!("O ~!~ builds on {{{{{wid}}}}}.")}]),
+    )
+    .unwrap();
+    land(&mut w.r, "x").unwrap();
+    assert_moved_by(&mut w, &p, "o");
+}
+
+#[test]
+fn wck6_filter_only_pack_keeps_its_freshness_on_a_new_reference() {
+    // the same landing under a pack with filter rules only: no module reads neighbours, so a
+    // new reference to the judged block leaves the assessment fresh, as before module rules
+    let rules = "  - name: f\n    select: type = claim and fields.ok = false\n    require: type = claim\n    severity: blocking\n    message: f message\n    fix: f fix\n";
+    let mut w = world(rules, None);
+    let p = propose_w(&mut w, "v");
+    let reach = reach_names(&w, &p);
+    assert!(reach.contains("w") && !reach.contains("o"), "{reach:?}");
+    let (o, wid) = (w.id("o"), w.id("w"));
+    write(
+        &mut w.r,
+        "x",
+        json!([{"op": "update", "id": o, "body": format!("O ~!~ builds on {{{{{wid}}}}}.")}]),
+    )
+    .unwrap();
+    land(&mut w.r, "x").unwrap();
     let l = approve(&mut w, &p).unwrap();
     assert_eq!(l.approved, p.r#ref);
+}
+
+#[test]
+fn wck6_new_link_to_a_judged_block_moves_the_assessment() {
+    let (mut w, p) = marked_world();
+    let (o, wid) = (w.id("o"), w.id("w"));
+    write(
+        &mut w.r,
+        "x",
+        json!([{"op": "update", "id": o, "body": "O ~!~ holds.", "links": {"describes": [{"target": wid}]}}]),
+    )
+    .unwrap();
+    land(&mut w.r, "x").unwrap();
+    assert_moved_by(&mut w, &p, "o");
+}
+
+#[test]
+fn wck6_new_child_of_a_reach_block_moves_the_assessment() {
+    // a new claim under w's section, which the reach holds
+    let (mut w, p) = marked_world();
+    let sw = w.id("sw");
+    let made = write(
+        &mut w.r,
+        "x",
+        json!([{"op": "create", "type": "claim", "id": "$k", "parent": sw, "body": "K ~!~ holds."}]),
+    )
+    .unwrap();
+    land(&mut w.r, "x").unwrap();
+    let k = made.created["$k"].clone();
+    let e = approve(&mut w, &p).unwrap_err();
+    assert_eq!(e.code, E_PROPOSAL_MOVED, "{e:#?}");
+    assert!(
+        e.message
+            .ends_with(&format!(" changed {k} after its assessment")),
+        "{}",
+        e.message
+    );
 }
 
 #[test]

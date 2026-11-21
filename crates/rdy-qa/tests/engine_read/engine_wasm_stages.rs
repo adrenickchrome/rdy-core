@@ -271,6 +271,13 @@ fn wck6_cached_and_uncached_scans_give_the_same_rows() {
             );
             break p;
         }
+        // a plain claim judged after the last marked one meets an empty rule budget: remove it
+        put_j(
+            &mut r,
+            "v",
+            json!([{"op": "delete", "id": plain}]),
+            j_typo(),
+        );
         assert!(extra < 5, "every plain claim sorted last");
     };
     let (rows, omitted) = warnings_of(&p2);
@@ -313,8 +320,8 @@ fn wck6_cached_and_uncached_scans_give_the_same_rows() {
     let p4 = propose_as(&mut r, "v");
     assert_eq!(
         module_runs_on_this_thread_for_tests() - runs,
-        100 + extra,
-        "every claim runs the new module"
+        101,
+        "every claim, the 100 marked and the one plain, runs the new module"
     );
     let (rows, omitted) = warnings_of(&p4);
     assert_eq!(rows.len(), 100);
