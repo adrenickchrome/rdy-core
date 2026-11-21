@@ -19,6 +19,7 @@ mod foundation;
 mod hooks;
 mod io;
 mod module_compile;
+mod module_input;
 mod paths;
 mod query;
 mod read_only;
