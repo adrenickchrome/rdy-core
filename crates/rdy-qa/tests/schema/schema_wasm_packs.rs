@@ -156,7 +156,8 @@ fn wck6_all_pack_entry_points_return_the_same_refusal() {
         );
         let mut loaded = Rdy::open(d.path()).unwrap();
         use_pack(d.path(), "wck6", &pack(&rules), "");
-        let file = d.path().join(".rdy/packs/wck6.yaml");
+        // joined part by part, as rdy builds it: a "/" in the join stays as is on Windows
+        let file = d.path().join(".rdy").join("packs").join("wck6.yaml");
         // open
         let open = Rdy::open(d.path()).err().expect("open refuses");
         assert_eq!(open.code, E_CONFIG, "{detail}: {open:#?}");
