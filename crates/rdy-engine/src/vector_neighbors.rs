@@ -377,9 +377,10 @@ mod tests {
     use super::*;
     use crate::lexicon::Lexicon;
     use crate::vectors::{
-        BudgetUse, MAX_REASON_ITEMS, MAX_SEED_TARGETS, MAX_SEED_WORDS, SOURCE_CANDIDATES,
-        SOURCE_POSTINGS, SOURCE_PRODUCTS, Seeds, SourceLimits, WeightScope, candidates,
-        reasons as reasons_of, round3, score_operands, score_pair, select_seeds,
+        BudgetUse, LEXICAL_SHARE, LINK_SHARE, MAX_REASON_ITEMS, MAX_SEED_TARGETS, MAX_SEED_WORDS,
+        SOURCE_CANDIDATES, SOURCE_POSTINGS, SOURCE_PRODUCTS, Seeds, SourceLimits, WeightScope,
+        candidates, idf, reasons as reasons_of, round3, score_operands, score_pair, select_seeds,
+        tf,
     };
     use crate::{Rdy, Scope};
     use rdy_model::{CROCKFORD, FieldValue, Link, StateSnapshot};
@@ -817,6 +818,275 @@ mod tests {
         }
     }
 
+    // ---- numeric words (D-ZDM0G) ----
+
+    /// A corpus of `n` blocks: the first `df` hold `word`, and each holds a word of its own. The
+    /// source is `c-00000`.
+    fn word_world(word: &str, df: usize, n: usize) -> World {
+        let blocks: Vec<Block> = (0..n)
+            .map(|i| {
+                let body = if i < df {
+                    format!("{word} own{i}")
+                } else {
+                    format!("own{i}")
+                };
+                blk(&nid("c", i), "claim", None, "a1", &body)
+            })
+            .collect();
+        World::new(&blocks)
+    }
+
+    /// The tokenizer's folded words of `text`.
+    fn forms(text: &str) -> Vec<String> {
+        rdy_model::entity::words(text)
+            .into_iter()
+            .map(|w| w.folded)
+            .collect()
+    }
+
+    #[test]
+    fn vxs10_numeric_words_never_seed_but_keep_their_weights() {
+        // the forms the tokenizer gives: a sign, a comma, a colon and an end dot split a number,
+        // and a `.` or `-` between two runs joins them; Unicode digits are word characters
+        assert_eq!(
+            forms("-5 1,000 12:30 12.5. 2026-11-20 1.2.3 1-2 ٣٤ ５ Ⅻ"),
+            [
+                "5",
+                "1",
+                "000",
+                "12",
+                "30",
+                "12.5",
+                "2026-11-20",
+                "1.2.3",
+                "1-2",
+                "٣٤",
+                "５",
+                "ⅻ"
+            ]
+        );
+        assert_eq!(
+            forms("v2 5ms x_1 1e5 v1.2.3 a-1 _5 0x1f"),
+            ["v2", "5ms", "x_1", "1e5", "v1.2.3", "a-1", "_5", "0x1f"]
+        );
+        let numeric = [
+            "5",
+            "000",
+            "12.5",
+            "2026-11-20",
+            "1.2.3",
+            "1-2",
+            "٣٤",
+            "５",
+            "ⅻ",
+        ];
+        let mixed = ["v2", "5ms", "x_1", "1e5", "v1.2.3", "a-1", "_5", "0x1f"];
+        // each word in two blocks of 40: every one is under the floor
+        let mut blocks = vec![blk(
+            &nid("c", 0),
+            "claim",
+            None,
+            "a1",
+            &[numeric.join(" "), mixed.join(" ")].join(" "),
+        )];
+        for (i, word) in numeric.iter().chain(mixed.iter()).enumerate() {
+            blocks.push(blk(&nid("t", i), "claim", None, "a1", word));
+        }
+        for i in 0..(40 - blocks.len()) {
+            blocks.push(blk(&nid("p", i), "claim", None, "a1", &format!("pad{i}")));
+        }
+        let world = World::new(&blocks);
+        let w = &world.w;
+        assert_eq!(w.corpus_words(), 40);
+        for word in numeric {
+            assert_eq!(w.df(word), 2, "{word}");
+            assert!(!w.word_is_seed(word), "{word} is numeric");
+            assert_eq!(
+                w.idf(word).unwrap(),
+                Some(idf(40, 2)),
+                "{word} keeps its idf"
+            );
+        }
+        for word in mixed {
+            assert_eq!(w.df(word), 2, "{word}");
+            assert!(w.word_is_seed(word), "{word} is mixed");
+        }
+        // the source keeps every word in its vector; only the mixed words seed
+        let op = Operand::of(w, Doc::Block(&nid("c", 0))).unwrap();
+        assert_eq!(op.lexical.len(), numeric.len() + mixed.len());
+        let seeds = select_seeds(w, &op);
+        let mut want: Vec<&str> = mixed.to_vec();
+        want.sort_unstable();
+        let mut got: Vec<&str> = seeds.words.clone();
+        got.sort_unstable();
+        assert_eq!(got, want);
+        let mut budget = VectorBudget::briefing();
+        let found: Vec<BlockId> = score_source(w, Doc::Block(&nid("c", 0)), |_| true, &mut budget)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.block.clone())
+            .collect();
+        let mut expect: Vec<BlockId> = vec![nid("c", 0)];
+        expect.extend((numeric.len()..numeric.len() + mixed.len()).map(|i| nid("t", i)));
+        expect.sort();
+        assert_eq!(found, expect, "only the blocks a mixed word finds");
+
+        // both frequency boundaries: a numeric word never seeds, a plain word at the same counts
+        // does, and the numeric word keeps its weight
+        for (df, n) in [(100usize, 100usize), (100, 1_500), (101, 1_010)] {
+            let plain = word_world("edge", df, n);
+            assert!(plain.w.word_is_seed("edge"), "edge {df}/{n}");
+            for word in ["2026-11-20", "12.5", "5"] {
+                let world = word_world(word, df, n);
+                let w = &world.w;
+                assert_eq!((w.df(word), w.corpus_words()), (df as u64, n as u64));
+                assert!(!w.word_is_seed(word), "{word} {df}/{n}");
+                assert!(w.word_is_seed("own0"));
+                let weight = w.idf(word).unwrap().unwrap();
+                assert_eq!(weight.to_bits(), idf(n as u64, df as u64).to_bits());
+                let raw = [tf(1) * weight, tf(1) * idf(n as u64, 1)];
+                let norm = (raw[0] * raw[0] + raw[1] * raw[1]).sqrt();
+                let src = nid("c", 0);
+                assert_eq!(w.lexical_norm(Doc::Block(&src)).unwrap(), Some(norm));
+                let mut b = VectorBudget::briefing();
+                let ids = score_source(w, Doc::Block(&src), |_| true, &mut b).unwrap();
+                assert_eq!(
+                    (ids.len(), b.used().postings),
+                    (1, 1),
+                    "{word}: only its own word finds the source itself"
+                );
+            }
+        }
+
+        // a pair found through a plain word scores the numeric words it shares
+        let mut p = Proj::new();
+        let dh = p.doc("home");
+        let s = p.alone(&dh, "alpha 2026-11-20 12.5");
+        let y = p.alone(&dh, "alpha 2026-11-20 12.5");
+        let x = p.alone(&dh, "alpha");
+        let z = p.alone(&dh, "beta 2026-11-20 12.5");
+        for i in 0..20 {
+            p.alone(&dh, &format!("filler{i}"));
+        }
+        let world = World::new(&p.blocks);
+        let w = &world.w;
+        assert!(w.word_is_seed("alpha") && !w.word_is_seed("12.5"));
+        let mut budget = VectorBudget::briefing();
+        let got = score_source(w, Doc::Block(&s), |id| *id != s, &mut budget).unwrap();
+        let mut want = vec![y.clone(), x.clone()];
+        want.sort();
+        assert_eq!(
+            got.iter().map(|c| c.block.clone()).collect::<Vec<_>>(),
+            want,
+            "alpha finds them; the numbers alone do not find z"
+        );
+        let (ls, ly) = (
+            w.lexical(Doc::Block(&s)).unwrap(),
+            w.lexical(Doc::Block(&y)).unwrap(),
+        );
+        let gy = got.iter().find(|c| *c.block == y).unwrap();
+        assert_eq!(gy.score.to_bits(), manual_dot(&ls, &ly).to_bits());
+        let alpha = |v: &[(&str, f64)]| v.iter().find(|(k, _)| *k == "alpha").unwrap().1;
+        assert!(gy.score > alpha(&ls) * alpha(&ly), "the numbers add to it");
+        let mut free = VectorBudget::briefing();
+        assert!(score_pair(w, Doc::Block(&s), Doc::Block(&z), &mut free).unwrap() > 0.0);
+
+        // a pair found through a link target scores the numeric word it shares
+        let (e1, e2) = (nid("e", 1), nid("e", 2));
+        let mut a = blk(&nid("c", 1), "claim", None, "a1", "gamma 7.5");
+        give_target(&mut a, &e1);
+        let mut b = blk(&nid("c", 2), "claim", None, "a1", "delta 7.5");
+        give_target(&mut b, &e1);
+        let mut c = blk(&nid("c", 3), "claim", None, "a1", "epsilon");
+        give_target(&mut c, &e1);
+        let mut d = blk(&nid("c", 4), "claim", None, "a1", "zeta");
+        give_target(&mut d, &e2);
+        let world = World::new(&[a.clone(), b.clone(), c.clone(), d]);
+        let w = &world.w;
+        assert!(!w.word_is_seed("7.5") && w.target_is_seed(&e1));
+        let mut budget = VectorBudget::briefing();
+        let got = score_source(w, Doc::Block(&a.id), |id| *id != a.id, &mut budget).unwrap();
+        assert_eq!(
+            got.iter().map(|c| c.block.clone()).collect::<Vec<_>>(),
+            vec![b.id.clone(), c.id.clone()]
+        );
+        let (la, lb) = (
+            w.lexical(Doc::Block(&a.id)).unwrap(),
+            w.lexical(Doc::Block(&b.id)).unwrap(),
+        );
+        let (ka, kb) = (
+            w.link(Doc::Block(&a.id)).unwrap(),
+            w.link(Doc::Block(&b.id)).unwrap(),
+        );
+        let lexical = manual_dot(&la, &lb);
+        assert!(lexical > 0.0, "7.5 is shared");
+        let want = LEXICAL_SHARE * lexical + LINK_SHARE * manual_dot(&ka, &kb);
+        assert_eq!(got[0].score.to_bits(), want.to_bits());
+        assert!(
+            got[0].score > got[1].score,
+            "the shared number lifts b over c"
+        );
+    }
+
+    #[test]
+    fn vxs10_numeric_only_sources_are_complete_empty_results() {
+        let mut p = Proj::new();
+        let dh = p.doc("home");
+        let z = p.alone(&dh, "2026-11-20 12.5 5 1.2.3");
+        let y = p.alone(&dh, "alpha 2026-11-20 12.5 5");
+        let s = p.alone(&dh, "alpha beta");
+        for i in 0..20 {
+            p.alone(&dh, &format!("filler{i} 5"));
+        }
+        let world = World::new(&p.blocks);
+        let w = &world.w;
+        // lexical membership is unchanged: the numbers are words of the lexicon and the vector
+        let holders = |word: &str| {
+            w.lexicon()
+                .word_blocks_of(word)
+                .map(|l| l.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        let mut both = vec![z.clone(), y.clone()];
+        both.sort();
+        assert_eq!(holders("2026-11-20"), both);
+        assert_eq!(holders("12.5"), both);
+        assert_eq!(holders("1.2.3"), vec![z.clone()]);
+        assert_eq!(w.df("5"), 22);
+        let lz: Vec<&str> = w
+            .lexical(Doc::Block(&z))
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(lz, ["1.2.3", "12.5", "2026-11-20", "5"]);
+        // the source is complete and empty: no candidate, no charge, no skip
+        let mut none = VectorBudget::briefing();
+        let r = score_source(w, Doc::Block(&z), |_| true, &mut none).unwrap();
+        assert!(r.is_empty());
+        assert_eq!(none.used(), BudgetUse::default());
+        let (adv, used) = world.advice(std::slice::from_ref(&z), AdviceCut::BRIEFING);
+        assert_eq!(
+            (adv.rows.len(), adv.skipped, used),
+            (0, 0, BudgetUse::default())
+        );
+        // with no work left it is still complete; only the seeded source is skipped
+        let mut empty = VectorBudget::new(0, 0);
+        let adv = vector_neighbors_in(
+            &world.m,
+            &world.g,
+            &world.pack,
+            &world.w,
+            &[z.clone(), s.clone()],
+            AdviceCut::BRIEFING,
+            &mut empty,
+        );
+        assert_eq!((adv.rows.len(), adv.skipped), (0, 1));
+        // the pair still has a score through the numbers
+        let mut free = VectorBudget::briefing();
+        assert!(score_pair(w, Doc::Block(&z), Doc::Block(&y), &mut free).unwrap() > 0.0);
+    }
+
     // ---- the briefing shape of the perf workload ----
 
     #[test]
@@ -845,7 +1115,7 @@ mod tests {
         for n in 10..97 {
             let word = n.to_string();
             assert_eq!(w.df(&word), 100, "number {n}");
-            assert!(w.word_is_seed(&word));
+            assert!(!w.word_is_seed(&word), "a numeric word never seeds");
         }
         // the briefing's sources: the claims of area-0/doc-0, in reading order
         let doc = m
@@ -872,7 +1142,8 @@ mod tests {
             .map(|b| b.id.clone())
             .collect();
         assert_eq!(sources.len(), 97);
-        // ten sources have no seed and charge nothing; each other has one seed with 100 postings
+        // every claim's words are `claim`, `of`, `doc` and two numbers: no source has a seed, and
+        // each charges nothing
         let mut seeded = 0;
         for src in &sources {
             let mut one = VectorBudget::briefing();
@@ -892,31 +1163,13 @@ mod tests {
                 continue;
             }
             seeded += 1;
-            assert_eq!(
-                used,
-                BudgetUse {
-                    postings: 100,
-                    candidates: 100,
-                    pairs: 99,
-                    products: 9 * 5 + 90 * 4,
-                }
-            );
-            assert_eq!(a.rows.len(), 10, "ninety-nine neighbors, ten kept");
         }
-        assert_eq!(seeded, 87);
-        // a briefing scores the first 20 sources (ten of them seeded) and skips the other 77
+        assert_eq!(seeded, 0);
+        // a briefing scores the first 20 sources, none of them seeded, and skips the other 77
         let mut cut = VectorBudget::briefing();
         let a = vector_neighbors_in(&m, &g, pack, &w, &sources, AdviceCut::BRIEFING, &mut cut);
-        assert_eq!(
-            cut.used(),
-            BudgetUse {
-                postings: 1_000,
-                candidates: 1_000,
-                pairs: 990,
-                products: 4_050,
-            }
-        );
-        assert_eq!((a.skipped, a.rows.len()), (77, 100));
+        assert_eq!(cut.used(), BudgetUse::default());
+        assert_eq!((a.skipped, a.rows.len()), (77, 0));
         // the whole section, with no source cut: sums, and nothing near a guard
         let whole = AdviceCut {
             max_sources: sources.len(),
@@ -925,17 +1178,9 @@ mod tests {
         let mut budget = VectorBudget::briefing();
         let a = vector_neighbors_in(&m, &g, pack, &w, &sources, whole, &mut budget);
         let used = budget.used();
-        assert_eq!(
-            used,
-            BudgetUse {
-                postings: 8_700,
-                candidates: 8_700,
-                pairs: 8_613,
-                products: 35_235,
-            }
-        );
+        assert_eq!(used, BudgetUse::default());
         assert_eq!(a.skipped, 0, "no guard skips a source");
-        assert_eq!(a.rows.len(), 870);
+        assert_eq!(a.rows.len(), 0);
         let l = budget.source_limits();
         assert_eq!(l, SourceLimits::FIXED);
         assert!(used.postings < SOURCE_POSTINGS * 87 && 100 < l.postings);
