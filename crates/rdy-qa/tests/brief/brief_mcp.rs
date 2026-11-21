@@ -264,7 +264,7 @@ fn mbrf1_the_overview_names_the_project_and_the_schema_and_tools_document_the_ed
     );
     let brief = sch["brief"].as_str().unwrap();
     assert!(
-        brief.ends_with("Governs includes proposed decisions and decisions that affect a described entity; through names that entity. Sources follow suspects. Findings follow related_decisions. vector_neighbors follows neighbors: advice only, from shared words and links, sorted by score, with vector_neighbors_skipped for the sources not scored. Trace explains why. A briefing guards a write and stays one level deep."),
+        brief.ends_with("Governs includes proposed decisions and decisions that affect a described entity; through names that entity. Sources follow suspects. Findings follow related_decisions. vector_neighbors follows neighbors: advice only, from shared words and links, sorted by score, at most 2 rows for each covered content block and each block once. A briefing of more than 20 content blocks lists none, and vector_neighbors_skipped counts them. For similar blocks, use rdy_search with like. Trace explains why. A briefing guards a write and stays one level deep."),
         "{brief}"
     );
 }

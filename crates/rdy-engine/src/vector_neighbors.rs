@@ -8,13 +8,14 @@
 //! nothing. A source that a work guard stops gives no rows and counts once in
 //! [`Advice::skipped`] (D-0ZPAP); so does an eligible source past the cut's source limit. A
 //! source with no seed (D-RY7B5) is complete: no rows, no count. Rows past a source's row cap
-//! count nowhere.
+//! count nowhere. A briefing's cut ([`AdviceCut::BRIEFING`]) shows each neighbor once, under the
+//! source that owns it (D-5BM47, D-5Y64F).
 use crate::brief::{effective_lifecycle, own_lifecycle};
 use crate::neighbors::{Relation, takes_part};
 use crate::tensions::index::{DEPRECATED, ended, is_deprecated};
 use crate::vectors::{
-    Doc, Guard, Operand, Reasons, VectorBudget, VectorWeights, rank_rows, reasons_of_operands,
-    score_source,
+    Doc, Guard, Operand, Reasons, Scored, VectorBudget, VectorWeights, rank_rows,
+    reasons_of_operands, score_source,
 };
 use crate::{Materialized, lexicon};
 use rdy_graph::Graph;
@@ -25,9 +26,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// The cut of one advice call: the lowest score that counts, the most rows each source keeps and
-/// the most eligible sources it scores. These are fixed judgements (D-Y1WEY); a cut is a
-/// parameter so a test can name a boundary.
+/// The cut of one advice call: the lowest score that counts, the most rows each source keeps, the
+/// most eligible sources it scores, and whether a neighbor shows once. These are fixed judgements
+/// (D-Y1WEY, D-5BM47); a cut is a parameter so a test can name a boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdviceCut {
     /// A row needs an exact score of at least this.
@@ -36,22 +37,37 @@ pub struct AdviceCut {
     pub per_source: usize,
     /// The most eligible sources the call scores, in the order given. Later ones count as skipped.
     pub max_sources: usize,
+    /// D-5Y64F: each neighbor shows once, under its owner: the complete source where its exact
+    /// score is highest, ties by the row order. Ownership comes before the row cap, and a
+    /// neighbor its owner does not keep goes to no other source.
+    pub once: bool,
 }
 
 impl AdviceCut {
-    /// A briefing: score at least 0.25, ten rows per source, the first 20 sources.
+    /// A briefing (D-5BM47): score at least 0.25, two rows per source, each neighbor once. A
+    /// briefing scores its sources only when it has at most 20 ([`AdviceCut::scores`]); its
+    /// caller checks that before it builds any weight.
     pub const BRIEFING: AdviceCut = AdviceCut {
         floor: 0.25,
-        per_source: 10,
+        per_source: 2,
         max_sources: 20,
+        once: true,
     };
 
-    /// A write receipt: score at least 0.25, three rows per source, the first ten sources.
+    /// A write receipt: score at least 0.25, three rows per source, the first ten sources. A
+    /// neighbor of several created blocks shows under each.
     pub const WRITE: AdviceCut = AdviceCut {
         floor: 0.25,
         per_source: 3,
         max_sources: 10,
+        once: false,
     };
+
+    /// D-5BM47: whether a briefing with `sources` eligible sources scores them: at most
+    /// `max_sources`. A wider one scores none and counts every source as skipped.
+    pub const fn scores(&self, sources: usize) -> bool {
+        sources <= self.max_sources
+    }
 }
 
 /// One vector neighbor row: `block` is a vector neighbor of `source`. The score is exact; round it
@@ -86,6 +102,12 @@ pub struct Advice {
     /// by a guard.
     pub skipped: usize,
 }
+
+/// What a [`AdviceCut::once`] call charges for each row it keeps until ownership is settled: the
+/// row and its neighbor's owner entry. The rows of all sources together keep within the
+/// per-source scratch limit ([`crate::vectors::SourceLimits::scratch`], 64 MiB).
+const OWNER_RECORD_BYTES: u64 =
+    (size_of::<(Scored<'static>, &Block)>() + size_of::<(&BlockId, (usize, f64))>()) as u64;
 
 /// Whether `b` is a source of vector advice: it exists in `m`, is a content block of a class
 /// other than supporting, and has a containing doc. Content is the pack's own reading
@@ -284,8 +306,11 @@ fn row_reasons<'w>(
 /// targets ([`eligible_target`]) that its seeds find (D-RY7B5), minus the source and its section
 /// and entity neighbors, which `neighbors` already lists; the exclusion reads local adjacencies
 /// and runs no bounded traversal. Each candidate is scored with all its features. A source keeps
-/// the `cut.per_source` best rows with an exact score of at least `cut.floor`. `budget` carries the
-/// work guards; a guard drops the source it stops, and the next source goes on within what is left.
+/// the `cut.per_source` best rows with an exact score of at least `cut.floor`. With `cut.once`,
+/// each candidate first gets one owner (D-5Y64F): the complete source with its highest exact
+/// score, ties by the row order. A source then keeps its best rows among the ones it owns, and a
+/// row it does not keep goes to no other source. `budget` carries the work guards; a guard drops
+/// the source it stops, which then owns nothing, and the next source goes on within what is left.
 pub fn vector_neighbors_in(
     m: &Materialized,
     g: &Graph,
@@ -303,7 +328,17 @@ pub fn vector_neighbors_in(
         .collect();
     let mut skipped = eligible.len().saturating_sub(cut.max_sources);
     let reader = Reader::new(m);
-    let mut rows: Vec<AdviceRow> = Vec::new();
+    // the scored sources that finished: each with its place, its block, its doc and its rows (all
+    // at or over the floor with `once`, else its best `per_source`)
+    type Complete<'m, 'w> = (
+        usize,
+        &'m Block,
+        Option<&'m BlockId>,
+        Vec<(Scored<'w>, &'m Block)>,
+    );
+    let mut complete: Vec<Complete<'_, '_>> = Vec::new();
+    let scratch = budget.source_limits().scratch;
+    let mut held: u64 = 0;
     for &(index, src) in eligible.iter().take(cut.max_sources) {
         let relation = Relation::new(m, g, pack, src);
         // the blocks `keep` accepts, in the order `score_source` scores them
@@ -324,16 +359,73 @@ pub fn vector_neighbors_in(
         };
         debug_assert_eq!(scored.len(), kept.len());
         let source_doc = m.doc_of(&src.id).map(|d| &d.id);
-        let top = rank_rows(
-            scored.into_iter().zip(kept).collect(),
-            |(s, _)| s.score,
-            cut.floor,
-            cut.per_source,
-            |(_, b)| reader.tie(source_doc, index, Cow::Borrowed(&b.id), Some(b)),
-        );
+        let rows: Vec<(Scored<'_>, &Block)> = if cut.once {
+            // the rows wait for ownership: charge them before they are kept
+            let n = scored.iter().filter(|s| s.score >= cut.floor).count() as u64;
+            let need = held.checked_add(n.saturating_mul(OWNER_RECORD_BYTES));
+            let Some(need) = need.filter(|v| *v <= scratch) else {
+                skipped += 1;
+                continue;
+            };
+            held = need;
+            scored
+                .into_iter()
+                .zip(kept)
+                .filter(|(s, _)| s.score >= cut.floor)
+                .collect()
+        } else {
+            rank_rows(
+                scored.into_iter().zip(kept).collect(),
+                |(s, _)| s.score,
+                cut.floor,
+                cut.per_source,
+                |(_, b)| reader.tie(source_doc, index, Cow::Borrowed(&b.id), Some(b)),
+            )
+        };
+        complete.push((index, src, source_doc, rows));
+    }
+    if cut.once {
+        // D-5Y64F: each candidate's owner, as its place in `complete` and its exact score
+        let mut owner: HashMap<&BlockId, (usize, f64)> = HashMap::new();
+        for (at, (index, _, doc, rows)) in complete.iter().enumerate() {
+            for (s, b) in rows {
+                let better = match owner.get(&b.id) {
+                    None => true,
+                    Some(&(was, score)) => match s.score.total_cmp(&score) {
+                        std::cmp::Ordering::Greater => true,
+                        std::cmp::Ordering::Less => false,
+                        std::cmp::Ordering::Equal => {
+                            let (was_index, _, was_doc, _) = &complete[was];
+                            reader.tie(*doc, *index, Cow::Borrowed(&b.id), Some(b))
+                                < reader.tie(*was_doc, *was_index, Cow::Borrowed(&b.id), Some(b))
+                        }
+                    },
+                };
+                if better {
+                    owner.insert(&b.id, (at, s.score));
+                }
+            }
+        }
+        for (at, (index, _, doc, rows)) in complete.iter_mut().enumerate() {
+            let owned: Vec<(Scored<'_>, &Block)> = std::mem::take(rows)
+                .into_iter()
+                .filter(|(_, b)| owner.get(&b.id).is_some_and(|(o, _)| *o == at))
+                .collect();
+            *rows = rank_rows(
+                owned,
+                |(s, _)| s.score,
+                cut.floor,
+                cut.per_source,
+                |(_, b)| reader.tie(*doc, *index, Cow::Borrowed(&b.id), Some(b)),
+            );
+        }
+    }
+    let mut rows: Vec<AdviceRow> = Vec::new();
+    for (index, src, _, top) in complete {
         let mut mine = Vec::with_capacity(top.len());
         let mut source_vectors = None;
         for (s, _) in top {
+            // a source stopped here gives no rows; the rows it owned go to no other source
             let Ok(why) = row_reasons(w, &mut source_vectors, &src.id, s.block) else {
                 mine.clear();
                 skipped += 1;
@@ -475,6 +567,16 @@ mod tests {
             f(self.blocks.iter_mut().find(|b| b.id == *id).unwrap());
         }
     }
+
+    /// The scorer's own cut, without a briefing's two-row cap and one owner per neighbor: ten
+    /// rows for each of the first 20 sources, at 0.25 or over. Tests of scoring, ties, guards
+    /// and stability use it; [`AdviceCut::BRIEFING`] and [`AdviceCut::WRITE`] have their own.
+    const SCORER: AdviceCut = AdviceCut {
+        floor: 0.25,
+        per_source: 10,
+        max_sources: 20,
+        once: false,
+    };
 
     /// A state built from blocks: its blocks, graph, pack and unnormalized weights.
     struct World {
@@ -1165,7 +1267,7 @@ mod tests {
             seeded += 1;
         }
         assert_eq!(seeded, 0);
-        // a briefing scores the first 20 sources, none of them seeded, and skips the other 77
+        // the cut scores the first 20 sources, none of them seeded, and skips the other 77
         let mut cut = VectorBudget::briefing();
         let a = vector_neighbors_in(&m, &g, pack, &w, &sources, AdviceCut::BRIEFING, &mut cut);
         assert_eq!(cut.used(), BudgetUse::default());
@@ -1417,7 +1519,7 @@ mod tests {
         let in_zeta = p.alone(&dz, same);
         let in_alpha = p.alone(&da, same);
         let world = World::new(&p.blocks);
-        let (adv, _) = world.advice(std::slice::from_ref(&src), AdviceCut::BRIEFING);
+        let (adv, _) = world.advice(std::slice::from_ref(&src), SCORER);
         assert_eq!(
             adv.rows.iter().map(|r| r.block.clone()).collect::<Vec<_>>(),
             vec![in_early, in_late, in_alpha, in_zeta],
@@ -1461,7 +1563,7 @@ mod tests {
             score(&s1, &low) < score(&s1, &wide),
             "the same-doc block has the lower exact score"
         );
-        let (one, _) = world.advice(std::slice::from_ref(&s1), AdviceCut::BRIEFING);
+        let (one, _) = world.advice(std::slice::from_ref(&s1), SCORER);
         assert_eq!(
             one.rows.iter().map(|r| r.block.clone()).collect::<Vec<_>>(),
             vec![
@@ -1473,7 +1575,7 @@ mod tests {
                 low.clone()
             ]
         );
-        let (both, _) = world.advice(&[s1.clone(), s2.clone()], AdviceCut::BRIEFING);
+        let (both, _) = world.advice(&[s1.clone(), s2.clone()], SCORER);
         let pairs = |rows: &[AdviceRow]| ids(rows);
         let sorted = vec![
             (s1.clone(), y.clone()),
@@ -1565,7 +1667,7 @@ mod tests {
             2
         );
 
-        // eleven eligible neighbors: ten rows in a briefing, three in a write, none counted as
+        // eleven eligible neighbors: two rows in a briefing, three in a write, none counted as
         // skipped; same-doc rows first
         let mut p = Proj::new();
         let (d_a, d_b) = (p.doc("docs-a"), p.doc("docs-b"));
@@ -1635,7 +1737,7 @@ mod tests {
         // the rows
         let covered = vec![src.clone()];
         let (adv, _) = world.advice(&covered, AdviceCut::BRIEFING);
-        let want: Vec<BlockId> = in_a.iter().chain(&in_b[..4]).cloned().collect();
+        let want: Vec<BlockId> = in_a[..2].to_vec();
         assert_eq!(
             adv.rows.iter().map(|r| r.block.clone()).collect::<Vec<_>>(),
             want
@@ -1651,7 +1753,7 @@ mod tests {
             w3.rows.iter().map(|r| r.block.clone()).collect::<Vec<_>>(),
             in_a[..3].to_vec()
         );
-        assert_eq!(AdviceCut::BRIEFING.per_source, 10);
+        assert_eq!(AdviceCut::BRIEFING.per_source, 2);
         assert_eq!(AdviceCut::WRITE.per_source, 3);
         assert_eq!(
             (
@@ -1692,34 +1794,261 @@ mod tests {
         assert!(adv.rows[0].links.is_empty());
     }
 
-    /// A briefing scores the first 20 eligible sources: the 21st gets no rows and counts once in
-    /// the skipped sources.
+    /// D-5BM47: a briefing scores its sources only when it has at most 20. Twenty sources are
+    /// all scored; the briefing checks the count before it builds weights, so 21 score none.
     #[test]
-    fn vxs2_briefing_scores_the_first_20_sources() {
+    fn vxs2_briefing_scores_at_most_20_sources() {
         let mut p = Proj::new();
         let da = p.doc("alpha");
         let mut sources = vec![];
         let mut partners = vec![];
-        for i in 0..21 {
+        for i in 0..20 {
             sources.push(p.alone(&da, &format!("w{i} x{i}")));
             partners.push(p.alone(&da, &format!("w{i} x{i}")));
         }
         let world = World::new(&p.blocks);
         let (adv, _) = world.advice(&sources, AdviceCut::BRIEFING);
-        assert_eq!(adv.skipped, 1, "the 21st source is skipped");
+        assert_eq!(adv.skipped, 0);
         let scored: BTreeSet<usize> = adv.rows.iter().map(|r| r.source_index).collect();
         assert_eq!(scored, (0..20).collect::<BTreeSet<usize>>());
-        assert!(adv.rows.iter().all(|r| r.source != sources[20]));
-        for (s, n) in sources.iter().zip(&partners).take(20) {
+        for (s, n) in sources.iter().zip(&partners) {
             assert!(
                 adv.rows.iter().any(|r| r.source == *s && r.block == *n),
                 "{s} keeps its partner"
             );
         }
-        // the 21st source alone has rows: only the cut leaves them out
-        let (one, _) = world.advice(std::slice::from_ref(&sources[20]), AdviceCut::BRIEFING);
-        assert_eq!(one.skipped, 0);
-        assert!(one.rows.iter().any(|r| r.block == partners[20]));
+        assert_eq!(AdviceCut::BRIEFING.max_sources, 20);
+        for (n, scores) in [(0, true), (1, true), (20, true), (21, false), (600, false)] {
+            assert_eq!(AdviceCut::BRIEFING.scores(n), scores, "{n}");
+        }
+    }
+
+    // ---- one owner per target, two rows per source (D-5BM47, D-5Y64F) ----
+
+    /// The exact score of `s` and `t` in `world`.
+    fn exact(world: &World, s: &BlockId, t: &BlockId) -> f64 {
+        let mut budget = VectorBudget::briefing();
+        score_pair(&world.w, Doc::Block(s), Doc::Block(t), &mut budget).unwrap()
+    }
+
+    /// The (source, block) pairs of `rows`, as a set.
+    fn pair_set(rows: &[AdviceRow]) -> BTreeSet<(BlockId, BlockId)> {
+        ids(rows).into_iter().collect()
+    }
+
+    #[test]
+    fn vxs11_each_target_has_one_highest_scoring_owner() {
+        // true ties: S1 and S2 mirror each other's words, so a block with one word of each scores
+        // the same exact value with both. Ties go by the row order: a row in its source's doc
+        // first, then the source's place.
+        let mut p = Proj::new();
+        let (da, db, dc) = (p.doc("alpha"), p.doc("beta"), p.doc("gamma"));
+        let s1 = p.alone(&dc, "zebra walrus");
+        let s2 = p.alone(&da, "otter moose");
+        let far = p.alone(&db, "zebra otter");
+        let near = p.alone(&da, "zebra otter");
+        let world = World::new(&p.blocks);
+        for t in [&far, &near] {
+            assert_eq!(
+                exact(&world, &s1, t).to_bits(),
+                exact(&world, &s2, t).to_bits(),
+                "a true tie"
+            );
+        }
+        let (adv, _) = world.advice(&[s1.clone(), s2.clone()], AdviceCut::BRIEFING);
+        // `far` is in neither source's doc: the first source owns it. `near` is in S2's doc: S2
+        // owns it, though S1 comes first.
+        assert_eq!(
+            pair_set(&adv.rows),
+            BTreeSet::from([(s1.clone(), far.clone()), (s2.clone(), near.clone())])
+        );
+        let (swapped, _) = world.advice(&[s2.clone(), s1.clone()], AdviceCut::BRIEFING);
+        assert_eq!(
+            pair_set(&swapped.rows),
+            BTreeSet::from([(s2.clone(), far.clone()), (s2.clone(), near.clone())]),
+            "the first source in the list owns the tie outside both docs"
+        );
+
+        // unequal exact scores that round to the same value: the higher exact score owns
+        let mut p = Proj::new();
+        let (da, db) = (p.doc("alpha"), p.doc("beta"));
+        let heavy = |n: usize| {
+            let mut words = vec!["kiwi".to_string()];
+            words.extend(std::iter::repeat_n("lime".to_string(), n));
+            words.join(" ")
+        };
+        let a = p.alone(&da, &heavy(400));
+        let b = p.alone(&da, &heavy(401));
+        let t = p.alone(&db, "kiwi lime");
+        let world = World::new(&p.blocks);
+        let (sa, sb) = (exact(&world, &a, &t), exact(&world, &b, &t));
+        assert_ne!(sa.to_bits(), sb.to_bits(), "{sa} {sb}");
+        assert_eq!(round3(sa), round3(sb), "{sa} {sb}");
+        // the source with the lower exact score comes first, so only the exact score picks
+        let (low, high) = if sa < sb { (a, b) } else { (b, a) };
+        let (adv, _) = world.advice(&[low.clone(), high.clone()], AdviceCut::BRIEFING);
+        let of_t: Vec<&BlockId> = adv
+            .rows
+            .iter()
+            .filter(|r| r.block == t)
+            .map(|r| &r.source)
+            .collect();
+        assert_eq!(of_t, [&high], "the higher exact score owns the target");
+
+        // the cap after ownership: S1 owns three targets and lists its best two; the third is
+        // not given to S2, which scores it lower, and S2 lists fewer than two rows
+        let mut p = Proj::new();
+        let (da, db, dc) = (p.doc("alpha"), p.doc("beta"), p.doc("gamma"));
+        let s1 = p.alone(&da, "fig grape plum");
+        let s2 = p.alone(&db, "pear kiwi");
+        let t1 = p.alone(&dc, "fig grape plum");
+        let t2 = p.alone(&dc, "fig grape");
+        let t3 = p.alone(&dc, "grape plum pear");
+        let t4 = p.alone(&dc, "pear kiwi quince");
+        for i in 0..30 {
+            p.alone(&dc, &format!("filler{i}"));
+        }
+        let world = World::new(&p.blocks);
+        for t in [&t1, &t2, &t3] {
+            assert!(exact(&world, &s1, t) > exact(&world, &s2, t), "{t}");
+        }
+        assert!(exact(&world, &s1, &t3) < exact(&world, &s1, &t2));
+        assert!(exact(&world, &s2, &t3) >= 0.25, "S2 would list t3");
+        assert!(exact(&world, &s2, &t4) > exact(&world, &s1, &t4));
+        let (adv, _) = world.advice(&[s1.clone(), s2.clone()], AdviceCut::BRIEFING);
+        let mine = |s: &BlockId| -> Vec<BlockId> {
+            adv.rows
+                .iter()
+                .filter(|r| r.source == *s)
+                .map(|r| r.block.clone())
+                .collect()
+        };
+        assert_eq!(mine(&s1), [t1.clone(), t2.clone()]);
+        assert_eq!(
+            mine(&s2),
+            std::slice::from_ref(&t4),
+            "no reassignment; one row is valid"
+        );
+        assert_eq!(adv.skipped, 0, "rows past the cap count nowhere");
+
+        // a source a guard stops owns nothing: its best target goes to the complete source
+        let mut p = Proj::new();
+        let (da, db, dc) = (p.doc("alpha"), p.doc("beta"), p.doc("gamma"));
+        let s0 = p.alone(&da, "quince bulk");
+        let s1 = p.alone(&db, "quince");
+        let t = p.alone(&dc, "quince bulk");
+        for i in 0..10 {
+            p.alone(&dc, &format!("bulk f{i}"));
+        }
+        let world = World::new(&p.blocks);
+        assert!(exact(&world, &s0, &t) > exact(&world, &s1, &t));
+        let run = |limits: SourceLimits| {
+            let mut budget = VectorBudget::briefing().with_source_limits(limits);
+            vector_neighbors_in(
+                &world.m,
+                &world.g,
+                &world.pack,
+                &world.w,
+                &[s0.clone(), s1.clone()],
+                AdviceCut::BRIEFING,
+                &mut budget,
+            )
+        };
+        let whole = run(SourceLimits::FIXED);
+        assert_eq!(whole.skipped, 0);
+        assert!(pair_set(&whole.rows).contains(&(s0.clone(), t.clone())));
+        assert!(
+            !pair_set(&whole.rows).contains(&(s1.clone(), t.clone())),
+            "the stronger complete source owns it"
+        );
+        let stopped = run(SourceLimits {
+            candidates: 5,
+            ..SourceLimits::FIXED
+        });
+        assert_eq!(stopped.skipped, 1, "the stopped source counts once");
+        assert!(stopped.rows.iter().all(|r| r.source != s0));
+        assert!(pair_set(&stopped.rows).contains(&(s1.clone(), t.clone())));
+    }
+
+    #[test]
+    fn vxs11_small_brief_caps_and_counters_keep_their_units() {
+        // twelve neighbors of one score: two rows, the first two by the row order; the other ten
+        // count nowhere. The write cut keeps three.
+        let mut p = Proj::new();
+        let (da, db) = (p.doc("alpha"), p.doc("beta"));
+        let src_sec = p.section(&da, "a1");
+        let src = p.claim(&src_sec, "a1", "capword");
+        let sec = p.section(&db, "a1");
+        let neighbors: Vec<BlockId> = (0..12)
+            .map(|k| p.claim(&sec, &format!("a{k:02}"), "capword"))
+            .collect();
+        // a section neighbor of the source scores 1 too, and is never a row
+        let sibling = p.claim(&src_sec, "a2", "capword");
+        let world = World::new(&p.blocks);
+        let (adv, _) = world.advice(std::slice::from_ref(&src), AdviceCut::BRIEFING);
+        assert_eq!(
+            adv.rows.iter().map(|r| r.block.clone()).collect::<Vec<_>>(),
+            neighbors[..2].to_vec()
+        );
+        assert_eq!(adv.skipped, 0);
+        assert!(
+            adv.rows
+                .iter()
+                .all(|r| r.block != sibling && r.score >= 0.25)
+        );
+        let (w3, _) = world.advice(std::slice::from_ref(&src), AdviceCut::WRITE);
+        assert_eq!(
+            w3.rows.iter().map(|r| r.block.clone()).collect::<Vec<_>>(),
+            neighbors[..3].to_vec()
+        );
+        assert_eq!(
+            (AdviceCut::BRIEFING.per_source, AdviceCut::BRIEFING.floor),
+            (2, 0.25)
+        );
+        assert_eq!(
+            (
+                AdviceCut::WRITE.per_source,
+                AdviceCut::WRITE.max_sources,
+                AdviceCut::WRITE.floor
+            ),
+            (3, 10, 0.25)
+        );
+
+        // the write cut keeps repeats: two created blocks that share neighbors both list them
+        let s2 = p.alone(&da, "capword");
+        let world = World::new(&p.blocks);
+        let (w, _) = world.advice(&[src.clone(), s2.clone()], AdviceCut::WRITE);
+        assert_eq!(w.rows.len(), 6, "three rows for each, repeats kept");
+        let (b, _) = world.advice(&[src.clone(), s2.clone()], AdviceCut::BRIEFING);
+        let blocks: BTreeSet<&BlockId> = b.rows.iter().map(|r| &r.block).collect();
+        assert_eq!(blocks.len(), b.rows.len(), "a briefing shows each once");
+        assert!(b.rows.len() <= 4);
+
+        // a no-seed source and the row cap add no count; a stopped source counts once
+        let mut p = Proj::new();
+        let da = p.doc("alpha");
+        let common = p.alone(&da, "common common");
+        for k in 0..120 {
+            p.alone(&da, &format!("common f{k}"));
+        }
+        let seeded = p.alone(&da, "rare common");
+        for _ in 0..3 {
+            p.alone(&da, "rare");
+        }
+        let world = World::new(&p.blocks);
+        let (adv, _) = world.advice(&[common.clone(), seeded.clone()], AdviceCut::BRIEFING);
+        assert_eq!((adv.rows.len(), adv.skipped), (2, 0));
+        let mut none = VectorBudget::new(0, 0);
+        let a = vector_neighbors_in(
+            &world.m,
+            &world.g,
+            &world.pack,
+            &world.w,
+            &[common.clone(), seeded.clone()],
+            AdviceCut::BRIEFING,
+            &mut none,
+        );
+        assert_eq!((a.rows.len(), a.skipped), (0, 1));
     }
 
     // ---- guards ----
@@ -1754,7 +2083,7 @@ mod tests {
                 &world.pack,
                 &world.w,
                 src,
-                AdviceCut::BRIEFING,
+                SCORER,
                 budget,
             );
             (a, world)
@@ -1851,7 +2180,7 @@ mod tests {
                 &world.pack,
                 &world.w,
                 std::slice::from_ref(&s1),
-                AdviceCut::BRIEFING,
+                SCORER,
                 &mut b,
             );
             world.w.stats().charged
@@ -1864,7 +2193,7 @@ mod tests {
             &world.pack,
             &tight,
             &all,
-            AdviceCut::BRIEFING,
+            SCORER,
             &mut b,
         );
         assert_eq!((sources_of(&a), a.skipped), (set(&[&s1]), 2));
@@ -1965,7 +2294,7 @@ mod tests {
                 &world.pack,
                 &world.w,
                 &sources,
-                AdviceCut::BRIEFING,
+                SCORER,
                 &mut budget,
             );
             let rows: Vec<_> = a
