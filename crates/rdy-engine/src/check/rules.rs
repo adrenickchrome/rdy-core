@@ -1,7 +1,9 @@
-//! Pack rule checks (D-JQD5X): a rule fails on a block that matches its `select` and does not
-//! match its `require`. The filters are M3f's ([`rdy_schema::filter`]); the evaluator is
+//! Pack rule checks (D-JQD5X, D-ZRXY0): a rule judges each block that matches its `select`. A
+//! filter rule fails on a block that does not match its `require`; a module rule runs its module
+//! once on the block ([`judge_module`]), which answers pass or fail, and a module that cannot
+//! answer fails the block. The filters are M3f's ([`rdy_schema::filter`]); the evaluator is
 //! [`FilterContext`]. This file adds no parser and no evaluator: it runs each rule over the
-//! blocks a stage names and words each failure.
+//! blocks a stage names and words each failure. Both kinds give the same rows, codes and caps.
 //!
 //! - At `change` ([`change_checks`]) a rule judges the blocks a write or view op changed and the
 //!   blocks one explicit link or pinned reference away, before or after. It never refuses.
@@ -17,6 +19,8 @@
 //! the pack in every state published under it, and owns a [`VerdictCache`] of that pack's module
 //! results. A reload compiles the new pack's rules into a new handle with an empty cache.
 use crate::brief::effective_stable;
+use crate::check::module_input::{ModuleState, encode_input, module_reads};
+use crate::check::module_run::{Judgement, RuleBudget, judge_module};
 use crate::check::stages::Stage;
 use crate::error::{E_CONFIG, E_INTERNAL, E_RULE_CHECK, RdyError, W_RULE_CHECK};
 use crate::filter::{FilterContext, FilterInputs};
@@ -29,8 +33,7 @@ use rdy_model::BlockId;
 use rdy_model::assessment::MAX_ROWS;
 use rdy_schema::filter::{Dir, Expr, Field, Filter, LinkKind};
 use rdy_schema::{
-    ArgValue, CheckedRule, CompiledRule, ModuleTest, Rule, RuleInput, RuleSeverity, RuleTestSpec,
-    check_resolved_rules, compile_rules,
+    ArgValue, CompiledRule, ModuleTest, RuleInput, RuleSeverity, RuleTestSpec, check_resolved_rules,
 };
 use rdy_schema::{Issue, Pack, Severity};
 use serde::Serialize;
@@ -127,15 +130,11 @@ pub fn fail_next_rule_report_for_tests() {
     FAIL_NEXT_REPORT.with(|f| f.set(true));
 }
 
-/// The rules of `pack`, compiled, in name order. A pack that resolved always compiles; an error
-/// here is the pack's `E_CONFIG`. Only [`evaluate_rules`] reads a pack this way: a state's scans
-/// read the rules compiled when its pack was loaded ([`ReadState::compiled_rules`]).
-pub(crate) fn compiled(pack: &Pack) -> Result<Vec<CompiledRule>, RdyError> {
-    if pack.rules.is_empty() {
-        return Ok(vec![]);
-    }
-    compile_rules(pack)
-        .map_err(|e| RdyError::new(E_CONFIG, format!("invalid pack: {e}"), "fix the pack file"))
+/// Tests only: the next module run on this thread faults inside the host, as a fault of rdy
+/// would; the scan gives the rule read error ([`host_fault`]).
+#[doc(hidden)]
+pub fn host_fault_in_next_module_run_for_tests() {
+    rdy_check_wasm::panic_in_next_run_for_tests(rdy_check_wasm::TestPanic::Check);
 }
 
 static RULE_COMPILATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -224,13 +223,36 @@ pub struct PreparedRule {
     pub fix: String,
 }
 
+impl PreparedRule {
+    /// The rule's filters: its `select`, and a filter rule's `require`.
+    fn filters(&self) -> impl Iterator<Item = &Filter> {
+        let require = match &self.test {
+            CompiledRuleTest::Filter(require) => Some(require),
+            CompiledRuleTest::Module(_) => None,
+        };
+        std::iter::once(&self.select).chain(require)
+    }
+
+    /// The most link steps the rule reads from a judged block (D-DSPMW): its deepest link test,
+    /// and a module rule's `depth`.
+    fn depth(&self) -> usize {
+        let links = self
+            .filters()
+            .map(|f| link_depth(&f.expr))
+            .max()
+            .unwrap_or(0);
+        match &self.test {
+            CompiledRuleTest::Module(m) => links.max(usize::from(m.depth())),
+            CompiledRuleTest::Filter(_) => links,
+        }
+    }
+}
+
 /// The rules of one loaded pack, compiled once ([`compile_rule_specs`]), in name order, with the
 /// cache of that pack's module results. Every state published under the pack shares it; a
 /// reload replaces it with the new pack's, and its cache is never carried over.
 pub struct CompiledRules {
     rules: Vec<PreparedRule>,
-    /// The filter rules, in the form the scans read.
-    filters: Vec<CompiledRule>,
     cache: VerdictCache,
 }
 
@@ -239,7 +261,6 @@ impl CompiledRules {
     pub fn empty() -> CompiledRules {
         CompiledRules {
             rules: vec![],
-            filters: vec![],
             cache: VerdictCache::new(),
         }
     }
@@ -254,9 +275,10 @@ impl CompiledRules {
         self.rules.is_empty()
     }
 
-    /// The filter rules, in name order: the rules the scans judge.
-    pub(crate) fn filters(&self) -> &[CompiledRule] {
-        &self.filters
+    /// Every filter of every rule: each `select`, and each filter rule's `require`. What they
+    /// need (`Filter::needs`) is every global fact the rules read: a module reads none.
+    pub(crate) fn filters(&self) -> Vec<&Filter> {
+        self.rules.iter().flat_map(PreparedRule::filters).collect()
     }
 
     /// The cache of this pack's module results.
@@ -267,8 +289,7 @@ impl CompiledRules {
 
 /// The rules of the resolved `pack`, compiled ([`compile_rule_specs`]).
 pub(crate) fn compile_pack_rules(pack: &Pack) -> Result<Arc<CompiledRules>, RdyError> {
-    let specs: Vec<RuleInput> = pack.rules.iter().map(RuleInput::from).collect();
-    compile_rule_specs(pack, &specs).map(Arc::new)
+    compile_rule_specs(pack, &pack.rules).map(Arc::new)
 }
 
 /// The rules `specs` of the resolved `pack`, the parent's first as the resolved pack lists them,
@@ -282,37 +303,22 @@ pub fn compile_rule_specs(pack: &Pack, specs: &[RuleInput]) -> Result<CompiledRu
     let checked = check_resolved_rules(pack, specs)
         .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix the pack file"))?;
     let mut rules = Vec::with_capacity(checked.len());
-    let mut filters = vec![];
-    for CheckedRule {
-        input,
+    for CompiledRule {
+        rule,
         select,
         require,
     } in checked
     {
         let RuleInput {
             name,
-            select: select_text,
             test,
             severity,
             message,
             fix,
-        } = input;
+            ..
+        } = rule;
         let test = match (test, require) {
-            (RuleTestSpec::Filter { require: text }, Some(require)) => {
-                filters.push(CompiledRule {
-                    rule: Rule {
-                        name: name.clone(),
-                        select: select_text,
-                        require: text,
-                        severity,
-                        message: message.clone(),
-                        fix: fix.clone(),
-                    },
-                    select: select.clone(),
-                    require: require.clone(),
-                });
-                CompiledRuleTest::Filter(require)
-            }
+            (RuleTestSpec::Filter { .. }, Some(require)) => CompiledRuleTest::Filter(require),
             (RuleTestSpec::Module(m), None) => {
                 CompiledRuleTest::Module(compile_module_rule(&name, m)?)
             }
@@ -335,7 +341,6 @@ pub fn compile_rule_specs(pack: &Pack, specs: &[RuleInput]) -> Result<CompiledRu
     }
     Ok(CompiledRules {
         rules,
-        filters,
         cache: VerdictCache::new(),
     })
 }
@@ -548,13 +553,8 @@ impl VerdictCache {
     }
 }
 
-/// Runs every rule of `pack` on each of `ids` that `inputs.m` holds, at `stage`. A rule fails
-/// when its `select` matches and its `require` does not. The row's code is `E_RULE_CHECK` when
-/// the rule is blocking and the block is in effective stable content of `inputs.m`, else
-/// `W_RULE_CHECK`. The rows come in rule name, then block id order, each pair once. At
-/// `propose` the first [`MAX_RULE_ROWS`] blocking rows and the first [`MAX_RULE_ROWS`] warning
-/// rows are kept; at `change`, the first [`MAX_RULE_ROWS`] rows of both. The rest are counted.
-/// One [`FilterContext`] judges the one state; it lives inside this call only. Rules never run
+/// Runs every rule of `pack` on each of `ids` that `inputs.m` holds, at `stage`, its rules
+/// compiled for this call ([`compile_rule_specs`]). The scan is [`evaluate`]'s. Rules never run
 /// at `land`.
 pub fn evaluate_rules(
     pack: &Pack,
@@ -563,7 +563,7 @@ pub fn evaluate_rules(
     stage: Stage,
 ) -> Result<RuleScan, RdyError> {
     refuse_land(stage)?;
-    evaluate(&compiled(pack)?, inputs, ids, stage)
+    evaluate(&*compile_pack_rules(pack)?, inputs, ids, stage)
 }
 
 /// Rules never run at `land`.
@@ -578,9 +578,62 @@ fn refuse_land(stage: Stage) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// [`evaluate_rules`] with the compiled filter rules `rules`, in name order.
+/// One rule's answer on one block that fails it: the row's message and fix.
+struct Failure {
+    message: String,
+    fix: String,
+}
+
+/// Rule `rule`'s answer on block `id`, which its `select` matched: `None` when the block passes.
+/// A module rule runs once on the block, charging `budget` ([`judge_module`]); its input comes
+/// from `st`. Err: a host fault, the rule read error.
+fn judge(
+    rule: &PreparedRule,
+    ctx: &FilterContext<'_>,
+    st: &ModuleState<'_>,
+    cache: &VerdictCache,
+    budget: &mut RuleBudget,
+    id: &BlockId,
+) -> Result<Option<Failure>, RdyError> {
+    let fails_on = |message: &str| format!("rule {} fails on {id}: {message}", rule.name);
+    let m = match &rule.test {
+        CompiledRuleTest::Filter(require) => {
+            return Ok((!ctx.matches(require, id)).then(|| Failure {
+                message: fails_on(&rule.message),
+                fix: rule.fix.clone(),
+            }));
+        }
+        CompiledRuleTest::Module(m) => m,
+    };
+    let input = || encode_input(st, &rule.name, m.args(), id, m.depth()).ok();
+    Ok(match judge_module(&rule.name, m, cache, budget, input)? {
+        Judgement::Pass => None,
+        Judgement::Fail { message, fix } => Some(Failure {
+            message: fails_on(message.as_deref().unwrap_or(&rule.message)),
+            fix: fix.unwrap_or_else(|| rule.fix.clone()),
+        }),
+        Judgement::CannotJudge(cause) => Some(Failure {
+            message: format!("rule {} could not judge {id}: {}", rule.name, cause.words()),
+            fix: format!(
+                "fix the module of rule {} in the pack file, or make the rule advisory",
+                rule.name
+            ),
+        }),
+    })
+}
+
+/// Runs each of the compiled `rules`, in name order, on each of `ids` that `inputs.m` holds and
+/// the rule's `select` matches, in block id order, at `stage`. A filter rule fails a block that
+/// its `require` does not match; a module rule runs its module once on the block, with a new
+/// fuel budget for each rule in each scan, and fails a block it answers fail on or cannot judge.
+/// A row's code is `E_RULE_CHECK` when the rule is blocking and the block is in effective stable
+/// content of `inputs.m`, else `W_RULE_CHECK`. At `propose` the first [`MAX_RULE_ROWS`] blocking
+/// rows and the first [`MAX_RULE_ROWS`] warning rows are kept; at `change`, the first
+/// [`MAX_RULE_ROWS`] rows of both. Every selected block is judged; the rows past the cut are
+/// counted. One [`FilterContext`] and one module state judge the one state; they live inside
+/// this call only. Err: a host fault in a module, the rule read error. Rules never run at `land`.
 pub(crate) fn evaluate(
-    rules: &[CompiledRule],
+    rules: &CompiledRules,
     inputs: FilterInputs<'_>,
     ids: impl Iterator<Item = BlockId>,
     stage: Stage,
@@ -592,25 +645,26 @@ pub(crate) fn evaluate(
     }
     RULE_SCANS.with(|n| n.set(n.get() + 1));
     let ids: BTreeSet<BlockId> = ids.collect();
-    let (m, graph) = (inputs.m, inputs.graph);
+    let (pack, m, graph, areas) = (inputs.pack, inputs.m, inputs.graph, inputs.areas);
+    let st = ModuleState::new(pack, m, graph, areas);
     let ctx = FilterContext::from_parts(inputs);
     let mut failing: Vec<(usize, BlockId)> = vec![];
-    for (at, rule) in rules.iter().enumerate() {
+    for (at, rule) in rules.rules().iter().enumerate() {
+        let mut budget = RuleBudget::new();
         for id in &ids {
-            if !ctx.matches(&rule.select, id) || ctx.matches(&rule.require, id) {
+            if !ctx.matches(&rule.select, id) {
                 continue;
             }
-            let blocking =
-                rule.rule.severity == RuleSeverity::Blocking && effective_stable(m, Some(id));
+            let Some(failure) = judge(rule, &ctx, &st, rules.cache(), &mut budget, id)? else {
+                continue;
+            };
+            let blocking = rule.severity == RuleSeverity::Blocking && effective_stable(m, Some(id));
             let row = RuleIssue {
-                rule: rule.rule.name.clone(),
+                rule: rule.name.clone(),
                 code: if blocking { E_RULE_CHECK } else { W_RULE_CHECK }.to_string(),
                 block: id.to_string(),
-                message: format!(
-                    "rule {} fails on {id}: {}",
-                    rule.rule.name, rule.rule.message
-                ),
-                fix: rule.rule.fix.clone(),
+                message: failure.message,
+                fix: failure.fix,
             };
             let room = match stage {
                 Stage::Change => scan.blocking.len() + scan.warnings.len() < MAX_RULE_ROWS,
@@ -634,7 +688,13 @@ pub(crate) fn evaluate(
         let mut read = Bounded::unbounded();
         for (at, id) in &failing {
             // an unbounded set never refuses
-            let _ = inputs_of(std::slice::from_ref(&rules[*at]), m, graph, id, &mut read);
+            let _ = inputs_of(
+                std::slice::from_ref(&rules.rules()[*at]),
+                m,
+                graph,
+                id,
+                &mut read,
+            );
         }
         scan.read_blocks = read.set;
     }
@@ -661,8 +721,7 @@ pub(crate) fn change_checks(
             "report this as a bug in rdy",
         ));
     }
-    let handle = after.compiled_rules()?;
-    let rules = handle.filters();
+    let rules = after.compiled_rules()?;
     if rules.is_empty() {
         return Ok(RuleScan::default());
     }
@@ -699,9 +758,9 @@ pub(crate) fn change_checks(
             );
         }
     }
-    let filters: Vec<&Filter> = rules.iter().flat_map(|r| [&r.select, &r.require]).collect();
+    let filters = rules.filters();
     let inputs = after.scope_inputs(&scope, &filters)?;
-    evaluate(rules, inputs.inputs(after), ids.into_iter(), Stage::Change)
+    evaluate(&rules, inputs.inputs(after), ids.into_iter(), Stage::Change)
 }
 
 /// An explicit pack link or a pinned reference: what a rule's one-link reach counts.
@@ -840,14 +899,16 @@ fn linked<'g>(g: &'g Graph, b: &BlockId) -> impl Iterator<Item = &'g BlockId> {
 }
 
 /// Adds to `out` the complete inputs of evaluating each of `rules` at `b` in `(m, g)`, whether
-/// it passes or fails: `b`, its ancestors for an inherited field (lifecycle, path, doc, area),
-/// every candidate a link test inspects and those candidates' own inputs, and the sources of
-/// derived inputs: a status's incoming links (supersedes, revokes), a suspect's pinned targets,
-/// and a tension's or a coverage score's linked neighbours, parent and ancestors. Every branch
-/// of `and`, `or` and `not` is walked, so a short-circuited evaluation leaves nothing out.
-/// Err: `out` is full.
+/// it passes or fails, and whether its `select` matches: `b`, its ancestors for an inherited
+/// field (lifecycle, path, doc, area), every candidate a link test inspects and those
+/// candidates' own inputs, and the sources of derived inputs: a status's incoming links
+/// (supersedes, revokes), a suspect's pinned targets, and a tension's or a coverage score's
+/// linked neighbours, parent and ancestors. Every branch of `and`, `or` and `not` is walked, so
+/// a short-circuited evaluation leaves nothing out. A module rule adds every block its module's
+/// input reads ([`module_reads`]): the neighbours to its `depth`, those the input's cap drops
+/// too, and their derived values' inputs. Err: `out` is full.
 fn inputs_of(
-    rules: &[CompiledRule],
+    rules: &[PreparedRule],
     m: &Materialized,
     g: &Graph,
     b: &BlockId,
@@ -856,13 +917,16 @@ fn inputs_of(
     out.insert(b)?;
     for rule in rules {
         // a blocking rule's severity reads the effective lifecycle, inherited from the ancestors
-        if rule.rule.severity == RuleSeverity::Blocking {
+        if rule.severity == RuleSeverity::Blocking {
             for a in ancestors(m, b) {
                 out.insert(a)?;
             }
         }
-        for f in [&rule.select, &rule.require] {
+        for f in rule.filters() {
             expr_inputs(&f.expr, m, g, b, out)?;
+        }
+        if let CompiledRuleTest::Module(module) = &rule.test {
+            module_reads(m, g, b, module.depth(), out)?;
         }
     }
     Ok(())
@@ -1034,11 +1098,35 @@ pub fn field_inputs_for_tests(
     out.set
 }
 
+/// Tests only: the reach `pack`'s rules add to version `pref`, which writes `written`, from
+/// `before` to `projected`, with no stored rule rows ([`rule_reach`]). Err: the rules do not
+/// compile.
+#[doc(hidden)]
+pub fn rule_reach_for_tests(
+    pref: &crate::ProposalRef,
+    pack: &Pack,
+    before: (&Materialized, &Graph),
+    projected: (&Materialized, &Graph),
+    written: &BTreeSet<BlockId>,
+) -> Result<Result<BTreeSet<BlockId>, Issue>, RdyError> {
+    let rules = compile_pack_rules(pack)?;
+    Ok(rule_reach(
+        pref,
+        pack,
+        rules.rules(),
+        before,
+        projected,
+        written,
+        &BTreeSet::new(),
+    ))
+}
+
 /// The reach a version's rules add to its assessment (TASK-946, D-DSPMW, D-AJ0XQ): empty when
 /// there are no rules. Otherwise, from each block the version writes (`written`, deleted ones
 /// included), in canon before (`before`) and in the version's landing projection (`projected`):
-/// the block, its descendants, and the blocks up to the deepest link nesting of any rule (0 to
-/// 3) away through placement edges, explicit links and pinned references, in either direction.
+/// the block, its descendants, and the blocks up to the deepest link nesting of any rule, or a
+/// module rule's `depth` (0 to 3), away through placement edges, explicit links and pinned
+/// references, in either direction.
 /// When a rule reads `tension` and a block of that walk can take part in a duplicate-definition
 /// group, also every block that can (the partners no link joins). Then, once and without expanding again, the complete rule inputs of every block of that
 /// expansion in both states ([`inputs_of`]), and every block a stored rule row reads
@@ -1047,7 +1135,7 @@ pub fn field_inputs_for_tests(
 pub(crate) fn rule_reach(
     pref: &crate::ProposalRef,
     pack: &Pack,
-    rules: &[CompiledRule],
+    rules: &[PreparedRule],
     before: (&Materialized, &Graph),
     projected: (&Materialized, &Graph),
     written: &BTreeSet<BlockId>,
@@ -1057,12 +1145,7 @@ pub(crate) fn rule_reach(
         return Ok(BTreeSet::new());
     }
     let too_large = || crate::readiness::assessment::too_large(pref);
-    let depth = rules
-        .iter()
-        .flat_map(|r| [&r.select, &r.require])
-        .map(|f| link_depth(&f.expr))
-        .max()
-        .unwrap_or(0);
+    let depth = rules.iter().map(PreparedRule::depth).max().unwrap_or(0);
     let mut expansion = Bounded::new(MAX_ROWS);
     for (m, g) in [before, projected] {
         for w in written {
@@ -1097,10 +1180,11 @@ pub(crate) fn rule_reach(
         }
     }
     // a tension reads duplicate partners, which no link joins (row 166): the blocks that share
-    // a name key or a text key with a block of the expansion, in either state
+    // a name key or a text key with a block of the expansion, in either state. A module reads
+    // no tension, so only a filter can.
     let reads_tension = rules
         .iter()
-        .flat_map(|r| [&r.select, &r.require])
+        .flat_map(PreparedRule::filters)
         .any(|f| f.needs().tension);
     if reads_tension
         && [before.0, projected.0]

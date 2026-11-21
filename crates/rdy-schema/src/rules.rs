@@ -5,8 +5,8 @@
 //! to refuse, and a text over the byte bound gets the same words as one over the character bound.
 //!
 //! A rule's test is a `require` filter or a `module` (D-ZRXY0). [`RuleInput`] is a rule of either
-//! kind and [`validate_rule_input`] checks its structure (D-WV7ZS): the module's bytes, `args` and
-//! `depth`, never the module's code. The pack's own parser still reads [`Rule`], a filter rule.
+//! kind, as a pack holds it, and [`validate_rule_input`] checks its structure as the pack file is
+//! read (D-WV7ZS, D-N1GG5): the module's bytes, `args` and `depth`, never the module's code.
 
 use crate::filter::{Expr, Field, Filter, parse};
 use crate::pack::Pack;
@@ -62,27 +62,6 @@ pub enum RuleSeverity {
     Blocking,
 }
 
-/// One rule as the pack file writes it. `select` and `require` are filters in the query grammar.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Rule {
-    pub name: String,
-    pub select: String,
-    pub require: String,
-    #[serde(default)]
-    pub severity: RuleSeverity,
-    pub message: String,
-    pub fix: String,
-}
-
-/// A rule with its two filters parsed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompiledRule {
-    pub rule: Rule,
-    pub select: Filter,
-    pub require: Filter,
-}
-
 /// One value of a module rule's `args`: what compact JSON holds with integers only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArgValue {
@@ -135,10 +114,12 @@ pub enum RuleTestSpec {
     Module(ModuleTest),
 }
 
-/// One rule of either kind, its structure checked by [`validate_rule_input`]. It serializes with
-/// the keys of [`Rule`] in its order, `require` replaced by `module`, `args` and `depth` on a
-/// module rule, each only when the rule sets it; `module` as standard base64 with no spaces. A
-/// filter rule writes the bytes its [`Rule`] writes.
+/// One rule of either kind as the pack file writes it, its structure checked by
+/// [`validate_rule_input`]; `select` and `require` are filters in the query grammar. It serializes
+/// its keys in the order `name`, `select`, `require` (a filter rule) or `module`, `args` and
+/// `depth` (a module rule, `args` and `depth` only when the rule sets them), `severity`,
+/// `message`, `fix`; `module` as standard base64 with no spaces. So a filter rule writes the
+/// bytes it wrote before module rules existed, and an unchanged pack keeps its digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuleInput {
     pub name: String,
@@ -173,18 +154,25 @@ impl Serialize for RuleInput {
     }
 }
 
-impl From<&Rule> for RuleInput {
-    /// The filter rule `rule` in the structure of either kind.
-    fn from(rule: &Rule) -> RuleInput {
-        RuleInput {
-            name: rule.name.clone(),
-            select: rule.select.clone(),
-            test: RuleTestSpec::Filter {
-                require: rule.require.clone(),
-            },
-            severity: rule.severity,
-            message: rule.message.clone(),
-            fix: rule.fix.clone(),
+impl<'de> Deserialize<'de> for RuleInput {
+    /// The rule [`validate_rule_input`] reads from the value; its refusal is the error's text.
+    /// A pack file's rules are checked first by [`crate::PackSet::add_yaml_from`], which keeps the
+    /// refusal's kind.
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<RuleInput, D::Error> {
+        let value = Value::deserialize(d)?;
+        validate_rule_input(&value).map_err(|e| match e {
+            SchemaError::Yaml(text) => de::Error::custom(text),
+            other => de::Error::custom(other),
+        })
+    }
+}
+
+impl RuleInput {
+    /// The `require` filter of a filter rule; `None` for a module rule.
+    pub fn require(&self) -> Option<&str> {
+        match &self.test {
+            RuleTestSpec::Filter { require } => Some(require),
+            RuleTestSpec::Module(_) => None,
         }
     }
 }
@@ -481,28 +469,20 @@ pub(crate) fn text_fits(text: &str) -> bool {
 }
 
 /// The rules of a resolved `pack`, checked and parsed, in exact name order. Err: the detail of the
-/// first refusal, in the pack's order of rules. `PackSet::resolve` runs this, so a pack that
-/// resolves always compiles. The checks are [`crate::check_resolved_rules`]'s.
+/// first refusal, in the pack's order of rules. `PackSet::resolve` runs the same checks, so a
+/// pack that resolves always compiles. The checks are [`crate::check_resolved_rules`]'s.
 pub fn compile_rules(pack: &Pack) -> Result<Vec<CompiledRule>, String> {
-    let parsed = crate::resolve::checked_rules(pack, pack.rules.iter().map(RuleView::from))?;
-    let mut compiled = Vec::with_capacity(parsed.len());
-    for (rule, (select, require)) in pack.rules.iter().zip(parsed) {
-        compiled.push(CompiledRule {
-            select,
-            require: require
-                .ok_or_else(|| format!("rule {} needs require or module", rule.name))?,
-            rule: rule.clone(),
-        });
-    }
-    compiled.sort_by(|a, b| a.rule.name.cmp(&b.rule.name));
-    Ok(compiled)
+    crate::check_resolved_rules(pack, &pack.rules).map_err(|e| match e {
+        SchemaError::Invalid(detail) => detail,
+        other => other.to_string(),
+    })
 }
 
 /// A rule of either kind with its filters parsed: `require` is the parsed filter of a filter
 /// rule and `None` for a module rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CheckedRule {
-    pub input: RuleInput,
+pub struct CompiledRule {
+    pub rule: RuleInput,
     pub select: Filter,
     pub require: Option<Filter>,
 }
@@ -518,19 +498,6 @@ pub(crate) struct RuleView<'a> {
     pub module_bytes: usize,
     pub message: &'a str,
     pub fix: &'a str,
-}
-
-impl<'a> From<&'a Rule> for RuleView<'a> {
-    fn from(rule: &'a Rule) -> RuleView<'a> {
-        RuleView {
-            name: &rule.name,
-            select: &rule.select,
-            require: Some(&rule.require),
-            module_bytes: 0,
-            message: &rule.message,
-            fix: &rule.fix,
-        }
-    }
 }
 
 impl<'a> From<&'a RuleInput> for RuleView<'a> {

@@ -246,32 +246,46 @@ fn via_parts<'s>(step: &'s Step) -> (&'static [u8], &'s [u8]) {
     (head, name)
 }
 
-/// Adds to `out` every block that the input of `root` at `depth` in `st` reads: `root`, each of
-/// its neighbours to `depth` (those that the input's cap drops too, whose edits move the cut),
-/// and the blocks that each of their derived values reads (ancestors for an inherited
-/// lifecycle, path, doc and area; a status's incoming links; an as-built status's decisions).
-/// A root that `st` lacks reads nothing. Err: `out` is full.
+/// Adds to `out` every block that the input of `root` at `depth` in `st` reads
+/// ([`module_reads`]). Err: `out` is full.
 pub(crate) fn module_inputs(
     st: &ModuleState,
     root: &BlockId,
     depth: u8,
     out: &mut Bounded,
 ) -> Result<(), ()> {
-    if st.m.get(root).is_none() {
+    module_reads(st.m, st.graph, root, depth, out)
+}
+
+/// Adds to `out` every block that the input of `root` at `depth` in `(m, g)` reads, for an
+/// assessment's reach: `root`, each of its neighbours to `depth` (those that the input's cap
+/// drops too, whose edits move the cut), and the blocks that each of their derived values reads
+/// (ancestors for an inherited lifecycle, path, doc and area, a derived name's siblings, a
+/// decision's `affects` targets, a status's incoming links, an as-built status's decisions). A
+/// block's own facts (its fields, body, links, references and key) are its own. A root that `m`
+/// lacks reads nothing. Err: `out` is full.
+pub(crate) fn module_reads(
+    m: &Materialized,
+    g: &Graph,
+    root: &BlockId,
+    depth: u8,
+    out: &mut Bounded,
+) -> Result<(), ()> {
+    if m.get(root).is_none() {
         return Ok(());
     }
-    value_inputs(st, root, out)?;
+    value_inputs(m, g, root, out)?;
     let mut result = Ok(());
-    walk(st.m, st.graph, root, depth, |n| {
+    walk(m, g, root, depth, |n| {
         if result.is_ok() {
-            result = value_inputs(st, n.id, out);
+            result = value_inputs(m, g, n.id, out);
         }
     });
     result
 }
 
 /// Adds `b` and the blocks its value's derived facts read.
-fn value_inputs(st: &ModuleState, b: &BlockId, out: &mut Bounded) -> Result<(), ()> {
+fn value_inputs(m: &Materialized, g: &Graph, b: &BlockId, out: &mut Bounded) -> Result<(), ()> {
     out.insert(b)?;
     for field in [
         Field::Lifecycle,
@@ -281,7 +295,7 @@ fn value_inputs(st: &ModuleState, b: &BlockId, out: &mut Bounded) -> Result<(), 
         Field::Status,
         Field::Planned,
     ] {
-        field_inputs(&field, st.m, st.graph, b, out)?;
+        field_inputs(&field, m, g, b, out)?;
     }
     Ok(())
 }

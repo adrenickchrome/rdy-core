@@ -2,7 +2,7 @@
 //! share the query parser, and cannot read the landing clock.
 
 use rdy_schema::filter::{Expr, Field, Op, parse};
-use rdy_schema::{Pack, PackSet, Rule, RuleSeverity, SchemaError, compile_rules};
+use rdy_schema::{Pack, PackSet, RuleSeverity, SchemaError, compile_rules};
 
 /// `text` as a YAML double-quoted scalar.
 fn q(text: &str) -> String {
@@ -253,7 +253,7 @@ fn ck1_rule_expressions_use_the_query_parser() {
     assert_eq!(compiled[0].select, parse("type = decision", &pack).unwrap());
     assert_eq!(
         compiled[0].require,
-        parse("not has fields.owner", &pack).unwrap()
+        Some(parse("not has fields.owner", &pack).unwrap())
     );
     assert_eq!(
         compiled[0].select.expr,
@@ -381,17 +381,20 @@ fn ck1_empty_rules_do_not_change_a_pack_serialization() {
     // no AST in the serialized form, and it round-trips
     let back: Pack = serde_json::from_value(json).unwrap();
     assert_eq!(back, with);
-    let one: Rule = back.rules[0].clone();
+    let one: RuleInput = back.rules[0].clone();
     assert_eq!(one.name, "r");
     // every member moves the digest input
     let bytes = |p: &Pack| serde_json::to_vec(p).unwrap();
     for change in [
-        |r: &mut Rule| r.name.push('x'),
-        |r: &mut Rule| r.select.push('x'),
-        |r: &mut Rule| r.require.push('x'),
-        |r: &mut Rule| r.severity = RuleSeverity::Blocking,
-        |r: &mut Rule| r.message.push('x'),
-        |r: &mut Rule| r.fix.push('x'),
+        |r: &mut RuleInput| r.name.push('x'),
+        |r: &mut RuleInput| r.select.push('x'),
+        |r: &mut RuleInput| match &mut r.test {
+            RuleTestSpec::Filter { require } => require.push('x'),
+            RuleTestSpec::Module(_) => unreachable!("a filter rule"),
+        },
+        |r: &mut RuleInput| r.severity = RuleSeverity::Blocking,
+        |r: &mut RuleInput| r.message.push('x'),
+        |r: &mut RuleInput| r.fix.push('x'),
     ] {
         let mut other = with.clone();
         change(&mut other.rules[0]);
@@ -414,7 +417,7 @@ fn wx10_reserved_names_and_trailing_dots_stay_refused() {
 }
 
 // wck2: the module-rule structure (D-ZRXY0, D-WV7ZS), tested through `validate_rule_input` and
-// `check_resolved_rules`. The public pack parser still refuses the module keys.
+// `check_resolved_rules`, which the pack's own parser and resolve use.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -670,7 +673,7 @@ fn wck2_resolved_module_total_at_and_past_limit() {
     ))
     .unwrap();
     let pack = set.resolve("parent").unwrap();
-    let inherited: Vec<RuleInput> = pack.rules.iter().map(RuleInput::from).collect();
+    let inherited: Vec<RuleInput> = pack.rules.clone();
 
     // eight identical modules of 1 MiB fill the total exactly; each counts, none is merged
     let mib = module_input("m0", &vec![1u8; MAX_MODULE_BYTES]);
@@ -688,9 +691,9 @@ fn wck2_resolved_module_total_at_and_past_limit() {
     let checked = check_resolved_rules(&pack, &all).unwrap();
     assert_eq!(checked.len(), 40);
     // in exact name order, the filter rules with their parsed require, module rules with none
-    assert_eq!(checked[0].input.name, "f00");
+    assert_eq!(checked[0].rule.name, "f00");
     assert_eq!(checked[0].require, Some(parse(ANY, &pack).unwrap()));
-    assert_eq!(checked[39].input.name, "m7");
+    assert_eq!(checked[39].rule.name, "m7");
     assert_eq!(checked[39].require, None);
     assert_eq!(checked[39].select, parse("type = decision", &pack).unwrap());
 
@@ -975,55 +978,88 @@ fn wck2_new_rule_keys_are_closed_and_suggest_near_keys() {
         Err(SchemaError::Yaml(_))
     ));
 
-    // the public pack parser keeps refusing the new keys as unknown
-    for key in ["module: AGFzbQEAAAA=", "args: {}", "depth: 1"] {
+    // the pack's own parser reads the same structure, with the same refusals
+    for (key, detail) in [
+        (
+            "module: AGFzbQEAAAA=",
+            "rule r takes require or module, not both",
+        ),
+        ("args: {}", "rule r args applies to module rules only"),
+        ("depth: 1", "rule r depth applies to module rules only"),
+    ] {
         let e = resolve(&format!(
             "  - {{ name: r, select: type = decision, require: has fields.x, {key}, message: m, fix: f }}\n"
         ))
         .unwrap_err();
-        let SchemaError::Yaml(text) = e else {
-            panic!("expected the pack's YAML error, got {e:?}")
-        };
-        let name = key.split(':').next().unwrap();
-        assert!(text.contains(&format!("unknown field `{name}`")), "{text}");
+        assert_eq!(e, SchemaError::Invalid(detail.to_string()));
     }
+    let e = resolve(
+        "  - { name: r, select: type = decision, modul: AGFzbQEAAAA=, message: m, fix: f }\n",
+    )
+    .unwrap_err();
+    let SchemaError::Yaml(text) = e else {
+        panic!("expected the pack's YAML error, got {e:?}")
+    };
+    assert!(text.starts_with("unknown field `modul`"), "{text}");
+    assert!(text.ends_with("; did you mean module?"), "{text}");
 }
 
 #[test]
 fn wck2_unset_module_keys_preserve_pack_bytes_and_digest() {
-    // the built-in pack: no rules, so no `rules` key either way
+    // the built-in pack: no rules, so no `rules` key
     let builtin = PackSet::with_builtin().resolve("rdy-standard").unwrap();
-    let inputs: Vec<RuleInput> = builtin.rules.iter().map(RuleInput::from).collect();
-    assert!(inputs.is_empty());
+    assert!(builtin.rules.is_empty());
     let json = serde_json::to_vec(&builtin).unwrap();
     assert!(!String::from_utf8_lossy(&json).contains("\"rules\""));
 
-    // filter rules write the same bytes through the new structure, in JSON (the digest input)
-    // and in YAML, the default severity included
+    /// A filter rule as packs wrote it before module rules: the bytes a pack's digest read.
+    #[derive(serde::Serialize)]
+    struct FilterRule<'a> {
+        name: &'a str,
+        select: &'a str,
+        require: &'a str,
+        severity: RuleSeverity,
+        message: &'a str,
+        fix: &'a str,
+    }
+    fn filter_rule(r: &RuleInput) -> FilterRule<'_> {
+        let RuleTestSpec::Filter { require } = &r.test else {
+            panic!("a filter rule")
+        };
+        FilterRule {
+            name: &r.name,
+            select: &r.select,
+            require,
+            severity: r.severity,
+            message: &r.message,
+            fix: &r.fix,
+        }
+    }
+    let old = |r: &RuleInput| serde_json::to_string(&filter_rule(r)).unwrap();
+
+    // filter rules write the bytes they wrote before, in JSON (the digest input) and in YAML,
+    // the default severity included
     let pack = resolve(
         "  - { name: a, select: type = decision, require: has fields.x, message: m, fix: f }\n  - { name: b, select: type = decision, require: has fields.y, severity: blocking, message: \"m2\", fix: \"f2\" }\n",
     )
     .unwrap();
     for rule in &pack.rules {
-        let new = RuleInput::from(rule);
+        assert_eq!(serde_json::to_string(rule).unwrap(), old(rule));
         assert_eq!(
-            serde_json::to_vec(&new).unwrap(),
-            serde_json::to_vec(rule).unwrap()
-        );
-        assert_eq!(
-            serde_yaml_ng::to_string(&new).unwrap(),
-            serde_yaml_ng::to_string(rule).unwrap()
+            serde_yaml_ng::to_string(rule).unwrap(),
+            serde_yaml_ng::to_string(&filter_rule(rule)).unwrap()
         );
         // and the structure reads them back as they were
         assert_eq!(
-            validate_rule_input(&serde_yaml_ng::to_value(rule).unwrap()).unwrap(),
-            new
+            &validate_rule_input(&serde_yaml_ng::to_value(rule).unwrap()).unwrap(),
+            rule
         );
     }
-    // the pack's JSON, the digest input, holds the same bytes for its rules either way
-    let inputs: Vec<RuleInput> = pack.rules.iter().map(RuleInput::from).collect();
-    let old_rules = serde_json::to_string(&pack.rules).unwrap();
-    assert_eq!(serde_json::to_string(&inputs).unwrap(), old_rules);
+    // the pack's JSON, the digest input, holds those bytes for its rules
+    let old_rules = format!(
+        "[{}]",
+        pack.rules.iter().map(old).collect::<Vec<_>>().join(",")
+    );
     let pack_json = serde_json::to_string(&pack).unwrap();
     assert_eq!(
         pack_json.matches(&format!("\"rules\":{old_rules}")).count(),
@@ -1207,14 +1243,14 @@ fn wck2_module_and_args_bounds_refuse_before_copying() {
 #[test]
 fn wck2_rule_count_and_texts_refuse_before_copying() {
     let base = resolve(&rule("r", ANY, ANY)).unwrap();
-    let long = Rule {
+    let long = RuleInput {
         message: "m".repeat(1_000_000),
         ..base.rules[0].clone()
     };
     // 65 rules: the count is refused before any rule is read
     let mut many = base.clone();
     many.rules = (0..65)
-        .map(|i| Rule {
+        .map(|i| RuleInput {
             name: format!("r{i:03}"),
             ..long.clone()
         })

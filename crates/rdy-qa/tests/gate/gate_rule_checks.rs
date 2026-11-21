@@ -647,7 +647,7 @@ fn ck5_rules_use_m3f_coverage_suspect_and_tension_inputs() {
     let mut want: Vec<(String, String)> = vec![];
     for rl in &compiled {
         for b in m.ids() {
-            if ctx.matches(&rl.select, b) && !ctx.matches(&rl.require, b) {
+            if ctx.matches(&rl.select, b) && !ctx.matches(rl.require.as_ref().unwrap(), b) {
                 want.push((
                     b.to_string(),
                     format!(

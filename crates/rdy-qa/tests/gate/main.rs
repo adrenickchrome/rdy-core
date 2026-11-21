@@ -41,5 +41,6 @@ mod gate_signing;
 mod gate_sync_replay;
 mod gate_sync_world;
 mod gate_tensions;
+mod gate_wasm_checks;
 mod gate_withdrawn;
 mod stop_early;
