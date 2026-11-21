@@ -2119,7 +2119,6 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "replaces a project from a dump; the dump_load row covers it",
     ),
     ("mcp", "starts the MCP server; the mcp row covers it"),
-    ("pack", "checks a pack file; the schema_packs row covers it"),
     ("plan confirm", "needs an open plan item"),
     ("new finding", "needs a finding pack"),
     (
@@ -2868,6 +2867,7 @@ fn cli_runtime() -> Value {
         ("view show", vec!["view", "show", "batch"]),
         ("key show", vec!["key", "show"]),
         ("remote list", vec!["remote", "list"]),
+        ("pack check", vec!["pack", "check"]),
         ("show", vec!["show", "c-ZZZZZ"]),
         ("no-such-command", vec!["no-such-command"]),
     ] {
@@ -3003,6 +3003,27 @@ fn cli_runtime() -> Value {
     setup_env.push(("HOME".to_string(), setup_text.clone()));
     setup_env.push(("USERPROFILE".to_string(), setup_text));
     cli_probe(&mut seen, setup_dir.path(), &setup_env, "setup", &["setup"]);
+    // wck7 (D-ZRXY0, D-N1GG5): `rdy pack check` lists the rich pack's module rules above; a
+    // pack whose module does not load is its refusal
+    let (bad, bad_project) = project();
+    drop(bad_project);
+    rdy_qa::packs::use_pack(
+        bad.path(),
+        "probe",
+        &format!(
+            "name: probe\nversion: \"1\"\nextends: rdy-standard\nrules:\n  - name: r\n    select: type = note\n    module: {}\n    message: m\n    fix: f\n",
+            wasm_fixture("imports").trim()
+        ),
+        "",
+    );
+    let refused = cli_probe(
+        &mut seen,
+        bad.path(),
+        &env,
+        "pack check",
+        &["pack", "check"],
+    );
+    assert_eq!(refused["code"], "E_CONFIG", "{refused}");
     cli_rule_probes(&mut seen);
     cli_publication_probes(&mut seen, &env);
     cli_review_probes(&mut seen, &env);
@@ -3415,6 +3436,14 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         };
         mcp_probe(seen, &mut w, tool, &label, args);
     }
+    // wck7 (D-WV7ZS): the exact rules object of `rdy_schema`'s checks, its tests and the fixed
+    // module limits included
+    let schema = ok_of(&w.call("rdy_schema", json!({})));
+    seen.note(
+        "rdy_schema checks.rules",
+        "exact",
+        schema["checks"]["rules"].clone(),
+    );
     // a landing's row and its change list (O15): a label of its own, since the object would
     // merge with the log's array
     mcp_probe(
@@ -5405,16 +5434,47 @@ const WASM_TRAP: &str = include_str!("../../fixtures/wasm/trap.b64");
 /// structure is a resolved pack's rules: a filter rule, a module rule that sets neither `args`
 /// nor `depth`, and one that sets both. Each refusal is the `[code, message, fix]` of the
 /// compiled pack read, the read that `rdy pack check` and a project open make; the pack file's
-/// path reads `<path>`.
+/// path reads `<path>`. wck7 (D-WV7ZS): the structure adds each module rule's metadata, the
+/// empty list of a pack with none, and `rdy pack check`'s rule lines and `modules`.
 fn module_rule_probes() -> (Value, Value) {
     let pass = WASM_PASS.trim();
-    let mut set = PackSet::with_builtin();
-    set.add_yaml(&format!(
+    let yaml = format!(
         "name: probe\nversion: \"1\"\nextends: rdy-standard\nrules:\n  - name: filter\n    select: type = note\n    require: type = claim\n    message: m\n    fix: f\n  - name: plain\n    select: type = note\n    module: {pass}\n    message: m\n    fix: f\n  - name: set\n    select: type = note\n    module: {pass}\n    args:\n      flag: true\n      limit: 3\n      word: w\n      words: [a, b]\n    depth: 3\n    severity: blocking\n    message: m\n    fix: f\n"
-    ))
-    .expect("a pack with module rules parses");
+    );
+    let mut set = PackSet::with_builtin();
+    set.add_yaml(&yaml)
+        .expect("a pack with module rules parses");
     let probe = set.resolve("probe").expect("it resolves");
+    // wck7 (D-ZRXY0, D-WV7ZS): each module rule's metadata, in rule name order, and the empty
+    // list of a pack with no module rule; then `rdy pack check` on a project of the probe pack,
+    // in text and JSON
+    let metadata = |pack: &rdy_schema::Pack| {
+        let rules = rdy_engine::check::rules::compile_rule_specs(pack, &pack.rules)
+            .expect("the rules compile");
+        serde_json::to_value(rdy_engine::check::rules::module_metadata(&rules))
+            .expect("the metadata serializes")
+    };
+    let std_pack = set
+        .resolve("rdy-standard")
+        .expect("the built-in pack resolves");
+    let pack_check = {
+        let (d, r) = project();
+        drop(r);
+        rdy_qa::packs::use_pack(d.path(), "probe", &yaml, "");
+        let (cfg, env) = rdy_qa::fixtures::human_env("human:qa");
+        let (code, text, err) = rdy_in(d.path(), &env, &["pack", "check"]);
+        assert_eq!(code, 0, "{err}");
+        let (code, out, err) = rdy_in(d.path(), &env, &["--json", "pack", "check"]);
+        assert_eq!(code, 0, "{err}");
+        drop(cfg);
+        let v: Value = serde_json::from_str(out.trim()).expect("pack check JSON");
+        let rule_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("rule ")).collect();
+        json!({"text_rule_lines": rule_lines, "modules": v["modules"]})
+    };
     let structure = json!({
+        "metadata": metadata(&probe),
+        "metadata_no_module": metadata(&std_pack),
+        "pack_check": pack_check,
         "rules": serde_json::to_value(&probe.rules).expect("the rules serialize"),
         "limits": {
             "max_module_bytes": rdy_schema::MAX_MODULE_BYTES,

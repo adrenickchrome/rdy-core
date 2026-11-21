@@ -121,8 +121,10 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
 
 /// `rdy_schema`'s `checks` key (D-JQD5X): every check with its stages. `stages` reads the stage
 /// registry of the deterministic checks; `agent` reads the catalogue of the eight authoring
-/// checks, each in no stage; `rules` is the pack rule contract (D-HZYK0).
+/// checks, each in no stage; `rules` is the pack rule contract (D-HZYK0): its two tests, and
+/// the fixed limits of a module rule (D-ZRXY0, D-WV7ZS).
 fn checks_doc() -> Value {
+    use rdy_engine::check::rules::MODULE_LIMITS;
     use rdy_engine::check::{AGENT_CHECKS, STAGE_CHECKS};
     json!({
         "stages": STAGE_CHECKS
@@ -138,6 +140,8 @@ fn checks_doc() -> Value {
             "grammar": "filter",
             "severity": ["advisory", "blocking"],
             "default_severity": "advisory",
+            "tests": ["filter", "module"],
+            "module": MODULE_LIMITS,
         },
     })
 }

@@ -69,3 +69,4 @@ mod render_types;
 mod render_urls;
 mod render_values;
 mod render_version;
+mod render_wasm_checks;

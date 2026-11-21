@@ -287,6 +287,96 @@ impl CompiledRules {
     }
 }
 
+/// One module rule as `rdy pack check` lists it (D-ZRXY0): the rule's name, the lowercase hex
+/// SHA-256 of its decoded module, the decoded length in bytes and the interface number of its
+/// exports.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ModuleMetadata {
+    pub rule: String,
+    pub sha256: String,
+    pub bytes: usize,
+    pub interface: u32,
+}
+
+/// The metadata of each module rule of `rules`, in rule name order; empty for a pack with no
+/// module rule. It reads the compiled rules only: no module runs.
+pub fn module_metadata(rules: &CompiledRules) -> Vec<ModuleMetadata> {
+    rules
+        .rules()
+        .iter()
+        .filter_map(|r| match &r.test {
+            CompiledRuleTest::Module(m) => Some(ModuleMetadata {
+                rule: r.name.clone(),
+                sha256: m.sha256().iter().map(|b| format!("{b:02x}")).collect(),
+                bytes: m.bytes(),
+                interface: m.interface(),
+            }),
+            CompiledRuleTest::Filter(_) => None,
+        })
+        .collect()
+}
+
+/// The fixed limits of a module rule (D-QVTJ9, D-WV7ZS), as `rdy_schema` lists them under
+/// `checks.rules.module`. Each is the value that the pack load or the run enforces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ModuleLimits {
+    /// The interface number of the exports a module must have.
+    pub interface: u32,
+    /// The most decoded bytes of one module.
+    pub module_bytes: usize,
+    /// The most decoded bytes of all the modules of a resolved pack.
+    pub pack_bytes: usize,
+    /// The most bytes of a rule's `args` as compact JSON.
+    pub args_bytes: usize,
+    pub depth_min: u8,
+    pub depth_max: u8,
+    pub depth_default: u8,
+    /// The most bytes of a module's linear memory.
+    pub memory_bytes: usize,
+    /// The exported linear memories a module has: exactly one.
+    pub memories: u32,
+    /// The most tables of a module.
+    pub tables: u32,
+    /// The most elements of a table.
+    pub table_elements: u32,
+    /// The most nested calls.
+    pub call_depth: usize,
+    /// The most bytes of the value stack: the locals and operands of all active frames.
+    pub value_stack_bytes: usize,
+    /// The most bytes of a block's input.
+    pub input_bytes: usize,
+    /// The most bytes of a module's output.
+    pub output_bytes: usize,
+    /// The fuel of one block.
+    pub fuel_per_block: u64,
+    /// The fuel of one rule in one scan.
+    pub fuel_per_rule: u64,
+}
+
+/// The fixed limits of a module rule.
+pub const MODULE_LIMITS: ModuleLimits = {
+    use rdy_check_wasm::config as c;
+    ModuleLimits {
+        interface: rdy_check_wasm::INTERFACE,
+        module_bytes: rdy_schema::MAX_MODULE_BYTES,
+        pack_bytes: rdy_schema::MAX_PACK_MODULE_BYTES,
+        args_bytes: rdy_schema::MAX_ARGS_BYTES,
+        depth_min: 0,
+        depth_max: rdy_schema::MAX_DEPTH,
+        depth_default: rdy_schema::DEFAULT_DEPTH,
+        memory_bytes: c::MEMORY_BYTES_MAX,
+        memories: 1,
+        tables: c::TABLES_MAX,
+        table_elements: c::TABLE_ELEMENTS_MAX,
+        call_depth: c::MAX_RECURSION_DEPTH,
+        value_stack_bytes: c::MAX_STACK_HEIGHT,
+        input_bytes: c::INPUT_BYTES_MAX,
+        output_bytes: c::OUTPUT_BYTES_MAX,
+        fuel_per_block: c::BLOCK_FUEL,
+        fuel_per_rule: c::RULE_FUEL,
+    }
+};
+
 /// The rules of the resolved `pack`, compiled ([`compile_rule_specs`]).
 pub(crate) fn compile_pack_rules(pack: &Pack) -> Result<Arc<CompiledRules>, RdyError> {
     compile_rule_specs(pack, &pack.rules).map(Arc::new)
