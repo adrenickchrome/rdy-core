@@ -3,7 +3,7 @@ use crate::output::{carried_targets, num, open_warnings, print_error, text};
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
 use rdy_engine::{
-    E_BAD_INPUT, E_CONFIG, E_NO_PROJECT, Rdy, check_path, lexical_path, project_pack,
+    E_BAD_INPUT, E_CONFIG, E_NO_PROJECT, Rdy, check_path, lexical_path, project_pack_compiled,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -72,7 +72,9 @@ pub(crate) fn init(
 
 pub(crate) fn pack(env: &Env, cmd: PackCmd) -> Result<(Value, String), ErrorReply> {
     let PackCmd::Check = cmd;
-    let pack = project_pack(&env.project)?;
+    // the rules compile as the open compiles them: a module that does not load fails here, and
+    // none runs
+    let (pack, _rules) = project_pack_compiled(&env.project)?;
     let classes: serde_json::Map<String, Value> = pack
         .block_types
         .keys()

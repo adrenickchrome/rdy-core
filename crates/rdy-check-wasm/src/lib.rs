@@ -4,13 +4,43 @@
 //!
 //! A module is compiled once per loaded pack and run in a fresh store and instance for each
 //! judged block. It imports nothing, so a guest has no host function, file, clock or network.
+mod compile;
 pub mod config;
+mod instance;
+
+pub use compile::compile_module;
+
+/// The interface number of the exports a check module gives.
+pub const INTERFACE: u32 = 1;
 
 /// A check module that the pinned interpreter validated and translated eagerly. It is opaque:
 /// it holds the interpreter's module, which never leaves this crate.
 pub struct CompiledModule {
-    #[expect(dead_code, reason = "compilation builds it and execution reads it")]
     module: wasmi::Module,
+    bytes: usize,
+}
+
+impl CompiledModule {
+    /// The bytes of the module it was compiled from.
+    pub fn module_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// The interface number of its exports: [`INTERFACE`].
+    pub fn interface(&self) -> u32 {
+        INTERFACE
+    }
+
+    /// Tests only: makes the fresh store and instance that a run of one block starts with, with
+    /// a block's fuel, and drops them. Runs no export. A panic inside the interpreter is
+    /// [`RunFailure::HostFault`].
+    #[doc(hidden)]
+    pub fn instance_setup_for_tests(&self) -> Result<(), RunFailure> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            instance::fresh_instance(&self.module, config::BLOCK_FUEL).map(drop)
+        }))
+        .unwrap_or(Err(RunFailure::HostFault))
+    }
 }
 
 /// Why a module's bytes did not compile into a [`CompiledModule`].

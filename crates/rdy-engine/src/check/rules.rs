@@ -11,6 +11,11 @@
 //! [`rule_reach`] is the dependency walk that widens an assessment's `reach` (D-DSPMW, D-AJ0XQ):
 //! the blocks a rule's result can read, so a landing that changes one of them stales the
 //! assessment and nothing reruns a rule at landing.
+//!
+//! A loaded pack's rules are compiled once, by [`compile_rule_specs`], into [`CompiledRules`]: each
+//! rule's filters parsed and each module rule's module compiled (D-QVTJ9). The handle travels with
+//! the pack in every state published under it, and owns a [`VerdictCache`] of that pack's module
+//! results. A reload compiles the new pack's rules into a new handle with an empty cache.
 use crate::brief::effective_stable;
 use crate::check::stages::Stage;
 use crate::error::{E_CONFIG, E_INTERNAL, E_RULE_CHECK, RdyError, W_RULE_CHECK};
@@ -18,15 +23,22 @@ use crate::filter::{FilterContext, FilterInputs};
 use crate::materialize::Materialized;
 use crate::tensions::index::duplicate_eligible;
 use crate::{ReadState, Scope};
+use rdy_check_wasm::{CheckResult, CompileFailure, CompiledModule, RunFailure, RunOutcome};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::BlockId;
 use rdy_model::assessment::MAX_ROWS;
 use rdy_schema::filter::{Dir, Expr, Field, Filter, LinkKind};
-use rdy_schema::{CompiledRule, RuleSeverity, compile_rules};
+use rdy_schema::{
+    ArgValue, CheckedRule, CompiledRule, ModuleTest, Rule, RuleInput, RuleSeverity, RuleTestSpec,
+    check_resolved_rules, compile_rules,
+};
 use rdy_schema::{Issue, Pack, Severity};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// The most failure rows a scan keeps of each kind it keeps (at `propose`: blocking and
 /// advisory each; at `change`: both together). The rest are counted.
@@ -116,13 +128,424 @@ pub fn fail_next_rule_report_for_tests() {
 }
 
 /// The rules of `pack`, compiled, in name order. A pack that resolved always compiles; an error
-/// here is the pack's `E_CONFIG`.
+/// here is the pack's `E_CONFIG`. Only [`evaluate_rules`] reads a pack this way: a state's scans
+/// read the rules compiled when its pack was loaded ([`ReadState::compiled_rules`]).
 pub(crate) fn compiled(pack: &Pack) -> Result<Vec<CompiledRule>, RdyError> {
     if pack.rules.is_empty() {
         return Ok(vec![]);
     }
     compile_rules(pack)
         .map_err(|e| RdyError::new(E_CONFIG, format!("invalid pack: {e}"), "fix the pack file"))
+}
+
+static RULE_COMPILATIONS: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static THREAD_RULE_COMPILATIONS: Cell<usize> = const { Cell::new(0) };
+    static THREAD_MODULE_COMPILATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Tests only: how many times this process has compiled a set of rules ([`compile_rule_specs`]),
+/// whatever the project.
+#[doc(hidden)]
+pub fn rule_compilations_for_tests() -> usize {
+    RULE_COMPILATIONS.load(Ordering::Relaxed)
+}
+
+/// Tests only: [`rule_compilations_for_tests`] counted on the calling thread only.
+#[doc(hidden)]
+pub fn rule_compilations_on_this_thread_for_tests() -> usize {
+    THREAD_RULE_COMPILATIONS.with(Cell::get)
+}
+
+/// Tests only: how many check modules the calling thread has compiled.
+#[doc(hidden)]
+pub fn module_compilations_on_this_thread_for_tests() -> usize {
+    THREAD_MODULE_COMPILATIONS.with(Cell::get)
+}
+
+/// A module rule's test, compiled: the module, the SHA-256 of its decoded bytes, their length,
+/// and the `args` and `depth` it runs with (an absent `args` is the empty mapping, an absent
+/// `depth` [`rdy_schema::DEFAULT_DEPTH`]). The decoded bytes are not kept.
+pub struct ModuleRule {
+    module: CompiledModule,
+    sha256: [u8; 32],
+    bytes: usize,
+    args: BTreeMap<String, ArgValue>,
+    depth: u8,
+}
+
+impl ModuleRule {
+    /// The compiled module.
+    pub fn module(&self) -> &CompiledModule {
+        &self.module
+    }
+
+    /// The SHA-256 of the decoded module bytes.
+    pub fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+
+    /// The decoded module's length in bytes.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// The interface number of the module's exports.
+    pub fn interface(&self) -> u32 {
+        self.module.interface()
+    }
+
+    /// The `args` the module receives.
+    pub fn args(&self) -> &BTreeMap<String, ArgValue> {
+        &self.args
+    }
+
+    /// The link steps of neighbours the module sees.
+    pub fn depth(&self) -> u8 {
+        self.depth
+    }
+}
+
+/// What a compiled rule tests on each block its `select` matches.
+pub enum CompiledRuleTest {
+    /// The parsed `require` filter.
+    Filter(Filter),
+    Module(ModuleRule),
+}
+
+/// One rule, its filters parsed and its module compiled.
+pub struct PreparedRule {
+    pub name: String,
+    pub select: Filter,
+    pub test: CompiledRuleTest,
+    pub severity: RuleSeverity,
+    pub message: String,
+    pub fix: String,
+}
+
+/// The rules of one loaded pack, compiled once ([`compile_rule_specs`]), in name order, with the
+/// cache of that pack's module results. Every state published under the pack shares it; a
+/// reload replaces it with the new pack's, and its cache is never carried over.
+pub struct CompiledRules {
+    rules: Vec<PreparedRule>,
+    /// The filter rules, in the form the scans read.
+    filters: Vec<CompiledRule>,
+    cache: VerdictCache,
+}
+
+impl CompiledRules {
+    /// No rules: a holder's, or a pack's that has none.
+    pub fn empty() -> CompiledRules {
+        CompiledRules {
+            rules: vec![],
+            filters: vec![],
+            cache: VerdictCache::new(),
+        }
+    }
+
+    /// Every rule, in name order.
+    pub fn rules(&self) -> &[PreparedRule] {
+        &self.rules
+    }
+
+    /// Whether there is no rule.
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    /// The filter rules, in name order: the rules the scans judge.
+    pub(crate) fn filters(&self) -> &[CompiledRule] {
+        &self.filters
+    }
+
+    /// The cache of this pack's module results.
+    pub fn cache(&self) -> &VerdictCache {
+        &self.cache
+    }
+}
+
+/// The rules of the resolved `pack`, compiled ([`compile_rule_specs`]).
+pub(crate) fn compile_pack_rules(pack: &Pack) -> Result<Arc<CompiledRules>, RdyError> {
+    let specs: Vec<RuleInput> = pack.rules.iter().map(RuleInput::from).collect();
+    compile_rule_specs(pack, &specs).map(Arc::new)
+}
+
+/// The rules `specs` of the resolved `pack`, the parent's first as the resolved pack lists them,
+/// checked ([`check_resolved_rules`]), then each module compiled, in name order. Compiling
+/// validates and translates every function body; it runs no module. Err: the first refusal, as
+/// `E_CONFIG` `invalid pack: <detail>` with the fix `fix the pack file`; a panic inside the
+/// interpreter is the host fault's `E_INTERNAL`.
+pub fn compile_rule_specs(pack: &Pack, specs: &[RuleInput]) -> Result<CompiledRules, RdyError> {
+    RULE_COMPILATIONS.fetch_add(1, Ordering::Relaxed);
+    THREAD_RULE_COMPILATIONS.with(|n| n.set(n.get().wrapping_add(1)));
+    let checked = check_resolved_rules(pack, specs)
+        .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix the pack file"))?;
+    let mut rules = Vec::with_capacity(checked.len());
+    let mut filters = vec![];
+    for CheckedRule {
+        input,
+        select,
+        require,
+    } in checked
+    {
+        let RuleInput {
+            name,
+            select: select_text,
+            test,
+            severity,
+            message,
+            fix,
+        } = input;
+        let test = match (test, require) {
+            (RuleTestSpec::Filter { require: text }, Some(require)) => {
+                filters.push(CompiledRule {
+                    rule: Rule {
+                        name: name.clone(),
+                        select: select_text,
+                        require: text,
+                        severity,
+                        message: message.clone(),
+                        fix: fix.clone(),
+                    },
+                    select: select.clone(),
+                    require: require.clone(),
+                });
+                CompiledRuleTest::Filter(require)
+            }
+            (RuleTestSpec::Module(m), None) => {
+                CompiledRuleTest::Module(compile_module_rule(&name, m)?)
+            }
+            _ => {
+                return Err(RdyError::new(
+                    E_INTERNAL,
+                    format!("rule {name} was checked without its test"),
+                    "report this as a bug in rdy",
+                ));
+            }
+        };
+        rules.push(PreparedRule {
+            name,
+            select,
+            test,
+            severity,
+            message,
+            fix,
+        });
+    }
+    Ok(CompiledRules {
+        rules,
+        filters,
+        cache: VerdictCache::new(),
+    })
+}
+
+/// The module rule `name`'s test `m`, compiled.
+fn compile_module_rule(name: &str, m: ModuleTest) -> Result<ModuleRule, RdyError> {
+    THREAD_MODULE_COMPILATIONS.with(|n| n.set(n.get().wrapping_add(1)));
+    let module = rdy_check_wasm::compile_module(&m.module).map_err(|f| compile_refusal(name, f))?;
+    Ok(ModuleRule {
+        module,
+        sha256: Sha256::digest(&m.module).into(),
+        bytes: m.module.len(),
+        args: m.args.unwrap_or_default(),
+        depth: m.depth.unwrap_or(rdy_schema::DEFAULT_DEPTH),
+    })
+}
+
+/// The refusal of rule `name`'s module (D-WV7ZS): `invalid pack: <detail>`, or the host fault.
+fn compile_refusal(name: &str, failure: CompileFailure) -> RdyError {
+    use rdy_check_wasm::config::{MEMORY_PAGES_MAX, TABLE_ELEMENTS_MAX};
+    let detail = match failure {
+        CompileFailure::Invalid(e) => format!("rule {name} module: {e}"),
+        CompileFailure::Import { module, name: item } => {
+            format!("rule {name} module imports {module}.{item}; a check module imports nothing")
+        }
+        CompileFailure::MissingExport { name: export, ty } => {
+            format!("rule {name} module lacks the export {export} of type {ty}")
+        }
+        CompileFailure::StartFunction => {
+            format!("rule {name} module has a start function; a check module has none")
+        }
+        CompileFailure::MemoryMinimum => {
+            format!("rule {name} module memory starts above {MEMORY_PAGES_MAX} pages")
+        }
+        CompileFailure::Tables => format!("rule {name} module has more than one table"),
+        CompileFailure::TableElements => {
+            format!("rule {name} module table exceeds {TABLE_ELEMENTS_MAX} elements")
+        }
+        CompileFailure::HostFault => return host_fault(),
+    };
+    RdyError::new(
+        E_CONFIG,
+        format!("invalid pack: {detail}"),
+        "fix the pack file",
+    )
+}
+
+/// A caught fault of rdy inside the interpreter (D-WV7ZS): never a row, and no panic payload.
+pub(crate) fn host_fault() -> RdyError {
+    RdyError::new(
+        E_INTERNAL,
+        "the rule checks could not be read: check module host fault",
+        "report this as a bug in rdy",
+    )
+}
+
+/// The most bytes of entries a [`VerdictCache`] keeps.
+pub const VERDICT_CACHE_BYTES: usize = 67_108_864;
+
+/// What a cached module result is keyed by: the rule's name, the SHA-256 of its decoded module
+/// and the SHA-256 of the block's canonical input.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VerdictKey {
+    pub rule: String,
+    pub module: [u8; 32],
+    pub input: [u8; 32],
+}
+
+/// A recorded module result.
+enum Recorded {
+    /// The run ended with a result, a trap or bad output, using `fuel`.
+    Completed {
+        result: Result<CheckResult, RunFailure>,
+        fuel: u64,
+    },
+    /// The run used all of `allowance`.
+    OutOfFuel { allowance: u64 },
+}
+
+struct CacheEntry {
+    /// When the entry was retained: the oldest goes first.
+    age: u64,
+    recorded: Recorded,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct CacheInner {
+    entries: BTreeMap<VerdictKey, CacheEntry>,
+    by_age: BTreeMap<u64, VerdictKey>,
+    next_age: u64,
+    bytes: usize,
+}
+
+/// The module results of one loaded pack (the O6 ruling), each with the fuel it used. A replay
+/// gives the result and fuel an uncached run would give under the current allowance, so rows,
+/// causes, omitted counts and rule budgets are the same with or without it. It holds at most
+/// [`VERDICT_CACHE_BYTES`] of entries ([`VerdictCache::entry_bytes`]) and evicts the oldest first;
+/// an evicted result is run again, never judged differently. A host fault and an input over the
+/// cap are never cached.
+pub struct VerdictCache {
+    inner: Mutex<CacheInner>,
+}
+
+impl VerdictCache {
+    fn new() -> VerdictCache {
+        VerdictCache {
+            inner: Mutex::new(CacheInner::default()),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CacheInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The cached outcome of `key` under `allowance`, the fuel the block may use. A completed
+    /// result that used F fuel applies when `allowance` is at least F, and charges F. A run that
+    /// used all of its allowance A applies when `allowance` is at most A, and charges all of
+    /// `allowance`. Otherwise `None`: the module runs again.
+    pub fn replay(&self, key: &VerdictKey, allowance: u64) -> Option<RunOutcome> {
+        let inner = self.lock();
+        match &inner.entries.get(key)?.recorded {
+            Recorded::Completed { result, fuel } if allowance >= *fuel => Some(RunOutcome {
+                result: result.clone(),
+                fuel: *fuel,
+            }),
+            Recorded::OutOfFuel { allowance: at } if allowance <= *at => Some(RunOutcome {
+                result: Err(RunFailure::OutOfFuel),
+                fuel: allowance,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Records the `outcome` of `key`, run under `allowance`, in place of any entry `key` had,
+    /// evicting the oldest entries until it fits. Whether it was kept: never for a host fault,
+    /// an input over the cap, or an entry larger than the whole cache. The size is checked before
+    /// anything is copied.
+    pub fn record(&self, key: &VerdictKey, allowance: u64, outcome: &RunOutcome) -> bool {
+        let Some(bytes) = VerdictCache::entry_bytes(key, outcome) else {
+            return false;
+        };
+        if bytes > VERDICT_CACHE_BYTES {
+            return false;
+        }
+        let mut inner = self.lock();
+        if let Some(old) = inner.entries.remove(key) {
+            inner.by_age.remove(&old.age);
+            inner.bytes -= old.bytes;
+        }
+        while inner.bytes + bytes > VERDICT_CACHE_BYTES {
+            let Some((_, oldest)) = inner.by_age.pop_first() else {
+                break;
+            };
+            if let Some(old) = inner.entries.remove(&oldest) {
+                inner.bytes -= old.bytes;
+            }
+        }
+        let recorded = match &outcome.result {
+            Err(RunFailure::OutOfFuel) => Recorded::OutOfFuel { allowance },
+            result => Recorded::Completed {
+                result: result.clone(),
+                fuel: outcome.fuel,
+            },
+        };
+        let age = inner.next_age;
+        inner.next_age += 1;
+        inner.by_age.insert(age, key.clone());
+        inner.entries.insert(
+            key.clone(),
+            CacheEntry {
+                age,
+                recorded,
+                bytes,
+            },
+        );
+        inner.bytes += bytes;
+        true
+    }
+
+    /// The bytes an entry of `key` and `outcome` counts against [`VERDICT_CACHE_BYTES`]: the
+    /// rule name's bytes, the two 32-byte digests, and the bytes of the texts the outcome holds
+    /// (a failure's message and fix, a trap's words, a bad output's detail). `None`: the outcome
+    /// is never cached.
+    pub fn entry_bytes(key: &VerdictKey, outcome: &RunOutcome) -> Option<usize> {
+        let text = match &outcome.result {
+            Err(RunFailure::HostFault | RunFailure::InputTooLarge) => return None,
+            Ok(CheckResult::Pass) | Err(RunFailure::OutOfFuel | RunFailure::OutputTooLarge) => 0,
+            Ok(CheckResult::Fail { message, fix }) => {
+                message.as_ref().map_or(0, String::len) + fix.as_ref().map_or(0, String::len)
+            }
+            Err(RunFailure::Trap(t) | RunFailure::BadOutput(t)) => t.len(),
+        };
+        Some(key.rule.len() + 64 + text)
+    }
+
+    /// The bytes of the entries kept.
+    pub fn bytes(&self) -> usize {
+        self.lock().bytes
+    }
+
+    /// The entries kept.
+    pub fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
+
+    /// Whether no entry is kept.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Runs every rule of `pack` on each of `ids` that `inputs.m` holds, at `stage`. A rule fails
@@ -139,6 +562,12 @@ pub fn evaluate_rules(
     ids: impl Iterator<Item = BlockId>,
     stage: Stage,
 ) -> Result<RuleScan, RdyError> {
+    refuse_land(stage)?;
+    evaluate(&compiled(pack)?, inputs, ids, stage)
+}
+
+/// Rules never run at `land`.
+fn refuse_land(stage: Stage) -> Result<(), RdyError> {
     if stage == Stage::Land {
         return Err(RdyError::new(
             E_INTERNAL,
@@ -146,7 +575,17 @@ pub fn evaluate_rules(
             "report this as a bug in rdy",
         ));
     }
-    let rules = compiled(pack)?;
+    Ok(())
+}
+
+/// [`evaluate_rules`] with the compiled filter rules `rules`, in name order.
+pub(crate) fn evaluate(
+    rules: &[CompiledRule],
+    inputs: FilterInputs<'_>,
+    ids: impl Iterator<Item = BlockId>,
+    stage: Stage,
+) -> Result<RuleScan, RdyError> {
+    refuse_land(stage)?;
     let mut scan = RuleScan::default();
     if rules.is_empty() {
         return Ok(scan);
@@ -222,8 +661,8 @@ pub(crate) fn change_checks(
             "report this as a bug in rdy",
         ));
     }
-    let pack = after.pack();
-    let rules = compiled(pack)?;
+    let handle = after.compiled_rules()?;
+    let rules = handle.filters();
     if rules.is_empty() {
         return Ok(RuleScan::default());
     }
@@ -262,7 +701,7 @@ pub(crate) fn change_checks(
     }
     let filters: Vec<&Filter> = rules.iter().flat_map(|r| [&r.select, &r.require]).collect();
     let inputs = after.scope_inputs(&scope, &filters)?;
-    evaluate_rules(pack, inputs.inputs(after), ids.into_iter(), Stage::Change)
+    evaluate(rules, inputs.inputs(after), ids.into_iter(), Stage::Change)
 }
 
 /// An explicit pack link or a pinned reference: what a rule's one-link reach counts.
