@@ -70,5 +70,6 @@ mod engine_ui_config;
 mod engine_values;
 mod engine_view_api;
 mod engine_vpos;
+mod engine_wasm_determinism;
 mod engine_wasm_stages;
 mod read_plan_suspects;

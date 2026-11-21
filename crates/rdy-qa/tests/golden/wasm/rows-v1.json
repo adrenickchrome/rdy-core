@@ -1,0 +1,3086 @@
+{
+  "change": {
+    "checks": [
+      {
+        "block": "c-F0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-F0000: b-fail message"
+      },
+      {
+        "block": "c-F0001",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-F0001: b-fail message"
+      },
+      {
+        "block": "c-K0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0000: b-fail message"
+      },
+      {
+        "block": "c-K0001",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0001: b-fail message"
+      },
+      {
+        "block": "c-K0002",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0002: b-fail message"
+      },
+      {
+        "block": "c-K0003",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0003: b-fail message"
+      },
+      {
+        "block": "c-K0004",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0004: b-fail message"
+      },
+      {
+        "block": "c-K0005",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0005: b-fail message"
+      },
+      {
+        "block": "c-K0006",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0006: b-fail message"
+      },
+      {
+        "block": "c-K0007",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0007: b-fail message"
+      },
+      {
+        "block": "c-K0008",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0008: b-fail message"
+      },
+      {
+        "block": "c-K0009",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0009: b-fail message"
+      },
+      {
+        "block": "c-K0010",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0010: b-fail message"
+      },
+      {
+        "block": "c-K0011",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0011: b-fail message"
+      },
+      {
+        "block": "c-K0012",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0012: b-fail message"
+      },
+      {
+        "block": "c-K0013",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0013: b-fail message"
+      },
+      {
+        "block": "c-K0014",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0014: b-fail message"
+      },
+      {
+        "block": "c-K0015",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0015: b-fail message"
+      },
+      {
+        "block": "c-K0016",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0016: b-fail message"
+      },
+      {
+        "block": "c-K0017",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0017: b-fail message"
+      },
+      {
+        "block": "c-K0018",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0018: b-fail message"
+      },
+      {
+        "block": "c-K0019",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0019: b-fail message"
+      },
+      {
+        "block": "c-K0020",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0020: b-fail message"
+      },
+      {
+        "block": "c-K0021",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0021: b-fail message"
+      },
+      {
+        "block": "c-K0022",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0022: b-fail message"
+      },
+      {
+        "block": "c-K0023",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0023: b-fail message"
+      },
+      {
+        "block": "c-K0024",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0024: b-fail message"
+      },
+      {
+        "block": "c-K0025",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0025: b-fail message"
+      },
+      {
+        "block": "c-K0026",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0026: b-fail message"
+      },
+      {
+        "block": "c-K0027",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0027: b-fail message"
+      },
+      {
+        "block": "c-K0028",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0028: b-fail message"
+      },
+      {
+        "block": "c-K0029",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0029: b-fail message"
+      },
+      {
+        "block": "c-K0030",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0030: b-fail message"
+      },
+      {
+        "block": "c-K0031",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0031: b-fail message"
+      },
+      {
+        "block": "c-K0032",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0032: b-fail message"
+      },
+      {
+        "block": "c-K0033",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0033: b-fail message"
+      },
+      {
+        "block": "c-K0034",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0034: b-fail message"
+      },
+      {
+        "block": "c-K0035",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0035: b-fail message"
+      },
+      {
+        "block": "c-K0036",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0036: b-fail message"
+      },
+      {
+        "block": "c-K0037",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0037: b-fail message"
+      },
+      {
+        "block": "c-K0038",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0038: b-fail message"
+      },
+      {
+        "block": "c-K0039",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0039: b-fail message"
+      },
+      {
+        "block": "c-K0040",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0040: b-fail message"
+      },
+      {
+        "block": "c-K0041",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0041: b-fail message"
+      },
+      {
+        "block": "c-K0042",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0042: b-fail message"
+      },
+      {
+        "block": "c-K0043",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0043: b-fail message"
+      },
+      {
+        "block": "c-K0044",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0044: b-fail message"
+      },
+      {
+        "block": "c-K0045",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0045: b-fail message"
+      },
+      {
+        "block": "c-K0046",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0046: b-fail message"
+      },
+      {
+        "block": "c-K0047",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0047: b-fail message"
+      },
+      {
+        "block": "c-K0048",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0048: b-fail message"
+      },
+      {
+        "block": "c-K0049",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0049: b-fail message"
+      },
+      {
+        "block": "c-K0050",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0050: b-fail message"
+      },
+      {
+        "block": "c-K0051",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0051: b-fail message"
+      },
+      {
+        "block": "c-K0052",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0052: b-fail message"
+      },
+      {
+        "block": "c-K0053",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0053: b-fail message"
+      },
+      {
+        "block": "c-K0054",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0054: b-fail message"
+      },
+      {
+        "block": "c-K0055",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0055: b-fail message"
+      },
+      {
+        "block": "c-K0056",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0056: b-fail message"
+      },
+      {
+        "block": "c-K0057",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0057: b-fail message"
+      },
+      {
+        "block": "c-K0058",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0058: b-fail message"
+      },
+      {
+        "block": "c-K0059",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0059: b-fail message"
+      },
+      {
+        "block": "c-K0060",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0060: b-fail message"
+      },
+      {
+        "block": "c-K0061",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0061: b-fail message"
+      },
+      {
+        "block": "c-K0062",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0062: b-fail message"
+      },
+      {
+        "block": "c-K0063",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0063: b-fail message"
+      },
+      {
+        "block": "c-K0064",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0064: b-fail message"
+      },
+      {
+        "block": "c-K0065",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0065: b-fail message"
+      },
+      {
+        "block": "c-K0066",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0066: b-fail message"
+      },
+      {
+        "block": "c-K0067",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0067: b-fail message"
+      },
+      {
+        "block": "c-K0068",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0068: b-fail message"
+      },
+      {
+        "block": "c-K0069",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0069: b-fail message"
+      },
+      {
+        "block": "c-K0070",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0070: b-fail message"
+      },
+      {
+        "block": "c-K0071",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0071: b-fail message"
+      },
+      {
+        "block": "c-K0072",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0072: b-fail message"
+      },
+      {
+        "block": "c-K0073",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0073: b-fail message"
+      },
+      {
+        "block": "c-K0074",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0074: b-fail message"
+      },
+      {
+        "block": "c-K0075",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0075: b-fail message"
+      },
+      {
+        "block": "c-K0076",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0076: b-fail message"
+      },
+      {
+        "block": "c-K0077",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0077: b-fail message"
+      },
+      {
+        "block": "c-K0078",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0078: b-fail message"
+      },
+      {
+        "block": "c-K0079",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0079: b-fail message"
+      },
+      {
+        "block": "c-K0080",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0080: b-fail message"
+      },
+      {
+        "block": "c-K0081",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0081: b-fail message"
+      },
+      {
+        "block": "c-K0082",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0082: b-fail message"
+      },
+      {
+        "block": "c-K0083",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0083: b-fail message"
+      },
+      {
+        "block": "c-K0084",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0084: b-fail message"
+      },
+      {
+        "block": "c-K0085",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0085: b-fail message"
+      },
+      {
+        "block": "c-K0086",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0086: b-fail message"
+      },
+      {
+        "block": "c-K0087",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0087: b-fail message"
+      },
+      {
+        "block": "c-K0088",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0088: b-fail message"
+      },
+      {
+        "block": "c-K0089",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0089: b-fail message"
+      },
+      {
+        "block": "c-K0090",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0090: b-fail message"
+      },
+      {
+        "block": "c-K0091",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0091: b-fail message"
+      },
+      {
+        "block": "c-K0092",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0092: b-fail message"
+      },
+      {
+        "block": "c-K0093",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0093: b-fail message"
+      },
+      {
+        "block": "c-K0094",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0094: b-fail message"
+      },
+      {
+        "block": "c-K0095",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0095: b-fail message"
+      },
+      {
+        "block": "c-K0096",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0096: b-fail message"
+      },
+      {
+        "block": "c-K0097",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0097: b-fail message"
+      },
+      {
+        "block": "c-K0098",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0098: b-fail message"
+      },
+      {
+        "block": "c-K0099",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0099: b-fail message"
+      },
+      {
+        "block": "c-K0100",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0100: b-fail message"
+      },
+      {
+        "block": "c-K0101",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0101: b-fail message"
+      },
+      {
+        "block": "c-M0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-M0000: b-fail message"
+      },
+      {
+        "block": "c-P0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-P0000: b-fail message"
+      },
+      {
+        "block": "c-S0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-S0000: b-fail message"
+      },
+      {
+        "block": "c-T0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-T0000: b-fail message"
+      },
+      {
+        "block": "c-W0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-W0000: b-fail message"
+      },
+      {
+        "block": "c-F0000",
+        "code": "W_RULE_CHECK",
+        "fix": "ask the module",
+        "message": "rule c-text fails on c-F0000: the module says no"
+      },
+      {
+        "block": "c-F0001",
+        "code": "W_RULE_CHECK",
+        "fix": "ask the module",
+        "message": "rule c-text fails on c-F0001: the module says no"
+      },
+      {
+        "block": "c-T0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule d-trap in the pack file, or make the rule advisory",
+        "message": "rule d-trap could not judge c-T0000: the module trapped: wasm `unreachable` instruction executed"
+      },
+      {
+        "block": "c-M0000",
+        "code": "W_RULE_CHECK",
+        "fix": "grow no more",
+        "message": "rule e-memory fails on c-M0000: the memory stopped at 256 pages"
+      },
+      {
+        "block": "c-S0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule f-depth in the pack file, or make the rule advisory",
+        "message": "rule f-depth could not judge c-S0000: the module trapped: call stack exhausted"
+      },
+      {
+        "block": "c-S0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule g-stack in the pack file, or make the rule advisory",
+        "message": "rule g-stack could not judge c-S0000: the module trapped: call stack exhausted"
+      },
+      {
+        "block": "c-W0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule h-spin in the pack file, or make the rule advisory",
+        "message": "rule h-spin could not judge c-W0000: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0000: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0001",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0001: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0002",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0002: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0003",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0003: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0004",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0004: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0005",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0005: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0006",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0006: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0007",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0007: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0008",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0008: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0009",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0009: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0010",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0010: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0011",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0011: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0012",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0012: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0013",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0013: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0014",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0014: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0015",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0015: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0016",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0016: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0017",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0017: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0018",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0018: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0019",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0019: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0020",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0020: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0021",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0021: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0022",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0022: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0023",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0023: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0024",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0024: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0025",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0025: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0026",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0026: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0027",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0027: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0028",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0028: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0029",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0029: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0030",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0030: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0031",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0031: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0032",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0032: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0033",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0033: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0034",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0034: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0035",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0035: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0036",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0036: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0037",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0037: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0038",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0038: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0039",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0039: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0040",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0040: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0041",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0041: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0042",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0042: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0043",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0043: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0044",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0044: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0045",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0045: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0046",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0046: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0047",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0047: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0048",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0048: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0049",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0049: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0050",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0050: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0051",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0051: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0052",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0052: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0053",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0053: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0054",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0054: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0055",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0055: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0056",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0056: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0057",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0057: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0058",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0058: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0059",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0059: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0060",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0060: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0061",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0061: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0062",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0062: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0063",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0063: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0064",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0064: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0065",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0065: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0066",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0066: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0067",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0067: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0068",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0068: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0069",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0069: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0070",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0070: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0071",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0071: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0072",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0072: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0073",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0073: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0074",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0074: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0075",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0075: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0076",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0076: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0077",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0077: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0078",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0078: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0079",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0079: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0080",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0080: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0081",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0081: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0082",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0082: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0083",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0083: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0084",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0084: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0085",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0085: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0086",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0086: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0087",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0087: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0088",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0088: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0089",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0089: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0090",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0090: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0091",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0091: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0092",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0092: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0093",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0093: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0094",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0094: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0095",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0095: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0096",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0096: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0097",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0097: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0098",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0098: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0099",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0099: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-K0100",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0100: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-K0101",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0101: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-M0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-M0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-P0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-P0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-S0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-S0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-T0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-T0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-W0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-W0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-F0000",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-F0000: j-tail message"
+      },
+      {
+        "block": "c-F0001",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-F0001: j-tail message"
+      },
+      {
+        "block": "c-K0000",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0000: j-tail message"
+      },
+      {
+        "block": "c-K0001",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0001: j-tail message"
+      },
+      {
+        "block": "c-K0002",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0002: j-tail message"
+      },
+      {
+        "block": "c-K0003",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0003: j-tail message"
+      },
+      {
+        "block": "c-K0004",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0004: j-tail message"
+      },
+      {
+        "block": "c-K0005",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0005: j-tail message"
+      },
+      {
+        "block": "c-K0006",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0006: j-tail message"
+      },
+      {
+        "block": "c-K0007",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0007: j-tail message"
+      },
+      {
+        "block": "c-K0008",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0008: j-tail message"
+      },
+      {
+        "block": "c-K0009",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0009: j-tail message"
+      },
+      {
+        "block": "c-K0010",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0010: j-tail message"
+      },
+      {
+        "block": "c-K0011",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0011: j-tail message"
+      },
+      {
+        "block": "c-K0012",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0012: j-tail message"
+      },
+      {
+        "block": "c-K0013",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0013: j-tail message"
+      },
+      {
+        "block": "c-K0014",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0014: j-tail message"
+      },
+      {
+        "block": "c-K0015",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0015: j-tail message"
+      },
+      {
+        "block": "c-K0016",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0016: j-tail message"
+      },
+      {
+        "block": "c-K0017",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0017: j-tail message"
+      },
+      {
+        "block": "c-K0018",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0018: j-tail message"
+      },
+      {
+        "block": "c-K0019",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0019: j-tail message"
+      },
+      {
+        "block": "c-K0020",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0020: j-tail message"
+      },
+      {
+        "block": "c-K0021",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0021: j-tail message"
+      },
+      {
+        "block": "c-K0022",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0022: j-tail message"
+      },
+      {
+        "block": "c-K0023",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0023: j-tail message"
+      },
+      {
+        "block": "c-K0024",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0024: j-tail message"
+      },
+      {
+        "block": "c-K0025",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0025: j-tail message"
+      },
+      {
+        "block": "c-K0026",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0026: j-tail message"
+      },
+      {
+        "block": "c-K0027",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0027: j-tail message"
+      },
+      {
+        "block": "c-K0028",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0028: j-tail message"
+      },
+      {
+        "block": "c-K0029",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0029: j-tail message"
+      },
+      {
+        "block": "c-K0030",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0030: j-tail message"
+      }
+    ],
+    "checks_omitted": 76
+  },
+  "propose": {
+    "blocking": [],
+    "blocking_omitted": 0,
+    "warnings": [
+      {
+        "block": "c-F0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-F0000: b-fail message"
+      },
+      {
+        "block": "c-F0001",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-F0001: b-fail message"
+      },
+      {
+        "block": "c-K0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0000: b-fail message"
+      },
+      {
+        "block": "c-K0001",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0001: b-fail message"
+      },
+      {
+        "block": "c-K0002",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0002: b-fail message"
+      },
+      {
+        "block": "c-K0003",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0003: b-fail message"
+      },
+      {
+        "block": "c-K0004",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0004: b-fail message"
+      },
+      {
+        "block": "c-K0005",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0005: b-fail message"
+      },
+      {
+        "block": "c-K0006",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0006: b-fail message"
+      },
+      {
+        "block": "c-K0007",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0007: b-fail message"
+      },
+      {
+        "block": "c-K0008",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0008: b-fail message"
+      },
+      {
+        "block": "c-K0009",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0009: b-fail message"
+      },
+      {
+        "block": "c-K0010",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0010: b-fail message"
+      },
+      {
+        "block": "c-K0011",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0011: b-fail message"
+      },
+      {
+        "block": "c-K0012",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0012: b-fail message"
+      },
+      {
+        "block": "c-K0013",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0013: b-fail message"
+      },
+      {
+        "block": "c-K0014",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0014: b-fail message"
+      },
+      {
+        "block": "c-K0015",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0015: b-fail message"
+      },
+      {
+        "block": "c-K0016",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0016: b-fail message"
+      },
+      {
+        "block": "c-K0017",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0017: b-fail message"
+      },
+      {
+        "block": "c-K0018",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0018: b-fail message"
+      },
+      {
+        "block": "c-K0019",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0019: b-fail message"
+      },
+      {
+        "block": "c-K0020",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0020: b-fail message"
+      },
+      {
+        "block": "c-K0021",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0021: b-fail message"
+      },
+      {
+        "block": "c-K0022",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0022: b-fail message"
+      },
+      {
+        "block": "c-K0023",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0023: b-fail message"
+      },
+      {
+        "block": "c-K0024",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0024: b-fail message"
+      },
+      {
+        "block": "c-K0025",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0025: b-fail message"
+      },
+      {
+        "block": "c-K0026",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0026: b-fail message"
+      },
+      {
+        "block": "c-K0027",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0027: b-fail message"
+      },
+      {
+        "block": "c-K0028",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0028: b-fail message"
+      },
+      {
+        "block": "c-K0029",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0029: b-fail message"
+      },
+      {
+        "block": "c-K0030",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0030: b-fail message"
+      },
+      {
+        "block": "c-K0031",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0031: b-fail message"
+      },
+      {
+        "block": "c-K0032",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0032: b-fail message"
+      },
+      {
+        "block": "c-K0033",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0033: b-fail message"
+      },
+      {
+        "block": "c-K0034",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0034: b-fail message"
+      },
+      {
+        "block": "c-K0035",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0035: b-fail message"
+      },
+      {
+        "block": "c-K0036",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0036: b-fail message"
+      },
+      {
+        "block": "c-K0037",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0037: b-fail message"
+      },
+      {
+        "block": "c-K0038",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0038: b-fail message"
+      },
+      {
+        "block": "c-K0039",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0039: b-fail message"
+      },
+      {
+        "block": "c-K0040",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0040: b-fail message"
+      },
+      {
+        "block": "c-K0041",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0041: b-fail message"
+      },
+      {
+        "block": "c-K0042",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0042: b-fail message"
+      },
+      {
+        "block": "c-K0043",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0043: b-fail message"
+      },
+      {
+        "block": "c-K0044",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0044: b-fail message"
+      },
+      {
+        "block": "c-K0045",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0045: b-fail message"
+      },
+      {
+        "block": "c-K0046",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0046: b-fail message"
+      },
+      {
+        "block": "c-K0047",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0047: b-fail message"
+      },
+      {
+        "block": "c-K0048",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0048: b-fail message"
+      },
+      {
+        "block": "c-K0049",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0049: b-fail message"
+      },
+      {
+        "block": "c-K0050",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0050: b-fail message"
+      },
+      {
+        "block": "c-K0051",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0051: b-fail message"
+      },
+      {
+        "block": "c-K0052",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0052: b-fail message"
+      },
+      {
+        "block": "c-K0053",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0053: b-fail message"
+      },
+      {
+        "block": "c-K0054",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0054: b-fail message"
+      },
+      {
+        "block": "c-K0055",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0055: b-fail message"
+      },
+      {
+        "block": "c-K0056",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0056: b-fail message"
+      },
+      {
+        "block": "c-K0057",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0057: b-fail message"
+      },
+      {
+        "block": "c-K0058",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0058: b-fail message"
+      },
+      {
+        "block": "c-K0059",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0059: b-fail message"
+      },
+      {
+        "block": "c-K0060",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0060: b-fail message"
+      },
+      {
+        "block": "c-K0061",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0061: b-fail message"
+      },
+      {
+        "block": "c-K0062",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0062: b-fail message"
+      },
+      {
+        "block": "c-K0063",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0063: b-fail message"
+      },
+      {
+        "block": "c-K0064",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0064: b-fail message"
+      },
+      {
+        "block": "c-K0065",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0065: b-fail message"
+      },
+      {
+        "block": "c-K0066",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0066: b-fail message"
+      },
+      {
+        "block": "c-K0067",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0067: b-fail message"
+      },
+      {
+        "block": "c-K0068",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0068: b-fail message"
+      },
+      {
+        "block": "c-K0069",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0069: b-fail message"
+      },
+      {
+        "block": "c-K0070",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0070: b-fail message"
+      },
+      {
+        "block": "c-K0071",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0071: b-fail message"
+      },
+      {
+        "block": "c-K0072",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0072: b-fail message"
+      },
+      {
+        "block": "c-K0073",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0073: b-fail message"
+      },
+      {
+        "block": "c-K0074",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0074: b-fail message"
+      },
+      {
+        "block": "c-K0075",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0075: b-fail message"
+      },
+      {
+        "block": "c-K0076",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0076: b-fail message"
+      },
+      {
+        "block": "c-K0077",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0077: b-fail message"
+      },
+      {
+        "block": "c-K0078",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0078: b-fail message"
+      },
+      {
+        "block": "c-K0079",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0079: b-fail message"
+      },
+      {
+        "block": "c-K0080",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0080: b-fail message"
+      },
+      {
+        "block": "c-K0081",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0081: b-fail message"
+      },
+      {
+        "block": "c-K0082",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0082: b-fail message"
+      },
+      {
+        "block": "c-K0083",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0083: b-fail message"
+      },
+      {
+        "block": "c-K0084",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0084: b-fail message"
+      },
+      {
+        "block": "c-K0085",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0085: b-fail message"
+      },
+      {
+        "block": "c-K0086",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0086: b-fail message"
+      },
+      {
+        "block": "c-K0087",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0087: b-fail message"
+      },
+      {
+        "block": "c-K0088",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0088: b-fail message"
+      },
+      {
+        "block": "c-K0089",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0089: b-fail message"
+      },
+      {
+        "block": "c-K0090",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0090: b-fail message"
+      },
+      {
+        "block": "c-K0091",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0091: b-fail message"
+      },
+      {
+        "block": "c-K0092",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0092: b-fail message"
+      },
+      {
+        "block": "c-K0093",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0093: b-fail message"
+      },
+      {
+        "block": "c-K0094",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0094: b-fail message"
+      },
+      {
+        "block": "c-K0095",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0095: b-fail message"
+      },
+      {
+        "block": "c-K0096",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0096: b-fail message"
+      },
+      {
+        "block": "c-K0097",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0097: b-fail message"
+      },
+      {
+        "block": "c-K0098",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0098: b-fail message"
+      },
+      {
+        "block": "c-K0099",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0099: b-fail message"
+      },
+      {
+        "block": "c-K0100",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0100: b-fail message"
+      },
+      {
+        "block": "c-K0101",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-K0101: b-fail message"
+      },
+      {
+        "block": "c-M0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-M0000: b-fail message"
+      },
+      {
+        "block": "c-P0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-P0000: b-fail message"
+      },
+      {
+        "block": "c-S0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-S0000: b-fail message"
+      },
+      {
+        "block": "c-T0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-T0000: b-fail message"
+      },
+      {
+        "block": "c-W0000",
+        "code": "W_RULE_CHECK",
+        "fix": "b-fail fix",
+        "message": "rule b-fail fails on c-W0000: b-fail message"
+      },
+      {
+        "block": "c-F0000",
+        "code": "W_RULE_CHECK",
+        "fix": "ask the module",
+        "message": "rule c-text fails on c-F0000: the module says no"
+      },
+      {
+        "block": "c-F0001",
+        "code": "W_RULE_CHECK",
+        "fix": "ask the module",
+        "message": "rule c-text fails on c-F0001: the module says no"
+      },
+      {
+        "block": "c-T0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule d-trap in the pack file, or make the rule advisory",
+        "message": "rule d-trap could not judge c-T0000: the module trapped: wasm `unreachable` instruction executed"
+      },
+      {
+        "block": "c-M0000",
+        "code": "W_RULE_CHECK",
+        "fix": "grow no more",
+        "message": "rule e-memory fails on c-M0000: the memory stopped at 256 pages"
+      },
+      {
+        "block": "c-S0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule f-depth in the pack file, or make the rule advisory",
+        "message": "rule f-depth could not judge c-S0000: the module trapped: call stack exhausted"
+      },
+      {
+        "block": "c-S0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule g-stack in the pack file, or make the rule advisory",
+        "message": "rule g-stack could not judge c-S0000: the module trapped: call stack exhausted"
+      },
+      {
+        "block": "c-W0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule h-spin in the pack file, or make the rule advisory",
+        "message": "rule h-spin could not judge c-W0000: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0000: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0001",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0001: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0002",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0002: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0003",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0003: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0004",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0004: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0005",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0005: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0006",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0006: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0007",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0007: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0008",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0008: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0009",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0009: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0010",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0010: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0011",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0011: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0012",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0012: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0013",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0013: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0014",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0014: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0015",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0015: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0016",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0016: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0017",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0017: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0018",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0018: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0019",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0019: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0020",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0020: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0021",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0021: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0022",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0022: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0023",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0023: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0024",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0024: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0025",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0025: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0026",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0026: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0027",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0027: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0028",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0028: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0029",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0029: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0030",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0030: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0031",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0031: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0032",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0032: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0033",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0033: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0034",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0034: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0035",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0035: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0036",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0036: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0037",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0037: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0038",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0038: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0039",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0039: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0040",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0040: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0041",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0041: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0042",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0042: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0043",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0043: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0044",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0044: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0045",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0045: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0046",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0046: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0047",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0047: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0048",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0048: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0049",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0049: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0050",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0050: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0051",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0051: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0052",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0052: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0053",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0053: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0054",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0054: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0055",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0055: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0056",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0056: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0057",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0057: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0058",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0058: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0059",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0059: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0060",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0060: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0061",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0061: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0062",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0062: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0063",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0063: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0064",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0064: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0065",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0065: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0066",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0066: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0067",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0067: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0068",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0068: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0069",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0069: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0070",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0070: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0071",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0071: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0072",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0072: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0073",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0073: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0074",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0074: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0075",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0075: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0076",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0076: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0077",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0077: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0078",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0078: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0079",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0079: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0080",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0080: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0081",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0081: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0082",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0082: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0083",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0083: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0084",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0084: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0085",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0085: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0086",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0086: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0087",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0087: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0088",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0088: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0089",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0089: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0090",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0090: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0091",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0091: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0092",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0092: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0093",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0093: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0094",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0094: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0095",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0095: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0096",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0096: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0097",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0097: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0098",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0098: the module used all of its 10000000 fuel"
+      },
+      {
+        "block": "c-K0099",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0099: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-K0100",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0100: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-K0101",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-K0101: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-M0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-M0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-P0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-P0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-S0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-S0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-T0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-T0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-W0000",
+        "code": "W_RULE_CHECK",
+        "fix": "fix the module of rule i-burn in the pack file, or make the rule advisory",
+        "message": "rule i-burn could not judge c-W0000: the rule used all of its 1000000000 fuel in this run"
+      },
+      {
+        "block": "c-F0000",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-F0000: j-tail message"
+      },
+      {
+        "block": "c-F0001",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-F0001: j-tail message"
+      },
+      {
+        "block": "c-K0000",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0000: j-tail message"
+      },
+      {
+        "block": "c-K0001",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0001: j-tail message"
+      },
+      {
+        "block": "c-K0002",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0002: j-tail message"
+      },
+      {
+        "block": "c-K0003",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0003: j-tail message"
+      },
+      {
+        "block": "c-K0004",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0004: j-tail message"
+      },
+      {
+        "block": "c-K0005",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0005: j-tail message"
+      },
+      {
+        "block": "c-K0006",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0006: j-tail message"
+      },
+      {
+        "block": "c-K0007",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0007: j-tail message"
+      },
+      {
+        "block": "c-K0008",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0008: j-tail message"
+      },
+      {
+        "block": "c-K0009",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0009: j-tail message"
+      },
+      {
+        "block": "c-K0010",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0010: j-tail message"
+      },
+      {
+        "block": "c-K0011",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0011: j-tail message"
+      },
+      {
+        "block": "c-K0012",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0012: j-tail message"
+      },
+      {
+        "block": "c-K0013",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0013: j-tail message"
+      },
+      {
+        "block": "c-K0014",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0014: j-tail message"
+      },
+      {
+        "block": "c-K0015",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0015: j-tail message"
+      },
+      {
+        "block": "c-K0016",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0016: j-tail message"
+      },
+      {
+        "block": "c-K0017",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0017: j-tail message"
+      },
+      {
+        "block": "c-K0018",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0018: j-tail message"
+      },
+      {
+        "block": "c-K0019",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0019: j-tail message"
+      },
+      {
+        "block": "c-K0020",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0020: j-tail message"
+      },
+      {
+        "block": "c-K0021",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0021: j-tail message"
+      },
+      {
+        "block": "c-K0022",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0022: j-tail message"
+      },
+      {
+        "block": "c-K0023",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0023: j-tail message"
+      },
+      {
+        "block": "c-K0024",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0024: j-tail message"
+      },
+      {
+        "block": "c-K0025",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0025: j-tail message"
+      },
+      {
+        "block": "c-K0026",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0026: j-tail message"
+      },
+      {
+        "block": "c-K0027",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0027: j-tail message"
+      },
+      {
+        "block": "c-K0028",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0028: j-tail message"
+      },
+      {
+        "block": "c-K0029",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0029: j-tail message"
+      },
+      {
+        "block": "c-K0030",
+        "code": "W_RULE_CHECK",
+        "fix": "j-tail fix",
+        "message": "rule j-tail fails on c-K0030: j-tail message"
+      }
+    ],
+    "warnings_omitted": 76
+  }
+}
