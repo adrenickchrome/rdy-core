@@ -1660,7 +1660,6 @@ mod tests {
         let fixed = [
             (VectorBudget::briefing(), (2_000_000, 8_000_000)),
             (VectorBudget::write(), (100_000, 1_000_000)),
-            (VectorBudget::review(), (200_000, 2_000_000)),
             (VectorBudget::search(), (2_000_000, 8_000_000)),
         ];
         for (mut b, (postings, products)) in fixed {

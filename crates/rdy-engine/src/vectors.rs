@@ -7,16 +7,15 @@
 //! The weights are lazy. [`VectorWeights`] holds one immutable lexicon and computes each word's
 //! idf, each target's weight and each block's norms the first time a read asks for them, once.
 //! A read scope keeps its weights on its build, so a write drops only that state's values and a
-//! held state keeps its own. Review reads canon plus the one in-flight source block
-//! ([`WeightScope::Review`]), which counts as one more corpus block.
+//! held state keeps its own.
 //!
 //! The scorer comes after the weights: [`select_seeds`] and [`candidates`] find a source's
 //! candidates (D-RY7B5), [`score_operands`] scores a pair with every feature (D-ZX5S6),
 //! [`rank_rows`] orders and cuts rows by their exact scores, and [`reasons`] names what a pair
-//! shares. [`VectorBudget`] holds the work guards. Advice, review and search all use these.
+//! shares. [`VectorBudget`] holds the work guards. Advice and search use these.
 use crate::Scope;
 use crate::lexicon::Lexicon;
-use rdy_model::{Block, BlockId};
+use rdy_model::BlockId;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -188,24 +187,17 @@ pub enum WeightScope<'a> {
     /// The scope the read reads: canon, a view, a landing or a proposal version. Its weights
     /// live on its build.
     Read(&'a Scope),
-    /// Review (D-R2CDN): canon at its current landing plus the one in-flight source block,
-    /// which counts as one more corpus block even when canon holds a block with its id. No other
-    /// view takes part. Its weights are made for the call and never cached under the block's id.
-    Review(&'a Block),
 }
 
-/// A document of a weight state: a block of the state's lexicon, or the overlay's source block.
+/// A document of a weight state: a block of the state's lexicon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Doc<'a> {
-    /// A block of the lexicon, by id; under an overlay, canon's block with that id.
+    /// A block of the lexicon, by id.
     Block(&'a BlockId),
-    /// The overlay's in-flight source block; empty in a state without one.
-    Source,
 }
 
 /// A lazy weight read could not finish inside [`WEIGHT_CACHE_BYTES`] (or the state's own limit):
-/// it installed nothing. Advice skips the source; review keeps only complete sources; ranked
-/// search returns its vector-work refusal.
+/// it installed nothing. Advice skips the source; ranked search returns its vector-work refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WeightLimit;
 
@@ -220,13 +212,6 @@ pub struct WeightStats {
     pub charged: usize,
 }
 
-/// The overlay's source block: its id, words and targets.
-struct Source {
-    id: BlockId,
-    counts: Option<WordCounts>,
-    targets: Option<LinkTargets>,
-}
-
 /// The lazy values of a weight state, and their charge. The maps are only read by key and
 /// counted, never walked, so no order of theirs is ever seen.
 #[derive(Default)]
@@ -235,8 +220,6 @@ struct Cache {
     targets: HashMap<BlockId, f64>,
     lexical: HashMap<BlockId, f64>,
     link: HashMap<BlockId, f64>,
-    source_lexical: Option<f64>,
-    source_link: Option<f64>,
     charged: usize,
 }
 
@@ -260,12 +243,11 @@ enum Kind {
     Link,
 }
 
-/// The weights of one weight state: its lexicon (and, for review, the source block), and the
-/// values computed from them so far. Every value is computed on first read, once, and charged
-/// before it is stored; a read that would pass the limit stores nothing.
+/// The weights of one weight state: its lexicon, and the values computed from it so far. Every
+/// value is computed on first read, once, and charged before it is stored; a read that would
+/// pass the limit stores nothing.
 pub struct VectorWeights {
     lexicon: Arc<Lexicon>,
-    source: Option<Source>,
     limit: usize,
     cache: Mutex<Cache>,
 }
@@ -275,24 +257,9 @@ impl VectorWeights {
     pub fn of(lexicon: Arc<Lexicon>) -> VectorWeights {
         VectorWeights {
             lexicon,
-            source: None,
             limit: WEIGHT_CACHE_BYTES,
             cache: Mutex::new(Cache::default()),
         }
-    }
-
-    /// Review's weights (D-R2CDN): `canon`'s blocks plus `source`, counted as one more corpus
-    /// block even when canon holds a block with its id. `source`'s words and targets are read
-    /// the lexicon's way. Nothing computed yet.
-    pub fn review(canon: Arc<Lexicon>, source: &Block) -> VectorWeights {
-        let (counts, targets) = canon.features_of(source);
-        let mut w = VectorWeights::of(canon);
-        w.source = Some(Source {
-            id: source.id.clone(),
-            counts: Some(counts).filter(|c| !c.is_empty()),
-            targets: Some(targets).filter(|t| !t.is_empty()),
-        });
-        w
     }
 
     /// Test hook: these weights with a charge limit of `bytes` instead of
@@ -313,41 +280,24 @@ impl VectorWeights {
         &self.lexicon
     }
 
-    /// The overlay's source block, for review's weights.
-    pub fn source(&self) -> Option<&BlockId> {
-        self.source.as_ref().map(|s| &s.id)
-    }
-
-    /// `N`: the corpus blocks that hold a word, the overlay's source included.
+    /// `N`: the corpus blocks that hold a word.
     pub fn corpus_words(&self) -> u64 {
-        let extra = self.source.as_ref().is_some_and(|s| s.counts.is_some());
-        self.lexicon.word_blocks() as u64 + u64::from(extra)
+        self.lexicon.word_blocks() as u64
     }
 
-    /// `L`: the corpus blocks that have a link target, the overlay's source included.
+    /// `L`: the corpus blocks that have a link target.
     pub fn corpus_links(&self) -> u64 {
-        let extra = self.source.as_ref().is_some_and(|s| s.targets.is_some());
-        self.lexicon.link_blocks() as u64 + u64::from(extra)
+        self.lexicon.link_blocks() as u64
     }
 
     /// `df(word)`: the corpus blocks that hold `word`; 0 for a word no block holds.
     pub fn df(&self, word: &str) -> u64 {
-        let extra = self
-            .source
-            .as_ref()
-            .and_then(|s| s.counts.as_ref())
-            .is_some_and(|c| c.get(word) > 0);
-        self.lexicon.word_df(word) as u64 + u64::from(extra)
+        self.lexicon.word_df(word) as u64
     }
 
     /// `indeg(target)`: the corpus blocks that have `target` as a link target.
     pub fn indeg(&self, target: &BlockId) -> u64 {
-        let extra = self
-            .source
-            .as_ref()
-            .and_then(|s| s.targets.as_ref())
-            .is_some_and(|t| t.contains(target));
-        self.lexicon.indeg(target) as u64 + u64::from(extra)
+        self.lexicon.indeg(target) as u64
     }
 
     /// D-RY7B5: whether `word` is a corpus word that seeds candidates ([`is_seed`] of `df` and
@@ -366,18 +316,14 @@ impl VectorWeights {
 
     /// The words of `doc` and their counts; `None` for a document with no word.
     pub fn counts(&self, doc: Doc<'_>) -> Option<&WordCounts> {
-        match doc {
-            Doc::Block(id) => self.lexicon.word_counts(id),
-            Doc::Source => self.source.as_ref().and_then(|s| s.counts.as_ref()),
-        }
+        let Doc::Block(id) = doc;
+        self.lexicon.word_counts(id)
     }
 
     /// The link targets of `doc`; `None` for a document with no target.
     pub fn targets(&self, doc: Doc<'_>) -> Option<&LinkTargets> {
-        match doc {
-            Doc::Block(id) => self.lexicon.link_targets(id),
-            Doc::Source => self.source.as_ref().and_then(|s| s.targets.as_ref()),
-        }
+        let Doc::Block(id) = doc;
+        self.lexicon.link_targets(id)
     }
 
     /// What these weights have computed so far.
@@ -386,8 +332,8 @@ impl VectorWeights {
         WeightStats {
             idf: c.idf.len(),
             targets: c.targets.len(),
-            lexical_norms: c.lexical.len() + usize::from(c.source_lexical.is_some()),
-            link_norms: c.link.len() + usize::from(c.source_link.is_some()),
+            lexical_norms: c.lexical.len(),
+            link_norms: c.link.len(),
             charged: c.charged,
         }
     }
@@ -478,10 +424,8 @@ impl VectorWeights {
 
     /// What a norm of `doc` is charged beside the feature weights it needs.
     fn norm_charge(doc: Doc<'_>) -> usize {
-        match doc {
-            Doc::Block(id) => id.as_str().len() + BLOCK_ENTRY_BYTES,
-            Doc::Source => size_of::<f64>(),
-        }
+        let Doc::Block(id) = doc;
+        id.as_str().len() + BLOCK_ENTRY_BYTES
     }
 
     /// `doc`'s lexical norm and raw weights (`tf × idf`, in `counts` order), under the held
@@ -584,8 +528,6 @@ fn cached(c: &Cache, doc: Doc<'_>, kind: Kind) -> Option<f64> {
     match (doc, kind) {
         (Doc::Block(id), Kind::Lexical) => c.lexical.get(id).copied(),
         (Doc::Block(id), Kind::Link) => c.link.get(id).copied(),
-        (Doc::Source, Kind::Lexical) => c.source_lexical,
-        (Doc::Source, Kind::Link) => c.source_link,
     }
 }
 
@@ -598,13 +540,11 @@ fn store(c: &mut Cache, doc: Doc<'_>, kind: Kind, norm: f64) {
         (Doc::Block(id), Kind::Link) => {
             c.link.insert(id.clone(), norm);
         }
-        (Doc::Source, Kind::Lexical) => c.source_lexical = Some(norm),
-        (Doc::Source, Kind::Link) => c.source_link = Some(norm),
     }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Scoring (D-ZX5S6, D-RY7B5, D-0ZPAP): the one scorer that advice, review and search share.
+// Scoring (D-ZX5S6, D-RY7B5, D-0ZPAP): the one scorer that advice and search share.
 // ---------------------------------------------------------------------------------------------
 
 /// D-RY7B5: the most seed words one source finds candidates with.
@@ -640,8 +580,8 @@ pub const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
 pub const CANDIDATE_RECORD_BYTES: u64 =
     (size_of::<&BlockId>() + size_of::<Scored<'static>>()) as u64;
 
-/// Which work guard stopped a source. Advice drops the source and counts it; review keeps the
-/// complete sources; ranked search returns its vector-work refusal.
+/// Which work guard stopped a source. Advice drops the source and counts it; ranked search
+/// returns its vector-work refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Guard {
     /// The source's seed postings passed [`SourceLimits::postings`].
@@ -709,7 +649,7 @@ struct SourceUse {
     scratch: u64,
 }
 
-/// The work budget of one advice section, receipt, review phase or search request: a whole-budget
+/// The work budget of one advice section, receipt or search request: a whole-budget
 /// limit on posting incidences and on products, and the per-source limits. Every charge happens
 /// before the work it pays for, and a charge that does not fit is refused and changes nothing. Work
 /// a stopped source already charged stays charged, so the sources after it keep to what is left.
@@ -753,11 +693,6 @@ impl VectorBudget {
     /// A write receipt: 100,000 posting incidences and 1,000,000 products.
     pub const fn write() -> VectorBudget {
         VectorBudget::new(100_000, 1_000_000)
-    }
-
-    /// One change's review vector phase: 200,000 posting incidences and 2,000,000 products.
-    pub const fn review() -> VectorBudget {
-        VectorBudget::new(200_000, 2_000_000)
     }
 
     /// One ranked search request: 2,000,000 posting incidences and 8,000,000 products.
@@ -1125,7 +1060,7 @@ mod tests {
     use super::*;
     use crate::{Materialized, Rdy, Session, WriteRequest, WriteResult};
     use rdy_model::Role;
-    use rdy_model::{FieldValue, Link};
+    use rdy_model::{Block, FieldValue, Link};
     use rdy_schema::{Pack, PackSet};
     use serde_json::{Value, json};
     use std::collections::BTreeSet;
@@ -1533,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn vxs1_weight_scope_counts_empty_and_overlay_blocks_exactly() {
+    fn vxs12_read_weights_keep_scope_counts_without_review_overlay() {
         // blocks with no word or no target are not in N or L
         let blocks = vec![
             blk(
@@ -1570,49 +1505,13 @@ mod tests {
         assert!(w.counts(Doc::Block(&s1)).is_none());
         assert!(w.lexical(Doc::Block(&s1)).unwrap().is_empty());
         assert!(w.link(Doc::Block(&s1)).unwrap().is_empty());
-        assert!(w.counts(Doc::Source).is_none() && w.source().is_none());
         let c3 = id("c-00003");
         assert!(w.lexical(Doc::Block(&c3)).unwrap().is_empty());
         assert_eq!(w.link(Doc::Block(&c3)).unwrap().len(), 1);
         assert_eq!(w.idf("delta").unwrap(), None);
 
-        // the overlay: a source whose id canon holds counts as one more corpus block
-        let source = blk(
-            "c-00001",
-            "claim",
-            None,
-            "Beta delta delta {{c-00002}}.",
-            vec![],
-            vec![],
-        );
-        let o = VectorWeights::review(lex(&blocks), &source);
-        assert_eq!(o.source(), Some(&id("c-00001")));
-        assert_eq!((o.corpus_words(), o.corpus_links()), (3, 3));
-        assert_eq!(
-            (o.df("beta"), o.df("alpha"), o.df("delta"), o.df("gamma")),
-            (3, 1, 1, 1)
-        );
-        assert_eq!((o.indeg(&id("c-00002")), o.indeg(&id("c-00001"))), (1, 2));
-        assert_eq!(o.counts(Doc::Source).unwrap().get("delta"), 2);
-        // canon's own c-00001 keeps its canon words
-        assert_eq!(
-            o.counts(Doc::Block(&id("c-00001"))).unwrap().get("delta"),
-            0
-        );
-        let idf_beta = idf(3, 3);
-        assert_eq!(o.idf("beta").unwrap(), Some(idf_beta));
-        let raw = [tf(1) * idf_beta, tf(2) * idf(3, 1)];
-        let norm = length(raw.into_iter());
-        assert_eq!(o.lexical_norm(Doc::Source).unwrap(), Some(norm));
-        let v = o.lexical(Doc::Source).unwrap();
-        assert_eq!(v, vec![("beta", raw[0] / norm), ("delta", raw[1] / norm)]);
-        // a source with no word or target adds no corpus block
-        let empty = blk("c-00009", "claim", None, "…", vec![], vec![]);
-        let e = VectorWeights::review(lex(&blocks), &empty);
-        assert_eq!((e.corpus_words(), e.corpus_links()), (2, 2));
-        assert!(e.lexical(Doc::Source).unwrap().is_empty());
-
-        // through a read state: review reads canon and the source, never another view
+        // through a read state: each read scope counts its own blocks, and a view's own block
+        // counts once, in that view only
         let dir = tempfile::tempdir().unwrap();
         let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
         write(&mut r, "work", doc_ops("alpha", 3));
@@ -1624,20 +1523,14 @@ mod tests {
             .vector_weights(WeightScope::Read(&Scope::View("side".into())))
             .unwrap();
         assert!(side.corpus_words() > canon.corpus_words());
-        let block = st
-            .materialized(&Scope::View("side".into()))
-            .unwrap()
-            .iter()
-            .find(|b| b.body.contains("delta gateway"))
-            .cloned()
+        // the side doc's title and its three notes hold "delta"; only its notes hold "gateway"
+        assert_eq!((canon.df("delta"), side.df("delta")), (0, 4));
+        assert_eq!(side.df("gateway"), canon.df("gateway") + 3);
+        // a read scope's weights are made once and kept on its build
+        let again = st
+            .vector_weights(WeightScope::Read(&Scope::View("side".into())))
             .unwrap();
-        let review = st.vector_weights(WeightScope::Review(&block)).unwrap();
-        assert_eq!(review.corpus_words(), canon.corpus_words() + 1);
-        assert_eq!(review.df("delta"), 1);
-        assert_eq!(review.df("gateway"), canon.df("gateway") + 1);
-        // review's weights are made per call, never cached under the block's id
-        let again = st.vector_weights(WeightScope::Review(&block)).unwrap();
-        assert!(!Arc::ptr_eq(&review, &again));
+        assert!(Arc::ptr_eq(&side, &again));
     }
 
     /// The numerical golden of the weights: its constants, log cases, blocks and expected bits.

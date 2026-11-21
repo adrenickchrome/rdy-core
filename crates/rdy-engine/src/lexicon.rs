@@ -235,12 +235,6 @@ impl Lexicon {
         self.pointed.get(target)
     }
 
-    /// The word counts and link targets of `b` read this lexicon's way, whether or not the
-    /// lexicon holds `b`: what review's overlay counts for its in-flight source block.
-    pub(crate) fn features_of(&self, b: &Block) -> (WordCounts, LinkTargets) {
-        (self.terms_of(b).1, link_targets_of(b))
-    }
-
     /// Whether `block_type` is an entity type (it has `defines`).
     pub fn is_entity_type(&self, block_type: &str) -> bool {
         self.entity_types.contains(block_type)
