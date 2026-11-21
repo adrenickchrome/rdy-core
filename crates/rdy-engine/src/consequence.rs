@@ -16,6 +16,8 @@ use crate::neighbors::{NeighborVia, neighbor_links, takes_part};
 use crate::tensions::delta::on_change;
 use crate::tensions::{SideRef, Tension, tension_label};
 use crate::tensions::{TensionDelta, tension_delta};
+use crate::vector_neighbors::{Advice, AdviceCut, eligible_source, vector_neighbors_except};
+use crate::vectors::{VectorBudget, WeightScope, round3};
 use crate::views::{ReplayResult, UndoResult, ViewOpResult};
 use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
 use rdy_graph::{
@@ -2882,7 +2884,101 @@ fn report<T: Serialize + 'static>(
         }
     }
     attach_related(&mut v, engine, view, &changes);
+    if let Some((_, a)) = &states {
+        attach_vector_neighbors(&mut v, a, &scope, &changes);
+    }
     Ok(v)
+}
+
+/// One vector neighbor row of a write result (D-Y1WEY): `block` is a vector neighbor of the
+/// created block `for`, with the briefing row's fields but `summary`.
+#[derive(Serialize)]
+struct WriteVectorNeighbor {
+    r#for: String,
+    block: String,
+    /// The score, rounded to three decimals. Rows sort on the exact score.
+    score: f64,
+    words: Vec<String>,
+    links: Vec<String>,
+    doc: String,
+}
+
+/// D-Y1WEY, D-0ZPAP, D-5BM47: the vector neighbors of the content blocks that `changes` create,
+/// read in `after`, the state the write produced, never a later one. The sources are the created
+/// blocks that survive the write, in operation order across all the changes; the first ten
+/// content blocks of them are scored ([`AdviceCut::WRITE`]) within the receipt's budget, and no
+/// block the write creates or changes is a row. `vector_neighbors` lists the rows and
+/// `vector_neighbors_skipped` counts the content sources past ten or stopped by a guard; each is
+/// absent when empty or 0. Advice never fails the write: what cannot be read adds nothing.
+fn attach_vector_neighbors(
+    v: &mut serde_json::Value,
+    after: &ReadState,
+    scope: &Scope,
+    changes: &[Hash],
+) {
+    let Ok(cs) = changes_of(after, changes) else {
+        return;
+    };
+    let mut created: Vec<BlockId> = Vec::new();
+    let mut written: BTreeSet<BlockId> = BTreeSet::new();
+    for op in cs.iter().flat_map(|c| &c.ops) {
+        if let Op::Create { block } = op
+            && !written.contains(&block.id)
+        {
+            created.push(block.id.clone());
+        }
+        written.insert(op.block_id().clone());
+    }
+    if created.is_empty() {
+        return;
+    }
+    let (Ok(m), Ok(g)) = (after.materialized(scope), after.graph(scope)) else {
+        return;
+    };
+    let pack = after.pack();
+    let sources = created
+        .iter()
+        .filter(|id| m.get(id).is_some_and(|b| eligible_source(&m, pack, b)))
+        .count();
+    if sources == 0 {
+        return;
+    }
+    let advice = match after.vector_weights(WeightScope::Read(scope)) {
+        Ok(w) => vector_neighbors_except(
+            &m,
+            &g,
+            pack,
+            &w,
+            &created,
+            AdviceCut::WRITE,
+            &mut VectorBudget::write(),
+            &|id| written.contains(id),
+        ),
+        // no weights: no source was scored
+        Err(_) => Advice {
+            rows: vec![],
+            skipped: sources,
+        },
+    };
+    if !advice.rows.is_empty() {
+        let rows: Vec<WriteVectorNeighbor> = advice
+            .rows
+            .into_iter()
+            .map(|r| WriteVectorNeighbor {
+                r#for: r.source.to_string(),
+                block: r.block.to_string(),
+                score: round3(r.score),
+                words: r.words,
+                links: r.links.iter().map(ToString::to_string).collect(),
+                doc: r.doc.to_string(),
+            })
+            .collect();
+        v["vector_neighbors"] =
+            serde_json::to_value(&rows).expect("vector rows serialize: strings and numbers only");
+    }
+    if advice.skipped > 0 {
+        v["vector_neighbors_skipped"] = advice.skipped.into();
+    }
 }
 
 /// FW-PC1 (D-0GGW9): whether a proposal is due for `view`. Only under cadence `changes`: the

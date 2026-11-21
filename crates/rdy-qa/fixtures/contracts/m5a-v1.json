@@ -22384,6 +22384,18 @@
               "path": "string"
             }
           ],
+          "vector_neighbors": [
+            {
+              "block": "string",
+              "doc": "string",
+              "for": "string",
+              "links": [],
+              "score": "number",
+              "words": [
+                "string"
+              ]
+            }
+          ],
           "warning_docs": {
             "<id>": "string"
           },
@@ -26043,7 +26055,18 @@
           },
           "created": {
             "$k?": "string",
-            "$n?": "string"
+            "$n?": "string",
+            "op0?": "string",
+            "op10?": "string",
+            "op1?": "string",
+            "op2?": "string",
+            "op3?": "string",
+            "op4?": "string",
+            "op5?": "string",
+            "op6?": "string",
+            "op7?": "string",
+            "op8?": "string",
+            "op9?": "string"
           },
           "on_change": {
             "checks": [
@@ -26088,6 +26111,21 @@
             ]
           },
           "suggestions": [],
+          "vector_neighbors?": [
+            {
+              "block": "string",
+              "doc": "string",
+              "for": "string",
+              "links": [
+                "string"
+              ],
+              "score": "number",
+              "words": [
+                "string"
+              ]
+            }
+          ],
+          "vector_neighbors_skipped?": "number",
           "warnings": [
             {
               "block": "string",

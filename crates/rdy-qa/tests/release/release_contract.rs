@@ -4968,6 +4968,86 @@ fn mcp_vector_probes(seen: &mut Seen) {
         }
         ok_of(&mcp_probe(seen, &mut c, "rdy_brief", "rdy_brief", args))
     });
+    mcp_write_vector_probes(seen, &mut c, &address);
+}
+
+/// D-Y1WEY, D-0ZPAP: the vector rows of a write result through MCP. Two claims created in
+/// section One list rows `{for, block, score, words, links, doc}` with words and links, at most
+/// three each; a write of eleven created claims counts the one past ten as skipped.
+fn mcp_write_vector_probes(seen: &mut Seen, c: &mut rdy_qa::mcp::McpClient, address: &str) {
+    let briefed = |c: &mut rdy_qa::mcp::McpClient| {
+        let b = ok_of(&c.call("rdy_brief", json!({"ids": [address]})));
+        assert!(b["base"]["token"].is_string(), "{b}");
+        b
+    };
+    let b = briefed(c);
+    let target = b["vector_neighbors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|v| v["links"].as_array()?.first()?.as_str().map(str::to_string))
+        .expect("a briefing row with a link");
+    // the section of the briefing's first source
+    let source = b["vector_neighbors"][0]["for"]
+        .as_str()
+        .expect("a row")
+        .to_string();
+    let read = ok_of(&c.call("rdy_read", json!({"id": source, "format": "yaml"})));
+    let section = read["text"]
+        .as_str()
+        .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("parent: ")))
+        .map(|p| p.trim_matches('"').to_string())
+        .unwrap_or_else(|| panic!("the source's section: {read}"));
+    let reply = mcp_probe(
+        seen,
+        c,
+        "rdy_write",
+        "rdy_write",
+        json!({"brief": b["base"]["token"], "ops": [
+            {"op": "create", "type": "claim", "id": "$n", "parent": section, "body": "Zebras graze near the walrus colony today.", "links": {"describes": [{"target": target}]}},
+            {"op": "create", "type": "claim", "id": "$k", "parent": section, "body": "Otters swim past the moose herd today.", "links": {"describes": [{"target": target}]}}
+        ]}),
+    );
+    let w = ok_of(&reply);
+    let rows = w["vector_neighbors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("write rows: {reply:?}"))
+        .clone();
+    assert!(!rows.is_empty(), "{w}");
+    assert!(
+        rows.iter()
+            .any(|r| !r["links"].as_array().unwrap().is_empty()
+                && !r["words"].as_array().unwrap().is_empty()),
+        "a row with words and links: {w}"
+    );
+    let fors: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|r| r["for"].as_str()).collect();
+    assert_eq!(fors.len(), 2, "rows of both created claims: {w}");
+    for f in &fors {
+        let n = rows.iter().filter(|r| r["for"].as_str() == Some(f)).count();
+        assert!(n <= 3, "at most three rows for {f}: {w}");
+    }
+    assert!(rows.iter().all(|r| r.get("summary").is_none()), "{w}");
+    assert!(w.get("vector_neighbors_skipped").is_none(), "{w}");
+    let b = briefed(c);
+    let ops: Vec<Value> = (0..11)
+        .map(|k| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Zebras graze near the colony, herd {k}.")}))
+        .collect();
+    let w = ok_of(&mcp_probe(
+        seen,
+        c,
+        "rdy_write",
+        "rdy_write",
+        json!({"brief": b["base"]["token"], "ops": ops}),
+    ));
+    assert_eq!(w["vector_neighbors_skipped"], json!(1), "{w}");
+    let fors: std::collections::BTreeSet<&str> = w["vector_neighbors"]
+        .as_array()
+        .expect("write rows")
+        .iter()
+        .filter_map(|r| r["for"].as_str())
+        .collect();
+    assert!(fors.len() <= 10, "{w}");
 }
 
 fn cli_vector_probes(seen: &mut Seen, env: &[(String, String)]) {
@@ -7518,6 +7598,8 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// drv6: the old publication probes' docs hold no section and no decision, and their profiles
 /// cite no decision outside the selection, so the review's outline, decision titles, decision
 /// rows and dropped decisions are empty there; the review rows probe fills each of them.
+/// vxs4: the Markdown import creates content blocks, so its reply lists vector rows; its blocks
+/// link to nothing, so those rows share no link (the `rdy_write` rows show the links).
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -7683,6 +7765,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_import md/ok/on_change/resolved",
     "mcp/rdy_import md/ok/on_change/tensions",
     "mcp/rdy_import md/ok/suggestions",
+    "mcp/rdy_import md/ok/vector_neighbors[]/links",
     "mcp/rdy_import reader/refused/issues",
     "mcp/rdy_import unknown key/refused/issues",
     "mcp/rdy_import/ok/consequences",
