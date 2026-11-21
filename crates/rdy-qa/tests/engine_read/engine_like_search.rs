@@ -419,3 +419,94 @@ fn vxs7_common_only_like_text_is_empty_not_refused() {
         assert!(score(m) > 0.0, "{m}");
     }
 }
+
+/// The first page of `like` over `source` that holds exactly one entry and a next cursor.
+fn one_entry_page(r: &Rdy, source: &str) -> (Value, String) {
+    let i = input(None, Some(source), None, json!({}));
+    for max in 1..2000 {
+        let Ok(res) = r.read().search_input(&Scope::Canon, &i, None, Some(max)) else {
+            continue;
+        };
+        let res = serde_json::to_value(res).unwrap();
+        if res["matches"].as_array().unwrap().len() == 1
+            && let Some(next) = res["next"].as_str().map(str::to_string)
+        {
+            return (res, next);
+        }
+    }
+    panic!("no one-entry page")
+}
+
+#[test]
+fn vxs7_like_cursor_goes_stale_when_the_source_regroups_hits() {
+    let (_d, mut r) = project();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "fen", "title": "Fen", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Reeds"}},
+            {"op": "create", "type": "claim", "id": "$src", "parent": "$s", "body": "alpha beta"},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "alpha\nbeta"},
+            {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "alpha\ngamma"},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "alpha!\ndelta"},
+            {"op": "create", "type": "claim", "id": "$f1", "parent": "$s", "body": "Herons wade."},
+            {"op": "create", "type": "claim", "id": "$f2", "parent": "$s", "body": "Otters swim."},
+            {"op": "create", "type": "claim", "id": "$f3", "parent": "$s", "body": "Moss grows."},
+            {"op": "create", "type": "claim", "id": "$f4", "parent": "$s", "body": "Frogs croak."},
+            {"op": "create", "type": "claim", "id": "$f5", "parent": "$s", "body": "Eels hide."},
+            {"op": "create", "type": "claim", "id": "$f6", "parent": "$s", "body": "Newts rest."}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let id = |k: &str| w.created[k].clone();
+    let order = like(&r, &id("$src"), json!({}));
+    assert_eq!(ids(&order), [id("$a"), id("$b"), id("$c")], "{order}");
+    assert_eq!(order["matches"].as_array().unwrap().len(), 3, "{order}");
+
+    // a score drift alone (a filler edit moves the weights) keeps the cursor
+    let (first, next) = one_entry_page(&r, &id("$src"));
+    assert_eq!(first["matches"][0]["id"], id("$a"), "{first}");
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": id("$f1"), "body": "Herons wade slowly."}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let i = input(None, Some(&id("$src")), None, json!({}));
+    let more = r
+        .read()
+        .search_input(&Scope::Canon, &i, Some(&next), Some(100_000))
+        .unwrap();
+    let more = serde_json::to_value(more).unwrap();
+    assert_eq!(ids(&more), [id("$b"), id("$c")], "{more}");
+
+    // the source now shares only alpha: a and b show the same line and collapse, so the old
+    // cursor's offset names a different entry and must go stale
+    let (_, next) = one_entry_page(&r, &id("$src"));
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": id("$src"), "body": "alpha"}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let regrouped = like(&r, &id("$src"), json!({}));
+    assert_eq!(
+        ids(&regrouped),
+        [id("$a"), id("$b"), id("$c")],
+        "{regrouped}"
+    );
+    assert_eq!(
+        regrouped["matches"].as_array().unwrap().len(),
+        2,
+        "{regrouped}"
+    );
+    let err = r
+        .read()
+        .search_input(&Scope::Canon, &i, Some(&next), Some(100_000))
+        .unwrap_err();
+    assert_eq!(err.code, "E_PAGE_STALE", "{err:?}");
+}
