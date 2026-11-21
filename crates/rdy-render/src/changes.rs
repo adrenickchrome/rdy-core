@@ -55,6 +55,15 @@
 //!    block the block diff has no entry for, from the two sides. Each type name reads with `_`
 //!    as a space. It is the block's structure, never a custom field (a field named `type` is
 //!    not read here), and the entry stays one Edited entry, moved or not: it counts once.
+//! 9. **A table** (D-AXK27): the diff of an edited table is a table, `<div class="table-wrap
+//!    chg-diff" data-rdy="content"><table>`, with the new table's columns and rows and the old
+//!    table's removed ones in their old places. Columns pair by header text (the k-th column of a
+//!    header text with the k-th of it in the other table); rows by a first cell unique in both
+//!    tables; each removed column or row stands after the one before it in the old table. Each
+//!    cell is the word diff of its old and new text, so the diff's cost cap holds per cell: a
+//!    cell of an added row or column is all added, of a removed one all removed, each with the
+//!    marks of rule 5. A new table is all added, a removed one all removed, as tables; a table
+//!    made another block type (or the reverse) shows each side whole in its own element (rule 6).
 use crate::escape;
 use crate::home::{self, ChangeRow};
 use crate::inline::{Form, code_escape};
@@ -104,8 +113,8 @@ pub struct Entry {
     /// The block in place on its page, when it is in this site.
     pub href: Option<String>,
     /// The word diff: `<p class="chg-diff" data-rdy="content">…</p>`, or for a code block
-    /// `<pre class="code chg-diff" data-rdy="content"><code>…</code></pre>` (rule 6), after the
-    /// type change in words when the type changed (rule 8).
+    /// `<pre class="code chg-diff" data-rdy="content"><code>…</code></pre>` (rule 6), or for a
+    /// table a table (rule 9), after the type change in words when the type changed (rule 8).
     pub diff_html: String,
 }
 
@@ -512,28 +521,35 @@ fn unit(b: &Block) -> Unit {
     }
 }
 
-/// The diff of a block from `old` (in `from`) to `new` (in `to`) (rules 4 and 6): a word diff in
+/// The diff of a block from `old` (in `from`) to `new` (in `to`) (rules 4, 6 and 9): a word diff in
 /// the block's element when both sides have the same kind of text, else each side whole in its
-/// own element.
+/// own element. A table's diff, or a new or removed table's, is a table (rule 9).
 fn block_diff(old: Option<&Block>, new: Option<&Block>, sides: &Sides) -> String {
-    let old = old.map(|o| {
-        (
-            text(o, sides.from, sides.site_of(sides.from)),
-            wrap_of(o),
-            o,
-        )
-    });
+    let old_site = sides.site_of(sides.from);
+    match (old.filter(|o| is_table(o)), new.filter(|n| is_table(n))) {
+        (Some(o), Some(n)) => return table_diff(Some((o, old_site)), Some((n, sides.text))),
+        (Some(o), None) if new.is_none() => return table_diff(Some((o, old_site)), None),
+        (None, Some(n)) if old.is_none() => return table_diff(None, Some((n, sides.text))),
+        _ => {}
+    }
+    let old = old.map(|o| (text(o, sides.from, old_site), wrap_of(o), o));
     let new = new.map(|n| (text(n, sides.to, sides.text), wrap_of(n), n));
     match (old, new) {
-        (Some((ot, ow, _)), Some((nt, nw, n))) if ow.same_kind(&nw) => {
+        (Some((ot, ow, o)), Some((nt, nw, n)))
+            if ow.same_kind(&nw) && !is_table(o) && !is_table(n) =>
+        {
             diff_html(&worddiff::diff(&ot, &nt, unit(n)), &nw)
         }
-        (Some((ot, ow, _)), Some((nt, nw, _))) => {
+        (Some((ot, ow, o)), Some((nt, nw, n))) => {
             let mut out = String::new();
-            if !ot.is_empty() {
+            if is_table(o) {
+                out.push_str(&table_diff(Some((o, old_site)), None));
+            } else if !ot.is_empty() {
                 out.push_str(&diff_html(&worddiff::diff(&ot, "", Unit::Lines), &ow));
             }
-            if !nt.is_empty() || ot.is_empty() {
+            if is_table(n) {
+                out.push_str(&table_diff(None, Some((n, sides.text))));
+            } else if !nt.is_empty() || ot.is_empty() {
                 out.push_str(&diff_html(&worddiff::diff("", &nt, Unit::Lines), &nw));
             }
             out
@@ -542,6 +558,177 @@ fn block_diff(old: Option<&Block>, new: Option<&Block>, sides: &Sides) -> String
         (Some((ot, ow, o)), None) => diff_html(&worddiff::diff(&ot, "", unit(o)), &ow),
         (None, None) => String::new(),
     }
+}
+
+/// Whether `b`'s diff is a table (rule 9): a table that is not removed (a removed block reads as
+/// the notice).
+fn is_table(b: &Block) -> bool {
+    b.block_type == "table" && !b.is_redacted()
+}
+
+/// A table's cells as a reader reads them (rule 9), each coded (rule 7): its header texts, and
+/// each row's cells. A row that is not a list is one cell. A cell reads as the search index reads
+/// it ([`own_text_coded`]).
+#[derive(Default)]
+struct Grid {
+    head: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+impl Grid {
+    fn of(b: &Block, site: &Site) -> Grid {
+        use rdy_model::FieldValue;
+        let cell = |v: &FieldValue| match v {
+            FieldValue::Str(s) => {
+                site.plain_coded(s, RefMode::Strict, Form::Spans, &|_| String::new())
+            }
+            FieldValue::Bool(b) => b.to_string(),
+            FieldValue::Int(i) => i.to_string(),
+            _ => String::new(),
+        };
+        let list = |name: &str| match b.fields.get(name) {
+            Some(FieldValue::List(l)) => l.as_slice(),
+            _ => &[],
+        };
+        let head = list("columns").iter().map(cell).collect();
+        let rows = list("rows")
+            .iter()
+            .map(|r| match r {
+                FieldValue::List(cells) => cells.iter().map(cell).collect(),
+                other => vec![cell(other)],
+            })
+            .collect();
+        Grid { head, rows }
+    }
+
+    /// How many columns the table has: its headers, or its widest row.
+    fn width(&self) -> usize {
+        self.rows
+            .iter()
+            .map(Vec::len)
+            .chain([self.head.len()])
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// The places of a table diff's columns or rows (rule 9): each new one in its order, paired with
+/// its old one, if any (`pair`, new to old), and each old one with no pair after the one that
+/// came before it in the old table (before them all when it was first).
+fn places(old: usize, pair: &[Option<usize>]) -> Vec<(Option<usize>, Option<usize>)> {
+    let mut paired = vec![false; old];
+    for &o in pair.iter().flatten() {
+        paired[o] = true;
+    }
+    // each unpaired old one under the nearest paired old one before it (None: the start)
+    let mut after: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
+    let mut anchor = None;
+    for (o, &p) in paired.iter().enumerate() {
+        if p {
+            anchor = Some(o);
+        } else {
+            after.entry(anchor).or_default().push(o);
+        }
+    }
+    let mut out: Vec<(Option<usize>, Option<usize>)> = vec![];
+    let removed = |out: &mut Vec<_>, at: Option<usize>| {
+        out.extend(
+            after
+                .get(&at)
+                .into_iter()
+                .flatten()
+                .map(|&o| (Some(o), None)),
+        );
+    };
+    removed(&mut out, None);
+    for (n, &o) in pair.iter().enumerate() {
+        out.push((o, Some(n)));
+        if o.is_some() {
+            removed(&mut out, o);
+        }
+    }
+    out
+}
+
+/// The diff of a table (rule 9), as a table: `old` and `new` each with the site its text reads
+/// against. Columns pair by header text, each one with the same text in the other table in turn;
+/// rows by a first cell that is unique in both tables. Each cell is its own word diff, so the
+/// diff's cost cap holds for each cell on its own. A new table's cells are all added, and a
+/// removed table's all removed.
+fn table_diff(old: Option<(&Block, &Site)>, new: Option<(&Block, &Site)>) -> String {
+    let og = old.map(|(b, s)| Grid::of(b, s)).unwrap_or_default();
+    let ng = new.map(|(b, s)| Grid::of(b, s)).unwrap_or_default();
+    let (ow, nw) = (og.width(), ng.width());
+    let header = |g: &Grid, i: usize| g.head.get(i).map_or("", String::as_str).to_string();
+    // columns: the k-th column of a header text in the new table pairs with the k-th of it in the
+    // old one
+    let mut free: BTreeMap<String, std::collections::VecDeque<usize>> = BTreeMap::new();
+    for i in 0..ow {
+        free.entry(header(&og, i)).or_default().push_back(i);
+    }
+    let col_pair: Vec<Option<usize>> = (0..nw)
+        .map(|i| free.get_mut(&header(&ng, i)).and_then(|q| q.pop_front()))
+        .collect();
+    let cols = places(ow, &col_pair);
+    // rows: a first cell that is unique in both tables
+    let first = |r: &Vec<String>| r.first().cloned().unwrap_or_default();
+    let counts = |g: &Grid| {
+        let mut c: BTreeMap<String, usize> = BTreeMap::new();
+        for r in &g.rows {
+            *c.entry(first(r)).or_default() += 1;
+        }
+        c
+    };
+    let (oc, nc) = (counts(&og), counts(&ng));
+    let old_at: BTreeMap<String, usize> = og
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (first(r), i))
+        .collect();
+    let row_pair: Vec<Option<usize>> = ng
+        .rows
+        .iter()
+        .map(|r| {
+            let k = first(r);
+            (oc.get(&k) == Some(&1) && nc.get(&k) == Some(&1)).then(|| old_at[&k])
+        })
+        .collect();
+    let rows = places(og.rows.len(), &row_pair);
+
+    // each cell: the word diff of its old text (when its row and column are old) and its new text
+    let cell_html = |out: &mut String, o: Option<&str>, n: Option<&str>| {
+        let (o, n) = (o.unwrap_or(""), n.unwrap_or(""));
+        pieces_html(&worddiff::diff(o, n, Unit::Words), out);
+    };
+    let mut out =
+        String::from("<div class=\"table-wrap chg-diff\" data-rdy=\"content\"><table><thead><tr>");
+    for &(oi, ni) in &cols {
+        out.push_str("<th scope=\"col\">");
+        cell_html(
+            &mut out,
+            oi.and_then(|i| og.head.get(i)).map(String::as_str),
+            ni.and_then(|i| ng.head.get(i)).map(String::as_str),
+        );
+        out.push_str("</th>");
+    }
+    out.push_str("</tr></thead><tbody>");
+    for &(or, nr) in &rows {
+        out.push_str("<tr>");
+        let (or, nr) = (or.map(|r| &og.rows[r]), nr.map(|r| &ng.rows[r]));
+        for &(oi, ni) in &cols {
+            out.push_str("<td>");
+            cell_html(
+                &mut out,
+                or.zip(oi).and_then(|(r, i)| r.get(i)).map(String::as_str),
+                nr.zip(ni).and_then(|(r, i)| r.get(i)).map(String::as_str),
+            );
+            out.push_str("</td>");
+        }
+        out.push_str("</tr>");
+    }
+    out.push_str("</tbody></table></div>");
+    out
 }
 
 /// The element a diff is written in (rule 6): the block's own kind of text.
@@ -789,5 +976,310 @@ mod tests {
             para("Run `make` now.", "Run make now."),
             format!("Run {DEL}<code>make</code></del>{INS}make</ins> now.")
         );
+    }
+
+    // rule 9 (D-AXK27): a table's diff is a table
+
+    fn table(head: &[&str], rows: &[&[&str]]) -> Block {
+        use rdy_model::FieldValue;
+        let strs = |c: &[&str]| {
+            FieldValue::List(c.iter().map(|t| FieldValue::Str(t.to_string())).collect())
+        };
+        Block {
+            id: BlockId::parse("tb-AAAAA").expect("an id"),
+            block_type: "table".into(),
+            parent: None,
+            order: "a0".into(),
+            fields: BTreeMap::from([
+                ("columns".to_string(), strs(head)),
+                (
+                    "rows".to_string(),
+                    FieldValue::List(rows.iter().map(|r| strs(r)).collect()),
+                ),
+            ]),
+            body: String::new(),
+            links: BTreeMap::new(),
+            pins: BTreeMap::new(),
+            foreign: Default::default(),
+            read_identity: None,
+        }
+    }
+
+    fn prose(body: &str) -> Block {
+        Block {
+            block_type: "prose".into(),
+            fields: BTreeMap::new(),
+            body: body.into(),
+            ..table(&[], &[])
+        }
+    }
+
+    fn pack() -> rdy_schema::Pack {
+        rdy_schema::PackSet::with_builtin()
+            .resolve("rdy-standard")
+            .expect("the pack")
+    }
+
+    /// `block_diff` of `old` to `new`, both read against one empty state.
+    fn diff_of(old: Option<&Block>, new: Option<&Block>) -> String {
+        let m = Materialized::default();
+        let pack = pack();
+        let site = Site::new(&m, &pack, "Project");
+        let sides = Sides {
+            from: &m,
+            to: &m,
+            text: &site,
+            from_text: None,
+        };
+        block_diff(old, new, &sides)
+    }
+
+    /// A table diff's cells, row by row (the header row first): `[-x-]` removed, `{+x+}` added.
+    fn grid(html: &str) -> Vec<Vec<String>> {
+        let inner = html
+            .strip_prefix("<div class=\"table-wrap chg-diff\" data-rdy=\"content\"><table><thead>")
+            .and_then(|h| h.strip_suffix("</tbody></table></div>"))
+            .unwrap_or_else(|| panic!("a table diff: {html}"))
+            .replace(DEL, "[-")
+            .replace("</del>", "-]")
+            .replace(INS, "{+")
+            .replace("</ins>", "+}")
+            .replace("</thead><tbody>", "");
+        inner
+            .split("<tr>")
+            .filter(|r| !r.is_empty())
+            .map(|r| {
+                let r = r.strip_suffix("</tr>").expect("a row");
+                r.split("</th>")
+                    .flat_map(|c| c.split("</td>"))
+                    .filter(|c| !c.is_empty())
+                    .map(|c| {
+                        c.strip_prefix("<th scope=\"col\">")
+                            .or_else(|| c.strip_prefix("<td>"))
+                            .expect("a cell")
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn cells(rows: &[&[&str]]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|r| r.iter().map(|c| c.to_string()).collect())
+            .collect()
+    }
+
+    fn tdiff(old: &Block, new: &Block) -> Vec<Vec<String>> {
+        grid(&diff_of(Some(old), Some(new)))
+    }
+
+    /// Columns pair by header text: an added column is added in every cell, a removed one
+    /// removed, in its old place; a changed header is one removed and one added column.
+    #[test]
+    fn sr6_table_columns_pair_by_header_text() {
+        let old = table(
+            &["Name", "Size", "Note"],
+            &[&["a", "1", "x"], &["b", "2", "y"]],
+        );
+        // Size removed, Colour added at the end, Note renamed to Notes
+        let new = table(
+            &["Name", "Notes", "Colour"],
+            &[&["a", "x", "red"], &["b", "y", "blue"]],
+        );
+        assert_eq!(
+            tdiff(&old, &new),
+            cells(&[
+                &["Name", "[-Size-]", "[-Note-]", "{+Notes+}", "{+Colour+}"],
+                &["a", "[-1-]", "[-x-]", "{+x+}", "{+red+}"],
+                &["b", "[-2-]", "[-y-]", "{+y+}", "{+blue+}"],
+            ])
+        );
+        // a removed first column stands before them all
+        let old = table(&["Id", "Name"], &[&["a", "a"]]);
+        let new = table(&["Name"], &[&["a"]]);
+        assert_eq!(
+            tdiff(&old, &new),
+            cells(&[&["[-Id-]", "Name"], &["[-a-]", "a"]])
+        );
+    }
+
+    /// Rows pair by a first cell unique in both tables, in the new order; a removed row stands
+    /// after the row that came before it in the old table.
+    #[test]
+    fn sr6_table_rows_pair_by_a_unique_first_cell() {
+        let old = table(&["K", "V"], &[&["a", "1"], &["b", "2"], &["c", "3"]]);
+        let new = table(
+            &["K", "V"],
+            &[&["z", "0"], &["a", "1"], &["c", "3"], &["d", "4"]],
+        );
+        assert_eq!(
+            tdiff(&old, &new),
+            cells(&[
+                &["K", "V"],
+                &["{+z+}", "{+0+}"],
+                &["a", "1"],
+                &["[-b-]", "[-2-]"],
+                &["c", "3"],
+                &["{+d+}", "{+4+}"],
+            ])
+        );
+        // a removed first row stands first
+        let new = table(&["K", "V"], &[&["b", "2"], &["c", "3"]]);
+        assert_eq!(
+            tdiff(&old, &new),
+            cells(&[&["K", "V"], &["[-a-]", "[-1-]"], &["b", "2"], &["c", "3"]])
+        );
+    }
+
+    /// A first cell that is not unique in both tables pairs no row: those rows are removed and
+    /// added.
+    #[test]
+    fn sr6_table_duplicate_first_cells_are_removed_and_added() {
+        let old = table(&["K", "V"], &[&["a", "1"], &["a", "2"], &["b", "3"]]);
+        let new = table(&["K", "V"], &[&["a", "1"], &["b", "4"]]);
+        assert_eq!(
+            tdiff(&old, &new),
+            cells(&[
+                &["K", "V"],
+                &["[-a-]", "[-1-]"],
+                &["[-a-]", "[-2-]"],
+                &["{+a+}", "{+1+}"],
+                &["b", "[-3-]{+4+}"],
+            ])
+        );
+    }
+
+    /// A cell of a paired row and column shows its own word diff; an unchanged cell its text.
+    /// Text is escaped, and a code span stays a `<code>` element.
+    #[test]
+    fn sr6_table_cells_show_their_own_word_diff() {
+        let old = table(
+            &["K", "Say"],
+            &[&["a", "the old <b> words"], &["b", "same"]],
+        );
+        let new = table(
+            &["K", "Say"],
+            &[&["a", "the new <b> words"], &["b", "same"]],
+        );
+        assert_eq!(
+            tdiff(&old, &new),
+            cells(&[
+                &["K", "Say"],
+                &["a", "the [-old-]{+new+} &lt;b&gt; words"],
+                &["b", "same"],
+            ])
+        );
+        let old = table(&["K", "Run"], &[&["a", "run `make` now"]]);
+        let new = table(&["K", "Run"], &[&["a", "run `make all` now"]]);
+        assert_eq!(
+            tdiff(&old, &new),
+            cells(&[
+                &["K", "Run"],
+                &["a", "run <code>make</code>{+<code> all</code>+} now"]
+            ])
+        );
+    }
+
+    /// The cost cap holds for each cell on its own: a cell past it shows its old text removed
+    /// and its new text added, inside its own cell, and the other cells keep their own diff.
+    #[test]
+    fn sr6_table_a_cell_past_the_cap_stays_in_its_cell() {
+        let words = |w: &str| {
+            (0..1_500)
+                .map(|i| format!("{w}{i}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let (ow, nw) = (words("old"), words("new"));
+        let old = table(&["K", "Long", "Short"], &[&["a", &ow, "one"]]);
+        let new = table(&["K", "Long", "Short"], &[&["a", &nw, "two"]]);
+        assert_eq!(
+            tdiff(&old, &new),
+            cells(&[
+                &["K", "Long", "Short"],
+                &["a", &format!("[-{ow}-]{{+{nw}+}}"), "[-one-]{+two+}"],
+            ])
+        );
+    }
+
+    /// A new table shows whole as added and a removed one whole as removed, as tables.
+    #[test]
+    fn sr6_a_new_or_removed_table_is_a_table() {
+        let t = table(&["K", "V"], &[&["a", "1"]]);
+        assert_eq!(
+            grid(&diff_of(None, Some(&t))),
+            cells(&[&["{+K+}", "{+V+}"], &["{+a+}", "{+1+}"]])
+        );
+        assert_eq!(
+            grid(&diff_of(Some(&t), None)),
+            cells(&[&["[-K-]", "[-V-]"], &["[-a-]", "[-1-]"]])
+        );
+    }
+
+    /// A table made a paragraph (or the reverse) shows each side whole in its own element.
+    #[test]
+    fn sr6_a_table_made_a_paragraph_shows_each_side_whole() {
+        let t = table(&["K"], &[&["a"]]);
+        let p = prose("Some words.");
+        let removed = diff_of(Some(&t), None);
+        let added = diff_of(None, Some(&t));
+        assert_eq!(
+            diff_of(Some(&t), Some(&p)),
+            format!(
+                "{removed}<p class=\"chg-diff\" data-rdy=\"content\">{INS}Some words.</ins></p>"
+            )
+        );
+        assert_eq!(
+            diff_of(Some(&p), Some(&t)),
+            format!("<p class=\"chg-diff\" data-rdy=\"content\">{DEL}Some words.</del></p>{added}")
+        );
+    }
+
+    /// A table of about 53,000 characters with one cell changed shows as a table with one small
+    /// cell diff, never one removed and one added run of the whole table.
+    #[test]
+    fn sr6_a_large_table_with_one_changed_cell_shows_one_cell_diff() {
+        let row = |i: usize, last: &str| {
+            vec![
+                format!("row{i:04}"),
+                format!("alpha beta gamma delta {i}"),
+                last.to_string(),
+            ]
+        };
+        let rows: Vec<Vec<String>> = (0..1_000)
+            .map(|i| row(i, "a quiet line of words"))
+            .collect();
+        let mut changed = rows.clone();
+        changed[500][2] = "a loud line of words".to_string();
+        fn as_refs(rs: &[Vec<String>]) -> Vec<Vec<&str>> {
+            rs.iter()
+                .map(|r| r.iter().map(String::as_str).collect())
+                .collect()
+        }
+        let (o, n) = (as_refs(&rows), as_refs(&changed));
+        let o: Vec<&[&str]> = o.iter().map(Vec::as_slice).collect();
+        let n: Vec<&[&str]> = n.iter().map(Vec::as_slice).collect();
+        let (old, new) = (
+            table(&["Key", "Words", "Tone"], &o),
+            table(&["Key", "Words", "Tone"], &n),
+        );
+        let chars: usize = rows.iter().flatten().map(|c| c.chars().count()).sum();
+        assert!((50_000..56_000).contains(&chars), "{chars}");
+        let started = std::time::Instant::now();
+        let html = diff_of(Some(&old), Some(&new));
+        let took = started.elapsed();
+        eprintln!(
+            "53k table diff: {chars} characters, {} bytes of HTML in {took:?}",
+            html.len()
+        );
+        assert_eq!(html.matches("<del>").count(), 1);
+        assert_eq!(html.matches("<ins>").count(), 1);
+        assert!(html.contains(&format!(
+            "<td>a {DEL}quiet</del>{INS}loud</ins> line of words</td>"
+        )));
+        let g = grid(&html);
+        assert_eq!(g.len(), 1_001);
+        assert!(g.iter().all(|r| r.len() == 3));
     }
 }
