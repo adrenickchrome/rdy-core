@@ -921,7 +921,16 @@ pub fn copy_project(e: &Env) -> (tempfile::TempDir, Local) {
             if p.is_dir() {
                 copy_dir(&p, &to.join(entry.file_name()));
             } else {
-                fs::copy(&p, to.join(entry.file_name())).unwrap();
+                let dest = to.join(entry.file_name());
+                match fs::copy(&p, &dest) {
+                    Ok(_) => {}
+                    // Windows: the open engine's whole-file locks (lock, index) block reads; the copy opens without them.
+                    #[cfg(windows)]
+                    Err(err) if err.raw_os_error() == Some(33) => {
+                        let _ = fs::remove_file(&dest);
+                    }
+                    Err(err) => panic!("copy {}: {err}", p.display()),
+                }
             }
         }
     }
