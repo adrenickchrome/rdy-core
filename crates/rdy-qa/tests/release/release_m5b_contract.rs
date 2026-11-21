@@ -73,7 +73,7 @@ fn wck1_successor_starts_from_the_integrated_fixture() {
 }
 
 /// wck1: in the resolved graph, only `rdy-check-wasm` depends on the interpreter, with exactly
-/// the `std` and `validate` features; the boundary depends on no rdy crate; and the engine
+/// the `portable-dispatch`, `std` and `validate` features; the boundary depends on no rdy crate; and the engine
 /// depends on the boundary.
 #[test]
 fn wck1_only_the_wrapper_depends_on_wasmi() {
@@ -135,7 +135,13 @@ fn wck1_only_the_wrapper_depends_on_wasmi() {
     let wasmi: Vec<&(String, BTreeSet<String>, Vec<String>)> =
         resolved.iter().filter(|(n, _, _)| n == "wasmi").collect();
     assert_eq!(wasmi.len(), 1, "one wasmi version");
-    assert_eq!(wasmi[0].2, ["std", "validate"], "wasmi's features");
+    // portable dispatch: the interpreter's loop never grows the host stack per operator, in an
+    // optimised build or not
+    assert_eq!(
+        wasmi[0].2,
+        ["portable-dispatch", "std", "validate"],
+        "wasmi's features"
+    );
     let wrapper = resolved
         .iter()
         .find(|(n, _, _)| n == "rdy-check-wasm")

@@ -20,6 +20,7 @@ mod hooks;
 mod io;
 mod module_compile;
 mod module_input;
+mod module_run;
 mod paths;
 mod query;
 mod read_only;
