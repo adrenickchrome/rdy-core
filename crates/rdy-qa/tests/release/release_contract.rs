@@ -4968,13 +4968,19 @@ fn mcp_vector_probes(seen: &mut Seen) {
         }
         ok_of(&mcp_probe(seen, &mut c, "rdy_brief", "rdy_brief", args))
     });
-    mcp_write_vector_probes(seen, &mut c, &address);
+    let section = mcp_write_vector_probes(seen, &mut c, &address);
+    mcp_relevance_probes(seen, &mut c, &address, &section);
 }
 
 /// D-Y1WEY, D-0ZPAP: the vector rows of a write result through MCP. Two claims created in
 /// section One list rows `{for, block, score, words, links, doc}` with words and links, at most
-/// three each; a write of eleven created claims counts the one past ten as skipped.
-fn mcp_write_vector_probes(seen: &mut Seen, c: &mut rdy_qa::mcp::McpClient, address: &str) {
+/// three each; a write of eleven created claims counts the one past ten as skipped. Returns the
+/// section the claims went to.
+fn mcp_write_vector_probes(
+    seen: &mut Seen,
+    c: &mut rdy_qa::mcp::McpClient,
+    address: &str,
+) -> String {
     let briefed = |c: &mut rdy_qa::mcp::McpClient| {
         let b = ok_of(&c.call("rdy_brief", json!({"ids": [address]})));
         assert!(b["base"]["token"].is_string(), "{b}");
@@ -5048,6 +5054,47 @@ fn mcp_write_vector_probes(seen: &mut Seen, c: &mut rdy_qa::mcp::McpClient, addr
         .filter_map(|r| r["for"].as_str())
         .collect();
     assert!(fors.len() <= 10, "{w}");
+    section
+}
+
+/// vxs6 (D-76Y9H, D-5VGAS): `sort: relevance` through MCP. Two claims in `section` share their
+/// matching line, so one entry carries a `score` and its `also` member its own; a regex or an
+/// unknown sort value is refused.
+fn mcp_relevance_probes(
+    seen: &mut Seen,
+    c: &mut rdy_qa::mcp::McpClient,
+    address: &str,
+    section: &str,
+) {
+    let b = ok_of(&c.call("rdy_brief", json!({"ids": [address]})));
+    let w = ok_of(&c.call(
+        "rdy_write",
+        json!({"brief": b["base"]["token"], "ops": [
+            {"op": "create", "type": "claim", "parent": section, "body": "Walrus pups rest.\nThey sleep on the ice floe all day."},
+            {"op": "create", "type": "claim", "parent": section, "body": "Walrus pups rest.\nOften."}
+        ]}),
+    ));
+    assert!(w.is_object(), "the pups: {w}");
+    let ranked = ok_of(&mcp_probe(
+        seen,
+        c,
+        "rdy_search",
+        "rdy_search relevance",
+        json!({"query": "Walrus pups", "sort": "relevance"}),
+    ));
+    let entry = &ranked["matches"][0];
+    assert!(entry["score"].is_number(), "{ranked}");
+    assert!(entry["also"][0]["score"].is_number(), "{ranked}");
+    for args in [
+        json!({"query": "walrus", "sort": "relevance", "regex": true}),
+        json!({"query": "walrus", "sort": "score"}),
+    ] {
+        let reply = mcp_probe(seen, c, "rdy_search", "rdy_search refused", args);
+        assert!(
+            matches!(reply, rdy_qa::mcp::Reply::ToolError(_)),
+            "{reply:?}"
+        );
+    }
 }
 
 fn cli_vector_probes(seen: &mut Seen, env: &[(String, String)]) {
@@ -7600,6 +7647,7 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// rows and dropped decisions are empty there; the review rows probe fills each of them.
 /// vxs4: the Markdown import creates content blocks, so its reply lists vector rows; its blocks
 /// link to nothing, so those rows share no link (the `rdy_write` rows show the links).
+/// vxs6: a search refusal has no issues.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -7849,6 +7897,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_schema/ok/children?",
     "mcp/rdy_schema/ok/fields?/planned/values",
     "mcp/rdy_schema/ok/fields?/since/values",
+    "mcp/rdy_search refused/refused/issues",
     "mcp/rdy_supersede/ok/consequences",
     "mcp/rdy_supersede/ok/on_change/checks",
     "mcp/rdy_supersede/ok/on_change/resolved",

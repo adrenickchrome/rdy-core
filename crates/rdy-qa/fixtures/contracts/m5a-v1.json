@@ -25604,6 +25604,61 @@
           }
         }
       },
+      "rdy_search refused": {
+        "refusal_codes": [
+          "E_BAD_INPUT"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_search relevance": {
+        "ok": {
+          "ignore_case": "bool",
+          "matches": [
+            {
+              "also": [
+                {
+                  "id": "string",
+                  "path": "string",
+                  "score": "number"
+                }
+              ],
+              "confidence": "string",
+              "coverage": "number",
+              "id": "string",
+              "issues": "number",
+              "lines": [
+                {
+                  "field": "string",
+                  "line": "number",
+                  "text": "string"
+                }
+              ],
+              "path": "string",
+              "score": "number",
+              "type": "string"
+            }
+          ],
+          "query": "string",
+          "regex": "bool",
+          "total": "number",
+          "totals": {
+            "docs": [
+              {
+                "hits": "number",
+                "path": "string"
+              }
+            ],
+            "types": {
+              "claim": "number"
+            }
+          }
+        }
+      },
       "rdy_session": {
         "ok": {
           "areas": [
