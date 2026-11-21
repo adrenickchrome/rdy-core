@@ -3,12 +3,15 @@
 //!
 //! `m5b-v1.json` is the current fixture: it started as a byte copy of `sync-client-b-v1.json`,
 //! which is frozen from here on, and every selector moves to it. The module rule capture
-//! (wck6) is its first change, and the module metadata capture (wck7) its second. The
-//! interpreter is linked through `rdy-check-wasm` alone: no other package of the workspace
+//! (wck6) is its first change, the module metadata capture (wck7) its second and the example
+//! pack's metadata (wck8) its last: wck9 pins its delta from the predecessor to exactly those
+//! additions, and every earlier fixture, the built-in pack, the store registry, the dump and
+//! store fixtures and the command tree to their bytes. The interpreter is linked through `rdy-check-wasm` alone: no other package of the workspace
 //! depends on it, the boundary depends on no rdy crate, and the engine depends on the boundary.
 use rdy_qa::fixtures::output_within;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -23,7 +26,7 @@ const PREDECESSOR_SHA: &str = "e65653b123aea1307a9e2ab9728f3b5d18e25b33b8f7ca8aa
 /// The current fixture, which every selector names.
 const CURRENT: &str = "m5b-v1.json";
 
-/// The sha256 of [`CURRENT`] since the example pack metadata capture (wck8).
+/// The sha256 of [`CURRENT`] since the example pack metadata capture (wck8), its final bytes.
 const CURRENT_SHA: &str = "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d26256d2fb41";
 
 /// The source file of each current-fixture selector, from the workspace root.
@@ -156,4 +159,346 @@ fn wck1_only_the_wrapper_depends_on_wasmi() {
         ["rdy-engine"],
         "the engine depends on the boundary"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// wck9: the freeze. The successor holds exactly the module-rule additions.
+// ---------------------------------------------------------------------------------------------
+
+/// Every leaf where `m5b-v1.json` differs from its predecessor, each with the task that captured
+/// it and why.
+const M5B_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /cli/runtime/probes/pack check",
+        "wck7: rdy pack check is probed, its module metadata included",
+    ),
+    (
+        "removed /cli/runtime/not_probed_commands/pack",
+        "wck7: pack leaves the list of commands with no probe, because it now has one",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema checks.rules",
+        "wck7: rdy_schema's checks.rules lists the module limits and the rule tests",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/checks?/rules/module",
+        "wck7: the module object of checks.rules and its fixed limits",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/checks?/rules/tests",
+        "wck7: the two rule tests, require and module",
+    ),
+    (
+        "added /mcp/result_fields/rdy_write module rules",
+        "wck6: a write's on_change.checks rows of a module rule",
+    ),
+    (
+        "added /schema_packs/module_rules",
+        "wck6 to wck8: module packs, their metadata and the example pack",
+    ),
+    (
+        "added /schema_packs/validation/module_rules",
+        "wck6: the closed pack-load refusals of module rules",
+    ),
+];
+
+fn read(name: &str) -> Value {
+    serde_json::from_slice(&bytes(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+/// A list of identified entries as an object keyed by identity (`key=`, `name=`, `id=` or the
+/// first string of a row), so a change reads as the entry's own path. Other lists stay lists.
+fn keyed(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => Value::Object(m.iter().map(|(k, x)| (k.clone(), keyed(x))).collect()),
+        Value::Array(a) => {
+            let identity = |e: &Value| -> Option<String> {
+                for k in ["key", "name", "id"] {
+                    if let Some(s) = e.get(k).and_then(Value::as_str) {
+                        return Some(format!("{k}={s}"));
+                    }
+                }
+                e.as_array()?.first()?.as_str().map(|s| format!("row={s}"))
+            };
+            let ids: Option<Vec<String>> = a.iter().map(identity).collect();
+            match ids {
+                Some(ids)
+                    if !a.is_empty() && ids.iter().collect::<BTreeSet<_>>().len() == ids.len() =>
+                {
+                    let mut m = Map::new();
+                    for (id, e) in ids.into_iter().zip(a) {
+                        m.insert(id, keyed(e));
+                    }
+                    Value::Object(m)
+                }
+                _ => Value::Array(a.iter().map(keyed).collect()),
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// Every member where `now` differs from `was`, as `added|removed|changed <path>`.
+fn leaves(was: &Value, now: &Value, path: &str, out: &mut Vec<String>) {
+    match (was, now) {
+        (Value::Object(a), Value::Object(b)) => {
+            let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            for k in keys {
+                let at = format!("{path}/{k}");
+                match (a.get(k), b.get(k)) {
+                    (None, Some(_)) => out.push(format!("added {at}")),
+                    (Some(_), None) => out.push(format!("removed {at}")),
+                    (Some(x), Some(y)) => leaves(x, y, &at, out),
+                    (None, None) => unreachable!("the key is in one of the objects"),
+                }
+            }
+        }
+        _ if was != now => out.push(format!("changed {path}")),
+        _ => {}
+    }
+}
+
+/// Every scalar and array member of `v` by its keyed path.
+fn flat(v: &Value, path: &str, out: &mut BTreeMap<String, Value>) {
+    match v {
+        Value::Object(m) if !m.is_empty() => {
+            for (k, x) in m {
+                flat(x, &format!("{path}/{k}"), out);
+            }
+        }
+        other => {
+            out.insert(path.to_string(), other.clone());
+        }
+    }
+}
+
+/// wck9: the current fixture differs from its predecessor in exactly the listed members: each
+/// listed member changed and no other; the one removal is `pack` leaving the list of commands
+/// with no probe; every other leaf keeps its value; no section moved; and the command tree is the
+/// predecessor's.
+#[test]
+fn wck9_m5b_contract_delta_is_exactly_the_listed_additions() {
+    let (was, now) = (read(PREDECESSOR), read(CURRENT));
+    let mut found = vec![];
+    leaves(&keyed(&was), &keyed(&now), "", &mut found);
+    found.sort();
+    let mut want: Vec<String> = M5B_CHANGES.iter().map(|(c, _)| c.to_string()).collect();
+    let distinct: BTreeSet<&String> = want.iter().collect();
+    assert_eq!(distinct.len(), want.len(), "no member is listed twice");
+    want.sort();
+    assert_eq!(found, want, "the delta is the listed members and no other");
+    for (change, why) in M5B_CHANGES {
+        assert!(why.len() > 10, "{change}: {why}");
+        let path = change.split_once(' ').expect("a verb").1;
+        assert!(
+            path.matches('/').count() >= 2,
+            "a member below a section: {change}"
+        );
+        if change.starts_with("removed ") {
+            assert_eq!(path, "/cli/runtime/not_probed_commands/pack");
+            assert!(
+                found.contains(&"added /cli/runtime/probes/pack check".to_string()),
+                "pack has a probe in its place"
+            );
+        } else {
+            assert!(change.starts_with("added "), "{change}");
+        }
+    }
+    // every leaf that no listed member touches keeps its value
+    let (mut a, mut b) = (BTreeMap::new(), BTreeMap::new());
+    flat(&keyed(&was), "", &mut a);
+    flat(&keyed(&now), "", &mut b);
+    let touched: Vec<&str> = found
+        .iter()
+        .map(|c| c.split_once(' ').expect("a verb").1)
+        .collect();
+    let mut kept = 0;
+    for (leaf, value) in &a {
+        if touched
+            .iter()
+            .any(|t| leaf == t || leaf.starts_with(&format!("{t}/")))
+        {
+            continue;
+        }
+        assert_eq!(b.get(leaf), Some(value), "{leaf} keeps its value");
+        kept += 1;
+    }
+    assert!(kept > 1000, "the check saw the whole predecessor: {kept}");
+    let (Value::Object(x), Value::Object(y)) = (&was, &now) else {
+        panic!("the fixtures are objects");
+    };
+    assert_eq!(x.keys().collect::<Vec<_>>(), y.keys().collect::<Vec<_>>());
+    // the command tree is the predecessor's: M5b adds no command or flag
+    assert_eq!(was["cli"]["tree"], now["cli"]["tree"], "the CLI tree");
+    // the store, dump, sync and identity sections are the predecessor's
+    for section in [
+        "store",
+        "dump_load",
+        "sync",
+        "derived_identities",
+        "inventory_version",
+    ] {
+        assert_eq!(was[section], now[section], "{section}");
+    }
+}
+
+/// Every earlier contract fixture, each with the sha256 of its bytes.
+const EARLIER: &[(&str, &str)] = &[
+    (
+        "release-1.json",
+        "635f63e24cb0a743892f52944b9b5182f4f013ca75f5491d9e05c120400a6ef6",
+    ),
+    (
+        "repo-links-v1.json",
+        "b975e0cad885386f134d9dbfab08bf7677ccdbbc9bdeb0c927289e9346f4ca27",
+    ),
+    (
+        "mcp-http-v1.json",
+        "13a8de668dedbbbd2591a6da4e24d65d7897de8368107ff90e9d89917e26a3de",
+    ),
+    (
+        "m4a-v1.json",
+        "49ca6b3f9cab4e97445c1de5df5a513fe97ceee3971d9ae17853307bc9922a71",
+    ),
+    (
+        "m4bc-v1.json",
+        "f8a229b41fff5337d52d8b614670a5b0edcbee534598b35c001064fa040d06c6",
+    ),
+    (
+        "readme-from-rdy-v1.json",
+        "883debf0ad6ba99e983662a92ddb8c7f044306cea027ca835994b39b5187dc16",
+    ),
+    (
+        "disclosure-review-v1.json",
+        "956044b4b5e6a51a9810f31a4c0c16ad81aa9a035d735ed4d8b9d7a1d9edf139",
+    ),
+    (
+        "sd1-v1.json",
+        "012ff9ed50f654618517e629e3dcfa6c8e28935bf311c880de2faaa40576aea2",
+    ),
+    (
+        "sync-client-v1.json",
+        "a8bc2d43a01a728f14d7926cb7ace8fd82d4312047f0c03f39720018efcae10c",
+    ),
+    (PREDECESSOR, PREDECESSOR_SHA),
+];
+
+/// The sha256 of the built-in pack's file, which M5b leaves as it was.
+const BUILTIN_PACK_SHA: &str = "20f0fb8fdaee1aa8b910226740154dc39408c4beca924a5399d4f9325c74cfce";
+
+/// The digest of the released dump fixtures and of the native store fixtures ([`tree_digest`]),
+/// which M5b leaves as they were.
+const DUMP_FIXTURES_DIGEST: (usize, &str) = (
+    86,
+    "232ec8e9db5e8f4b582e82c3a4543c42743cdd59d82a36b3d39f75f7fe6a5d8e",
+);
+const STORE_FIXTURES_DIGEST: (usize, &str) = (
+    85,
+    "e5c48b33394612a9d4acc0f8325eaaa880953eb9dfa3ae723527b89853443fc8",
+);
+
+/// The files under `dir`, and the sha256 of one line per file in byte order of its `/` path:
+/// `<path> <sha256 of its bytes>`.
+fn tree_digest(dir: &Path) -> (usize, String) {
+    fn walk(dir: &Path, at: &str, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = if at.is_empty() {
+                name
+            } else {
+                format!("{at}/{name}")
+            };
+            if e.file_type().unwrap().is_dir() {
+                walk(&e.path(), &rel, out);
+            } else {
+                out.push((rel, std::fs::read(e.path()).unwrap()));
+            }
+        }
+    }
+    let mut files = vec![];
+    walk(dir, "", &mut files);
+    files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let lines: String = files
+        .iter()
+        .map(|(path, bytes)| format!("{path} {}\n", sha(bytes)))
+        .collect();
+    (files.len(), sha(lines.as_bytes()))
+}
+
+/// wck9: M5b changes no released format: every earlier contract fixture keeps its bytes and the
+/// current fixture has its final bytes, the folder holds those and no other; the built-in pack's
+/// file, the released dump fixtures and the native store fixtures keep their bytes; the store
+/// registers the same features at the same formats; and the built-in pack still has no rule.
+#[test]
+fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
+    for (name, want) in EARLIER {
+        assert_eq!(&sha(&bytes(name)), want, "{name} is frozen");
+    }
+    assert_eq!(
+        sha(&bytes(CURRENT)),
+        CURRENT_SHA,
+        "{CURRENT} has its final bytes"
+    );
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/contracts");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let mut want: Vec<&str> = EARLIER.iter().map(|(n, _)| *n).chain([CURRENT]).collect();
+    want.sort();
+    assert_eq!(
+        names, want,
+        "the folder holds the earlier fixtures and {CURRENT}"
+    );
+
+    // the built-in pack, its bytes and the pack the project resolves from them
+    let pack_file = root().join("crates/rdy-schema/packs/rdy-standard.yaml");
+    assert_eq!(sha(&std::fs::read(&pack_file).unwrap()), BUILTIN_PACK_SHA);
+    let pack = rdy_schema::PackSet::with_builtin()
+        .resolve("rdy-standard")
+        .unwrap();
+    assert!(pack.rules.is_empty(), "the built-in pack has no rule");
+    let now = read(CURRENT);
+    assert_eq!(
+        now["schema_packs"]["builtin_packs"],
+        read(PREDECESSOR)["schema_packs"]["builtin_packs"]
+    );
+
+    // the released dump fixtures and the native store fixtures
+    let qa = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dump = tree_digest(&qa.join("fixtures/dump"));
+    assert_eq!(
+        (dump.0, dump.1.as_str()),
+        DUMP_FIXTURES_DIGEST,
+        "the dump fixtures"
+    );
+    let store = tree_digest(&qa.join("fixtures/store"));
+    assert_eq!(
+        (store.0, store.1.as_str()),
+        STORE_FIXTURES_DIGEST,
+        "the store fixtures"
+    );
+
+    // the store registry and the formats: no feature, store format or dump format is new
+    assert_eq!(
+        now["store"]["registered_names"],
+        serde_json::json!(rdy_store::format::REGISTERED_FEATURES),
+        "the store registers what the contract lists"
+    );
+    assert_eq!(
+        now["dump_load"]["dump_format"],
+        rdy_store::dump::DUMP_FORMAT
+    );
+    assert_eq!(
+        (
+            rdy_store::format::FEATURE_STORE_FORMAT,
+            rdy_store::format::MANIFEST_VERSION,
+            rdy_store::dump::DUMP_FORMAT,
+        ),
+        (19, 1, 4),
+        "the store and dump formats"
+    );
+    assert_eq!(rdy_store::format::REGISTERED_FEATURES.len(), 12);
 }

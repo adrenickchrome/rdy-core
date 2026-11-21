@@ -1,0 +1,112 @@
+{
+  "input": {
+    "block": "c-P0000",
+    "bytes": 680,
+    "rule": "a-pass",
+    "sha256": "c312880cbf8d5443fc3c27a0913fbd41cdb9213213250fd92ed1f40a96054755",
+    "text": "{\"args\":{\"limit\":3,\"words\":[\"tab\\u0009end\",\"bell\\u0007\"]},\"block\":{\"area\":[],\"body\":\"Tab\\u0009then escape \\u001b[0m, unit \\u001f, tab \\u000b, delete ,\\u000anew line, \\\"quote\\\" and \\\\ end.\",\"doc\":\"d-DET00\",\"fields\":{},\"id\":\"c-P0000\",\"links\":{},\"parent\":\"s-DET01\",\"path\":\"determinism\",\"planned\":false,\"references\":[],\"traits\":[\"describes\",\"normative\"],\"type\":\"claim\"},\"interface\":1,\"neighbours\":[{\"block\":{\"area\":[],\"doc\":\"d-DET00\",\"fields\":{\"title\":\"Cases\"},\"id\":\"s-DET01\",\"links\":{},\"parent\":\"d-DET00\",\"path\":\"determinism\",\"planned\":false,\"references\":[],\"traits\":[\"structural\"],\"type\":\"section\"},\"from\":\"c-P0000\",\"hops\":1,\"via\":\"parent\"}],\"neighbours_omitted\":0,\"rule\":\"a-pass\"}"
+  },
+  "modules": [
+    {
+      "bytes": 106,
+      "fixture": "pass.b64",
+      "fuel": 4,
+      "input_sha256": "c312880cbf8d5443fc3c27a0913fbd41cdb9213213250fd92ed1f40a96054755",
+      "interface": 1,
+      "judgement": "pass",
+      "rule": "a-pass",
+      "sha256": "05ce18b044539328bfc3232b89e3832162c96707b99f03eab0fcbceb515f2e99"
+    },
+    {
+      "bytes": 107,
+      "fixture": "fail.b64",
+      "fuel": 4,
+      "input_sha256": "534af1c343fa827d912564b961525c58c51c8e01904a1faf57c05c8904464709",
+      "interface": 1,
+      "judgement": "fail: (rule message) | (rule fix)",
+      "rule": "b-fail",
+      "sha256": "5b258a6aab49ee05fb14ac4806bf379bb3e70a55acf93465c7458ba8caaeb7fe"
+    },
+    {
+      "bytes": 162,
+      "fixture": "fail-text.b64",
+      "fuel": 4,
+      "input_sha256": "c9e410d26040d98fbd8915720bd485b1a052bec87418df00d9dc3ce80378572f",
+      "interface": 1,
+      "judgement": "fail: the module says no | ask the module",
+      "rule": "c-text",
+      "sha256": "8513f75dbc549c85bfff2ef0357143d24bf9c5717836dd4594c99c881119ce0a"
+    },
+    {
+      "bytes": 84,
+      "fixture": "trap.b64",
+      "fuel": 3,
+      "input_sha256": "e9474d5a05c778d9deb88f504cb4ce501abfdaa734193ae041e546c8173c292f",
+      "interface": 1,
+      "judgement": "cannot judge: the module trapped: wasm `unreachable` instruction executed",
+      "rule": "d-trap",
+      "sha256": "4d8f6f6f33f9483ca8c65cd6f659b0684d3bd9bf871478ddb20a316b7e142523"
+    },
+    {
+      "bytes": 213,
+      "fixture": "memory-grow.b64",
+      "fuel": 261138,
+      "input_sha256": "bba863559c3fd0a95116c6bca773fa7ebca13d7499b487d38698156a571ee2a0",
+      "interface": 1,
+      "judgement": "fail: the memory stopped at 256 pages | grow no more",
+      "rule": "e-memory",
+      "sha256": "f015fa803d47f2835466f0d28bce444834deaff10f5f6ea4594f6292fb96bdf3"
+    },
+    {
+      "bytes": 134,
+      "fixture": "call-depth.b64",
+      "fuel": 8190,
+      "input_sha256": "dc9dadecae74bb55c51259a820c47190787d17c6aa29dc4a316b6eb2b223d0a6",
+      "interface": 1,
+      "judgement": "cannot judge: the module trapped: call stack exhausted",
+      "rule": "f-depth",
+      "sha256": "95c2adc21ca91a6ec8b37432599788f6cf8ce2f40dd4987c381a049be5467395"
+    },
+    {
+      "bytes": 126,
+      "fixture": "value-stack.b64",
+      "fuel": 697,
+      "input_sha256": "61bb583bcda59887747410a68914c0b887333eecde3ddf10a0a618018fc03de5",
+      "interface": 1,
+      "judgement": "cannot judge: the module trapped: call stack exhausted",
+      "rule": "g-stack",
+      "sha256": "eebfecc741c3f9dc807a5c63bb0604ea0c5fae54e13041f3005cea8dfe1b0895"
+    },
+    {
+      "bytes": 89,
+      "fixture": "spin.b64",
+      "fuel": 10000000,
+      "input_sha256": "cef5c12a8e1a4c4c26c391376f381c358d87e1835c6f0512354510156d0b9397",
+      "interface": 1,
+      "judgement": "cannot judge: the module used all of its 10000000 fuel",
+      "rule": "h-spin",
+      "sha256": "1c70165f8c985168c858972951597d29af81b863132e313372013fd4889a0d8f"
+    },
+    {
+      "bytes": 190,
+      "fixture": "burn-marker.b64",
+      "fuel": 20861,
+      "input_sha256": "de541ae134c09190ffb24cb553268c2a5c1b732813180038f6afe94a956f4929",
+      "interface": 1,
+      "judgement": "pass",
+      "rule": "i-burn",
+      "sha256": "3aaed6e648d63e0b8adc34f1366e8051535d8ec9b79ec1862679d20e31aa01fa"
+    },
+    {
+      "bytes": 107,
+      "fixture": "fail.b64",
+      "fuel": 4,
+      "input_sha256": "4b4383df56b3b0c44bbf5f67b5f04df85d2a821e772ced43587cc2753d941f19",
+      "interface": 1,
+      "judgement": "fail: (rule message) | (rule fix)",
+      "rule": "j-tail",
+      "sha256": "5b258a6aab49ee05fb14ac4806bf379bb3e70a55acf93465c7458ba8caaeb7fe"
+    }
+  ],
+  "pack_sha256": "45cba5fa7f0296dc4a22518b815ce3cf62618204fe82d85faf9e654c20e6b133"
+}

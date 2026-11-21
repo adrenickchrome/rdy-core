@@ -100,6 +100,13 @@ pub fn spec_ceiling_ms(op: &str) -> Option<f64> {
         "snapshot_delta_read_warm" => 5.0,
         "snapshot_delta_land" => 100.0,
         "snapshot_delta_upgrade_large" => 300_000.0,
+        // The check-module rows (D-QVTJ9): fixed p95 ceilings chosen by judgement. Planning
+        // budgets, never baseline-relative; a miss is a finding.
+        "wasm_pack_load_8m" => 2000.0,
+        "wasm_check_10k" => 10_000.0,
+        "wasm_check_depth3_1k" => 10_000.0,
+        "wasm_pending_counts_10k" => 2000.0,
+        "wasm_pack_structural_12m" => 1000.0,
         _ => return None,
     })
 }
@@ -117,7 +124,7 @@ pub enum TargetClass {
     /// A stated spec target that is reported, not enforced; compared at 2x.
     Target,
     /// A fixed planning ceiling on p95 ([`spec_ceiling_ms`]) that no baseline row backs: the
-    /// SD1 snapshot-delta rows (D-ANNKF). A row over its ceiling is `OverCeiling`; within it, it
+    /// SD1 snapshot-delta rows (D-ANNKF) and the check-module rows ([`WASM_OPS`]). A row over its ceiling is `OverCeiling`; within it, it
     /// passes with no baseline and never regresses against one.
     FixedCeiling,
     /// A proposed target (ledger F4), not a spec target: reported, never failed.
@@ -211,7 +218,12 @@ pub fn target_class(op: &str) -> Option<TargetClass> {
         "snapshot_delta_read_cold"
         | "snapshot_delta_read_warm"
         | "snapshot_delta_land"
-        | "snapshot_delta_upgrade_large" => TargetClass::FixedCeiling,
+        | "snapshot_delta_upgrade_large"
+        | "wasm_pack_load_8m"
+        | "wasm_check_10k"
+        | "wasm_check_depth3_1k"
+        | "wasm_pending_counts_10k"
+        | "wasm_pack_structural_12m" => TargetClass::FixedCeiling,
         "diff_since"
         | "site_versions_page"
         | "site_versions_page_warm"
@@ -724,6 +736,21 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "snapshot_delta_upgrade_large" => {
             "fixed ceiling < 300,000 ms p95 (D-ANNKF): 10,000 legacy landings of 10,000 entries, one changed entry per later landing; backup, append, reindex, full check and mirrors"
+        }
+        "wasm_pack_load_8m" => {
+            "fixed ceiling < 2,000 ms p95 (D-QVTJ9): resolve, decode, validate and eagerly compile eight distinct 1 MiB modules, 8 MiB in all, with a cold compiler"
+        }
+        "wasm_check_10k" => {
+            "fixed ceiling < 10,000 ms p95 (D-QVTJ9): one module rule over 10,000 claims of 1 KiB at depth 1, each body read; an input and an instance for every block"
+        }
+        "wasm_check_depth3_1k" => {
+            "fixed ceiling < 10,000 ms p95 (D-QVTJ9): one module rule over 1,000 claims of the perf tree at depth 3; an input and an instance for every block"
+        }
+        "wasm_pending_counts_10k" => {
+            "fixed ceiling < 2,000 ms p95 (D-QVTJ9): the second pending-counts read on a new snapshot, one module rule and one open proposal over 10,000 claims; no module runs"
+        }
+        "wasm_pack_structural_12m" => {
+            "fixed ceiling < 1,000 ms p95 (D-QVTJ9): read, parse, resolve and decode a 12 MiB pack file of 8 MiB of modules through the structural read; no module compiles"
         }
         _ => return None,
     };
@@ -6242,6 +6269,692 @@ fn tier_checks(out: &mut Vec<Measure>, parent: &std::path::Path, runs: &Runs) ->
     }
 }
 
+// ---- check modules (D-QVTJ9) ----
+
+/// The five check-module rows, each with a fixed p95 ceiling ([`spec_ceiling_ms`]) chosen by
+/// judgement and no baseline row: [`tier_wasm_checks`] measures them in the typical workload.
+pub const WASM_OPS: [&str; 5] = [
+    "wasm_pack_load_8m",
+    "wasm_check_10k",
+    "wasm_check_depth3_1k",
+    "wasm_pending_counts_10k",
+    "wasm_pack_structural_12m",
+];
+
+/// The sizes of the check-module workloads: [`WASM_BENCH`] on the bench, smaller ones in the
+/// tests, which check counts only.
+#[derive(Clone, Copy, Debug)]
+struct WasmRecipe {
+    /// Timed runs of each row.
+    runs: usize,
+    /// The distinct modules of the pack-load pack, and the bytes of each.
+    modules: usize,
+    module_bytes: usize,
+    /// The claims of the check project, each with a body of `body_bytes`; every
+    /// `mark_every`th holds the mark, which the check module fails.
+    claims: usize,
+    body_bytes: usize,
+    mark_every: usize,
+    /// The perf tree of the depth-3 row (folders, docs per folder, claims per doc) and the
+    /// claims it selects.
+    tree: (usize, usize, usize),
+    deep: usize,
+    /// The bytes of the structural pack file.
+    structural_bytes: usize,
+}
+
+/// The bench's recipe: 8 MiB of modules, 10,000 claims of 1 KiB, the 10k perf tree, a 12 MiB
+/// pack file.
+const WASM_BENCH: WasmRecipe = WasmRecipe {
+    runs: 5,
+    modules: 8,
+    module_bytes: 1_048_576,
+    claims: 10_000,
+    body_bytes: 1024,
+    mark_every: 1000,
+    tree: (10, 10, 97),
+    deep: 1000,
+    structural_bytes: 12 * 1_048_576,
+};
+
+/// What the check-module workloads did, counted outside their timers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct WasmFacts {
+    /// The module rules each pack-load sample compiled, and their bytes.
+    compiled: usize,
+    compiled_bytes: usize,
+    /// The module runs and inputs of the last sample of each selection row.
+    check_runs: u64,
+    check_inputs: usize,
+    deep_runs: u64,
+    deep_inputs: usize,
+    /// The depth-3 inputs that reach the 1 MiB input cap: some neighbours left out.
+    deep_capped: usize,
+    /// The rule rows of the open proposal, as its card and the uncached scan give them.
+    pending_rows: usize,
+    /// The module rules and decoded bytes the structural read resolved.
+    structural_rules: usize,
+    structural_bytes: usize,
+}
+
+/// A small encoder of check modules: the exports `memory`, `rdy_alloc` and `rdy_check_v1`.
+mod guest {
+    pub const I32: u8 = 0x7f;
+    pub const I64: u8 = 0x7e;
+
+    pub fn leb(mut v: u64, out: &mut Vec<u8>) {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                return;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    pub fn sleb(mut v: i64, out: &mut Vec<u8>) {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && b & 0x40 == 0) || (v == -1 && b & 0x40 != 0) {
+                out.push(b);
+                return;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    pub fn i32c(v: i32, out: &mut Vec<u8>) {
+        out.push(0x41);
+        sleb(i64::from(v), out);
+    }
+
+    /// `i64.const` of the result for the output at `at`, `len` bytes long.
+    pub fn result(at: u32, len: u32, out: &mut Vec<u8>) {
+        out.push(0x42);
+        sleb(((u64::from(at) << 32) | u64::from(len)) as i64, out);
+    }
+
+    fn with_len(bytes: &[u8], out: &mut Vec<u8>) {
+        leb(bytes.len() as u64, out);
+        out.extend_from_slice(bytes);
+    }
+
+    /// A function body: one run of `locals` `i32` locals, then `code`, then `end`.
+    pub fn body(locals: u64, code: &[u8]) -> Vec<u8> {
+        let mut inner = vec![];
+        if locals == 0 {
+            inner.push(0);
+        } else {
+            inner.extend([1]);
+            leb(locals, &mut inner);
+            inner.push(I32);
+        }
+        inner.extend_from_slice(code);
+        inner.push(0x0b);
+        let mut out = vec![];
+        with_len(&inner, &mut out);
+        out
+    }
+
+    /// A module: type 0 `(i32) -> i32`, type 1 `(i32, i32) -> i64`, type 2 `() -> ()`; function 0
+    /// `rdy_alloc` (type 0) and function 1 `rdy_check_v1` (type 1), each with one `i32` local
+    /// after its parameters, then `extra` functions of type 2, given as their bodies; one memory
+    /// of one page; `data` at its offsets.
+    pub fn module(alloc: &[u8], check: &[u8], extra: &[Vec<u8>], data: &[(u32, &[u8])]) -> Vec<u8> {
+        let section = |id: u8, body: &[u8], out: &mut Vec<u8>| {
+            out.push(id);
+            with_len(body, out);
+        };
+        let mut out = b"\0asm\x01\0\0\0".to_vec();
+        section(
+            1,
+            &[
+                3, 0x60, 1, I32, 1, I32, 0x60, 2, I32, I32, 1, I64, 0x60, 0, 0,
+            ],
+            &mut out,
+        );
+        let mut funcs = vec![];
+        leb(2 + extra.len() as u64, &mut funcs);
+        funcs.extend([0, 1]);
+        funcs.extend(std::iter::repeat_n(2, extra.len()));
+        section(3, &funcs, &mut out);
+        section(5, &[1, 0, 1], &mut out);
+        let mut exports = vec![3];
+        for (name, kind, index) in [
+            ("memory", 2, 0),
+            ("rdy_alloc", 0, 0),
+            ("rdy_check_v1", 0, 1),
+        ] {
+            with_len(name.as_bytes(), &mut exports);
+            exports.extend([kind, index]);
+        }
+        section(7, &exports, &mut out);
+        let mut code = vec![];
+        leb(2 + extra.len() as u64, &mut code);
+        code.extend(body(1, alloc));
+        code.extend(body(1, check));
+        for f in extra {
+            code.extend_from_slice(f);
+        }
+        section(10, &code, &mut out);
+        let mut segs = vec![];
+        leb(data.len() as u64, &mut segs);
+        for (at, bytes) in data {
+            segs.push(0);
+            i32c(*at as i32, &mut segs);
+            segs.push(0x0b);
+            with_len(bytes, &mut segs);
+        }
+        section(11, &segs, &mut out);
+        out
+    }
+
+    pub const PASS: &[u8] = b"{\"pass\":true}";
+    pub const FAIL: &[u8] = b"{\"pass\":false}";
+
+    /// The `rdy_alloc` of the check modules: it grows the memory to hold `n` bytes at 1024 and
+    /// returns 1024.
+    pub fn growing_alloc() -> Vec<u8> {
+        let mut c = vec![];
+        // pages = (n + 1024 + 65535) >> 16; grow by pages - memory.size when that is above 0
+        c.extend([0x20, 0]);
+        i32c(1024 + 65_535, &mut c);
+        c.extend([0x6a]);
+        i32c(16, &mut c);
+        c.extend([0x76, 0x3f, 0x00, 0x6b, 0x21, 1, 0x20, 1]);
+        i32c(0, &mut c);
+        c.extend([0x4a, 0x04, 0x40, 0x20, 1, 0x40, 0x00, 0x1a, 0x0b]);
+        i32c(1024, &mut c);
+        c
+    }
+
+    /// A module that passes at once, whatever its input.
+    pub fn pass() -> Vec<u8> {
+        let mut check = vec![];
+        result(0, PASS.len() as u32, &mut check);
+        module(&growing_alloc(), &check, &[], &[(0, PASS)])
+    }
+
+    /// A module that reads every byte of its input: it fails an input that holds `~!~`, with the
+    /// rule's words, and passes any other.
+    pub fn reader() -> Vec<u8> {
+        let mut c = vec![0x02, 0x40, 0x03, 0x40];
+        // i + 3 > len: done
+        c.extend([0x20, 2]);
+        i32c(3, &mut c);
+        c.extend([0x6a, 0x20, 1, 0x4b, 0x0d, 1]);
+        for (offset, byte) in [(0u8, b'~'), (1, b'!'), (2, b'~')] {
+            c.extend([0x20, 0, 0x20, 2, 0x6a, 0x2d, 0x00, offset]);
+            i32c(i32::from(byte), &mut c);
+            c.push(0x46);
+            if offset > 0 {
+                c.push(0x71);
+            }
+        }
+        c.extend([0x04, 0x40]);
+        result(64, FAIL.len() as u32, &mut c);
+        c.extend([0x0f, 0x0b, 0x20, 2]);
+        i32c(1, &mut c);
+        c.extend([0x6a, 0x21, 2, 0x0c, 0, 0x0b, 0x0b]);
+        result(0, PASS.len() as u32, &mut c);
+        module(&growing_alloc(), &c, &[], &[(0, PASS), (64, FAIL)])
+    }
+
+    /// A module of exactly `len` bytes that passes at once, distinct for each `seed`: its bulk is
+    /// functions of real code (constants added and dropped), every body validated and
+    /// translated at load. `len` is at least 4,096 and below 2 MiB.
+    pub fn bulky(seed: u32, len: usize) -> Vec<u8> {
+        assert!((4096..2_097_152).contains(&len), "{len}");
+        let filler = |k: usize, groups: usize, nops: usize| -> Vec<u8> {
+            let mut c = vec![];
+            for g in 0..groups {
+                i32c(((seed as usize + k + g) % 64) as i32, &mut c);
+                i32c(((seed as usize * 7 + g) % 64) as i32, &mut c);
+                c.extend([0x6a, 0x1a]);
+            }
+            c.extend(std::iter::repeat_n(0x01, nops));
+            body(0, &c)
+        };
+        let mut alloc = vec![];
+        i32c(1024 + (seed % 1024) as i32, &mut alloc);
+        let mut check = vec![];
+        result(0, PASS.len() as u32, &mut check);
+        let build = |extra: &[Vec<u8>]| module(&alloc, &check, extra, &[(0, PASS)]);
+        // full fillers of 170 groups (1,020 code bytes) while a last filler of at least 200
+        // nops still leaves 2,000 bytes; that last one takes more nops to the exact length (its
+        // body's length stays two bytes long, so each nop adds one byte)
+        let mut extra: Vec<Vec<u8>> = vec![];
+        let room = |extra: &mut Vec<Vec<u8>>| {
+            extra.push(filler(extra.len(), 0, 200));
+            let room = len as i64 - build(extra).len() as i64;
+            extra.pop();
+            room
+        };
+        while room(&mut extra) >= 2_000 {
+            extra.push(filler(extra.len(), 170, 0));
+        }
+        let more = usize::try_from(room(&mut extra)).expect("room for the last filler");
+        extra.push(filler(extra.len(), 0, 200 + more));
+        let out = build(&extra);
+        assert_eq!(out.len(), len, "the module's length");
+        out
+    }
+}
+
+/// Standard base64 with padding, as a pack file holds a module.
+fn base64(bytes: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                ABC[((n >> (18 - 6 * i)) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+/// A pack of module rules on claims, each `(name, module)`: its base64 in 76-column lines of a
+/// literal block, which the load reads without the line breaks.
+fn module_pack(name: &str, rules: &[(String, Vec<u8>)]) -> String {
+    let mut yaml = format!("name: {name}\nversion: \"1\"\nextends: rdy-standard\nrules:\n");
+    for (rule, module) in rules {
+        yaml.push_str(&format!(
+            "  - name: {rule}\n    select: type = claim\n    message: {rule} fails\n    fix: repair {rule}\n    module: |\n"
+        ));
+        let text = base64(module);
+        for line in text.as_bytes().chunks(76) {
+            yaml.push_str("      ");
+            yaml.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+            yaml.push('\n');
+        }
+    }
+    yaml
+}
+
+/// A project at `dir` on pack `name`, its file `yaml`; the store is made, then closed.
+fn pack_project(dir: &std::path::Path, name: &str, yaml: &str) {
+    std::fs::create_dir_all(dir).expect("mkdir");
+    drop(Rdy::init(dir, "rdy-standard").expect("init"));
+    crate::packs::use_pack(dir, name, yaml, "");
+}
+
+/// The module rules of `pack`, with their decoded bytes.
+fn module_rules(pack: &rdy_schema::Pack) -> Vec<usize> {
+    pack.rules
+        .iter()
+        .filter_map(|r| match &r.test {
+            rdy_schema::RuleTestSpec::Module(m) => Some(m.module.len()),
+            rdy_schema::RuleTestSpec::Filter { .. } => None,
+        })
+        .collect()
+}
+
+/// The check project: `claims` claims in canon, a hundred per doc, ten docs per folder, each
+/// body `body_bytes` long, every `mark_every`th marked; then the pack of one module rule, `read`,
+/// running [`guest::reader`]. Returns the claims' ids.
+fn wasm_check_project(dir: &std::path::Path, recipe: &WasmRecipe) -> (Rdy, Vec<BlockId>) {
+    std::fs::create_dir_all(dir).expect("mkdir");
+    let mut r = Rdy::init(dir, "rdy-standard").expect("init");
+    let mut ids = vec![];
+    let mut folder = String::new();
+    for doc in 0..recipe.claims.div_ceil(100) {
+        if doc % 10 == 0 {
+            let w = write(
+                &mut r,
+                "work",
+                json!([{"op": "create", "type": "folder", "fields": {"name": format!("area-{}", doc / 10)}}]),
+            )
+            .expect("folder");
+            folder = w.created["op0"].clone();
+        }
+        let mut ops = vec![
+            json!({"op": "create", "type": "doc", "id": "$d", "parent": folder, "fields": {"name": format!("doc-{doc}"), "title": format!("Doc {doc}"), "doc_type": "constraints"}}),
+            json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Constraints"}}),
+        ];
+        let first = doc * 100;
+        let last = (first + 100).min(recipe.claims);
+        for c in first..last {
+            let mark = if c % recipe.mark_every == recipe.mark_every - 1 {
+                " ~!~"
+            } else {
+                ""
+            };
+            let mut body = format!("Claim {c} of doc {doc}{mark}.");
+            while body.len() + 5 <= recipe.body_bytes {
+                body.push_str(" word");
+            }
+            while body.len() < recipe.body_bytes {
+                body.push('.');
+            }
+            ops.push(json!({"op": "create", "type": "claim", "id": format!("$c{c}"), "parent": "$s", "body": body}));
+        }
+        let w = write(&mut r, "work", json!(ops)).expect("claims");
+        ids.extend((first..last).map(|c| BlockId::parse(&w.created[&format!("$c{c}")]).unwrap()));
+    }
+    land(&mut r, "work").expect("land the claims");
+    drop(r);
+    crate::packs::use_pack(
+        dir,
+        "perf-wasm",
+        &module_pack("perf-wasm", &[("read".into(), guest::reader())]),
+        "",
+    );
+    let r = Rdy::open(dir).expect("open the check project");
+    ids.sort();
+    (r, ids)
+}
+
+/// The only module rule of `r`'s loaded pack.
+fn the_module_rule(
+    rules: &rdy_engine::check::rules::CompiledRules,
+) -> (&str, &rdy_engine::check::rules::ModuleRule) {
+    let [rule] = rules.rules() else {
+        panic!("one rule");
+    };
+    let rdy_engine::check::rules::CompiledRuleTest::Module(m) = &rule.test else {
+        panic!("a module rule");
+    };
+    (&rule.name, m)
+}
+
+/// One selection sample: each of `ids` judged in `scope` of `r` by the loaded pack's one module
+/// rule, its compilation reused, a new rule budget and an empty cache, so each block gets an input
+/// and an instance. The time of the judging alone; the runs and inputs it made; whether every
+/// block passed or failed on the module's own answer (none ran out of fuel).
+fn wasm_select_sample(r: &Rdy, scope: &Scope, ids: &[BlockId]) -> (Duration, u64, usize) {
+    use rdy_engine::check::module_input::{ModuleState, encode_input};
+    use rdy_engine::check::module_run::{
+        Judgement, RuleBudget, judge_module, module_runs_on_this_thread_for_tests,
+    };
+    let st = r.read();
+    let m = st.materialized(scope).expect("the scope");
+    let g = st.graph(scope).expect("its graph");
+    let rules = st.compiled_rules().expect("the compiled rules");
+    let (name, rule) = the_module_rule(&rules);
+    let empty = rdy_engine::check::rules::CompiledRules::empty();
+    let (runs, s) = (module_runs_on_this_thread_for_tests(), Instant::now());
+    let ms = ModuleState::new(st.pack(), &m, &g, st.area_matcher());
+    let mut budget = RuleBudget::new();
+    let inputs = std::cell::Cell::new(0usize);
+    let mut answered = 0usize;
+    for id in ids {
+        let input = || {
+            inputs.set(inputs.get() + 1);
+            encode_input(&ms, name, rule.args(), id, rule.depth()).ok()
+        };
+        let j = judge_module(name, rule, empty.cache(), &mut budget, input).expect("no host fault");
+        answered += usize::from(matches!(j, Judgement::Pass | Judgement::Fail { .. }));
+    }
+    let took = s.elapsed();
+    assert_eq!(
+        answered,
+        ids.len(),
+        "every block gets the module's own answer"
+    );
+    assert!(
+        budget.remaining() > 0,
+        "the guest fuel stays below the rule's"
+    );
+    (
+        took,
+        module_runs_on_this_thread_for_tests() - runs,
+        inputs.get(),
+    )
+}
+
+/// The check-module rows ([`WASM_OPS`]), each with a fixed ceiling, on projects of their own
+/// under `parent`. Setup stays outside every timer.
+fn tier_wasm_checks(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    recipe: &WasmRecipe,
+) -> WasmFacts {
+    use rdy_engine::check::module_run::module_runs_on_this_thread_for_tests;
+    let mut facts = WasmFacts::default();
+    // wasm_pack_load_8m: resolve, decode, validate and compile the distinct modules, a cold
+    // compiler for every sample (nothing compiled is kept from the last one)
+    let rules: Vec<(String, Vec<u8>)> = (0..recipe.modules)
+        .map(|k| {
+            (
+                format!("load-{k}"),
+                guest::bulky(k as u32, recipe.module_bytes),
+            )
+        })
+        .collect();
+    let yaml = module_pack("perf-load", &rules);
+    let load = parent.join("wasm-load");
+    pack_project(&load, "perf-load", &yaml);
+    out.push(measure_timed("wasm_pack_load_8m", recipe.runs, |_| {
+        let s = Instant::now();
+        let (pack, compiled) = rdy_engine::project_pack_compiled(&load).expect("the pack loads");
+        let took = s.elapsed();
+        facts.compiled = compiled.rules().len();
+        facts.compiled_bytes = module_rules(&pack).iter().sum();
+        took
+    }));
+    assert_eq!(facts.compiled, recipe.modules);
+    assert_eq!(facts.compiled_bytes, recipe.modules * recipe.module_bytes);
+
+    // wasm_pack_structural_12m: the same modules in a pack file of exactly the recipe's bytes
+    // (comment lines make up the rest), read, parsed, resolved and decoded; no module compiles
+    let mut text = yaml;
+    assert!(text.len() + 2 <= recipe.structural_bytes, "{}", text.len());
+    let mut pad = recipe.structural_bytes - text.len();
+    while pad > 0 {
+        let line = pad.min(1001);
+        text.push('#');
+        text.push_str(&" ".repeat(line.saturating_sub(2)));
+        if line > 1 {
+            text.push('\n');
+        }
+        pad -= line;
+    }
+    assert_eq!(text.len(), recipe.structural_bytes);
+    let structural = parent.join("wasm-structural");
+    pack_project(
+        &structural,
+        "perf-structural",
+        &text.replace("perf-load", "perf-structural"),
+    );
+    let compilations = rdy_engine::check::rules::module_compilations_on_this_thread_for_tests;
+    let read = || rdy_engine::project_pack(&structural).expect("the structural read");
+    let sample = |_| {
+        let compiles = compilations();
+        let s = Instant::now();
+        let pack = read();
+        let took = s.elapsed();
+        assert_eq!(compilations(), compiles, "no module compiles");
+        let decoded = module_rules(&pack);
+        facts.structural_rules = decoded.len();
+        facts.structural_bytes = decoded.iter().sum();
+        took
+    };
+    let row = measure_timed("wasm_pack_structural_12m", recipe.runs, sample);
+    out.push(row);
+    assert_eq!(
+        (facts.structural_rules, facts.structural_bytes),
+        (recipe.modules, recipe.modules * recipe.module_bytes)
+    );
+
+    // wasm_check_10k: one rule over every claim at depth 1, each body read by the module
+    let (mut r, ids) = wasm_check_project(&parent.join("wasm-check"), recipe);
+    assert_eq!(ids.len(), recipe.claims);
+    out.push(measure_timed("wasm_check_10k", recipe.runs, |_| {
+        let (took, runs, inputs) = wasm_select_sample(&r, &Scope::Canon, &ids);
+        (facts.check_runs, facts.check_inputs) = (runs, inputs);
+        took
+    }));
+    assert_eq!(
+        (facts.check_runs, facts.check_inputs),
+        (recipe.claims as u64, recipe.claims)
+    );
+
+    // wasm_pending_counts_10k: an open proposal of one edit, whose landing projection holds every
+    // claim; the counts read on a new snapshot after a warm one, which runs no module
+    write(
+        &mut r,
+        "edit",
+        json!([{"op": "update", "id": ids[0].to_string(), "body": "An edited claim."}]),
+    )
+    .expect("the edit");
+    let p = r
+        .propose(&writer(), "edit", "edit", Some(crate::intake::TEST_SUMMARY))
+        .expect("propose");
+    let q = PendingQuery {
+        person: crate::intake::PERSON.into(),
+        session_ref: None,
+        max_tokens: CARD_DEFAULT_TOKENS,
+    };
+    let warm = r.read().pending_counts(&q).expect("the warm counts");
+    assert!(warm.items >= 1, "{warm:?}");
+    out.push(measure_timed("wasm_pending_counts_10k", recipe.runs, |i| {
+        // a new snapshot: a write in a view of its own publishes one
+        write(
+            &mut r,
+            &format!("other{i}"),
+            json!([{"op": "create", "type": "doc", "fields": {"name": format!("other-{i}"), "title": format!("Other {i}"), "doc_type": "overview"}}]),
+        )
+        .expect("a new snapshot");
+        let st = r.read();
+        let runs = module_runs_on_this_thread_for_tests();
+        let s = Instant::now();
+        let counts = st.pending_counts(&q).expect("the counts");
+        let took = s.elapsed();
+        assert_eq!(
+            module_runs_on_this_thread_for_tests(),
+            runs,
+            "the second read runs no module"
+        );
+        assert_eq!(counts, warm);
+        took
+    }));
+    // the rows the cached read's card gives are the uncached scan's
+    let card: Vec<String> = r
+        .read()
+        .pending(&PendingQuery {
+            max_tokens: rdy_engine::pending::CARD_MAX_TOKENS,
+            ..q
+        })
+        .expect("the queue")
+        .items
+        .into_iter()
+        .find(|i| i.r#ref == p.r#ref)
+        .expect("the proposal's card")
+        .facts
+        .into_iter()
+        .filter(|f| f.name == "Rule check")
+        .map(|f| f.value)
+        .collect();
+    let want: Vec<String> = {
+        let st = r.read();
+        let scope = Scope::View("edit".into());
+        let m = st.materialized(&scope).expect("the view");
+        let g = st.graph(&scope).expect("its graph");
+        let (empty, none) = (BTreeSet::new(), BTreeMap::new());
+        let inputs = rdy_engine::filter::FilterInputs {
+            pack: st.pack(),
+            m: &m,
+            graph: &g,
+            areas: st.area_matcher(),
+            suspects: &empty,
+            tensions: &empty,
+            coverage: &none,
+        };
+        rdy_engine::check::evaluate_rules(
+            st.pack(),
+            inputs,
+            m.ids().cloned(),
+            rdy_engine::check::Stage::Propose,
+        )
+        .expect("the uncached scan")
+        .warnings
+        .iter()
+        .map(|w| format!("{}; fix: {}", w.message, w.fix))
+        .collect()
+    };
+    assert_eq!(card, want, "the cached card's rows are the uncached scan's");
+    assert_eq!(want.len(), recipe.claims / recipe.mark_every);
+    facts.pending_rows = want.len();
+    drop(r);
+
+    // wasm_check_depth3_1k: one rule at depth 3 over claims of the perf tree, a module that
+    // passes at once; the inputs that reach the cap are counted outside the timer
+    let deep = parent.join("wasm-deep");
+    std::fs::create_dir_all(&deep).expect("mkdir");
+    let (folders, docs, claims) = recipe.tree;
+    testkit::generate_tree(&deep, folders, docs, claims);
+    let mut r = Rdy::open(&deep).expect("open the tree");
+    land(&mut r, "work").expect("land the tree");
+    drop(r);
+    let mut pass = guest::pass();
+    // depth 3: the module rule's depth key, after its module
+    let yaml = module_pack("perf-deep", &[("deep".into(), std::mem::take(&mut pass))])
+        .replace("    module: |\n", "    depth: 3\n    module: |\n");
+    crate::packs::use_pack(&deep, "perf-deep", &yaml, "");
+    let r = Rdy::open(&deep).expect("open the tree");
+    let selected: Vec<BlockId> = {
+        let m = r.read().materialized(&Scope::Canon).expect("canon");
+        let mut c: Vec<BlockId> = m
+            .iter()
+            .filter(|b| b.block_type == "claim")
+            .map(|b| b.id.clone())
+            .collect();
+        c.sort();
+        c.truncate(recipe.deep);
+        c
+    };
+    assert_eq!(selected.len(), recipe.deep);
+    facts.deep_capped = {
+        use rdy_engine::check::module_input::{ModuleState, encode_input};
+        let st = r.read();
+        let m = st.materialized(&Scope::Canon).expect("canon");
+        let g = st.graph(&Scope::Canon).expect("graph");
+        let rules = st.compiled_rules().expect("rules");
+        let (name, rule) = the_module_rule(&rules);
+        assert_eq!(rule.depth(), 3);
+        let ms = ModuleState::new(st.pack(), &m, &g, st.area_matcher());
+        selected
+            .iter()
+            .filter(|id| {
+                let bytes = encode_input(&ms, name, rule.args(), id, 3).expect("an input");
+                let tail =
+                    String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(300)..]).into_owned();
+                !tail.contains("\"neighbours_omitted\":0,")
+            })
+            .count()
+    };
+    out.push(measure_timed("wasm_check_depth3_1k", recipe.runs, |_| {
+        let (took, runs, inputs) = wasm_select_sample(&r, &Scope::Canon, &selected);
+        (facts.deep_runs, facts.deep_inputs) = (runs, inputs);
+        took
+    }));
+    assert_eq!(
+        (facts.deep_runs, facts.deep_inputs),
+        (recipe.deep as u64, recipe.deep)
+    );
+    eprintln!(
+        "wasm checks: {} modules of {} bytes; {} claims, {} rule rows; depth 3: {} inputs, {} at the cap",
+        recipe.modules,
+        recipe.module_bytes,
+        recipe.claims,
+        facts.pending_rows,
+        recipe.deep,
+        facts.deep_capped
+    );
+    facts
+}
+
 pub fn run_workload() -> Vec<Measure> {
     rdy_model::seed_ids_for_tests(0x7064_6566);
     let dir = tempfile::tempdir().expect("tempdir");
@@ -6391,6 +7104,8 @@ pub fn run_workload() -> Vec<Measure> {
     tier_signatures(&mut out, &proj, dir.path(), "", SIGNATURE_RUNS);
     // on projects of their own: the check ops (D-JQD5X), reported
     tier_checks(&mut out, dir.path(), &TYPICAL_RUNS);
+    // on projects of their own: the check-module rows (D-QVTJ9), each with a fixed ceiling
+    tier_wasm_checks(&mut out, dir.path(), &WASM_BENCH);
     tier_change_plan(&mut out, &proj, dir.path(), "", &TYPICAL_RUNS, 5, PLAN_N);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
@@ -11723,7 +12438,16 @@ mod tests {
             ("snapshot_delta_upgrade_large", 300_000.0),
         ];
         assert_eq!(SD1_OPS, fixed.map(|(op, _)| op));
-        for (op, c) in fixed {
+        // the check-module rows share the class and its comparison
+        let wasm = [
+            ("wasm_pack_load_8m", 2000.0),
+            ("wasm_check_10k", 10_000.0),
+            ("wasm_check_depth3_1k", 10_000.0),
+            ("wasm_pending_counts_10k", 2000.0),
+            ("wasm_pack_structural_12m", 1000.0),
+        ];
+        assert_eq!(WASM_OPS, wasm.map(|(op, _)| op));
+        for (op, c) in fixed.into_iter().chain(wasm) {
             assert_eq!(spec_ceiling_ms(op), Some(c), "{op}");
             assert_eq!(target_class(op), Some(TargetClass::FixedCeiling), "{op}");
             assert!(!TargetClass::FixedCeiling.informational());
@@ -11771,12 +12495,12 @@ mod tests {
         let baseline: serde_json::Value =
             serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
         for class in baseline["classes"].as_object().expect("classes").values() {
-            for op in SD1_OPS {
+            for op in SD1_OPS.into_iter().chain(WASM_OPS) {
                 assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
             }
         }
         // the closed predecessor ceiling set holds exactly what it held
-        for op in SD1_OPS {
+        for op in SD1_OPS.into_iter().chain(WASM_OPS) {
             assert_ne!(target_class(op), Some(TargetClass::Ceiling), "{op}");
             assert_eq!(
                 target_class(&format!("{op}{LARGE_SUFFIX}")),
@@ -11903,5 +12627,240 @@ mod tests {
             [SD1_OPS[0], SD1_OPS[1], SD1_OPS[3]]
         );
         assert!(out.iter().all(|m| m.runs == 2), "{out:?}");
+    }
+
+    /// The five check-module rows: each exact name has its fixed p95 ceiling and the fixed
+    /// class, states it, is measured once in the workload source, and is not baselined. Over its
+    /// ceiling a row fails in every mode, a machine class with no baseline included; within it,
+    /// compare passes it with no op baseline and never regresses it against one, and record
+    /// records it.
+    #[test]
+    fn wck9_wasm_perf_rows_have_fixed_ceilings() {
+        let ceilings = [
+            ("wasm_pack_load_8m", 2000.0, "2,000"),
+            ("wasm_check_10k", 10_000.0, "10,000"),
+            ("wasm_check_depth3_1k", 10_000.0, "10,000"),
+            ("wasm_pending_counts_10k", 2000.0, "2,000"),
+            ("wasm_pack_structural_12m", 1000.0, "1,000"),
+        ];
+        assert_eq!(WASM_OPS, ceilings.map(|(op, _, _)| op));
+        let src = include_str!("perf.rs");
+        let body = |f: &str| {
+            let from = src.find(f).expect(f);
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        assert!(
+            body("pub fn run_workload(")
+                .contains("tier_wasm_checks(&mut out, dir.path(), &WASM_BENCH);"),
+            "the typical workload measures the rows on the bench recipe"
+        );
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        for (op, c, text) in ceilings {
+            assert_eq!(spec_ceiling_ms(op), Some(c), "{op}");
+            assert_eq!(target_class(op), Some(TargetClass::FixedCeiling), "{op}");
+            let t = spec_target(op).unwrap_or_else(|| panic!("{op} has no text"));
+            assert!(
+                t.starts_with(&format!("fixed ceiling < {text} ms p95 ")),
+                "{op}: {t}"
+            );
+            assert_eq!(
+                src.matches(&format!("measure_timed(\"{op}\"")).count(),
+                1,
+                "{op} is measured exactly once"
+            );
+            assert!(body("fn tier_wasm_checks(").contains(&format!("measure_timed(\"{op}\"")));
+            for class in baseline["classes"].as_object().expect("classes").values() {
+                assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
+            }
+            let row = |p95: f64| Measure {
+                op: op.into(),
+                median_ms: c / 4.0,
+                p95_ms: p95,
+                runs: WASM_BENCH.runs,
+            };
+            // at the ceiling is within it; a hair past it is over
+            for p95 in [c, c * 0.5] {
+                let v = compare(None, &[row(p95)], Mode::Compare);
+                assert_eq!((v[0].status, v[0].pass), (Status::Pass, true), "{op} {p95}");
+                let base = mg3_base(&[(op, c / 1000.0)]);
+                let v = compare(Some(&base), &[row(p95)], Mode::Compare);
+                assert_eq!((v[0].status, v[0].pass), (Status::Pass, true), "{op}");
+                let v = compare(Some(&base), &[row(p95)], Mode::Record);
+                assert_eq!((v[0].status, v[0].pass), (Status::Recorded, true), "{op}");
+                let v = not_compared(&[row(p95)]);
+                assert_eq!(
+                    (v[0].status, v[0].pass),
+                    (Status::NotCompared, false),
+                    "{op}"
+                );
+            }
+            let over = row(c + 0.001);
+            let base = mg3_base(&[(op, c)]);
+            for v in [
+                compare(None, std::slice::from_ref(&over), Mode::Compare),
+                compare(Some(&base), std::slice::from_ref(&over), Mode::Compare),
+                compare(None, std::slice::from_ref(&over), Mode::Record),
+                not_compared(std::slice::from_ref(&over)),
+            ] {
+                assert_eq!(
+                    (v[0].status, v[0].pass),
+                    (Status::OverCeiling, false),
+                    "{op}"
+                );
+            }
+        }
+        // the bench recipe is the rows' names
+        assert_eq!(
+            (WASM_BENCH.modules, WASM_BENCH.module_bytes),
+            (8, 1_048_576)
+        );
+        assert_eq!(WASM_BENCH.modules * WASM_BENCH.module_bytes, 8_388_608);
+        assert_eq!((WASM_BENCH.claims, WASM_BENCH.body_bytes), (10_000, 1024));
+        assert_eq!(WASM_BENCH.deep, 1000);
+        assert_eq!(WASM_BENCH.structural_bytes, 12_582_912);
+        let (folders, docs, claims) = WASM_BENCH.tree;
+        assert!(folders * docs * claims >= WASM_BENCH.deep);
+    }
+
+    /// The check-module workloads on a small recipe, two runs each: each row is measured, every
+    /// selected block gets an input and a run, the structural read compiles nothing, and the
+    /// cached pending read runs no module and gives the uncached rows (asserted inside the tier).
+    /// Counts only, never a time. Then, outside the timed rows, a rule's whole budget runs out:
+    /// the first 100 blocks use all of their fuel and every later block fails with the rule's
+    /// cause, judged without a run.
+    #[test]
+    fn wck9_small_wasm_workloads_do_the_named_work() {
+        rdy_model::seed_ids_for_tests(0x7763_6b39);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let small = WasmRecipe {
+            runs: 2,
+            modules: 2,
+            module_bytes: 8192,
+            claims: 150,
+            body_bytes: 96,
+            mark_every: 50,
+            tree: (2, 2, 10),
+            deep: 30,
+            structural_bytes: 32_768,
+        };
+        let mut out = vec![];
+        let facts = tier_wasm_checks(&mut out, dir.path(), &small);
+        let mut names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        names.sort();
+        let mut want = WASM_OPS.to_vec();
+        want.sort();
+        assert_eq!(names, want);
+        assert!(out.iter().all(|m| m.runs == 2), "{out:?}");
+        assert_eq!(
+            facts,
+            WasmFacts {
+                compiled: 2,
+                compiled_bytes: 16_384,
+                check_runs: 150,
+                check_inputs: 150,
+                deep_runs: 30,
+                deep_inputs: 30,
+                deep_capped: 0,
+                pending_rows: 3,
+                structural_rules: 2,
+                structural_bytes: 16_384,
+            }
+        );
+        // at the bench's size, the modules are exact and distinct, two of them load and compile,
+        // and the eight fit the structural file
+        let bench: Vec<(String, Vec<u8>)> = (0..WASM_BENCH.modules)
+            .map(|k| {
+                (
+                    format!("load-{k}"),
+                    guest::bulky(k as u32, WASM_BENCH.module_bytes),
+                )
+            })
+            .collect();
+        assert!(bench.iter().all(|(_, m)| m.len() == 1_048_576));
+        assert_ne!(bench[0].1, bench[1].1);
+        assert!(module_pack("perf-load", &bench).len() + 2 <= WASM_BENCH.structural_bytes);
+        let two = dir.path().join("wasm-two");
+        pack_project(&two, "perf-two", &module_pack("perf-two", &bench[..2]));
+        let (_, compiled) =
+            rdy_engine::project_pack_compiled(&two).expect("the bench modules load");
+        assert_eq!(compiled.rules().len(), 2);
+
+        // the rule budget: 103 claims, each burning all of a block's fuel
+        use rdy_engine::check::module_run::module_runs_on_this_thread_for_tests;
+        let proj = dir.path().join("wasm-budget");
+        let burn = include_str!("../fixtures/wasm/burn.b64").trim();
+        pack_project(
+            &proj,
+            "perf-budget",
+            &format!(
+                "name: perf-budget\nversion: \"1\"\nextends: rdy-standard\nrules:\n  - name: burn\n    select: type = claim\n    module: {burn}\n    message: burn fails\n    fix: repair burn\n"
+            ),
+        );
+        let mut r = Rdy::open(&proj).expect("open");
+        let ops: Vec<_> = [json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "budget", "title": "Budget", "doc_type": "overview"}}),
+            json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Claims"}})]
+            .into_iter()
+            .chain((0..103).map(|k| json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("Claim {k}.")})))
+            .collect();
+        write(&mut r, "budget", json!(ops)).expect("the claims");
+        let st = r.read();
+        let scope = Scope::View("budget".into());
+        let m = st.materialized(&scope).expect("the view");
+        let g = st.graph(&scope).expect("its graph");
+        let (empty, none) = (BTreeSet::new(), BTreeMap::new());
+        let inputs = rdy_engine::filter::FilterInputs {
+            pack: st.pack(),
+            m: &m,
+            graph: &g,
+            areas: st.area_matcher(),
+            suspects: &empty,
+            tensions: &empty,
+            coverage: &none,
+        };
+        let mut claims: Vec<String> = m
+            .iter()
+            .filter(|b| b.block_type == "claim")
+            .map(|b| b.id.to_string())
+            .collect();
+        claims.sort();
+        let runs = module_runs_on_this_thread_for_tests();
+        let scan = rdy_engine::check::evaluate_rules(
+            st.pack(),
+            inputs,
+            m.ids().cloned(),
+            rdy_engine::check::Stage::Propose,
+        )
+        .expect("the scan");
+        assert_eq!(
+            module_runs_on_this_thread_for_tests() - runs,
+            100,
+            "the hundredth block ends the rule's fuel; no later block runs"
+        );
+        let got: Vec<(String, String)> = scan
+            .warnings
+            .iter()
+            .map(|w| (w.block.clone(), w.message.clone()))
+            .collect();
+        let want: Vec<(String, String)> = claims
+            .iter()
+            .enumerate()
+            .map(|(k, id)| {
+                let cause = if k < 100 {
+                    "the module used all of its 10000000 fuel"
+                } else {
+                    "the rule used all of its 1000000000 fuel in this run"
+                };
+                (
+                    id.clone(),
+                    format!("rule burn could not judge {id}: {cause}"),
+                )
+            })
+            .collect();
+        assert_eq!(got, want);
+        assert_eq!((scan.warnings_omitted, scan.blocking_omitted), (0, 0));
+        drop(st);
+        drop(r);
+        rdy_model::unseed_ids_for_tests();
     }
 }
