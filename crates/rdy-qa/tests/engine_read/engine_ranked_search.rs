@@ -581,3 +581,65 @@ fn vxs6_coverage_sort_keeps_its_values_order_and_cursor() {
     let bounded = search(&r, "alpha beta", json!({"coverage_below": 100}));
     assert_eq!(ranked["total"], bounded["total"]);
 }
+
+/// `n` claims that each hold the one word `kelp`, in one section of doc `bed`, written straight
+/// to view `w`.
+fn kelp_blocks(from: usize, n: usize) -> Vec<rdy_model::Block> {
+    let id = |prefix: &str, k: usize| {
+        let mut body = [b'0'; 5];
+        let mut v = k;
+        for d in body.iter_mut().rev() {
+            *d = rdy_model::CROCKFORD[v % 32];
+            v /= 32;
+        }
+        format!("{prefix}-{}", std::str::from_utf8(&body).unwrap())
+    };
+    let mut blocks = vec![];
+    if from == 0 {
+        blocks.push(raw(
+            "d-0000K",
+            "doc",
+            None,
+            "a1",
+            &[("name", "bed"), ("title", "Bed"), ("doc_type", "overview")],
+            "",
+        ));
+        blocks.push(raw("s-0000K", "section", Some("d-0000K"), "a1", &[], ""));
+    }
+    for k in from..from + n {
+        blocks.push(raw(
+            &id("c", k + 1),
+            "claim",
+            Some("s-0000K"),
+            &format!("a{k:06}"),
+            &[],
+            "kelp",
+        ));
+    }
+    blocks
+}
+
+#[test]
+fn vxs6_ranked_hits_past_the_candidate_limit_are_refused() {
+    use rdy_engine::vectors::SOURCE_CANDIDATES;
+    let (_d, mut r) = project();
+    let view = Scope::View("w".into());
+    let limit = SOURCE_CANDIDATES as usize;
+    raw_commit(&mut r, "w", kelp_blocks(0, limit));
+    let relevance = query("kelp", json!({"sort": "relevance"}));
+    let res = r.read().search(&view, &relevance, None, Some(100)).unwrap();
+    assert_eq!(res.total, limit, "the limit itself is ranked");
+    // one hit more than a source's candidate limit: the ranking is refused, not cut
+    raw_commit(&mut r, "w", kelp_blocks(limit, 1));
+    let e = r
+        .read()
+        .search(&view, &relevance, None, Some(100))
+        .unwrap_err();
+    assert_eq!(e.code, E_LIMIT);
+    assert_eq!(e.message, "vector search exceeds its work limit");
+    assert_eq!(e.fix, "use query without sort relevance");
+    // the default order still lists every hit
+    let plain = query("kelp", json!({}));
+    let res = r.read().search(&view, &plain, None, Some(100)).unwrap();
+    assert_eq!(res.total, limit + 1);
+}

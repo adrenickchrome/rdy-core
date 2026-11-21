@@ -8,8 +8,8 @@ use crate::lexicon::{link_kind_for, tied};
 use crate::materialize::Materialized;
 use crate::suggest::{Suggestion, suggestion_id};
 use crate::tensions::index::is_deprecated;
+use crate::vectors::{CANDIDATE_RECORD_BYTES, round3, score_operands, tf};
 use crate::vectors::{Doc, Operand, VectorBudget, VectorWeights, WeightScope, WordCounts};
-use crate::vectors::{round3, score_operands, tf};
 use crate::{ReadState, Scope, now_ms};
 use rdy_graph::{EdgeKind, GoverningCache, GoverningStatuses};
 use rdy_model::decision::{DECISION, DESCRIBES};
@@ -668,8 +668,9 @@ fn vector_work_refused() -> RdyError {
 /// D-76Y9H, D-J5FWG: gives each hit its exact lexical score against `text`. The query's lexical
 /// vector holds every word of `text` that a block of the scope holds, `tf × idf` under `w`, by
 /// word, divided by its length; a query has no link vector. A hit's score is the dot product
-/// with its own lexical vector: 0 for a hit that shares no whole word. The products and lazy
-/// weights are charged to one search budget first; a guard refuses the search.
+/// with its own lexical vector: 0 for a hit that shares no whole word. The hits are the query's
+/// candidates: their ids and scratch, then the products and lazy weights, are charged to one
+/// search budget first; a guard refuses the search.
 fn relevance_scores(w: &VectorWeights, text: &str, hits: &mut [Hit<'_>]) -> Result<(), RdyError> {
     let counts = WordCounts::of(rdy_model::entity::words(text).into_iter().map(|w| w.folded));
     let mut lexical: Vec<(&str, f64)> = Vec::with_capacity(counts.len());
@@ -697,6 +698,15 @@ fn relevance_scores(w: &VectorWeights, text: &str, hits: &mut [Hit<'_>]) -> Resu
     };
     let mut budget = VectorBudget::search();
     budget.begin_source();
+    // every kept hit is a candidate of the query: its id and its scratch are charged before any
+    // hit is scored, so a hit set past the candidate or scratch limit is refused, never cut
+    let scratch: u64 = hits
+        .iter()
+        .map(|h| CANDIDATE_RECORD_BYTES + h.block.id.as_str().len() as u64)
+        .sum();
+    budget
+        .charge_candidates(hits.len() as u64, scratch)
+        .map_err(|_| vector_work_refused())?;
     for h in hits {
         let block = Operand {
             lexical: w
