@@ -1418,7 +1418,8 @@ pub(crate) fn rule_inputs_of(
     c: &Candidate,
 ) -> Result<crate::readiness::RuleInputs, RdyError> {
     let v = Version::read_for(st, c, Removal::Skip)?;
-    let compiled = crate::check::rules::compiled(st.pack())?;
+    let handle = st.compiled_rules()?;
+    let compiled = handle.filters().to_vec();
     let projection = crate::check::landing_projection(st, &v.pref, &v.p, &v.next)?;
     let built = v.built.after(&projection.updates, st.pack());
     let graph = Arc::clone(built.graph.get_or_init(|| {
@@ -1633,9 +1634,10 @@ impl Version {
     /// suspects, tensions and intrinsic coverage of that canon (only the sets a rule needs), and
     /// the reach the rules add from canon to it.
     fn compute_checks(&self, st: &ReadState) -> Result<Checks, RdyError> {
-        use crate::check::{Stage, evaluate_rules, rules};
+        use crate::check::{Stage, rules};
         let pack = st.pack();
-        let compiled = rules::compiled(pack)?;
+        let handle = st.compiled_rules()?;
+        let compiled = handle.filters();
         if compiled.is_empty() && self.p.alternative.is_none() {
             return Ok(Checks {
                 keys: crate::check::options::assigned_keys(st, &self.p, &self.next)?,
@@ -1690,7 +1692,7 @@ impl Version {
                 Arc::clone(st.reader().tracking()),
             ))
         }));
-        let (suspects, tensions, scores) = self.rule_sets(st, &built, &graph, &compiled)?;
+        let (suspects, tensions, scores) = self.rule_sets(st, &built, &graph, compiled)?;
         let inputs = crate::filter::FilterInputs {
             pack,
             m: &built.m,
@@ -1700,12 +1702,12 @@ impl Version {
             tensions: &tensions,
             coverage: &scores,
         };
-        let scan = evaluate_rules(pack, inputs, built.m.ids().cloned(), Stage::Propose)?;
+        let scan = rules::evaluate(compiled, inputs, built.m.ids().cloned(), Stage::Propose)?;
         let (canon, canon_g) = (st.materialized(&Scope::Canon)?, st.graph(&Scope::Canon)?);
         let reach = rules::rule_reach(
             &self.pref,
             pack,
-            &compiled,
+            compiled,
             (&canon, &canon_g),
             (&built.m, &graph),
             &self.touched,
