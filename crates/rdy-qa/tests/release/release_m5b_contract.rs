@@ -23,11 +23,14 @@ const PREDECESSOR: &str = "sync-client-b-v1.json";
 /// change is a successor fixture, never an edit of that file.
 const PREDECESSOR_SHA: &str = "e65653b123aea1307a9e2ab9728f3b5d18e25b33b8f7ca8aa9fb2ff5a2dcb3e1";
 
-/// The current fixture, which every selector names.
+/// This plan's fixture, which every selector named until its successor [`SELECTED`].
 const CURRENT: &str = "m5b-v1.json";
 
 /// The sha256 of [`CURRENT`] since the example pack metadata capture (wck8), its final bytes.
 const CURRENT_SHA: &str = "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d26256d2fb41";
+
+/// The successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen since.
+const SELECTED: &str = "hub-forks-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -54,8 +57,8 @@ fn sha(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// wck1: the integrated predecessor keeps its bytes, the current fixture has its captured
-/// bytes, and every selector names it and no earlier fixture.
+/// wck1: the integrated predecessor keeps its bytes, this plan's fixture has its captured
+/// bytes, and every selector names its successor and no earlier fixture.
 #[test]
 fn wck1_successor_starts_from_the_integrated_fixture() {
     let (old, new) = (bytes(PREDECESSOR), bytes(CURRENT));
@@ -65,13 +68,15 @@ fn wck1_successor_starts_from_the_integrated_fixture() {
         let text =
             std::fs::read_to_string(root().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert!(
-            text.contains(&format!("fixtures/contracts/{CURRENT}\"")),
-            "{file} selects {CURRENT}"
+            text.contains(&format!("fixtures/contracts/{SELECTED}\"")),
+            "{file} selects {SELECTED}"
         );
-        assert!(
-            !text.contains(&format!("contracts/{PREDECESSOR}\"")),
-            "{file} no longer selects {PREDECESSOR}"
-        );
+        for earlier in [PREDECESSOR, CURRENT] {
+            assert!(
+                !text.contains(&format!("contracts/{earlier}\"")),
+                "{file} no longer selects {earlier}"
+            );
+        }
     }
 }
 
@@ -426,9 +431,9 @@ fn tree_digest(dir: &Path) -> (usize, String) {
     (files.len(), sha(lines.as_bytes()))
 }
 
-/// wck9: M5b changes no released format: every earlier contract fixture keeps its bytes and the
-/// current fixture has its final bytes, the folder holds those and no other; the built-in pack's
-/// file, the released dump fixtures and the native store fixtures keep their bytes; the store
+/// wck9: M5b changes no released format: every earlier contract fixture keeps its bytes and this
+/// plan's fixture has its final bytes, the folder holds those and its successor and no other; the
+/// built-in pack's file, the released dump fixtures and the native store fixtures keep their bytes; the store
 /// registers the same features at the same formats; and the built-in pack still has no rule.
 #[test]
 fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
@@ -446,11 +451,15 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    let mut want: Vec<&str> = EARLIER.iter().map(|(n, _)| *n).chain([CURRENT]).collect();
+    let mut want: Vec<&str> = EARLIER
+        .iter()
+        .map(|(n, _)| *n)
+        .chain([CURRENT, SELECTED])
+        .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds the earlier fixtures and {CURRENT}"
+        "the folder holds the earlier fixtures, {CURRENT} and {SELECTED}"
     );
 
     // the built-in pack, its bytes and the pack the project resolves from them

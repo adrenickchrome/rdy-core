@@ -32,7 +32,7 @@ const PREDECESSOR_SHA: &str = "012ff9ed50f654618517e629e3dcfa6c8e28935bf311c880d
 const CURRENT: &str = "sync-client-v1.json";
 
 /// The successors of [`CURRENT`], in order; the last is the fixture the selectors name now.
-const LATER: [&str; 2] = ["sync-client-b-v1.json", "m5b-v1.json"];
+const LATER: [&str; 3] = ["sync-client-b-v1.json", "m5b-v1.json", "hub-forks-v1.json"];
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -499,8 +499,8 @@ fn leaves(was: &Value, now: &Value, path: &str, out: &mut Vec<String>) {
 }
 
 /// scc1: the current fixture starts from the shipped predecessor: `sd1-v1.json` keeps the bytes
-/// rdy 0.52.0 shipped, every selector names `sync-client-v1.json` and none names the
-/// predecessor, and no member of the predecessor is removed.
+/// rdy 0.52.0 shipped, every selector names a successor of `sync-client-v1.json` and none names
+/// the predecessor, and no member of the predecessor is removed.
 #[test]
 fn scc1_successor_starts_from_the_shipped_predecessor() {
     assert_eq!(
@@ -512,8 +512,8 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     for file in SELECTORS {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
-        // ruling R-F2: a later successor (`sync-client-b-v1.json`, then `m5b-v1.json`) is the
-        // selected file
+        // ruling R-F2: a later successor (`sync-client-b-v1.json`, `m5b-v1.json`, then
+        // `hub-forks-v1.json`) is the selected file
         let selects = |name: &str| text.contains(&format!("fixtures/contracts/{name}\""));
         assert!(
             selects(CURRENT) || LATER.iter().any(|n| selects(n)),
@@ -1031,7 +1031,8 @@ const FROZEN: &[(&str, &str)] = &[
 ];
 
 /// scc7: every frozen fixture keeps its shipped bytes, `sd1-v1.json` included, and the contracts
-/// folder holds these and the current fixture alone, so a capture never wrote a baseline.
+/// folder holds these, this plan's fixture and its successors alone, so a capture never wrote a
+/// baseline.
 #[test]
 fn scc7_predecessor_fixtures_keep_their_bytes() {
     for (name, want) in FROZEN {
@@ -1052,7 +1053,7 @@ fn scc7_predecessor_fixtures_keep_their_bytes() {
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds the frozen fixtures and {CURRENT}"
+        "the folder holds the frozen fixtures, {CURRENT} and {LATER:?}"
     );
     assert!(
         FROZEN.iter().any(|(n, _)| *n == "sd1-v1.json"),
