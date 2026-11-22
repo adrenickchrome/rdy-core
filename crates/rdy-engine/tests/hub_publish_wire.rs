@@ -1626,6 +1626,52 @@ mod sized_alloc {
 #[global_allocator]
 static ALLOC: sized_alloc::Sized = sized_alloc::Sized;
 
+/// A write's reply from something other than the hub (a proxy's 502 page, say) stays
+/// `E_UPSTREAM_UNCERTAIN`, and its message names the status the upstream answered with. It never
+/// quotes the reply's body.
+#[test]
+fn hpb7_a_non_hub_reply_to_a_write_names_its_status() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let files = [FileIdentity {
+        hash: h(1),
+        size: 1,
+    }];
+    let m = manifest();
+    let rec = record(None, &m);
+    let page = b"<html><body>502 Bad Gateway from the proxy</body></html>";
+    let headers = [
+        "content-type: text/html".to_string(),
+        format!("content-length: {}", page.len()),
+        "connection: close".to_string(),
+    ];
+    for status in [502u16, 503, 504, 500] {
+        let reply = || Reply::with_headers(status, &headers, page);
+        let mut b = Cursor::new(vec![7u8]);
+        let (file, _) = served(&mut s, reply(), || {
+            hub.wire
+                .put_file(&cx, PUSH, &files[0], "text/plain", &mut b)
+        });
+        let mut b = Cursor::new(b"abc".to_vec());
+        let (objects, _) = served(&mut s, reply(), || {
+            hub.wire.put_objects(&cx, PUSH, &mut b, 3)
+        });
+        let (publish, _) = served(&mut s, reply(), || {
+            hub.wire.publish(&cx, PUSH, SITE, &rec, &m, None)
+        });
+        for e in [err(file), err(objects), err(publish)] {
+            assert_eq!(e.code, E_UPSTREAM_UNCERTAIN, "{status}");
+            assert!(
+                e.message.contains(&format!("upstream answered {status}")),
+                "{status}: {}",
+                e.message
+            );
+            assert!(!e.message.contains("proxy"), "{}", e.message);
+        }
+    }
+}
+
 /// A stored tag reads at any length up to HA1's upload bound (1,048,576 bytes); the live site's
 /// 256-byte limit on new names does not apply to a publication of an existing tag.
 #[test]

@@ -1226,6 +1226,17 @@ pub(crate) fn invalid_reply(effect: Effect) -> RdyError {
     }
 }
 
+/// A reply at `status` outside the contract after the request was sent. A write's error names
+/// the status, so a proxy's reply (a 502, say) is told apart from the hub's; it never quotes the
+/// body.
+fn invalid_reply_at(effect: Effect, status: u16) -> RdyError {
+    let mut e = invalid_reply(effect);
+    if effect == Effect::Write {
+        e.message = format!("{}; upstream answered {status}", e.message);
+    }
+    e
+}
+
 /// One request of a step.
 struct Exchange<'a> {
     effect: Effect,
@@ -1585,11 +1596,11 @@ fn refused(
     reply_limit: usize,
 ) -> PostError {
     if (200..300).contains(&status) {
-        return PostError::Other(invalid_reply(effect));
+        return PostError::Other(invalid_reply_at(effect, status));
     }
     match refusal(status, body, reply_limit, &cx.bearer) {
         Some(e) => PostError::Refused(e),
-        None => PostError::Other(invalid_reply(effect)),
+        None => PostError::Other(invalid_reply_at(effect, status)),
     }
 }
 
