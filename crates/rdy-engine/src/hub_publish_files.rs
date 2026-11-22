@@ -8,7 +8,7 @@
 //!   the negotiated limits and core's caps, requires the source's paths to be exactly the
 //!   manifest's, and reads every file once through a 65,536-byte buffer: its exact size and hash,
 //!   and the exact empty notice slot at each HTML notice offset. A reader is never collected
-//!   into a file-sized buffer.
+//!   into a file-sized buffer. A publish runs the check once; the upload does not repeat it.
 //! - **By content.** [`upload_files`] names each distinct hash once in one files/known request,
 //!   in raw hash order, and sends only the files the hub lacks, in that order. Two or more go in
 //!   tar bodies ([`file_batches`] bounds each); a lone file goes in the one-file form with the
@@ -532,6 +532,18 @@ pub fn upload_files(
     context: &mut dyn FnMut() -> Result<UploadContext, RdyError>,
 ) -> Result<FilesSent, RdyError> {
     validate_artifact(source, limits)?;
+    upload_checked(source, push, limits, wire, context)
+}
+
+/// [`upload_files`] for a `source` that [`validate_artifact`] already checked at `limits`: the
+/// check is not repeated, so each file is read once before the requests.
+pub(crate) fn upload_checked(
+    source: &dyn ArtifactSource,
+    push: &str,
+    limits: ArtifactLimits,
+    wire: &dyn PublishWire,
+    context: &mut dyn FnMut() -> Result<UploadContext, RdyError>,
+) -> Result<FilesSent, RdyError> {
     let order = by_path(source.manifest());
     let files = distinct(&order)?;
     check_count(files.len(), MAX_KNOWN_FILES, LimitUnit::Entries)?;

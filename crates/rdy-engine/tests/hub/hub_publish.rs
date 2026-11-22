@@ -507,6 +507,8 @@ struct Wire {
     batches: Mutex<Vec<Vec<u8>>>,
     files: Mutex<BTreeMap<Hash, Vec<u8>>>,
     published: Mutex<Vec<(Value, Option<bool>)>>,
+    /// Whether the hub already holds every artifact file (files/known answers none missing).
+    holds_files: Mutex<bool>,
 }
 
 fn base_state() -> PublishState {
@@ -543,6 +545,7 @@ impl Wire {
             batches: Mutex::new(Vec::new()),
             files: Mutex::new(BTreeMap::new()),
             published: Mutex::new(Vec::new()),
+            holds_files: Mutex::new(false),
         }
     }
 
@@ -650,6 +653,9 @@ impl PublishWire for Wire {
         files: &[FileIdentity],
     ) -> Result<Vec<Hash>, RdyError> {
         self.enter("files_known", cx, Some(push))?;
+        if *self.holds_files.lock().unwrap() {
+            return Ok(Vec::new());
+        }
         Ok(files.iter().map(|f| f.hash).collect())
     }
 
@@ -719,6 +725,8 @@ impl PublishWire for Wire {
 struct Mem {
     manifest: Manifest,
     files: BTreeMap<String, Vec<u8>>,
+    /// How often each path was opened; every open is read whole.
+    opens: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl ArtifactSource for Mem {
@@ -731,6 +739,7 @@ impl ArtifactSource for Mem {
     }
 
     fn open(&self, path: &str) -> Result<Box<dyn Read + '_>, RdyError> {
+        *self.opens.lock().unwrap().entry(path.into()).or_default() += 1;
         Ok(Box::new(std::io::Cursor::new(self.files[path].as_slice())))
     }
 }
@@ -763,7 +772,11 @@ fn page_artifact(profile: &str) -> Mem {
             },
         ],
     };
-    Mem { manifest, files }
+    Mem {
+        manifest,
+        files,
+        opens: Arc::default(),
+    }
 }
 
 /// What the fake renderer was asked: the scope, the tag and the profile of each render.
@@ -772,6 +785,8 @@ struct Renderer {
     captures: AtomicUsize,
     renders: Mutex<Vec<(Scope, String, String)>>,
     manifest_hash: Mutex<Option<Hash>>,
+    /// The opens of every artifact this renderer made.
+    opens: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl PublishRenderer for Renderer {
@@ -792,7 +807,8 @@ impl PublishRenderer for Renderer {
             .lock()
             .unwrap()
             .push((scope.clone(), tag.to_string(), profile.to_string()));
-        let artifact = page_artifact(profile);
+        let mut artifact = page_artifact(profile);
+        artifact.opens = Arc::clone(&self.opens);
         *self.manifest_hash.lock().unwrap() =
             Some(manifest_hash(&artifact.manifest, MANIFEST_RECIPE).unwrap());
         Ok(RenderedUpload {
@@ -955,6 +971,34 @@ fn hpb14_end_to_end_upload_returns_candidate_and_writes_no_project_record() {
     let published = wire.published.lock().unwrap().clone();
     assert_eq!(published[0].1, None);
     assert!(published[0].0.get("keep_latest").is_none());
+}
+
+/// A publish reads each artifact file once for its check, and once more only while it is sent:
+/// the check is not repeated before the files go up.
+#[test]
+fn hpb14_each_file_is_checked_once() {
+    let e = env();
+    let paths = ["assets/site.css", "index.html"];
+    for (holds, want) in [(false, 2), (true, 1)] {
+        let wire = Wire::new();
+        *wire.holds_files.lock().unwrap() = holds;
+        let renderer = Renderer::default();
+        run_with(
+            &e,
+            &Api::default(),
+            &Clock::at(T0),
+            &wire,
+            &agent(),
+            standard(),
+            &renderer,
+        )
+        .unwrap();
+        let opens = renderer.opens.lock().unwrap().clone();
+        let want: BTreeMap<String, usize> = paths.iter().map(|p| (p.to_string(), want)).collect();
+        assert_eq!(opens, want, "hub holds the files: {holds}");
+        let sent = wire.files.lock().unwrap().len();
+        assert_eq!(sent, if holds { 0 } else { paths.len() });
+    }
 }
 
 /// The site's profile resolves at the tag, not in current canon: the tag's revision, its

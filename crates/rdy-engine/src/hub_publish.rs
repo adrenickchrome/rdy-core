@@ -42,7 +42,7 @@ use crate::hub_config::{
     BAD_REMOTE_NAME_FIX, BAD_REMOTE_NAME_MESSAGE, HubConfig, RemoteMode, is_remote_name,
 };
 use crate::hub_credentials::HubCredentials;
-use crate::hub_publish_files::{ArtifactLimits, ArtifactSource, publish_record, upload_files};
+use crate::hub_publish_files::{ArtifactLimits, ArtifactSource, publish_record, upload_checked};
 use crate::hub_publish_stream::{BatchLimits, PreparedHistory, PushId, send_history};
 use crate::hub_publish_wire::{
     Candidate, MAX_SITE_BYTES, ProfileIdentity, PublicationInputs, PublishState, PublishWire,
@@ -735,7 +735,8 @@ impl<'a> PublishService<'a> {
         )
         .map_err(|e| in_phase(e, &push, Phase::Objects))?;
         drop(history);
-        upload_files(
+        // the artifact was checked at step 8
+        upload_checked(
             &*rendered.artifact,
             push.as_str(),
             limits,
