@@ -11,9 +11,10 @@
 //!   gives, equals the signed bytes exactly. Otherwise `mismatch`
 //!   (`E_SIG_OBJECT_MISMATCH` for a valid signature). In a holder only (ruling task-13), a valid
 //!   signature whose statement, rebuilt for the repo id it names, equals the signed bytes, but
-//!   names a repo id other than the holder's own, is `foreign_repo`, with that repo id: signed in
-//!   another project and not verified here. A holder holds no fork history and trusts none (H2
-//!   brings hub-recorded lineage); it is neither a mismatch nor an error code.
+//!   names a repo id other than the holder's own and its counted fork origins, is
+//!   `foreign_repo`, with that repo id: signed in another project and not verified here. A
+//!   holder trusts only the fork origins its creating batch holds (D-HX6BX), and an ordinary
+//!   holder holds none. It is neither a mismatch nor an error code.
 //! - **trust**: a covered signature's key is trusted for its principal and namespace by the
 //!   caller's allowed-signers data. Otherwise `unknown`, with one `W_SIG_UNKNOWN_KEY` warning for
 //!   a covered signature only.
@@ -40,8 +41,7 @@ use rdy_model::signature::{
 };
 use rdy_model::{ActorRun, Answer, Hash, LandingRecord, RepoId, Tag};
 use rdy_store::holder::{StoreMode, answer_tag_object_ref, is_relay_answer_of};
-use rdy_store::kinds::RefUpdate;
-use rdy_store::meta::{REF_ORIGIN, decode_origin};
+use rdy_store::meta::REF_ORIGIN;
 use rdy_store::signature::MAX_PER_SUBJECT;
 use rdy_store::{StoreError, kinds};
 use serde::Serialize;
@@ -56,7 +56,7 @@ pub const STATEMENT_MATCH: &str = "match";
 /// `statement`: it does not, or the signature is invalid.
 pub const STATEMENT_MISMATCH: &str = "mismatch";
 /// `statement`: in a holder only, the signature is valid over its subject but its statement
-/// names another project's repo id, which the holder cannot verify (no fork history).
+/// names another project's repo id, which the holder cannot verify (not a counted origin).
 pub const STATEMENT_FOREIGN_REPO: &str = "foreign_repo";
 /// `trust`: the caller's allowed-signers data trusts the key for the principal and namespace.
 pub const TRUST_TRUSTED: &str = "trusted";
@@ -103,7 +103,7 @@ pub struct CheckContext {
     pub subject: SignatureSubject,
     pub current_repo: RepoId,
     /// The other repo ids a signature may name, tried in order after `current_repo`; locally
-    /// the fork sources, ascending, and empty for a project never forked or a holder.
+    /// the fork sources, ascending, and empty for a project never forked or an ordinary holder.
     pub source_repos: Vec<RepoId>,
     /// The subject is read in a holder: a valid signature that names a repo id other than
     /// `current_repo` and `source_repos` is [`STATEMENT_FOREIGN_REPO`], not a mismatch.
@@ -562,37 +562,32 @@ impl<'s> Lineage<'s> {
     }
 }
 
-/// The repo ids a signature in `state` may name (ruling task-6, D-17AA8, D-DAGNB): the
-/// project's own `meta/repo_id`, and the `repo_id` of every `meta/origin` value with
-/// `fork: true` that the log records, in any batch, current or earlier, ascending and without
-/// the project's own. A clone keeps its source's log (D-C8C70), so an ordinary clone of a fork
-/// keeps the fork's origin batch, and a fork of a fork both of its ancestors'. One pass over the
-/// stored ref updates; nothing is written. A project with no `meta/origin` was never cloned:
-/// only a clone's origin batch writes that ref, and nothing removes it, so its log holds no
-/// origin value and the pass is skipped.
+/// The repo ids a signature in `state` may name (ruling task-6, D-17AA8, D-DAGNB, D-HX6BX): the
+/// store's own `meta/repo_id`, and the `repo_id` of each counted fork origin the index holds
+/// (`StoreReader::counted_fork_origins_before`), ascending and without the store's own. A
+/// project counts every `meta/origin` value with `fork: true` its log records. A clone keeps
+/// its source's log (D-C8C70), so an ordinary clone of a fork keeps the fork's origin batch,
+/// and a fork of a fork both of its ancestors'. A holder counts only the origins its creating
+/// batch holds: a later origin widens nothing. The baselines read the same ids. Nothing is
+/// written. A store with no `meta/origin` holds no origin value, so the read is skipped.
+///
+/// The read ends where the index ends, not at the state's log end, as the repo id read does.
+/// A clone's load checks a state published before its origin batch, with the new repo id.
 pub(crate) fn repo_ids(state: &ReadState) -> Result<(RepoId, Vec<RepoId>), RdyError> {
     let current = state.repo_id()?;
-    // a holder trusts no lineage: the upload carries none (ruling task-13)
-    if state.origin()?.is_none() || is_holder(state)? {
+    let reader = state.reader();
+    // only a clone's origin batch or a fork's creation writes the ref, and nothing removes it
+    if reader.get_ref(REF_ORIGIN)?.is_none() {
         return Ok((current, vec![]));
     }
     #[cfg(test)]
     LINEAGE_SCANS.with(|n| n.set(n.get() + 1));
-    let reader = state.reader();
-    let mut sources = BTreeSet::new();
-    reader.for_each_object_of(kinds::REF_UPDATE, |hash| {
-        let update: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &hash)?;
-        if update.name == REF_ORIGIN {
-            // a value that does not decode names no repo id: it widens nothing
-            if let Some(origin) = decode_origin(&update.value)
-                && origin.fork
-                && origin.repo_id != current
-            {
-                sources.insert(origin.repo_id);
-            }
-        }
-        Ok(())
-    })?;
+    let sources: BTreeSet<RepoId> = reader
+        .counted_fork_origins_before(rdy_store::closure::END_OF_LOG)?
+        .into_iter()
+        .map(|o| o.repo_id)
+        .filter(|r| *r != current)
+        .collect();
     Ok((current, sources.into_iter().collect()))
 }
 
@@ -651,7 +646,8 @@ pub(crate) fn subject_context(
     Ok(CheckContext {
         subject,
         current_repo,
-        source_repos: if holder { vec![] } else { source_repos },
+        // a holder's are its counted origins only (D-HX6BX): none for an ordinary holder
+        source_repos,
         holder,
     })
 }

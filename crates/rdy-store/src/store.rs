@@ -1216,6 +1216,14 @@ fn apply_upgrade(
     }
 }
 
+/// What a new holder's first sealed batch names (`Store::create_holder_with_origins`): its repo
+/// id, and the fork origins it counts, in the order they are written.
+#[derive(Clone, Copy)]
+struct NewHolder<'a> {
+    repo_id: RepoId,
+    origins: &'a [crate::meta::Origin],
+}
+
 /// The refusal of a holder's creation where a store, or anything else, already is.
 fn already_exists(dir: &Path) -> StoreError {
     StoreError::Io(std::io::Error::new(
@@ -1370,6 +1378,20 @@ impl Store {
     /// leaves a directory that no open accepts, never a project: retry in a new directory. The
     /// store holds its lock as any open store does.
     pub fn create_holder(dir: &Path, repo_id: RepoId) -> Result<Store, StoreError> {
+        Store::create_holder_with_origins(dir, repo_id, &[])
+    }
+
+    /// Creates a holder store as [`Store::create_holder`] does, and writes `origins` into its
+    /// first sealed batch, after its mode, in the order given (D-HX6BX). A fork gives its
+    /// source's counted origins oldest first, then its own origin last, which is then the
+    /// current `meta/origin`. Only this batch supplies the origins a holder's lineage counts
+    /// (`StoreReader::counted_fork_origins_before`). It creates only a fresh store: no take or
+    /// upload reaches it. An empty `origins` writes no origin.
+    pub fn create_holder_with_origins(
+        dir: &Path,
+        repo_id: RepoId,
+        origins: &[crate::meta::Origin],
+    ) -> Result<Store, StoreError> {
         crate::follower::refuse_follower(dir)?;
         let mut synced = match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() && std::fs::read_dir(dir)?.next().is_none() => vec![],
@@ -1378,7 +1400,8 @@ impl Store {
             Err(e) => return Err(e.into()),
         };
         synced.push(dir.to_path_buf());
-        let mut store = Store::open_current_format(dir, synced, None, Some(repo_id))?;
+        let holder = NewHolder { repo_id, origins };
+        let mut store = Store::open_current_format(dir, synced, None, Some(holder))?;
         format::write_format_file(dir, &store.features)?;
         store.synced.push(dir.to_path_buf());
         Ok(store)
@@ -1821,12 +1844,12 @@ impl Store {
 
     /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`). With
     /// `holder`, the log must be empty (`AlreadyExists` otherwise): its first batch makes the
-    /// store a holder with that repo id.
+    /// store a holder with that repo id and those origins.
     fn open_current_format(
         dir: &Path,
         synced: Vec<PathBuf>,
         held: Option<StoreLock>,
-        holder: Option<RepoId>,
+        holder: Option<NewHolder<'_>>,
     ) -> Result<Store, StoreError> {
         Store::open_current_format_with(dir, synced, held, holder, false)
     }
@@ -1837,7 +1860,7 @@ impl Store {
         dir: &Path,
         synced: Vec<PathBuf>,
         held: Option<StoreLock>,
-        holder: Option<RepoId>,
+        holder: Option<NewHolder<'_>>,
         upgrade_pending: bool,
     ) -> Result<Store, StoreError> {
         Store::open_current_format_as(
@@ -1856,7 +1879,7 @@ impl Store {
         dir: &Path,
         mut synced: Vec<PathBuf>,
         held: Option<StoreLock>,
-        holder: Option<RepoId>,
+        holder: Option<NewHolder<'_>>,
         upgrade_pending: bool,
         access: Access,
     ) -> Result<Store, StoreError> {
@@ -2356,8 +2379,8 @@ impl Store {
     /// (`create_holder` writes `FORMAT` only after this.)
     ///
     /// With `holder`, the new store's batch is a holder's: the features, the repo id `holder`
-    /// names and `meta/store_mode`.
-    fn ensure_format(&mut self, holder: Option<RepoId>) -> Result<(), StoreError> {
+    /// names and `meta/store_mode`, then each origin it names, in its order.
+    fn ensure_format(&mut self, holder: Option<NewHolder<'_>>) -> Result<(), StoreError> {
         let held_frames = self.log.end()
             != Location {
                 segment: 0,
@@ -2397,15 +2420,24 @@ impl Store {
                     (format::REF_STORE_FEATURES.into(), features.to_json()),
                     (
                         crate::meta::REF_REPO_ID.into(),
-                        crate::meta::encode_repo_id(&holder.unwrap_or_else(RepoId::new)),
+                        crate::meta::encode_repo_id(
+                            &holder.map_or_else(RepoId::new, |h| h.repo_id),
+                        ),
                     ),
                 ];
                 // a holder's mode is the creation's (D-BPYN8): this batch is the only place
-                if holder.is_some() {
+                if let Some(h) = holder {
                     refs.push((
                         crate::holder::REF_STORE_MODE.into(),
                         crate::holder::HOLDER_MODE.to_vec(),
                     ));
+                    // its counted fork origins (D-HX6BX): in the order given, after the mode
+                    for o in h.origins {
+                        refs.push((
+                            crate::meta::REF_ORIGIN.into(),
+                            crate::meta::encode_origin(o),
+                        ));
+                    }
                 }
                 let items = self.ref_items(refs);
                 self.write_refs(items, RefWrite::Unchecked)?;

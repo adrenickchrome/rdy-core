@@ -701,6 +701,19 @@ impl StoreReader {
     /// the holes of the indexed log and that end.
     fn read_creation(&self) -> Result<(Creation, Holes, Location), StoreError> {
         let upto = self.index().indexed_upto()?;
+        let (creation, holes) = self.walk_first_batch(upto, |_, _| {})?;
+        Ok((creation, holes, upto))
+    }
+
+    /// Walks the log's first batch from the origin to its marker, or to `upto` if that comes
+    /// first. `f` takes the kind and payload of each frame before the marker (None for an
+    /// authorized hole). Returns the creation and the holes of the log up to `upto`. The fsck
+    /// and the fork origin reader (`counted_fork_origins_before`) share this boundary.
+    pub(crate) fn walk_first_batch(
+        &self,
+        upto: Location,
+        mut f: impl FnMut(u8, Option<&[u8]>),
+    ) -> Result<(Creation, Holes), StoreError> {
         let spans = self.index().redaction_spans_in(Creation::EMPTY.end, upto)?;
         let holes = crate::store::holes_of(&spans);
         let mut first = FirstBatch::default();
@@ -710,11 +723,14 @@ impl StoreReader {
                     .frame(v.kind, v.payload, next)
                 {
                     Ok(true) => Err(Walk::Done),
-                    Ok(false) => Ok(()),
+                    Ok(false) => {
+                        f(v.kind, v.payload);
+                        Ok(())
+                    }
                     Err(e) => Err(Walk::Failed(e)),
                 });
         match walked {
-            Ok(()) | Err(Walk::Done) => Ok((first.creation(upto), holes, upto)),
+            Ok(()) | Err(Walk::Done) => Ok((first.creation(upto), holes)),
             Err(Walk::Failed(e)) => Err(e),
         }
     }
