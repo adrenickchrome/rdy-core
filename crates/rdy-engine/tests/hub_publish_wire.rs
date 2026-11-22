@@ -3079,3 +3079,90 @@ fn upfast_changed_bytes_are_held_back_under_zstd() {
     }
     assert_eq!(s.finish(), 0);
 }
+
+/// `n` bytes that zstd cannot shrink: a xorshift stream.
+fn incompressible(n: usize) -> Vec<u8> {
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 32) as u8
+        })
+        .collect()
+}
+
+/// D-YXX9Y: with zstd taken, a body whose frame is not smaller than the body goes as it is,
+/// with no `Content-Encoding`; a body that shrinks goes as its frame. This holds for objects
+/// and one file, and for the empty body. A tar body follows the same test on its whole bytes:
+/// its zero headers and end blocks shrink even around incompressible files.
+#[test]
+fn upfast_a_body_zstd_does_not_shrink_goes_as_identity() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx_zstd();
+    for (plain, shrinks) in [
+        (incompressible(20_000), false),
+        (Vec::new(), false),
+        (compressible(20_000), true),
+    ] {
+        let n = plain.len() as u64;
+        // objects/put
+        let mut b = Cursor::new(plain.clone());
+        let reply = format!(r#"{{"records":1,"bytes":{n}}}"#);
+        let (r, req) = served(&mut s, Reply::json(201, &reply), || {
+            hub.wire.put_objects(&cx, PUSH, &mut b, n)
+        });
+        r.unwrap();
+        // files/put, one file
+        let file = FileIdentity {
+            hash: Hash::of(&plain),
+            size: n,
+        };
+        let held = format!(r#"{{"hash":"{}","size":{n}}}"#, file.hash);
+        let mut b = Cursor::new(plain.clone());
+        let (r, one) = served(&mut s, Reply::json(201, &held), || {
+            hub.wire.put_file(&cx, PUSH, &file, "image/png", &mut b)
+        });
+        r.unwrap();
+        for req in [req, one] {
+            if shrinks {
+                assert_eq!(req.header("content-encoding"), Some("zstd"));
+                assert!(req.body.len() < plain.len());
+                assert_eq!(one_frame(&req.body), plain);
+            } else {
+                assert_eq!(req.header("content-encoding"), None, "{n} bytes");
+                assert_eq!(req.header("content-length"), Some(n.to_string().as_str()));
+                assert_eq!(req.body, plain);
+            }
+        }
+    }
+    // a tar body of incompressible files: the whole body is weighed, headers included
+    let a = incompressible(3000);
+    let b = incompressible(5000);
+    let contents: [&[u8]; 2] = [&a[..1500], &b];
+    let files = Mem::new(&contents).files;
+    let items: Vec<String> = files.iter().map(crbp_held).collect();
+    let mut m = Mem::new(&contents);
+    let (r, req) = served(&mut s, Reply::json(201, &crbp_reply(&items)), || {
+        hub.wire.put_files(&cx, PUSH, &mut m)
+    });
+    r.unwrap();
+    let tar_bytes = tar_len(&files).unwrap() as usize;
+    let mut plain_tar = Mem::new(&contents);
+    let mut whole = Vec::new();
+    for (i, c) in contents.iter().enumerate() {
+        whole.extend_from_slice(&tar_header(&plain_tar.files()[i]));
+        whole.extend_from_slice(c);
+        whole.resize(whole.len().next_multiple_of(512), 0);
+        let mut sink = vec![0u8; c.len()];
+        plain_tar.read(i, &mut sink).unwrap();
+    }
+    whole.resize(tar_bytes, 0);
+    assert!(level3(&whole).len() < tar_bytes, "the headers shrink");
+    assert_eq!(req.header("content-encoding"), Some("zstd"));
+    assert_eq!(one_frame(&req.body), whole);
+    assert_eq!(crbp_entries(&whole).len(), 2);
+    assert_eq!(s.finish(), 0);
+}

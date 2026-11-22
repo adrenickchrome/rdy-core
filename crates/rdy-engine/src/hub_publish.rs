@@ -32,10 +32,13 @@
 //!   `.rdy/publish-resume.json`: the project's local state, outside the log, which no dump
 //!   carries. The next publish of the same tag to the same remote and repo at the same epoch
 //!   names that push id, so the hub's known steps list only what its quarantine lacks; any other
-//!   publish replaces the record with a new push id. A reply to the publish write clears the
-//!   record, and so does `E_UPSTREAM_UNCERTAIN` on that write, which still names the push id: the
-//!   candidate may exist. A run that stops before its publish write keeps it. The client checks
-//!   no quarantine age.
+//!   publish replaces the record with a new push id. The hub's refusal of a known or put request
+//!   removes the record (D-YXX9Y); a transport failure, a lost reply or a stop on rdy's side
+//!   keeps it. A reply to the publish write clears the record, except a refusal with
+//!   `E_HUB_BUSY`, `E_HUB_OVER_BUDGET` or `E_HUB_READ_ONLY`, which leaves the quarantine whole;
+//!   so does `E_UPSTREAM_UNCERTAIN` on that write, which still names the push id: the candidate
+//!   may exist. A run that stops before its publish write keeps it. The client checks no
+//!   quarantine age, and the account is not part of the record.
 //! - **The result.** The candidate's id, state and page link, the push id, the tagged profile's
 //!   audience, the full record, the reference summary, a bounded inventory, the settings and
 //!   credential warnings and the renderer's warnings, and `review: hub`: the hub's own review is
@@ -547,14 +550,35 @@ fn clear_resume(path: &Path) -> Option<Issue> {
     }
 }
 
-/// Whether the publish write was answered: the candidate, a reply outside its contract, the
-/// hub's refusal, or `E_UPSTREAM_UNCERTAIN` (the reply was lost). Any other error came before
-/// the request was sent.
-fn publish_answered<T>(sent: &Result<T, RdyError>) -> bool {
+/// The hub's refusals of a publish write that keep the resume record: a refused write changes
+/// nothing on the hub, so the quarantine is still whole (D-YXX9Y).
+const KEEP_ON_PUBLISH: [&str; 3] = ["E_HUB_BUSY", "E_HUB_OVER_BUDGET", "E_HUB_READ_ONLY"];
+
+/// Whether `e` is the hub's refusal: its error object, or a tar entry refused with a hub code.
+fn hub_refused(e: &RdyError) -> bool {
+    is_hub_refusal(e) || e.code.starts_with("E_HUB_")
+}
+
+/// Whether the outcome of the publish write clears the resume record: the candidate, a reply
+/// outside its contract, `E_UPSTREAM_UNCERTAIN` (the reply was lost), or the hub's refusal with
+/// any code but [`KEEP_ON_PUBLISH`]. Any other error came before the request was sent.
+fn publish_clears<T>(sent: &Result<T, RdyError>) -> bool {
     match sent {
         Ok(_) => true,
-        Err(e) => e.code == E_UPSTREAM_UNCERTAIN || is_hub_refusal(e),
+        Err(e) => {
+            e.code == E_UPSTREAM_UNCERTAIN || (hub_refused(e) && !KEEP_ON_PUBLISH.contains(&e.code))
+        }
     }
+}
+
+/// `e` of a known or put step: the hub's refusal removes the resume record, so the next publish
+/// takes a new push id (D-YXX9Y); a transport failure, a lost reply or a stop on rdy's side
+/// keeps it. A failed removal adds its warning.
+fn upload_failed(mut e: RdyError, resume: &Path) -> RdyError {
+    if hub_refused(&e) {
+        e.issues.extend(clear_resume(resume));
+    }
+    e
 }
 
 /// The settings and credential warnings of a run, each once, in the order first seen.
@@ -868,7 +892,7 @@ impl<'a> PublishService<'a> {
             self.wire,
             &mut context,
         )
-        .map_err(|e| in_phase(e, &push, Phase::Objects))?;
+        .map_err(|e| in_phase(upload_failed(e, &resume), &push, Phase::Objects))?;
         drop(history);
         // the artifact was checked at step 8
         upload_checked(
@@ -878,7 +902,7 @@ impl<'a> PublishService<'a> {
             self.wire,
             &mut context,
         )
-        .map_err(|e| in_phase(e, &push, Phase::Files))?;
+        .map_err(|e| in_phase(upload_failed(e, &resume), &push, Phase::Files))?;
         read.ensure_current_epoch()?;
 
         // 11. publish, then the candidate's checks
@@ -894,7 +918,7 @@ impl<'a> PublishService<'a> {
             cx,
         );
         // a reply, or a lost one, leaves nothing to resume; a request never sent keeps it
-        let cleared = if publish_answered(&sent) {
+        let cleared = if publish_clears(&sent) {
             clear_resume(&resume)
         } else {
             None

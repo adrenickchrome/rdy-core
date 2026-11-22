@@ -29,8 +29,9 @@
 //!   hostname check, token and claim checks, closed headers, agent settings, connection marking
 //!   and failure suppression above; its body streams with its exact length and its reply cap is
 //!   the caller's, never over 16 MiB. A put body may go as one zstd frame ([`zstd_frame`]) with
-//!   `Content-Encoding: zstd`; the frame is made before the request, from the body read to its
-//!   exact length. Sign-in and key requests stay on the install alone.
+//!   `Content-Encoding: zstd` when the frame is smaller than the body; the frame is made before
+//!   the request, from the body read to its exact length. Sign-in and key requests stay on the
+//!   install alone.
 use crate::error::{
     E_BAD_INPUT, E_IO, E_UPSTREAM_ORIGIN, RdyError, actor_unbound, signing_selector, upload_body,
     upstream_auth, upstream_ca, upstream_key_proof, upstream_origin, upstream_protocol,
@@ -124,13 +125,19 @@ pub enum BodyEncoding {
 /// The zstd level of an upload body (D-SEGWK).
 pub const ZSTD_LEVEL: i32 = 3;
 
-/// The `len` bytes of `body` as one zstd frame at [`ZSTD_LEVEL`], with its content size and
-/// checksum, in an anonymous temporary file read from its start: the file and the frame's
-/// length. The bound counts the bytes before compression: `len` over
-/// [`MAX_UPLOAD_BODY_BYTES`] is `E_LIMIT` before a byte is read. A body that ends before `len`,
-/// runs past it or fails to read is `E_IO`, as [`HttpHubTransport::upload`] has it; so is a
-/// frame that would pass the bound. Nothing is sent.
-pub fn zstd_frame(body: &mut dyn Read, len: u64) -> Result<(std::fs::File, u64), RdyError> {
+/// The `len` bytes of `body` as they go on the wire, in an anonymous temporary file read from
+/// its start: one zstd frame at [`ZSTD_LEVEL`], with its content size and checksum, when that
+/// frame is smaller than the body; else the body's own bytes (D-YXX9Y). Returns the file, its
+/// length and its encoding. The body is read once, to its exact length, into both the frame and
+/// a copy of its bytes. The bound counts the bytes before compression: `len` over
+/// [`MAX_UPLOAD_BODY_BYTES`] is `E_LIMIT` before a byte is read, and a frame is used only when it
+/// is smaller, so compression never takes a body past the bound. A body that ends before `len`,
+/// runs past it or fails to read is `E_IO`, as [`HttpHubTransport::upload`] has it. Nothing is
+/// sent.
+pub fn zstd_frame(
+    body: &mut dyn Read,
+    len: u64,
+) -> Result<(std::fs::File, u64, BodyEncoding), RdyError> {
     if len > MAX_UPLOAD_BODY_BYTES {
         let cap = usize::try_from(MAX_UPLOAD_BODY_BYTES).unwrap_or(usize::MAX);
         return Err(hub_limit(cap, LimitUnit::Bytes));
@@ -142,13 +149,18 @@ pub fn zstd_frame(body: &mut dyn Read, len: u64) -> Result<(std::fs::File, u64),
             "check the temporary directory and available disk space",
         )
     };
-    let file = tempfile::tempfile().map_err(|_| scratch())?;
-    let mut enc = zstd::stream::write::Encoder::new(file, ZSTD_LEVEL).map_err(|_| scratch())?;
-    enc.include_checksum(true).map_err(|_| scratch())?;
-    enc.set_pledged_src_size(Some(len)).map_err(|_| scratch())?;
     if len == 0 && !at_end(body) {
         return Err(upload_body());
     }
+    let framed_file = tempfile::tempfile().map_err(|_| scratch())?;
+    let mut plain = std::io::BufWriter::with_capacity(
+        UPLOAD_BUFFER_BYTES,
+        tempfile::tempfile().map_err(|_| scratch())?,
+    );
+    let mut enc =
+        zstd::stream::write::Encoder::new(framed_file, ZSTD_LEVEL).map_err(|_| scratch())?;
+    enc.include_checksum(true).map_err(|_| scratch())?;
+    enc.set_pledged_src_size(Some(len)).map_err(|_| scratch())?;
     let mut exact = Exact::new(body, len);
     let mut buf = vec![0u8; UPLOAD_BUFFER_BYTES];
     loop {
@@ -158,17 +170,21 @@ pub fn zstd_frame(body: &mut dyn Read, len: u64) -> Result<(std::fs::File, u64),
             Err(_) => return Err(upload_body()),
         };
         enc.write_all(&buf[..n]).map_err(|_| scratch())?;
+        plain.write_all(&buf[..n]).map_err(|_| scratch())?;
     }
     if exact.remaining != 0 {
         return Err(upload_body());
     }
-    let mut file = enc.finish().map_err(|_| scratch())?;
-    let framed = file.stream_position().map_err(|_| scratch())?;
-    if framed > MAX_UPLOAD_BODY_BYTES {
-        return Err(upload_body());
-    }
+    let mut framed_file = enc.finish().map_err(|_| scratch())?;
+    let framed = framed_file.stream_position().map_err(|_| scratch())?;
+    let (mut file, n, encoding) = if framed < len {
+        (framed_file, framed, BodyEncoding::Zstd)
+    } else {
+        let file = plain.into_inner().map_err(|_| scratch())?;
+        (file, len, BodyEncoding::Identity)
+    };
     file.seek(SeekFrom::Start(0)).map_err(|_| scratch())?;
-    Ok((file, framed))
+    Ok((file, n, encoding))
 }
 
 /// One upload request for [`HttpHubTransport::upload`].

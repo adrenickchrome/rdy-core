@@ -2081,6 +2081,12 @@ fn stopped(e: &Env, req: PublishRequest) -> String {
 
 /// The hub's refusal of a write, as the real wire reads it: a 409 hub error object.
 fn hub_refusal(e: &Env) -> RdyError {
+    hub_refusal_of(e, 409, "E_HUB_SITE_AUDIENCE", None)
+}
+
+/// The hub's refusal `code` at `status`, with `retry_after` when given, as the real wire reads
+/// it from a publish reply.
+fn hub_refusal_of(e: &Env, status: u16, code: &str, retry_after: Option<u64>) -> RdyError {
     let done = run(e, &Wire::new(), standard()).unwrap();
     let manifest = page_artifact("implicit:org").manifest;
     let mut server = hub_tls::Server::start();
@@ -2099,17 +2105,19 @@ fn hub_refusal(e: &Env) -> RdyError {
         bearer: Secret::new(access1()),
         zstd: false,
     };
-    let body = json!({"code": "E_HUB_SITE_AUDIENCE", "message": "the site audience differs",
-        "fix": "choose another site", "request_id": "req_00000000000000000000000009",
-        "issues": []})
-    .to_string();
-    server.reply(hub_tls::Reply::json(409, &body));
+    let mut body = json!({"code": code, "message": "the hub refused it",
+        "fix": "do what the code says", "request_id": "req_00000000000000000000000009",
+        "issues": []});
+    if let Some(n) = retry_after {
+        body["retry_after"] = json!(n);
+    }
+    server.reply(hub_tls::Reply::json(status, &body.to_string()));
     server.accept_n(1);
     let push = "0123456789abcdefghjkmnpqrs";
     let refused = http
         .publish(&cx, push, SITE, &done.record, &manifest, None)
         .unwrap_err();
-    assert_eq!(refused.code, "E_HUB_SITE_AUDIENCE");
+    assert_eq!(refused.code, code);
     assert_eq!(server.finish(), 0);
     refused
 }
@@ -2146,7 +2154,7 @@ fn upfast_a_stopped_publish_resumes_under_its_push_id() {
     let at_known = String::from_utf8(at_known.expect("the record was written first")).unwrap();
     assert!(at_known.contains(&first), "{at_known}");
 
-    // every stop before the publish write keeps it, a hub refusal of a put included
+    // every transport failure, lost reply or rdy-side stop before the publish write keeps it
     let refusal = hub_refusal(&e);
     assert!(!path.exists(), "the publish reply cleared it");
     let wire = Wire::new().failing("known", upstream_transport());
@@ -2155,10 +2163,9 @@ fn upfast_a_stopped_publish_resumes_under_its_push_id() {
     for (step, failure) in [
         ("known", upstream_uncertain()),
         ("objects", upstream_uncertain()),
-        ("objects", refusal.clone()),
+        ("objects", upstream_transport()),
         ("files_known", upstream_transport()),
         ("file", upstream_uncertain()),
-        ("file", refusal.clone()),
         // a publish request certainly not sent
         ("publish", upstream_transport()),
     ] {
@@ -2167,6 +2174,7 @@ fn upfast_a_stopped_publish_resumes_under_its_push_id() {
         assert_eq!(push_of(&wire), first, "{step}");
         assert!(path.exists(), "{step}");
     }
+    let _ = refusal;
     // the record is local state: no log record, ref or store byte changed
     assert_eq!(
         e.r.read().reader().refs_with_prefix("").unwrap(),
@@ -2279,4 +2287,93 @@ fn upfast_another_tag_remote_repo_or_epoch_takes_a_new_push_id() {
     let j = stopped(&e, v1.clone());
     assert_ne!(j, i, "a redaction landed since");
     assert_eq!(stopped(&e, v1), j);
+}
+
+/// D-YXX9Y: the hub's refusal of a known or put request removes the record, and the run still
+/// stops with the hub's code; the next publish takes a new push id. A transport failure or a
+/// lost reply at the same step keeps it.
+#[test]
+fn upfast_a_hub_refusal_at_known_or_put_clears_the_record() {
+    let e = env();
+    let path = resume_file(&e);
+    let refusal = hub_refusal(&e);
+    for step in ["known", "objects", "files_known", "file"] {
+        let kept = stopped(&e, standard());
+        // a transport failure keeps it
+        let wire = Wire::new().failing(step, upstream_transport());
+        run(&e, &wire, standard()).unwrap_err();
+        assert_eq!(push_of(&wire), kept, "{step}");
+        assert!(path.exists(), "{step}: a transport failure keeps it");
+        // the hub's refusal clears it
+        let wire = Wire::new().failing(step, refusal.clone());
+        let err = run(&e, &wire, standard()).unwrap_err();
+        assert_eq!(err.code, "E_HUB_SITE_AUDIENCE", "{step}");
+        assert_eq!(push_of(&wire), kept, "{step}");
+        assert!(!path.exists(), "{step}: the hub's refusal clears it");
+        assert_ne!(stopped(&e, standard()), kept, "{step}: a new push id");
+    }
+}
+
+/// D-YXX9Y: a publish write refused with a retry code keeps the record, so the next publish
+/// names the same push id; any other refusal of the publish write clears it.
+#[test]
+fn upfast_a_retry_code_on_the_publish_write_keeps_the_record() {
+    let e = env();
+    let path = resume_file(&e);
+    for (status, code) in [
+        (503, "E_HUB_BUSY"),
+        (429, "E_HUB_OVER_BUDGET"),
+        (503, "E_HUB_READ_ONLY"),
+    ] {
+        let refused = hub_refusal_of(&e, status, code, Some(30));
+        let kept = stopped(&e, standard());
+        let wire = Wire::new().failing("publish", refused);
+        assert_eq!(run(&e, &wire, standard()).unwrap_err().code, code);
+        assert_eq!(push_of(&wire), kept, "{code}");
+        assert!(path.exists(), "{code} keeps it");
+        let wire = Wire::new();
+        assert_eq!(run(&e, &wire, standard()).unwrap().push, kept, "{code}");
+    }
+    let other = hub_refusal(&e);
+    let kept = stopped(&e, standard());
+    let wire = Wire::new().failing("publish", other);
+    run(&e, &wire, standard()).unwrap_err();
+    assert!(!path.exists(), "another refusal clears it");
+    assert_ne!(stopped(&e, standard()), kept);
+}
+
+/// A record that is not exactly one record (corrupt, oversized, or naming a bad push id) gives
+/// a new push id, and the record rdy writes is private to its owner (0600).
+#[test]
+fn upfast_a_bad_record_gives_a_new_push_id_and_the_record_is_private() {
+    let e = env();
+    let path = resume_file(&e);
+    let first = stopped(&e, standard());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    let good: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut bad_id = good.clone();
+    bad_id["push"] = json!("NOT-A-PUSH-ID");
+    let mut extra = good.clone();
+    extra["account"] = json!("acc_1");
+    let mut padded = serde_json::to_vec(&good).unwrap();
+    padded.resize(5000, b' ');
+    let mut last = first;
+    for (case, bytes) in [
+        ("corrupt", b"{\"push\":".to_vec()),
+        ("oversized", padded),
+        ("a bad push id", serde_json::to_vec(&bad_id).unwrap()),
+        ("an unknown member", serde_json::to_vec(&extra).unwrap()),
+    ] {
+        // the record as it stands resumes; the bad one does not
+        assert_eq!(stopped(&e, standard()), last, "{case}");
+        fs::write(&path, bytes).unwrap();
+        let next = stopped(&e, standard());
+        assert_ne!(next, last, "{case}");
+        last = next;
+    }
 }

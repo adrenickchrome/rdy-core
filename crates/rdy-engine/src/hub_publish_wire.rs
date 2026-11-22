@@ -32,7 +32,8 @@
 //!   `E_UPSTREAM_UNCERTAIN`. Nothing is retried.
 //! - **zstd put bodies (D-SEGWK; rdyhub D-2TDK5).** When the state reply holds `zstd: true`, the
 //!   upload context says so, and each objects/put and files/put body goes as one zstd frame at
-//!   level 3 with `Content-Encoding: zstd`; else, and in every other step, bodies go as they are.
+//!   level 3 with `Content-Encoding: zstd`, unless the frame is not smaller than the body
+//!   (D-YXX9Y); else, and in every other step, bodies go as they are.
 //!   The batch limits, the upload bounds and the replies' counts are of the bytes before
 //!   compression.
 use crate::error::{
@@ -1603,8 +1604,8 @@ impl HttpPublishWire {
 
 impl HttpPublishWire {
     /// `POST <url>` of a put step (objects/put or files/put): `len` bytes of `body` as
-    /// `content_type`, as one zstd frame with `Content-Encoding: zstd` when `cx.zstd`, else as
-    /// they are. `len` and every bound count the bytes before compression; the frame is made
+    /// `content_type`, as one zstd frame with `Content-Encoding: zstd` when `cx.zstd` and the
+    /// frame is smaller than the body, else as they are. `len` and every bound count the bytes before compression; the frame is made
     /// before the request, so a body that fails to read sends nothing.
     fn put(
         &self,
@@ -1615,11 +1616,11 @@ impl HttpPublishWire {
         len: u64,
         reply_limit: usize,
     ) -> Result<Vec<u8>, RdyError> {
-        let mut frame;
+        let mut spooled;
         let (body, body_len, encoding): (&mut dyn Read, u64, BodyEncoding) = if cx.zstd {
-            let (file, framed) = zstd_frame(body, len)?;
-            frame = file;
-            (&mut frame, framed, BodyEncoding::Zstd)
+            let (file, n, encoding) = zstd_frame(body, len)?;
+            spooled = file;
+            (&mut spooled, n, encoding)
         } else {
             (body, len, BodyEncoding::Identity)
         };
