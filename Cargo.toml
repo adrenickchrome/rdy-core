@@ -61,7 +61,7 @@ ssh-encoding = { version = "=0.2.0", default-features = false, features = ["std"
 # Test-only: the in-memory software signer of the signing tests.
 ed25519-dalek = { version = "=2.2.0", default-features = false }
 # Hub client: canonical HTTPS origins and URLs (IDNA, host case, default ports).
-url = "=2.5.7"
+url = "=2.5.9"
 # Hub client: the blocking HTTPS transport (Rustls backend only).
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 # Hub client: the platform's trusted root certificates.
