@@ -174,6 +174,10 @@ Compare this line and fingerprint with the ones in the README at v0.56.0. Use th
 - **The pack digest.** A pack's digest changes when a module, its `args` or its `depth` changes. The layout of the base64 text does not change it.
 - **You do nothing to move.** rdy 0.56.0 opens a store made by rdy 0.55.0 as it is, with no upgrade step and no dump and load. Store format 19, dump format 4 and the store features stay.
 
+### Security
+
+- **url 2.5.9.** rdy builds with url 2.5.9, which fixes RUSTSEC-2026-0592.
+
 ### Project and build
 
 - **New crate.** `rdy-check-wasm` compiles and runs check modules.
