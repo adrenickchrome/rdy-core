@@ -1227,12 +1227,13 @@ pub(crate) fn invalid_reply(effect: Effect) -> RdyError {
 }
 
 /// A reply at `status` outside the contract after the request was sent. A write's error names
-/// the status, so a proxy's reply (a 502, say) is told apart from the hub's; it never quotes the
-/// body.
+/// the status in its message and carries it in `upstream_status`, so a proxy's reply (a 502,
+/// say) is told apart from the hub's; it never quotes the body.
 fn invalid_reply_at(effect: Effect, status: u16) -> RdyError {
     let mut e = invalid_reply(effect);
     if effect == Effect::Write {
         e.message = format!("{}; upstream answered {status}", e.message);
+        e.upstream_status = Some(status);
     }
     e
 }

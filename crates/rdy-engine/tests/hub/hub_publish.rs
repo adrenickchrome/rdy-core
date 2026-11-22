@@ -9,6 +9,8 @@
 //! Its 0600 credential fixtures in private config directories go through `rdy_store::pio`
 //! (FW-XP1 D-1RXEA).
 use crate::common;
+use crate::hub_tls;
+use rdy_engine::hub_http::HttpHubTransport;
 
 use rdy_engine::hub_config::{
     BAD_REMOTE_NAME_FIX, BAD_REMOTE_NAME_MESSAGE, Credential, CredentialFile, HubConfig,
@@ -20,13 +22,13 @@ use rdy_engine::hub_publish::{
 };
 use rdy_engine::hub_publish_files::ArtifactSource;
 use rdy_engine::hub_publish_wire::{
-    Candidate, Discovery, FileBatch, FileIdentity, ObjectPut, ProfileIdentity, PublicationInputs,
-    PublishState, PublishWire, StateRequest, UploadContext, encode_publish,
+    Candidate, Discovery, FileBatch, FileIdentity, HttpPublishWire, ObjectPut, ProfileIdentity,
+    PublicationInputs, PublishState, PublishWire, StateRequest, UploadContext, encode_publish,
 };
 use rdy_engine::hub_remotes::{RemoteLevel, RemoteService};
 use rdy_engine::hub_types::{
     HubCall, HubClock, HubFailure, HubMetadata, HubOperation, HubReply, HubTransport, MeReply,
-    Origin, RefreshReply, RequestClaim, Secret, TokenPair,
+    Origin, OriginFence, RefreshReply, RequestClaim, Secret, TokenPair,
 };
 use rdy_engine::publication::{self, Audience, Resolved, reference_summary};
 use rdy_engine::publication_manifest::{
@@ -998,6 +1000,132 @@ fn hpb14_each_file_is_checked_once() {
         assert_eq!(opens, want, "hub holds the files: {holds}");
         let sent = wire.files.lock().unwrap().len();
         assert_eq!(sent, if holds { 0 } else { paths.len() });
+    }
+}
+
+/// Two small files for a real tar body.
+struct TwoFiles {
+    files: Vec<FileIdentity>,
+    bodies: Vec<std::io::Cursor<Vec<u8>>>,
+}
+
+impl FileBatch for TwoFiles {
+    fn files(&self) -> &[FileIdentity] {
+        &self.files
+    }
+    fn media_type(&self, _: usize) -> &str {
+        "text/plain"
+    }
+    fn read(&mut self, index: usize, out: &mut [u8]) -> std::io::Result<usize> {
+        self.bodies[index].read(out)
+    }
+}
+
+/// A proxy's 502 page answering a write, at each write phase: the real HTTPS wire turns it into
+/// the uncertain error with its status, and the publish keeps that status as a second issue
+/// beside the phase's. No byte of the page reaches the error.
+#[test]
+fn hpb14_a_non_hub_reply_names_its_status_in_every_write_phase() {
+    let e = env();
+    // The record and manifest a real publish request carries.
+    let done = run(&e, &Wire::new(), standard()).unwrap();
+    let manifest = page_artifact("implicit:org").manifest;
+
+    let mut server = hub_tls::Server::start();
+    let dir = private_dir();
+    let ca = dir.path().join("ca.pem");
+    fs::write(&ca, server.ca_pem()).unwrap();
+    let origin = Origin::parse(server.origin()).unwrap();
+    let http = HttpPublishWire::new(
+        HttpHubTransport::new(OriginFence::new(origin.clone(), []).unwrap()).unwrap(),
+    );
+    let cx = UploadContext {
+        install: origin.clone(),
+        sync_base: Some(format!("{origin}{SYNC_PATH}")),
+        ca_file: Some(ca),
+        claim: RequestClaim::from_session(&agent()).unwrap(),
+        bearer: Secret::new(access1()),
+    };
+    let page = b"<html><body>502 Bad Gateway from the proxy</body></html>";
+    let headers = [
+        "content-type: text/html".to_string(),
+        format!("content-length: {}", page.len()),
+        "connection: close".to_string(),
+    ];
+    let mut proxied = |call: &dyn Fn() -> RdyError| {
+        server.reply(hub_tls::Reply::with_headers(502, &headers, page));
+        server.accept_n(1);
+        call()
+    };
+    let push = "0123456789abcdefghjkmnpqrs";
+    let objects = proxied(&|| {
+        let mut b = std::io::Cursor::new(b"abc".to_vec());
+        http.put_objects(&cx, push, &mut b, 3).unwrap_err()
+    });
+    let files = proxied(&|| {
+        let bodies: [&[u8]; 2] = [b"ab", b"cd"];
+        let mut batch = TwoFiles {
+            files: bodies
+                .iter()
+                .map(|b| FileIdentity {
+                    hash: Hash::of(b),
+                    size: b.len() as u64,
+                })
+                .collect(),
+            bodies: bodies
+                .iter()
+                .map(|b| std::io::Cursor::new(b.to_vec()))
+                .collect(),
+        };
+        http.put_files(&cx, push, &mut batch).unwrap_err()
+    });
+    let publish = proxied(&|| {
+        http.publish(&cx, push, SITE, &done.record, &manifest, None)
+            .unwrap_err()
+    });
+
+    for (phase, step, wire_error) in [
+        ("objects", "objects", objects),
+        ("files", "file", files),
+        ("publish", "publish", publish),
+    ] {
+        assert_eq!(wire_error.code, E_UPSTREAM_UNCERTAIN, "{phase}");
+        let wire = Wire::new().failing(step, wire_error);
+        let err = run(&e, &wire, standard()).unwrap_err();
+        let push = wire
+            .calls()
+            .iter()
+            .find_map(|c| c.push.clone())
+            .expect("a push id was sent");
+        let fix = format!("check push {push} on the hub before publishing again");
+        assert_eq!(
+            triple(&err),
+            (
+                E_UPSTREAM_UNCERTAIN,
+                "the publication upload may have completed",
+                fix.as_str()
+            ),
+            "{phase}"
+        );
+        let issue = |message: String| Issue {
+            severity: Severity::Error,
+            code: E_UPSTREAM_UNCERTAIN,
+            block: None,
+            message,
+            fix: fix.clone(),
+        };
+        assert_eq!(
+            err.issues,
+            vec![
+                issue(format!("upload phase {phase}")),
+                issue("upstream answered 502".to_string()),
+            ],
+            "{phase}"
+        );
+        let text = format!("{err:?} {}", serde_json::to_string(&err).unwrap());
+        for body in ["Bad Gateway", "<html", "proxy"] {
+            assert!(!text.contains(body), "{phase}: {text}");
+        }
     }
 }
 

@@ -1628,7 +1628,7 @@ static ALLOC: sized_alloc::Sized = sized_alloc::Sized;
 
 /// A write's reply from something other than the hub (a proxy's 502 page, say) stays
 /// `E_UPSTREAM_UNCERTAIN`, and its message names the status the upstream answered with. It never
-/// quotes the reply's body.
+/// quotes the reply's body. A read step's such reply is still the bare protocol refusal.
 #[test]
 fn hpb7_a_non_hub_reply_to_a_write_names_its_status() {
     let mut s = Server::start();
@@ -1653,6 +1653,9 @@ fn hpb7_a_non_hub_reply_to_a_write_names_its_status() {
             hub.wire
                 .put_file(&cx, PUSH, &files[0], "text/plain", &mut b)
         });
+        let contents: [&[u8]; 2] = [b"ab", b"cd"];
+        let mut body = Mem::new(&contents);
+        let (batch, _) = served(&mut s, reply(), || hub.wire.put_files(&cx, PUSH, &mut body));
         let mut b = Cursor::new(b"abc".to_vec());
         let (objects, _) = served(&mut s, reply(), || {
             hub.wire.put_objects(&cx, PUSH, &mut b, 3)
@@ -1660,14 +1663,27 @@ fn hpb7_a_non_hub_reply_to_a_write_names_its_status() {
         let (publish, _) = served(&mut s, reply(), || {
             hub.wire.publish(&cx, PUSH, SITE, &rec, &m, None)
         });
-        for e in [err(file), err(objects), err(publish)] {
+        let want = format!("the hub request may have completed; upstream answered {status}");
+        for e in [err(file), err(batch), err(objects), err(publish)] {
             assert_eq!(e.code, E_UPSTREAM_UNCERTAIN, "{status}");
-            assert!(
-                e.message.contains(&format!("upstream answered {status}")),
-                "{status}: {}",
-                e.message
+            assert_eq!(e.message, want);
+            assert_eq!(e.upstream_status, Some(status));
+            assert!(!format!("{e:?}").contains("proxy"), "{e:?}");
+        }
+        // A read step: the bare protocol refusal, with no status.
+        let (state, _) = served(&mut s, reply(), || hub.wire.state(&cx, &state_request()));
+        let (known, _) = served(&mut s, reply(), || hub.wire.known_files(&cx, PUSH, &files));
+        for e in [err(state), err(known)] {
+            assert_eq!(
+                (e.code, e.message.as_str(), e.fix.as_str()),
+                (
+                    E_UPSTREAM_PROTOCOL,
+                    UPSTREAM_PROTOCOL_MESSAGE,
+                    UPSTREAM_PROTOCOL_FIX
+                ),
+                "{status}"
             );
-            assert!(!e.message.contains("proxy"), "{}", e.message);
+            assert_eq!(e.upstream_status, None);
         }
     }
 }

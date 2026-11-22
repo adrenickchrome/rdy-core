@@ -396,8 +396,8 @@ impl Phase {
     }
 }
 
-/// `E_UPSTREAM_UNCERTAIN` for push `push`: the upload may have completed in `phase`. It carries
-/// exactly one issue, which names the phase.
+/// `E_UPSTREAM_UNCERTAIN` for push `push`: the upload may have completed in `phase`. Its first
+/// issue names the phase.
 fn uncertain(push: &PushId, phase: Phase) -> RdyError {
     let fix = format!(
         "check push {} on the hub before publishing again",
@@ -425,14 +425,26 @@ fn stale_after_publish(mut e: RdyError, push: &PushId) -> RdyError {
     e
 }
 
-/// `e` of a write step: a lost or invalid reply becomes the push-bearing uncertainty of `phase`;
-/// any other error is unchanged.
+/// `e` of a write step: a lost or invalid reply becomes the push-bearing uncertainty of `phase`,
+/// with a second issue naming the upstream status when the reply was not the hub's; any other
+/// error is unchanged.
 fn in_phase(e: RdyError, push: &PushId, phase: Phase) -> RdyError {
-    if e.code == E_UPSTREAM_UNCERTAIN {
-        uncertain(push, phase)
-    } else {
-        e
+    if e.code != E_UPSTREAM_UNCERTAIN {
+        return e;
     }
+    let mut out = uncertain(push, phase);
+    if let Some(status) = e.upstream_status {
+        let fix = out.fix.clone();
+        out.issues.push(Issue {
+            severity: Severity::Error,
+            code: E_UPSTREAM_UNCERTAIN,
+            block: None,
+            message: format!("upstream answered {status}"),
+            fix,
+        });
+        out.upstream_status = Some(status);
+    }
+    out
 }
 
 /// The hub's actor-claim refusal code (hub tb-68J50).
