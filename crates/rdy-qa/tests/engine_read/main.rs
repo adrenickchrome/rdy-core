@@ -70,6 +70,7 @@ mod engine_tracking;
 mod engine_tree;
 mod engine_ui_config;
 mod engine_values;
+mod engine_vector_determinism;
 mod engine_vector_revocation;
 mod engine_view_api;
 mod engine_vpos;
