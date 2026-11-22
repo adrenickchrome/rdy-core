@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-adapter"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "postcard",
  "rcgen",
@@ -2145,14 +2145,14 @@ dependencies = [
 
 [[package]]
 name = "rdy-check-wasm"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "wasmi",
 ]
 
 [[package]]
 name = "rdy-cli"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2170,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-daemon"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -2201,14 +2201,14 @@ dependencies = [
 
 [[package]]
 name = "rdy-diagram"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "mmdflux",
 ]
 
 [[package]]
 name = "rdy-engine"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -2247,7 +2247,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-graph"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "imbl",
  "rdy-model",
@@ -2256,7 +2256,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-mcp"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-model"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "blake3",
  "postcard",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-qa"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-render"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "minijinja",
  "miniz_oxide",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-schema"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "base64 0.22.1",
  "proptest",
@@ -2361,7 +2361,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-store"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "blake3",
  "criterion",
