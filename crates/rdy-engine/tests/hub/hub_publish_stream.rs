@@ -469,6 +469,7 @@ fn cx() -> UploadContext {
         })
         .unwrap(),
         bearer: Secret::new(ACCESS),
+        zstd: false,
     }
 }
 

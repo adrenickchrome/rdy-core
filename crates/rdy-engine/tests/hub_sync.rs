@@ -501,6 +501,7 @@ fn scc8_hub_refusals_use_publish_mapping() {
         ca_file: Some(ca),
         claim: claim.clone(),
         bearer: Secret::new(access()),
+        zstd: false,
     };
     let request = SyncStateRequest::new(&claim);
     let body = |code: &str, extra: &str| {
@@ -2943,4 +2944,40 @@ fn scc8_every_write_names_each_carried_tag_once() {
     let writes = fresh.writes();
     assert_eq!(writes.len(), 1);
     assert_eq!(named_tags(&writes[0]), ["v1.0.0", "v1.1.0", "v1.2.0"]);
+}
+
+/// D-SEGWK: a push's objects/put bodies go as zstd when the sync state reply holds
+/// `zstd: true`, as a publish's do, and only then: every request after the state step says so.
+#[test]
+fn upfast_push_puts_follow_the_state_reply_zstd_member() {
+    for zstd in [false, true] {
+        let e = env(2);
+        let hub = Hub::new().with_state(|s| s.zstd = zstd);
+        push(&e, &hub, None).unwrap();
+        let calls = hub.calls();
+        assert!(calls.iter().any(|c| c.step == "put"), "{zstd}");
+        for c in calls.iter().filter(|c| matches!(c.step, "known" | "put")) {
+            assert_eq!(c.zstd, zstd, "{zstd}: {}", c.step);
+        }
+    }
+}
+
+/// D-SEGWK: a restore's objects/put bodies follow the state reply's `zstd` member too.
+#[test]
+fn upfast_restore_puts_follow_the_state_reply_zstd_member() {
+    for zstd in [false, true] {
+        let dir = private_dir();
+        let scratch = private_dir();
+        let caller = env(0);
+        let src = env(2);
+        let dump = dump_of(&src.engine, dir.path(), "project.rdydump");
+        let renderer = Renderer::default();
+        let hub = Hub::new().with_state(|s| s.zstd = zstd);
+        restore_with(&caller, &hub, &renderer, scratch.path(), &dump).unwrap();
+        let calls = hub.calls();
+        assert!(calls.iter().any(|c| c.step == "put"), "{zstd}");
+        for c in calls.iter().filter(|c| matches!(c.step, "known" | "put")) {
+            assert_eq!(c.zstd, zstd, "{zstd}: {}", c.step);
+        }
+    }
 }

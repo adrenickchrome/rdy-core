@@ -26,16 +26,24 @@
 //!   keeps the push id with the publish phase, since the candidate may exist.
 //! - **Uncertainty.** A write whose reply was lost, or a publish reply that breaks the candidate
 //!   contract, is `E_UPSTREAM_UNCERTAIN` naming the push id and the phase: the upload may have
-//!   completed. Reads that fail stay `E_UPSTREAM_TRANSPORT`. Nothing is retried and nothing is
-//!   kept locally to resume.
+//!   completed. Reads that fail stay `E_UPSTREAM_TRANSPORT`. Nothing is retried within a run.
+//! - **Resume (D-SEGWK).** Before the first known request, the run writes its push id with the
+//!   remote's URL, the repo id, the root tag's hash and the redaction epoch to
+//!   `.rdy/publish-resume.json`: the project's local state, outside the log, which no dump
+//!   carries. The next publish of the same tag to the same remote and repo at the same epoch
+//!   names that push id, so the hub's known steps list only what its quarantine lacks; any other
+//!   publish replaces the record with a new push id. A reply to the publish write clears the
+//!   record, and so does `E_UPSTREAM_UNCERTAIN` on that write, which still names the push id: the
+//!   candidate may exist. A run that stops before its publish write keeps it. The client checks
+//!   no quarantine age.
 //! - **The result.** The candidate's id, state and page link, the push id, the tagged profile's
 //!   audience, the full record, the reference summary, a bounded inventory, the settings and
 //!   credential warnings and the renderer's warnings, and `review: hub`: the hub's own review is
 //!   authoritative. The inventory is no disclosure diff and claims no baseline. The page link is
 //!   returned, never fetched or opened.
 use crate::error::{
-    E_BAD_INPUT, E_LIMIT, E_REPO_MISMATCH, E_UPSTREAM_ACTOR_CLAIM, E_UPSTREAM_UNCERTAIN, RdyError,
-    SYNC_REMOTE_MODE_FIX, SYNC_REMOTE_MODE_MESSAGE, upstream_auth, upstream_protocol,
+    E_BAD_INPUT, E_IO, E_LIMIT, E_REPO_MISMATCH, E_UPSTREAM_ACTOR_CLAIM, E_UPSTREAM_UNCERTAIN,
+    RdyError, SYNC_REMOTE_MODE_FIX, SYNC_REMOTE_MODE_MESSAGE, upstream_auth, upstream_protocol,
 };
 use crate::formats::formats;
 use crate::hub_config::{
@@ -46,7 +54,7 @@ use crate::hub_publish_files::{ArtifactLimits, ArtifactSource, publish_record, u
 use crate::hub_publish_stream::{BatchLimits, PreparedHistory, PushId, send_history};
 use crate::hub_publish_wire::{
     Candidate, MAX_SITE_BYTES, ProfileIdentity, PublicationInputs, PublishState, PublishWire,
-    StateRequest, UploadContext,
+    StateRequest, UploadContext, is_hub_refusal,
 };
 use crate::hub_types::{HubClock, HubTransport, Origin, OriginFence, RequestClaim};
 use crate::publication::{
@@ -463,6 +471,92 @@ fn candidate_url_ok(install: &Origin, url: &str) -> bool {
         .is_ok_and(|o| o == *install)
 }
 
+/// The file in the project's `.rdy` folder that keeps a stopped publish's push id (D-SEGWK).
+pub const RESUME_FILE: &str = "publish-resume.json";
+/// The most bytes a resume record is read from; a longer file is no record.
+const MAX_RESUME_BYTES: u64 = 4096;
+
+/// A stopped publish's push id and what it was for: the remote's URL, the repo id, the root
+/// tag's hash and the redaction epoch (D-SEGWK). A private machine file: unknown members are
+/// refused, and a file that is not exactly a record is no record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeRecord {
+    remote: String,
+    repo_id: String,
+    tag: String,
+    epoch: u64,
+    push: String,
+}
+
+impl ResumeRecord {
+    /// Whether `self` is a stopped publish of the same tag to the same remote and repo at the
+    /// same epoch as `other`; the push ids are not compared.
+    fn same_target(&self, other: &ResumeRecord) -> bool {
+        (&self.remote, &self.repo_id, &self.tag, self.epoch)
+            == (&other.remote, &other.repo_id, &other.tag, other.epoch)
+    }
+}
+
+/// The resume record of the project at `project`.
+fn resume_path(project: &Path) -> PathBuf {
+    project.join(".rdy").join(RESUME_FILE)
+}
+
+/// The record at `path`: none when there is no regular file of at most [`MAX_RESUME_BYTES`]
+/// holding exactly one record.
+fn read_resume(path: &Path) -> Option<ResumeRecord> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_RESUME_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn resume_error(action: &str) -> RdyError {
+    RdyError::new(
+        E_IO,
+        format!("the publish resume record could not be {action}"),
+        "check that the project's .rdy folder is writable, then publish again",
+    )
+}
+
+/// Makes `record` the durable content of `path` (0600, replaced whole).
+fn write_resume(path: &Path, record: &ResumeRecord) -> Result<(), RdyError> {
+    let bytes = serde_json::to_vec(record).map_err(|_| resume_error("written"))?;
+    rdy_store::fsutil::write_private_durable(path, &bytes).map_err(|_| resume_error("written"))
+}
+
+/// Removes the record at `path`, if any. A failure is a warning: the publish's own outcome
+/// stands.
+fn clear_resume(path: &Path) -> Option<Issue> {
+    match std::fs::remove_file(path) {
+        Ok(()) => None,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => {
+            let e = resume_error("removed");
+            Some(Issue {
+                severity: Severity::Warning,
+                code: e.code,
+                block: None,
+                message: e.message,
+                fix: format!("remove .rdy/{RESUME_FILE} before publishing this tag again"),
+            })
+        }
+    }
+}
+
+/// Whether the publish write was answered: the candidate, a reply outside its contract, the
+/// hub's refusal, or `E_UPSTREAM_UNCERTAIN` (the reply was lost). Any other error came before
+/// the request was sent.
+fn publish_answered<T>(sent: &Result<T, RdyError>) -> bool {
+    match sent {
+        Ok(_) => true,
+        Err(e) => e.code == E_UPSTREAM_UNCERTAIN || is_hub_refusal(e),
+    }
+}
+
 /// The settings and credential warnings of a run, each once, in the order first seen.
 #[derive(Default)]
 struct Warnings(Vec<Issue>);
@@ -576,6 +670,7 @@ impl<'a> PublishService<'a> {
             ca_file: t.ca_file.clone(),
             claim: grant.claim,
             bearer: grant.access_token,
+            zstd: false,
         })
     }
 
@@ -729,10 +824,38 @@ impl<'a> PublishService<'a> {
         check_result_size(&result)?;
         drop(resolved);
 
-        // 9. the tagged history and one push id
+        // 9. the tagged history and one push id: a stopped publish's, when it was of the same
+        // tag to the same remote and repo at the same epoch; recorded before the first known
         let mut history = PreparedHistory::capture(read, u.tag_hash)?;
-        let push = PushId::new();
-        let mut context = || self.context(t, account, read, Some(&base));
+        let resume = resume_path(&self.project);
+        let target = ResumeRecord {
+            remote: t.url.clone(),
+            repo_id: repo_id.to_string(),
+            tag: u.tag_hash.to_string(),
+            epoch: read.redaction_epoch(),
+            push: String::new(),
+        };
+        let resumed = read_resume(&resume)
+            .filter(|r| r.same_target(&target))
+            .and_then(|r| PushId::parse(&r.push));
+        let push = match resumed {
+            Some(p) => p,
+            None => {
+                let p = PushId::new();
+                let record = ResumeRecord {
+                    push: p.as_str().to_string(),
+                    ..target
+                };
+                write_resume(&resume, &record)?;
+                p
+            }
+        };
+        // every request after the state step says whether the hub takes zstd put bodies
+        let zstd = state.zstd;
+        let mut context = || {
+            self.context(t, account, read, Some(&base))
+                .map(|cx| UploadContext { zstd, ..cx })
+        };
 
         // 10. history, then files, then the epoch again
         send_history(
@@ -761,7 +884,7 @@ impl<'a> PublishService<'a> {
         // 11. publish, then the candidate's checks
         let cx = context()?;
         let manifest: &Manifest = rendered.artifact.manifest();
-        let candidate = publish_record(
+        let sent = publish_record(
             &result.record,
             manifest,
             push.as_str(),
@@ -769,22 +892,33 @@ impl<'a> PublishService<'a> {
             u.keep_latest,
             self.wire,
             cx,
-        )
-        .map_err(|e| in_phase(e, &push, Phase::Publish))?;
+        );
+        // a reply, or a lost one, leaves nothing to resume; a request never sent keeps it
+        let cleared = if publish_answered(&sent) {
+            clear_resume(&resume)
+        } else {
+            None
+        };
+        let with_cleared = |mut e: RdyError| {
+            e.issues.extend(cleared.clone());
+            e
+        };
+        let candidate = sent.map_err(|e| with_cleared(in_phase(e, &push, Phase::Publish)))?;
         // a redaction that landed while publish was in flight: no success, and the push id is
         // kept because the candidate may exist; nothing is sent again
         read.ensure_current_epoch()
-            .map_err(|e| stale_after_publish(e, &push))?;
+            .map_err(|e| with_cleared(stale_after_publish(e, &push)))?;
         let Candidate { id, state, url } = candidate;
         if state != "candidate" || !candidate_url_ok(&t.install, &url) {
-            return Err(uncertain(&push, Phase::Publish));
+            return Err(with_cleared(uncertain(&push, Phase::Publish)));
         }
         result.id = id;
         result.state = state;
         result.url = url;
         result.push = push.as_str().to_string();
+        result.warnings.extend(cleared.clone());
         // the budget held every bound part; a reply past it would still name the candidate
-        check_result_size(&result).map_err(|_| uncertain(&push, Phase::Publish))?;
+        check_result_size(&result).map_err(|_| with_cleared(uncertain(&push, Phase::Publish)))?;
         Ok(result)
     }
 }

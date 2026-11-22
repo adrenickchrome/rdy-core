@@ -250,6 +250,8 @@ pub struct Call {
     pub ca_file: Option<PathBuf>,
     pub sync_base: Option<String>,
     pub remote: Option<String>,
+    /// Whether the context let a put body go as zstd.
+    pub zstd: bool,
 }
 
 pub type Hook = Box<dyn FnMut(&'static str) + Send>;
@@ -328,6 +330,7 @@ pub fn base_state() -> PublishState {
         audience: None,
         artifact_bytes: 201_326_592,
         artifact_files: 32_000,
+        zstd: false,
     }
 }
 
@@ -453,6 +456,7 @@ impl Hub {
                 ca_file: cx.ca_file.clone(),
                 sync_base: cx.sync_base.clone(),
                 remote: remote.map(str::to_string),
+                zstd: cx.zstd,
             });
             calls.iter().filter(|c| c.step == step).count()
         };

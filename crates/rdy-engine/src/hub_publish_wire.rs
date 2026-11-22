@@ -30,14 +30,19 @@
 //!   `E_UPSTREAM_TRANSPORT` and an invalid reply `E_UPSTREAM_PROTOCOL`. Objects, file and publish
 //!   are writes: once the request may have been sent, a lost or invalid reply is
 //!   `E_UPSTREAM_UNCERTAIN`. Nothing is retried.
+//! - **zstd put bodies (D-SEGWK; rdyhub D-2TDK5).** When the state reply holds `zstd: true`, the
+//!   upload context says so, and each objects/put and files/put body goes as one zstd frame at
+//!   level 3 with `Content-Encoding: zstd`; else, and in every other step, bodies go as they are.
+//!   The batch limits, the upload bounds and the replies' counts are of the bytes before
+//!   compression.
 use crate::error::{
     E_BAD_INPUT, E_LIMIT, E_UPSTREAM_REFUSED, RdyError, actor_unbound, core_error_code,
     upstream_protocol, upstream_refused, upstream_transport, upstream_uncertain,
 };
 use crate::formats::formats;
 use crate::hub_http::{
-    HttpHubTransport, JsonLimits, Prefixes, ReplySink, UploadHttpRequest, UploadMethod,
-    api_error_entry, decode_bounded_json, reply_echoes,
+    BodyEncoding, HttpHubTransport, JsonLimits, Prefixes, ReplySink, UploadHttpRequest,
+    UploadMethod, api_error_entry, decode_bounded_json, reply_echoes, zstd_frame,
 };
 use crate::hub_types::{
     HubFailure, LimitUnit, MAX_ID_BYTES, MAX_URL_BYTES, Origin, OriginFence, RemoteUrl,
@@ -134,6 +139,9 @@ pub struct UploadContext {
     pub ca_file: Option<PathBuf>,
     pub claim: RequestClaim,
     pub bearer: Secret,
+    /// Whether an objects/put or files/put body goes as one zstd frame: the state reply's
+    /// `zstd` member. No other step reads it.
+    pub zstd: bool,
 }
 
 impl fmt::Debug for UploadContext {
@@ -144,6 +152,7 @@ impl fmt::Debug for UploadContext {
             .field("ca_file", &self.ca_file)
             .field("actor", &self.claim.actor)
             .field("run", &self.claim.run)
+            .field("zstd", &self.zstd)
             .finish_non_exhaustive()
     }
 }
@@ -270,6 +279,10 @@ pub struct PublishState {
     pub audience: Option<Audience>,
     pub artifact_bytes: u64,
     pub artifact_files: u64,
+    /// Whether the hub takes a files/put or objects/put body with `Content-Encoding: zstd`
+    /// (rdyhub D-2TDK5). Optional: absent is false.
+    #[serde(default)]
+    pub zstd: bool,
 }
 
 /// An objects/put reply: the push quarantine's distinct records and bytes.
@@ -1248,6 +1261,7 @@ struct Exchange<'a> {
     body_len: u64,
     reply_limit: usize,
     success: &'a [u16],
+    encoding: BodyEncoding,
 }
 
 pub(crate) fn limits(bytes: usize, values: usize) -> JsonLimits {
@@ -1340,6 +1354,19 @@ fn issue(dto: IssueDto) -> Issue {
     }
 }
 
+/// The start of the request-id notice that ends every hub refusal ([`refusal`]).
+const REQUEST_ID_NOTICE: &str = "hub request ";
+
+/// Whether `e` is the hub's own refusal, a reply of the hub: every one [`refusal`] makes carries
+/// the request-id notice, and no local refusal does.
+pub(crate) fn is_hub_refusal(e: &RdyError) -> bool {
+    e.issues.iter().any(|i| {
+        i.code == E_UPSTREAM_REFUSED
+            && i.fix == REQUEST_ID_FIX
+            && i.message.starts_with(REQUEST_ID_NOTICE)
+    })
+}
+
 fn notice(message: String, fix: &str) -> Issue {
     Issue {
         severity: Severity::Error,
@@ -1392,7 +1419,7 @@ fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyE
     };
     e.issues = dto.issues.into_iter().map(issue).collect();
     e.issues.push(notice(
-        format!("hub request {}", dto.request_id),
+        format!("{REQUEST_ID_NOTICE}{}", dto.request_id),
         REQUEST_ID_FIX,
     ));
     if let Some(n) = dto.retry_after {
@@ -1439,6 +1466,7 @@ impl HttpPublishWire {
                 body: x.body,
                 body_len: x.body_len,
                 reply_limit: x.reply_limit,
+                encoding: x.encoding,
             },
         );
         let (status, body) = sent.map_err(|f| PostError::Other(failed(cx, effect, f)))?;
@@ -1475,6 +1503,7 @@ impl HttpPublishWire {
                 body: Some(&mut body),
                 body_len: len,
                 reply_limit: REPLY_BYTES,
+                encoding: BodyEncoding::Identity,
             },
             ReplySink {
                 status: 200,
@@ -1536,6 +1565,7 @@ impl HttpPublishWire {
                 body_len: len,
                 reply_limit,
                 success,
+                encoding: BodyEncoding::Identity,
             },
         )
     }
@@ -1565,6 +1595,46 @@ impl HttpPublishWire {
                 body_len: len,
                 reply_limit,
                 success,
+                encoding: BodyEncoding::Identity,
+            },
+        )
+    }
+}
+
+impl HttpPublishWire {
+    /// `POST <url>` of a put step (objects/put or files/put): `len` bytes of `body` as
+    /// `content_type`, as one zstd frame with `Content-Encoding: zstd` when `cx.zstd`, else as
+    /// they are. `len` and every bound count the bytes before compression; the frame is made
+    /// before the request, so a body that fails to read sends nothing.
+    fn put(
+        &self,
+        cx: &UploadContext,
+        url: &str,
+        content_type: &str,
+        body: &mut dyn Read,
+        len: u64,
+        reply_limit: usize,
+    ) -> Result<Vec<u8>, RdyError> {
+        let mut frame;
+        let (body, body_len, encoding): (&mut dyn Read, u64, BodyEncoding) = if cx.zstd {
+            let (file, framed) = zstd_frame(body, len)?;
+            frame = file;
+            (&mut frame, framed, BodyEncoding::Zstd)
+        } else {
+            (body, len, BodyEncoding::Identity)
+        };
+        self.exchange(
+            cx,
+            Exchange {
+                effect: Effect::Write,
+                method: UploadMethod::Post,
+                url,
+                content_type,
+                body: Some(body),
+                body_len,
+                reply_limit,
+                success: &[200, 201],
+                encoding,
             },
         )
     }
@@ -1748,6 +1818,7 @@ impl PublishWire for HttpPublishWire {
                 body_len: 0,
                 reply_limit: REPLY_BYTES,
                 success: &[200],
+                encoding: BodyEncoding::Identity,
             },
         )?;
         let dto: DiscoveryDto = reply(
@@ -1800,19 +1871,7 @@ impl PublishWire for HttpPublishWire {
     ) -> Result<ObjectPut, RdyError> {
         check_push(push)?;
         let url = route(cx, &["objects", "put"], &[("push", push)])?;
-        let reply_body = self.exchange(
-            cx,
-            Exchange {
-                effect: Effect::Write,
-                method: UploadMethod::Post,
-                url: &url,
-                content_type: "application/octet-stream",
-                body: Some(body),
-                body_len: len,
-                reply_limit: REPLY_BYTES,
-                success: &[200, 201],
-            },
-        )?;
+        let reply_body = self.put(cx, &url, "application/octet-stream", body, len, REPLY_BYTES)?;
         reply(
             &reply_body,
             limits(REPLY_BYTES, MAX_JSON_VALUES),
@@ -1872,19 +1931,7 @@ impl PublishWire for HttpPublishWire {
         check_push(push)?;
         let hash = file.hash.to_string();
         let url = route(cx, &["files", "put"], &[("push", push), ("hash", &hash)])?;
-        let reply_body = self.exchange(
-            cx,
-            Exchange {
-                effect: Effect::Write,
-                method: UploadMethod::Post,
-                url: &url,
-                content_type: media_type,
-                body: Some(body),
-                body_len: file.size,
-                reply_limit: REPLY_BYTES,
-                success: &[200, 201],
-            },
-        )?;
+        let reply_body = self.put(cx, &url, media_type, body, file.size, REPLY_BYTES)?;
         let held: FileIdentity = reply(
             &reply_body,
             limits(REPLY_BYTES, MAX_JSON_VALUES),
@@ -1917,18 +1964,13 @@ impl PublishWire for HttpPublishWire {
         let len = tar_len(&files).ok_or_else(|| hub_limit(usize::MAX, LimitUnit::Bytes))?;
         let url = route(cx, &["files", "put"], &[("push", push)])?;
         let mut body = TarBody::new(batch);
-        let reply_body = self.exchange(
+        let reply_body = self.put(
             cx,
-            Exchange {
-                effect: Effect::Write,
-                method: UploadMethod::Post,
-                url: &url,
-                content_type: TAR_MEDIA_TYPE,
-                body: Some(&mut body),
-                body_len: len,
-                reply_limit: FILES_KNOWN_REPLY_BYTES,
-                success: &[200, 201],
-            },
+            &url,
+            TAR_MEDIA_TYPE,
+            &mut body,
+            len,
+            FILES_KNOWN_REPLY_BYTES,
         )?;
         // Three values per item, with headroom for added members.
         let dto: FilesPut = reply(

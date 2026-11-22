@@ -404,9 +404,15 @@ impl<'a, 's> Exchange<'a, 's> {
         Ok(out)
     }
 
+    /// The context of one request; its put bodies go as zstd when the state reply says the hub
+    /// takes it (D-SEGWK).
     fn context(&self) -> Result<UploadContext, RdyError> {
         self.service
             .context(self.t, &self.read, Some(&self.base_url))
+            .map(|cx| UploadContext {
+                zstd: self.state.zstd,
+                ..cx
+            })
     }
 
     /// The tags of `pool` (the keys known named missing), each with the disagreements at its

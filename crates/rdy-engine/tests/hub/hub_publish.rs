@@ -119,6 +119,11 @@ fn other_install() -> &'static str {
     &origins()[1]
 }
 
+/// The URL of a second publish remote on the install.
+fn second_remote() -> String {
+    format!("{}/second", install())
+}
+
 fn candidate_url() -> String {
     format!("{}/app/publications/{CANDIDATE_ID}", install())
 }
@@ -492,6 +497,8 @@ struct Call {
     claim: RequestClaim,
     sync_base: Option<String>,
     push: Option<String>,
+    /// Whether the context let a put body go as zstd.
+    zstd: bool,
 }
 
 type Hook = Box<dyn FnMut(&'static str) + Send>;
@@ -529,6 +536,7 @@ fn base_state() -> PublishState {
         audience: None,
         artifact_bytes: 201_326_592,
         artifact_files: 32_000,
+        zstd: false,
     }
 }
 
@@ -586,6 +594,7 @@ impl Wire {
             claim: cx.claim.clone(),
             sync_base: cx.sync_base.clone(),
             push: push.map(str::to_string),
+            zstd: cx.zstd,
         });
         if let Some(h) = self.hook.lock().unwrap().as_mut() {
             h(step);
@@ -599,7 +608,10 @@ impl Wire {
 
 impl PublishWire for Wire {
     fn discovery(&self, cx: &UploadContext, remote: &str) -> Result<Discovery, RdyError> {
-        assert_eq!(remote, install(), "discovery reads the remote's URL");
+        assert!(
+            remote == install() || remote == second_remote(),
+            "discovery reads the remote's URL"
+        );
         self.enter("discovery", cx, None)?;
         Ok(Discovery {
             sync_base: format!("{}{SYNC_PATH}", install()),
@@ -1045,6 +1057,7 @@ fn hpb14_a_non_hub_reply_names_its_status_in_every_write_phase() {
         ca_file: Some(ca),
         claim: RequestClaim::from_session(&agent()).unwrap(),
         bearer: Secret::new(access1()),
+        zstd: false,
     };
     let page = b"<html><body>502 Bad Gateway from the proxy</body></html>";
     let headers = [
@@ -2002,4 +2015,268 @@ fn hpb14_the_request_is_strict_and_keep_latest_is_optional() {
     let mut extra = base;
     extra["profile"] = json!("implicit:org");
     assert!(parse(extra).is_err(), "no caller profile");
+}
+
+// ---------------------------------------------------------------------------------------------
+// upfast: zstd put bodies and publish resume (D-SEGWK)
+// ---------------------------------------------------------------------------------------------
+
+/// The state reply's `zstd: true` reaches the context of every request after the state step
+/// (the wire compresses only the objects and files bodies; hpb7's upfast tests pin that), and
+/// discovery and state go without it. The batches and the files are the same with zstd and
+/// without, since the limits count the bytes before compression.
+#[test]
+fn upfast_zstd_reaches_only_the_put_steps_and_leaves_the_plan_unchanged() {
+    let e = env();
+    let small = |s: &mut PublishState| s.batch_records = 3;
+    let plain = Wire::new().with_state(small);
+    run(&e, &plain, standard()).unwrap();
+    let zstd = Wire::new().with_state(|s| {
+        small(s);
+        s.zstd = true;
+    });
+    run(&e, &zstd, standard()).unwrap();
+    assert!(plain.calls().iter().all(|c| !c.zstd));
+    for c in zstd.calls() {
+        assert_eq!(
+            c.zstd,
+            !matches!(c.step, "discovery" | "state"),
+            "{}",
+            c.step
+        );
+    }
+    assert_eq!(plain.steps(), zstd.steps());
+    assert!(
+        zstd.steps().iter().filter(|s| **s == "objects").count() > 1,
+        "several batches"
+    );
+    assert_eq!(
+        *plain.batches.lock().unwrap(),
+        *zstd.batches.lock().unwrap()
+    );
+    assert_eq!(*plain.files.lock().unwrap(), *zstd.files.lock().unwrap());
+}
+
+/// Where a stopped publish keeps its push id: the project's local state, outside the log.
+fn resume_file(e: &Env) -> PathBuf {
+    e.project.join(".rdy").join("publish-resume.json")
+}
+
+/// The one push id every upload request of `wire` named.
+#[track_caller]
+fn push_of(wire: &Wire) -> String {
+    let pushes: std::collections::BTreeSet<String> =
+        wire.calls().into_iter().filter_map(|c| c.push).collect();
+    assert_eq!(pushes.len(), 1, "one push id: {pushes:?}");
+    pushes.into_iter().next().unwrap()
+}
+
+/// A run of `req` that stops at the objects step; its push id.
+fn stopped(e: &Env, req: PublishRequest) -> String {
+    let wire = Wire::new().failing("objects", upstream_uncertain());
+    let err = run(e, &wire, req).unwrap_err();
+    assert_eq!(err.code, E_UPSTREAM_UNCERTAIN);
+    push_of(&wire)
+}
+
+/// The hub's refusal of a write, as the real wire reads it: a 409 hub error object.
+fn hub_refusal(e: &Env) -> RdyError {
+    let done = run(e, &Wire::new(), standard()).unwrap();
+    let manifest = page_artifact("implicit:org").manifest;
+    let mut server = hub_tls::Server::start();
+    let dir = private_dir();
+    let ca = dir.path().join("ca.pem");
+    fs::write(&ca, server.ca_pem()).unwrap();
+    let origin = Origin::parse(server.origin()).unwrap();
+    let http = HttpPublishWire::new(
+        HttpHubTransport::new(OriginFence::new(origin.clone(), []).unwrap()).unwrap(),
+    );
+    let cx = UploadContext {
+        install: origin.clone(),
+        sync_base: Some(format!("{origin}{SYNC_PATH}")),
+        ca_file: Some(ca),
+        claim: RequestClaim::from_session(&agent()).unwrap(),
+        bearer: Secret::new(access1()),
+        zstd: false,
+    };
+    let body = json!({"code": "E_HUB_SITE_AUDIENCE", "message": "the site audience differs",
+        "fix": "choose another site", "request_id": "req_00000000000000000000000009",
+        "issues": []})
+    .to_string();
+    server.reply(hub_tls::Reply::json(409, &body));
+    server.accept_n(1);
+    let push = "0123456789abcdefghjkmnpqrs";
+    let refused = http
+        .publish(&cx, push, SITE, &done.record, &manifest, None)
+        .unwrap_err();
+    assert_eq!(refused.code, "E_HUB_SITE_AUDIENCE");
+    assert_eq!(server.finish(), 0);
+    refused
+}
+
+/// A publish that stops before its publish write keeps its push id, with the remote, the hub
+/// repo, the root tag and the redaction epoch, in the project's local state and not in the log:
+/// written before the first known request. The next publish of the same tag to the same remote
+/// and repo at the same epoch names that push id, until a reply to the publish write.
+#[test]
+fn upfast_a_stopped_publish_resumes_under_its_push_id() {
+    let e = env();
+    let path = resume_file(&e);
+    let refs_before = e.r.read().reader().refs_with_prefix("").unwrap();
+    let store_before = tree(&e.project.join(".rdy").join("store"));
+
+    // the record is in place when the first known request goes
+    let wire = Wire::new().failing("known", upstream_transport());
+    let seen: Arc<Mutex<Option<Option<Vec<u8>>>>> = Arc::default();
+    {
+        let (path, seen) = (path.clone(), Arc::clone(&seen));
+        wire.on_step(move |step| {
+            let mut seen = seen.lock().unwrap();
+            if step == "known" && seen.is_none() {
+                *seen = Some(fs::read(&path).ok());
+            }
+        });
+    }
+    assert_eq!(
+        run(&e, &wire, standard()).unwrap_err().code,
+        E_UPSTREAM_TRANSPORT
+    );
+    let first = push_of(&wire);
+    let at_known = seen.lock().unwrap().clone().expect("known was sent");
+    let at_known = String::from_utf8(at_known.expect("the record was written first")).unwrap();
+    assert!(at_known.contains(&first), "{at_known}");
+
+    // every stop before the publish write keeps it, a hub refusal of a put included
+    let refusal = hub_refusal(&e);
+    assert!(!path.exists(), "the publish reply cleared it");
+    let wire = Wire::new().failing("known", upstream_transport());
+    run(&e, &wire, standard()).unwrap_err();
+    let first = push_of(&wire);
+    for (step, failure) in [
+        ("known", upstream_uncertain()),
+        ("objects", upstream_uncertain()),
+        ("objects", refusal.clone()),
+        ("files_known", upstream_transport()),
+        ("file", upstream_uncertain()),
+        ("file", refusal.clone()),
+        // a publish request certainly not sent
+        ("publish", upstream_transport()),
+    ] {
+        let wire = Wire::new().failing(step, failure);
+        run(&e, &wire, standard()).unwrap_err();
+        assert_eq!(push_of(&wire), first, "{step}");
+        assert!(path.exists(), "{step}");
+    }
+    // the record is local state: no log record, ref or store byte changed
+    assert_eq!(
+        e.r.read().reader().refs_with_prefix("").unwrap(),
+        refs_before
+    );
+    assert_eq!(tree(&e.project.join(".rdy").join("store")), store_before);
+
+    // the next whole publish resumes it, and its reply clears it
+    let wire = Wire::new();
+    let done = run(&e, &wire, standard()).unwrap();
+    assert_eq!(done.push, first);
+    assert_eq!(push_of(&wire), first);
+    assert!(!path.exists());
+    let wire = Wire::new();
+    let next = run(&e, &wire, standard()).unwrap();
+    assert_ne!(
+        next.push, first,
+        "a finished publish leaves nothing to resume"
+    );
+}
+
+/// A reply to the publish write clears the record: the candidate, the hub's refusal, and a
+/// reply that breaks the candidate contract. So does `E_UPSTREAM_UNCERTAIN` on that write, and
+/// the error still names the push id. The publish after each takes a new push id.
+#[test]
+fn upfast_a_publish_reply_or_an_uncertain_publish_write_clears_the_record() {
+    let e = env();
+    let path = resume_file(&e);
+    let refusal = hub_refusal(&e);
+    let outside = Wire::new();
+    outside.candidate.lock().unwrap().url = format!("{}/app/c", other_install());
+    let cases: [(&str, Wire); 4] = [
+        ("the candidate", Wire::new()),
+        ("the hub's refusal", Wire::new().failing("publish", refusal)),
+        ("a reply outside the contract", outside),
+        (
+            "an uncertain write",
+            Wire::new().failing("publish", upstream_uncertain()),
+        ),
+    ];
+    for (case, wire) in cases {
+        let kept = stopped(&e, standard());
+        assert!(path.exists(), "{case}");
+        let r = run(&e, &wire, standard());
+        assert_eq!(push_of(&wire), kept, "{case}: resumed");
+        assert!(!path.exists(), "{case}: cleared");
+        if let Err(err) = r
+            && err.code == E_UPSTREAM_UNCERTAIN
+        {
+            assert!(err.fix.contains(&kept), "{case}: {err:?}");
+        }
+        let wire = Wire::new();
+        assert_ne!(run(&e, &wire, standard()).unwrap().push, kept, "{case}");
+    }
+}
+
+/// Another tag, another remote, another hub repo or another redaction epoch takes a new push id
+/// and replaces the record, so the publish after it does not resume the first.
+#[test]
+fn upfast_another_tag_remote_repo_or_epoch_takes_a_new_push_id() {
+    let mut e = env();
+    let path = resume_file(&e);
+    tag(&mut e.r, "v1.1.0");
+    RemoteService::new(&e.project, &e.user_file)
+        .add(
+            "second",
+            &second_remote(),
+            RemoteMode::Publish,
+            RemoteLevel::Project,
+        )
+        .unwrap();
+    let v1 = standard();
+    let v11 = request("v1.1.0", "hub", SITE);
+    let second = request("v1.0.0", "second", SITE);
+
+    // another tag, then the first again
+    let a = stopped(&e, v1.clone());
+    assert_eq!(stopped(&e, v1.clone()), a, "the same publish resumes");
+    let b = stopped(&e, v11.clone());
+    assert_ne!(b, a, "another tag");
+    let c = stopped(&e, v1.clone());
+    assert!(c != a && c != b, "the record was replaced");
+    // another remote, then the first again
+    let d = stopped(&e, second.clone());
+    assert_ne!(d, c, "another remote");
+    let f = stopped(&e, v1.clone());
+    assert!(f != c && f != d);
+
+    // another hub repo, then another epoch, as the record names them
+    let edit = |member: &str, value: Value| {
+        let mut v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(v.get(member).is_some(), "{member}: {v}");
+        v[member] = value;
+        fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    };
+    let g = stopped(&e, v1.clone());
+    assert_eq!(g, f);
+    edit("repo_id", json!(RepoId([7; 16]).to_string()));
+    let h = stopped(&e, v1.clone());
+    assert_ne!(h, g, "another hub repo");
+    let v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    edit("epoch", json!(v["epoch"].as_u64().unwrap() + 1));
+    let i = stopped(&e, v1.clone());
+    assert_ne!(i, h, "another epoch");
+
+    // a real redaction moves the epoch
+    assert_eq!(stopped(&e, v1.clone()), i);
+    let target = e.ids.b.to_string();
+    redact(&mut e.r, &[target]);
+    let j = stopped(&e, v1.clone());
+    assert_ne!(j, i, "a redaction landed since");
+    assert_eq!(stopped(&e, v1), j);
 }

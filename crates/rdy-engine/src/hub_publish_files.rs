@@ -14,7 +14,8 @@
 //!   tar bodies ([`file_batches`] bounds each); a lone file goes in the one-file form with the
 //!   media type of its lexicographically first path. The manifest keeps every path's own media
 //!   type. A sent file is hashed again while it streams; bytes that changed since the check are
-//!   withheld before the request completes. One file is open at a time.
+//!   withheld before the request completes, or, when the body goes as zstd, before the request
+//!   is made, since its frame is made first. One file is open at a time.
 //! - **One final call.** [`publish_record`] checks the record against its manifest and sends the
 //!   one publish request; `keep_latest` reaches the wire unchanged.
 //! - **No retry.** Each request is sent once. A failed or lost one ends the upload with the

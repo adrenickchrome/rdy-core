@@ -441,6 +441,7 @@ fn cx() -> UploadContext {
         ca_file: None,
         claim,
         bearer: Secret::new(ACCESS),
+        zstd: false,
     }
 }
 
