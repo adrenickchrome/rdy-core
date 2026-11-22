@@ -27,7 +27,7 @@ use crate::readiness::assessment::{GateConfig, config_digest, pack_digest};
 use crate::readiness::{Candidate, assess};
 use rdy_model::assessment::AssessedPolicy;
 use rdy_model::{BlockId, Change, Hash, LandingRecord, Op, Proposal, StateSnapshot};
-use rdy_schema::{Issue, Pack};
+use rdy_schema::{Issue, Pack, RuleTestSpec};
 use serde::Serialize;
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
@@ -65,7 +65,11 @@ impl CheckInputs {
     /// Checks the inputs a caller passes (`E_BAD_INPUT`), in the ranges the config keeps: a
     /// coverage target from 0 to 100, a propose changes count from 1 to 1000, and a decisions
     /// home that is not empty and has no spaces at its ends. The config drops such a value with
-    /// a warning; an explicit input is refused instead.
+    /// a warning; an explicit input is refused instead. Then each module rule of the pack, in the
+    /// pack's order, before any rule is copied or compiled and whatever blocks it selects: its
+    /// module, `args` and `depth` within the limits a pack file's rule meets
+    /// ([`rdy_schema::check_module_test`]), refused as `invalid pack: <detail>` with the words a
+    /// pack file's rule gets.
     pub fn check(&self) -> Result<(), RdyError> {
         if self.coverage_target > 100 {
             return Err(RdyError::new(
@@ -101,6 +105,17 @@ impl CheckInputs {
                     "decisions home has spaces at its ends",
                     "pass the decisions home without them",
                 ));
+            }
+        }
+        for rule in &self.pack.rules {
+            if let RuleTestSpec::Module(m) = &rule.test {
+                rdy_schema::check_module_test(&rule.name, m).map_err(|detail| {
+                    RdyError::new(
+                        E_BAD_INPUT,
+                        format!("invalid pack: {detail}"),
+                        "pass a pack whose module rules are within the limits",
+                    )
+                })?;
             }
         }
         Ok(())

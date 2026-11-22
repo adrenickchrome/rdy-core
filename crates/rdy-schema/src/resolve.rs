@@ -128,6 +128,18 @@ fn across_warnings(name: &str, doc: &serde_yaml_ng::Value) -> Vec<PackWarning> {
         .collect()
 }
 
+/// The first refusal of a rule of the pack file `doc`, in the order of its `rules`, as
+/// [`crate::validate_rule_input`] gives it; `None` when every rule has its structure, or the file
+/// has no list of rules.
+fn first_rule_refusal(doc: &serde_yaml_ng::Value) -> Option<SchemaError> {
+    let serde_yaml_ng::Value::Sequence(rules) = doc.get("rules")? else {
+        return None;
+    };
+    rules
+        .iter()
+        .find_map(|rule| crate::validate_rule_input(rule).err())
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PackSet {
     warnings: BTreeMap<String, Vec<PackWarning>>,
@@ -155,8 +167,11 @@ impl PackSet {
         // the last value silently). serde_yaml_ng's `Value` mapping refuses it and names the key.
         let doc = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(yaml)
             .map_err(|e| SchemaError::Yaml(with_duplicate_line(&e, yaml)))?;
-        let pack: Pack =
-            serde_yaml_ng::from_str(yaml).map_err(|e| SchemaError::Yaml(e.to_string()))?;
+        // a rule's own refusal (D-N1GG5) keeps its kind and words: the typed parse would bury
+        // it in serde's text, so a failed parse looks for it first
+        let pack: Pack = serde_yaml_ng::from_str(yaml).map_err(|e| {
+            first_rule_refusal(&doc).unwrap_or_else(|| SchemaError::Yaml(e.to_string()))
+        })?;
         // an assessment records the pack's name and version, each 1 to 256 bytes
         // (`Assessment::validate`), so a pack outside them is refused here, in its file
         if !(1..=MAX_PACK_BYTES).contains(&pack.name.len()) {
@@ -963,8 +978,67 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
     check_areas(pack)?;
     check_coverage(pack)?;
     // after the engine types and links exist: the filters read them
-    crate::rules::compile_rules(pack).map_err(SchemaError::Invalid)?;
+    checked_rules(pack, pack.rules.iter().map(crate::rules::RuleView::from))
+        .map_err(SchemaError::Invalid)?;
     Ok(())
+}
+
+/// The rules of the resolved `pack`, of either kind, checked and parsed, in exact name order: at
+/// most [`crate::MAX_RULES`] rules, each name declared once, each module rule's module, `args`
+/// and `depth` as [`crate::check_module_test`] checks them, each name, text and filter as
+/// [`crate::compile_rules`] checks them, then at most [`crate::MAX_PACK_MODULE_BYTES`] of decoded
+/// modules in all. `rules` holds the parent's rules first, as the resolved pack lists them; each
+/// module counts, an identical one too. Err: the first refusal, in the order of `rules`.
+pub fn check_resolved_rules(
+    pack: &Pack,
+    rules: &[crate::RuleInput],
+) -> Result<Vec<crate::CompiledRule>, SchemaError> {
+    let parsed = checked_rules(pack, rules.iter().map(crate::rules::RuleView::from))
+        .map_err(SchemaError::Invalid)?;
+    let mut checked: Vec<crate::CompiledRule> = rules
+        .iter()
+        .zip(parsed)
+        .map(|(rule, (select, require))| crate::CompiledRule {
+            rule: rule.clone(),
+            select,
+            require,
+        })
+        .collect();
+    checked.sort_by(|a, b| a.rule.name.cmp(&b.rule.name));
+    Ok(checked)
+}
+
+/// The checks of [`check_resolved_rules`] over borrowed `rules`, the count first, before any rule
+/// is read: each rule's parsed `select` and `require`, in the order of `rules`, its refusal as the
+/// detail.
+pub(crate) fn checked_rules<'a>(
+    pack: &Pack,
+    rules: impl ExactSizeIterator<Item = crate::rules::RuleView<'a>>,
+) -> Result<Vec<(crate::filter::Filter, Option<crate::filter::Filter>)>, String> {
+    if rules.len() > crate::MAX_RULES {
+        return Err(format!("a pack takes at most {} rules", crate::MAX_RULES));
+    }
+    let mut names = BTreeSet::new();
+    let mut parsed = Vec::with_capacity(rules.len());
+    let mut total = 0usize;
+    for rule in rules {
+        crate::rules::check_name(rule.name)?;
+        if !names.insert(rule.name) {
+            return Err(format!("rule {} is declared more than once", rule.name));
+        }
+        if let Some(m) = rule.module {
+            crate::rules::check_module_test(rule.name, m)?;
+        }
+        parsed.push(crate::rules::check_rule(pack, &rule)?);
+        total = total.saturating_add(rule.module_bytes);
+    }
+    if total > crate::MAX_PACK_MODULE_BYTES {
+        return Err(format!(
+            "the pack's modules hold {total} bytes; a pack takes at most {}",
+            crate::MAX_PACK_MODULE_BYTES
+        ));
+    }
+    Ok(parsed)
 }
 
 /// The ranges of the pack's `coverage:` numbers, and at least one dimension with a weight.

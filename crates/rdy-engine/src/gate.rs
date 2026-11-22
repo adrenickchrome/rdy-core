@@ -3196,9 +3196,14 @@ impl Rdy {
     /// (record `p`) still holds. It reads the assessment and the landings since its base, and
     /// computes nothing for the approver. A version with no stored assessment is not ready: its
     /// readiness issues, or the O10 issue when it has none. A landing since the assessment's base
-    /// that wrote a block of its `reach`, then a pack, then a gate config other than the
-    /// assessment's, refuses with `E_PROPOSAL_MOVED` and a fresh card ([`Rdy::moved_fresh`],
-    /// RULING F1). M3c O16 adds, for every lander: (1) a live policy other than the assessment's;
+    /// that wrote a block of its `reach`, or, when the assessment's pack (the live pack, by
+    /// digest) has a module rule, added or removed a reference, a link or a placement whose other
+    /// end is a block of its `reach` ([`moves_reach_edges`]): a module reads its judged block's
+    /// neighbours, so a new or removed neighbour changes its input. The record keeps one reach,
+    /// so in such a pack the check covers the filter rules' reach too; a move it adds there is
+    /// one more retry, the safe direction. A pack with no module rule keeps the earlier check.
+    /// Then a pack, then a gate config other than the assessment's, refuses with
+    /// `E_PROPOSAL_MOVED` and a fresh card ([`Rdy::moved_fresh`], RULING F1). M3c O16 adds, for every lander: (1) a live policy other than the assessment's;
     /// (2) under `coverage.gate: no_lower`, a landing since the base that wrote a block of one of
     /// the assessment's pages; and for [`Lander::Policy`] only: (3) under an accepting rule with
     /// `lifecycle: draft`, a written block in stable content in canon now. Each refuses the same
@@ -3225,12 +3230,21 @@ impl Rdy {
         let wire = st.reader().assessment_wire(&h)?;
         let a = wire.local();
         let reach: BTreeSet<&BlockId> = a.reach.iter().collect();
+        // the edge check reads only an assessment whose pack, the live one, has a module rule
+        let module_pack = pack_digest(st.pack()) == a.pack.digest
+            && st
+                .pack()
+                .rules
+                .iter()
+                .any(|r| matches!(r.test, rdy_schema::RuleTestSpec::Module(_)));
         let since = Self::landings_since(st, a.base)?;
         for (l, rec) in since.iter().rev() {
             let mut hit = BTreeSet::new();
             for c in &rec.changes {
                 for op in &st.reader().change(c)?.ops {
-                    if reach.contains(op.block_id()) {
+                    if reach.contains(op.block_id())
+                        || (module_pack && moves_reach_edges(st, op, &reach)?)
+                    {
                         hit.insert(op.block_id().to_string());
                     }
                 }
@@ -4473,4 +4487,32 @@ impl ReadState {
             }),
         })
     }
+}
+
+/// Whether `op` adds or removes a reference, a link or a placement whose other end is a block of
+/// `reach`: the ends of the block it writes against the ends of the version it replaces (its
+/// `base`), each end a reference or link target or the parent. A new edge to a judged block or
+/// its neighbour, or one gone, changes the neighbours a module reads, though the judged block
+/// itself is unchanged. It reads the two versions and runs no check.
+fn moves_reach_edges(
+    st: &ReadState,
+    op: &Op,
+    reach: &BTreeSet<&BlockId>,
+) -> Result<bool, RdyError> {
+    fn ends(b: &Block) -> BTreeSet<BlockId> {
+        let mut out = targets(b);
+        out.extend(b.parent.clone());
+        out
+    }
+    let new = match op {
+        Op::Create { block } | Op::Update { block, .. } => ends(block),
+        Op::Delete { .. } => BTreeSet::new(),
+    };
+    let old = match op.base() {
+        Some(base) => ends(&st.reader().get_block(&base)?),
+        None => BTreeSet::new(),
+    };
+    Ok(new
+        .symmetric_difference(&old)
+        .any(|end| reach.contains(end)))
 }

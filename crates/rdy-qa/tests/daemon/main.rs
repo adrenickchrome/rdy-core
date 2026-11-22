@@ -38,4 +38,5 @@ mod daemon_transport;
 mod daemon_ui_events;
 mod daemon_ui_http;
 mod daemon_upgrade;
+mod daemon_wasm_packs;
 mod daemon_windows;

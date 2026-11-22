@@ -15,6 +15,7 @@ Each crate is in `crates/`.
 - `rdy-store`: the append-only segment log and the derived index (`redb`).
 - `rdy-schema`: schema packs, path globs and block validation.
 - `rdy-graph`: the block graph and the coordination graph.
+- `rdy-check-wasm`: the sandboxed WebAssembly check modules, behind the one pinned interpreter.
 - `rdy-engine`: reads, writes, briefings, tensions, working copies and config.
 - `rdy-render`: renders a project as a static site.
 - `rdy-adapter`: the in-process store handle and captured read snapshots for a host that embeds rdy core.
@@ -28,7 +29,8 @@ A crate depends only on crates listed before it.
 - `rdy-diagram` depends on no rdy crate.
 - `rdy-model` depends on no rdy crate.
 - `rdy-store`, `rdy-schema` and `rdy-graph` depend on `rdy-model`.
-- `rdy-engine` depends on `rdy-model`, `rdy-schema`, `rdy-store` and `rdy-graph`.
+- `rdy-check-wasm` depends on no rdy crate.
+- `rdy-engine` depends on `rdy-model`, `rdy-schema`, `rdy-store`, `rdy-graph` and `rdy-check-wasm`.
 - `rdy-render` depends on `rdy-diagram`, `rdy-model`, `rdy-engine`, `rdy-graph` and `rdy-schema`.
 - `rdy-adapter` depends on `rdy-model`, `rdy-store`, `rdy-schema`, `rdy-engine` and `rdy-render`.
 - `rdy-mcp` depends on `rdy-model`, `rdy-engine`, `rdy-schema` and `rdy-graph`.

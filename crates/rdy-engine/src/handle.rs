@@ -43,11 +43,13 @@ impl EpochCaches {
     }
 }
 
-/// What a handle reads besides its store: the pack resolved for it with its lineage, the pack
-/// files' fingerprint, and the config. A project reads them from its files (`project_context`);
+/// What a handle reads besides its store: the pack resolved for it with its compiled rules and its
+/// lineage, the pack files' fingerprint, and the config. A project reads them from its files (`project_context`);
 /// a holder's are fixed values that no file supplies (`holder::holder_context`).
 pub(crate) struct Context {
     pub(crate) pack: Pack,
+    /// `pack`'s rules, compiled once.
+    pub(crate) rules: Arc<crate::check::rules::CompiledRules>,
     pub(crate) lineage: Vec<String>,
     pub(crate) fingerprint: PackFingerprint,
     pub(crate) config: Config,
@@ -76,8 +78,10 @@ fn project_file_context(project: &Path) -> Result<Context, RdyError> {
     };
     let config = parse_config(project, &sources.config, sources.local.as_deref())?;
     let (pack, lineage) = load_pack_from(&sources.packs, &config.pack)?;
+    let rules = crate::check::rules::compile_pack_rules(&pack)?;
     Ok(Context {
         pack,
+        rules,
         lineage,
         fingerprint: sources.fingerprint,
         config,
@@ -387,6 +391,7 @@ impl Rdy {
     fn over_store(project: &Path, mut store: Store, context: Context) -> Rdy {
         let Context {
             pack,
+            rules,
             lineage,
             fingerprint,
             config: cfg,
@@ -420,6 +425,7 @@ impl Rdy {
             tags: Arc::new(vec![]),
             pack: Arc::clone(&pack),
             areas: Arc::clone(&areas),
+            rules: crate::read_state::StateRules::Loaded(Arc::clone(&rules)),
             root: Arc::from(project),
             reads_files: true,
             explicit_base: false,
@@ -468,6 +474,7 @@ impl Rdy {
             store,
             pack,
             areas,
+            rules,
             lineage,
             fingerprint,
             serve: cfg.serve.resolve(),
@@ -488,6 +495,10 @@ impl Rdy {
     }
     pub fn pack(&self) -> &Pack {
         &self.pack
+    }
+    /// The loaded pack's compiled rules: the handle every state published under it shares.
+    pub fn compiled_rules(&self) -> Arc<crate::check::rules::CompiledRules> {
+        Arc::clone(&self.rules)
     }
     /// The `serve:` settings the config had when it was last loaded.
     pub fn serve_config(&self) -> ServeConfig {

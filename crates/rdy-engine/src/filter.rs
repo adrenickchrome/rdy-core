@@ -207,31 +207,22 @@ impl<'a> FilterContext<'a> {
         result
     }
 
-    /// `b`'s own `lifecycle` field or its nearest ancestor's, as search reads it.
     fn lifecycle<'b>(&'b self, b: &'b Block) -> Option<&'b str> {
-        let m = self.inputs.m;
-        let mut cur = b;
-        for _ in 0..=m.len() {
-            if let Some(FieldValue::Str(l)) = cur.fields.get("lifecycle") {
-                return Some(l);
-            }
-            cur = m.get(cur.parent.as_ref()?)?;
-        }
-        None
+        lifecycle_of(self.inputs.m, b)
+    }
+
+    fn resolver(&self) -> &Resolver<'a> {
+        self.as_built
+            .get_or_init(|| Resolver::new(self.inputs.pack, self.inputs.m))
     }
 
     /// `b`'s as-built status in the supplied state; `None` for a block that is no content block.
     fn as_built(&self, b: &Block) -> Option<AsBuilt> {
-        self.as_built
-            .get_or_init(|| Resolver::new(self.inputs.pack, self.inputs.m))
-            .status(&b.id)
+        self.resolver().status(&b.id)
     }
 
     fn areas_of(&self, b: &Block) -> Vec<String> {
-        if self.inputs.areas.is_empty() {
-            return Vec::new();
-        }
-        block_areas(self.inputs.areas, self.inputs.m, b)
+        areas_of(self.inputs.areas, self.inputs.m, b)
     }
 
     fn compare(&self, field: &Field, op: Op, value: &Value, b: &Block) -> bool {
@@ -257,11 +248,9 @@ impl<'a> FilterContext<'a> {
             Field::Lifecycle => self
                 .lifecycle(b)
                 .is_some_and(|l| equality_holds(l == text, op)),
-            Field::Status => self
-                .inputs
-                .graph
-                .status(&b.id)
-                .is_some_and(|s| equality_holds(s.tag() == text, op)),
+            Field::Status => {
+                status_of(self.inputs.graph, &b.id).is_some_and(|s| equality_holds(s == text, op))
+            }
             Field::Suspect => bool_holds(self.inputs.suspects.contains(&b.id), op, value),
             Field::Tension => bool_holds(self.inputs.tensions.contains(&b.id), op, value),
             Field::Coverage => self
@@ -269,9 +258,9 @@ impl<'a> FilterContext<'a> {
                 .coverage
                 .get(&b.id)
                 .is_some_and(|score| int_holds(i64::from(*score), op, value)),
-            Field::Planned => self
-                .as_built(b)
-                .is_some_and(|s| bool_holds(s.status == Status::Planned, op, value)),
+            Field::Planned => {
+                planned_of(self.resolver(), &b.id).is_some_and(|p| bool_holds(p, op, value))
+            }
             Field::Since => self
                 .as_built(b)
                 .and_then(|s| s.since)
@@ -291,7 +280,7 @@ impl<'a> FilterContext<'a> {
             Field::Doc => m.doc_of(&b.id).is_some(),
             Field::Area => !self.areas_of(b).is_empty(),
             Field::Lifecycle => self.lifecycle(b).is_some(),
-            Field::Status => self.inputs.graph.status(&b.id).is_some(),
+            Field::Status => status_of(self.inputs.graph, &b.id).is_some(),
             Field::Coverage => self.inputs.coverage.contains_key(&b.id),
             Field::Since => self.as_built(b).is_some_and(|s| s.since.is_some()),
             Field::Custom(name) => b.fields.get(name).is_some_and(|v| *v != FieldValue::Null),
@@ -306,14 +295,50 @@ impl<'a> FilterContext<'a> {
     }
 
     fn traits_of(&self, b: &Block) -> Vec<&'static str> {
-        self.inputs
-            .pack
-            .block_types
-            .get(&b.block_type)
-            .map_or_else(Vec::new, |t| {
-                t.traits.iter().map(|held| trait_name(*held)).collect()
-            })
+        traits_of(self.inputs.pack, b)
     }
+}
+
+// The derived values of one block. The filter evaluator and a module rule's input both read them
+// here, so a module and a filter rule never disagree on a block (D-ZR2VZ).
+
+/// `b`'s own `lifecycle` field or its nearest ancestor's, as search reads it.
+pub(crate) fn lifecycle_of<'b>(m: &'b Materialized, b: &'b Block) -> Option<&'b str> {
+    let mut cur = b;
+    for _ in 0..=m.len() {
+        if let Some(FieldValue::Str(l)) = cur.fields.get("lifecycle") {
+            return Some(l);
+        }
+        cur = m.get(cur.parent.as_ref()?)?;
+    }
+    None
+}
+
+/// The areas `b` is in: ascending and distinct; empty for a pack without areas.
+pub(crate) fn areas_of(areas: &AreaMatcher, m: &Materialized, b: &Block) -> Vec<String> {
+    if areas.is_empty() {
+        return Vec::new();
+    }
+    block_areas(areas, m, b)
+}
+
+/// The traits of `b`'s type in `pack`, in the type's order; empty for a type the pack lacks.
+pub(crate) fn traits_of(pack: &Pack, b: &Block) -> Vec<&'static str> {
+    pack.block_types
+        .get(&b.block_type)
+        .map_or_else(Vec::new, |t| {
+            t.traits.iter().map(|held| trait_name(*held)).collect()
+        })
+}
+
+/// The derived status tag of block `id`; `None` for a block that is no decision with a status.
+pub(crate) fn status_of(graph: &Graph, id: &BlockId) -> Option<&'static str> {
+    graph.status(id).map(|s| s.tag())
+}
+
+/// Whether block `id`'s as-built status is planned; `None` for a block that is no content block.
+pub(crate) fn planned_of(resolver: &Resolver, id: &BlockId) -> Option<bool> {
+    resolver.status(id).map(|s| s.status == Status::Planned)
 }
 
 /// The text of a filter value, as written in the filter.

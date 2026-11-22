@@ -2,7 +2,7 @@
 //! share the query parser, and cannot read the landing clock.
 
 use rdy_schema::filter::{Expr, Field, Op, parse};
-use rdy_schema::{Pack, PackSet, Rule, RuleSeverity, SchemaError, compile_rules};
+use rdy_schema::{Pack, PackSet, RuleSeverity, SchemaError, compile_rules};
 
 /// `text` as a YAML double-quoted scalar.
 fn q(text: &str) -> String {
@@ -253,7 +253,7 @@ fn ck1_rule_expressions_use_the_query_parser() {
     assert_eq!(compiled[0].select, parse("type = decision", &pack).unwrap());
     assert_eq!(
         compiled[0].require,
-        parse("not has fields.owner", &pack).unwrap()
+        Some(parse("not has fields.owner", &pack).unwrap())
     );
     assert_eq!(
         compiled[0].select.expr,
@@ -381,17 +381,20 @@ fn ck1_empty_rules_do_not_change_a_pack_serialization() {
     // no AST in the serialized form, and it round-trips
     let back: Pack = serde_json::from_value(json).unwrap();
     assert_eq!(back, with);
-    let one: Rule = back.rules[0].clone();
+    let one: RuleInput = back.rules[0].clone();
     assert_eq!(one.name, "r");
     // every member moves the digest input
     let bytes = |p: &Pack| serde_json::to_vec(p).unwrap();
     for change in [
-        |r: &mut Rule| r.name.push('x'),
-        |r: &mut Rule| r.select.push('x'),
-        |r: &mut Rule| r.require.push('x'),
-        |r: &mut Rule| r.severity = RuleSeverity::Blocking,
-        |r: &mut Rule| r.message.push('x'),
-        |r: &mut Rule| r.fix.push('x'),
+        |r: &mut RuleInput| r.name.push('x'),
+        |r: &mut RuleInput| r.select.push('x'),
+        |r: &mut RuleInput| match &mut r.test {
+            RuleTestSpec::Filter { require } => require.push('x'),
+            RuleTestSpec::Module(_) => unreachable!("a filter rule"),
+        },
+        |r: &mut RuleInput| r.severity = RuleSeverity::Blocking,
+        |r: &mut RuleInput| r.message.push('x'),
+        |r: &mut RuleInput| r.fix.push('x'),
     ] {
         let mut other = with.clone();
         change(&mut other.rules[0]);
@@ -411,4 +414,957 @@ fn wx10_reserved_names_and_trailing_dots_stay_refused() {
     for ok in ["console", "com0", "com10", "lpt", "a.b", "wallets-2"] {
         assert!(rdy_model::tree::name_problem(ok).is_none(), "{ok}");
     }
+}
+
+// wck2: the module-rule structure (D-ZRXY0, D-WV7ZS), tested through `validate_rule_input` and
+// `check_resolved_rules`, which the pack's own parser and resolve use.
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use rdy_schema::{
+    ArgValue, MAX_ARGS_BYTES, MAX_MODULE_BYTES, MAX_PACK_MODULE_BYTES, ModuleTest, RuleInput,
+    RuleTestSpec, check_resolved_rules, validate_rule_input,
+};
+use serde_yaml_ng::{Mapping, Value};
+
+/// The eight bytes of an empty WebAssembly module: its magic and version.
+const MAGIC: &str = "AGFzbQEAAAA=";
+const MAGIC_BYTES: &[u8] = b"\0asm\x01\0\0\0";
+
+fn yaml(text: &str) -> Value {
+    serde_yaml_ng::from_str(text).unwrap()
+}
+
+fn input(text: &str) -> Result<RuleInput, SchemaError> {
+    validate_rule_input(&yaml(text))
+}
+
+fn input_refused(text: &str) -> String {
+    match input(text) {
+        Err(SchemaError::Invalid(detail)) => detail,
+        other => panic!("expected an invalid rule, got {other:?}"),
+    }
+}
+
+/// A module rule named `name` with `extra` YAML lines, the module given as `module`.
+fn module_yaml(name: &str, module: &str, extra: &str) -> String {
+    format!(
+        "name: {}\nselect: type = decision\nmodule: {module}\n{extra}message: m\nfix: f\n",
+        q(name)
+    )
+}
+
+/// A module rule as a mapping, with `extra` keys added.
+fn module_value(name: &str, module: &str, extra: Vec<(&str, Value)>) -> Value {
+    let mut m = Mapping::new();
+    m.insert("name".into(), name.into());
+    m.insert("select".into(), "type = decision".into());
+    m.insert("module".into(), module.into());
+    for (k, v) in extra {
+        m.insert(k.into(), v);
+    }
+    m.insert("message".into(), "m".into());
+    m.insert("fix".into(), "f".into());
+    Value::Mapping(m)
+}
+
+fn module_of(rule: &RuleInput) -> &ModuleTest {
+    match &rule.test {
+        RuleTestSpec::Module(m) => m,
+        other => panic!("expected a module test, got {other:?}"),
+    }
+}
+
+/// A checked module rule named `name` holding `bytes`.
+fn module_input(name: &str, bytes: &[u8]) -> RuleInput {
+    validate_rule_input(&module_value(name, &STANDARD.encode(bytes), vec![])).unwrap()
+}
+
+#[test]
+fn wck2_rule_takes_exactly_one_test() {
+    let filter =
+        input("name: r\nselect: type = decision\nrequire: has fields.x\nmessage: m\nfix: f\n")
+            .unwrap();
+    assert_eq!(
+        filter.test,
+        RuleTestSpec::Filter {
+            require: "has fields.x".to_string()
+        }
+    );
+    assert_eq!(filter.severity, RuleSeverity::Advisory);
+
+    let module = input(&module_yaml("r", MAGIC, "")).unwrap();
+    let m = module_of(&module);
+    assert_eq!(m.module, MAGIC_BYTES);
+    assert_eq!(m.args, None);
+    assert_eq!(m.depth, None);
+
+    // both: refused before the module is decoded, so a bad module gives the same words
+    for text in [MAGIC, "\"!!!!\""] {
+        assert_eq!(
+            input_refused(&module_yaml("r", text, "require: has fields.x\n")),
+            "rule r takes require or module, not both"
+        );
+    }
+    // neither
+    assert_eq!(
+        input_refused("name: r\nselect: type = decision\nmessage: m\nfix: f\n"),
+        "rule r needs require or module"
+    );
+    assert_eq!(
+        input_refused("name: r\nselect: type = decision\nseverity: blocking\nmessage: m\nfix: f\n"),
+        "rule r needs require or module"
+    );
+    // the name in the detail is the rule's own
+    assert_eq!(
+        input_refused("name: \"two words\"\nselect: type = decision\nmessage: m\nfix: f\n"),
+        "rule two words needs require or module"
+    );
+}
+
+#[test]
+fn wck2_module_only_keys_require_module() {
+    let filter = |extra: &str| {
+        format!(
+            "name: r\nselect: type = decision\nrequire: has fields.x\n{extra}message: m\nfix: f\n"
+        )
+    };
+    assert_eq!(
+        input_refused(&filter("args: {}\n")),
+        "rule r args applies to module rules only"
+    );
+    assert_eq!(
+        input_refused(&filter("args: { a: 1 }\n")),
+        "rule r args applies to module rules only"
+    );
+    assert_eq!(
+        input_refused(&filter("depth: 1\n")),
+        "rule r depth applies to module rules only"
+    );
+    // args is named first
+    assert_eq!(
+        input_refused(&filter("depth: 1\nargs: {}\n")),
+        "rule r args applies to module rules only"
+    );
+    // both keys load on a module rule
+    let m = input(&module_yaml("r", MAGIC, "args: { a: 1 }\ndepth: 2\n")).unwrap();
+    assert_eq!(module_of(&m).depth, Some(2));
+}
+
+#[test]
+fn wck2_explicit_rule_nulls_refuse() {
+    let cases: Vec<(&str, String)> = vec![
+        ("require", "name: r\nselect: type = decision\nrequire: null\nmessage: m\nfix: f\n".into()),
+        ("require", format!("name: r\nselect: type = decision\nrequire: ~\nmodule: {MAGIC}\nmessage: m\nfix: f\n")),
+        ("module", "name: r\nselect: type = decision\nmodule: null\nmessage: m\nfix: f\n".into()),
+        ("module", "name: r\nselect: type = decision\nrequire: has fields.x\nmodule:\nmessage: m\nfix: f\n".into()),
+        ("args", module_yaml("r", MAGIC, "args: null\n")),
+        ("depth", module_yaml("r", MAGIC, "depth: ~\n")),
+        // a null args on a filter rule is the null refusal
+        ("args", "name: r\nselect: type = decision\nrequire: has fields.x\nargs: null\nmessage: m\nfix: f\n".into()),
+    ];
+    for (key, text) in &cases {
+        assert_eq!(
+            input_refused(text),
+            format!("rule r {key}: null is not allowed"),
+            "{text}"
+        );
+    }
+    // null inside args stays allowed, in a mapping and in a list
+    let m = input(&module_yaml(
+        "r",
+        MAGIC,
+        "args: { a: null, b: [null, 1] }\n",
+    ))
+    .unwrap();
+    let args = module_of(&m).args.clone().unwrap();
+    assert_eq!(args["a"], ArgValue::Null);
+    assert_eq!(
+        args["b"],
+        ArgValue::List(vec![ArgValue::Null, ArgValue::Int(1)])
+    );
+}
+
+#[test]
+fn wck2_base64_is_standard_and_bounded() {
+    // spaces and YAML line breaks inside the text are ignored
+    for text in [
+        "AGFzbQEAAAA=",
+        "\"AGFz bQEA AAA=\"",
+        "|\n  AGFz\n  bQEA\n  AAA=",
+        ">\n  AGFzbQ\n  EAAAA=",
+        "\"AGFzbQEAAAA=\\r\\n\"",
+    ] {
+        let m = input(&module_yaml("r", text, "")).unwrap();
+        assert_eq!(module_of(&m).module, MAGIC_BYTES, "{text}");
+    }
+    let not = "rule r module: not base64";
+    for text in [
+        // the URL-safe alphabet: standard `+/8=` written as `-_8=`
+        "-_8=",
+        // missing, extra and misplaced padding
+        "AGFzbQEAAAA",
+        "AGFzbQEAAAA==",
+        "AGFz=QEAAAA=",
+        "====",
+        // trailing bits that are not zero
+        "QR==",
+        // a tab, and a character outside the alphabet
+        "\"AGFz\\tbQEAAAA=\"",
+        "AGFzbQEAAA\u{e9}",
+        "\"AGFzbQEAAAA*\"",
+    ] {
+        assert_eq!(input_refused(&module_yaml("r", text, "")), not, "{text}");
+    }
+    assert_eq!(
+        module_of(&input(&module_yaml("r", "+/8=", "")).unwrap()).module,
+        [0xfb, 0xff]
+    );
+    // an empty text decodes to no bytes; the engine refuses the module later
+    assert!(
+        module_of(&input(&module_yaml("r", "\"\"", "")).unwrap())
+            .module
+            .is_empty()
+    );
+
+    // the decoded length is checked before decoding: a text whose length is past the limit gets
+    // the size refusal although its last character is outside the alphabet
+    let mut long = "A".repeat(1_398_104);
+    long.pop();
+    long.push('!');
+    assert_eq!(
+        validate_rule_input(&module_value("r", &long, vec![])),
+        Err(SchemaError::Invalid(
+            "rule r module is 1048578 bytes; a module takes at most 1048576".to_string()
+        ))
+    );
+}
+
+#[test]
+fn wck2_module_bytes_at_and_past_limit() {
+    assert_eq!(MAX_MODULE_BYTES, 1_048_576);
+    let at = vec![7u8; MAX_MODULE_BYTES];
+    assert_eq!(module_of(&module_input("r", &at)).module.len(), 1_048_576);
+    for len in [
+        MAX_MODULE_BYTES + 1,
+        MAX_MODULE_BYTES + 2,
+        MAX_MODULE_BYTES + 3,
+    ] {
+        let past = vec![7u8; len];
+        assert_eq!(
+            validate_rule_input(&module_value("r", &STANDARD.encode(&past), vec![])),
+            Err(SchemaError::Invalid(format!(
+                "rule r module is {len} bytes; a module takes at most 1048576"
+            )))
+        );
+    }
+}
+
+#[test]
+fn wck2_resolved_module_total_at_and_past_limit() {
+    assert_eq!(MAX_PACK_MODULE_BYTES, 8_388_608);
+    // a parent with filter rules, resolved; module rules follow it as a child's rules would
+    let mut set = PackSet::with_builtin();
+    let parent_rules: String = (0..32)
+        .map(|i| rule(&format!("f{i:02}"), ANY, ANY))
+        .collect();
+    set.add_yaml(&format!(
+        "name: parent\nversion: \"1\"\nextends: rdy-standard\nrules:\n{parent_rules}"
+    ))
+    .unwrap();
+    let pack = set.resolve("parent").unwrap();
+    let inherited: Vec<RuleInput> = pack.rules.clone();
+
+    // eight identical modules of 1 MiB fill the total exactly; each counts, none is merged
+    let mib = module_input("m0", &vec![1u8; MAX_MODULE_BYTES]);
+    let modules = |n: usize| -> Vec<RuleInput> {
+        (0..n)
+            .map(|i| {
+                let mut r = mib.clone();
+                r.name = format!("m{i}");
+                r
+            })
+            .collect()
+    };
+    let mut all = inherited.clone();
+    all.extend(modules(8));
+    let checked = check_resolved_rules(&pack, &all).unwrap();
+    assert_eq!(checked.len(), 40);
+    // in exact name order, the filter rules with their parsed require, module rules with none
+    assert_eq!(checked[0].rule.name, "f00");
+    assert_eq!(checked[0].require, Some(parse(ANY, &pack).unwrap()));
+    assert_eq!(checked[39].rule.name, "m7");
+    assert_eq!(checked[39].require, None);
+    assert_eq!(checked[39].select, parse("type = decision", &pack).unwrap());
+
+    let mut past = all.clone();
+    past.push(module_input("one more", &[0]));
+    assert_eq!(
+        check_resolved_rules(&pack, &past),
+        Err(SchemaError::Invalid(
+            "the pack's modules hold 8388609 bytes; a pack takes at most 8388608".to_string()
+        ))
+    );
+
+    // the 64-rule limit counts both kinds across the parent and the child
+    let small = |n: usize| -> Vec<RuleInput> {
+        (0..n)
+            .map(|i| module_input(&format!("s{i:02}"), MAGIC_BYTES))
+            .collect()
+    };
+    let mut at = inherited.clone();
+    at.extend(small(32));
+    assert_eq!(check_resolved_rules(&pack, &at).unwrap().len(), 64);
+    let mut over = inherited.clone();
+    over.extend(small(33));
+    assert_eq!(
+        check_resolved_rules(&pack, &over),
+        Err(SchemaError::Invalid(
+            "a pack takes at most 64 rules".to_string()
+        ))
+    );
+
+    // a name is unique across kinds; the names and texts keep their bounds
+    let mut twice = inherited.clone();
+    twice.push(module_input("f00", MAGIC_BYTES));
+    assert_eq!(
+        check_resolved_rules(&pack, &twice),
+        Err(SchemaError::Invalid(
+            "rule f00 is declared more than once".to_string()
+        ))
+    );
+    assert_eq!(
+        check_resolved_rules(&pack, &[module_input(&"n".repeat(65), MAGIC_BYTES)]),
+        Err(SchemaError::Invalid(
+            "rule name must have 1 to 64 characters".to_string()
+        ))
+    );
+    let mut long_message = module_input("r", MAGIC_BYTES);
+    long_message.message = "m".repeat(2001);
+    assert_eq!(
+        check_resolved_rules(&pack, &[long_message]),
+        Err(SchemaError::Invalid(
+            "rule r: message must have 1 to 2000 characters".to_string()
+        ))
+    );
+
+    // a module rule's select uses the query parser and cannot read the landing clock
+    let mut typo = module_input("r", MAGIC_BYTES);
+    typo.select = "typ = decision".to_string();
+    let what = parse("typ = decision", &pack).unwrap_err();
+    assert_eq!(
+        check_resolved_rules(&pack, &[typo]),
+        Err(SchemaError::Invalid(format!("rule r select: {what}")))
+    );
+    let mut clock = module_input("r", MAGIC_BYTES);
+    clock.select = "has fields.decided_at".to_string();
+    assert_eq!(
+        check_resolved_rules(&pack, &[clock]),
+        Err(SchemaError::Invalid(
+            "rule r select: a rule cannot read fields.decided_at, because the landing sets it"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
+fn wck2_args_bytes_at_and_past_limit() {
+    assert_eq!(MAX_ARGS_BYTES, 8_192);
+    let refused = "rule r args: at most 8192 bytes";
+    // `{"k":"<s>"}` is 8 bytes around the string's escaped form
+    let one = |s: String| {
+        let mut m = Mapping::new();
+        m.insert("k".into(), Value::String(s));
+        module_value("r", MAGIC, vec![("args", Value::Mapping(m))])
+    };
+    let run = |v: Value| validate_rule_input(&v);
+    // plain, two-byte escapes, six-byte control escapes, and two-byte UTF-8
+    for (unit, width) in [("a", 1), ("\"", 2), ("\\", 2), ("\u{1}", 6), ("\u{e9}", 2)] {
+        let n = 8_184 / width;
+        assert_eq!(n * width, 8_184, "{unit:?}");
+        let at = run(one(unit.repeat(n))).unwrap();
+        assert_eq!(
+            module_of(&at).args.as_ref().unwrap()["k"],
+            ArgValue::Str(unit.repeat(n))
+        );
+        assert_eq!(
+            run(one(unit.repeat(n + 1))),
+            Err(SchemaError::Invalid(refused.to_string())),
+            "{unit:?}"
+        );
+    }
+    // every JSON form counts: `{"a":[1,true,null,false,{}],"b":-12}` is 36 bytes
+    let mixed = "{ a: [1, true, null, false, {}], b: -12, s: \"";
+    let fill = |n: usize| format!("{mixed}{}\" }}", "x".repeat(n));
+    // with `,"s":""` the fixed part is 43 bytes
+    run(module_value(
+        "r",
+        MAGIC,
+        vec![("args", yaml(&fill(8_192 - 43)))],
+    ))
+    .unwrap();
+    assert_eq!(
+        run(module_value(
+            "r",
+            MAGIC,
+            vec![("args", yaml(&fill(8_192 - 42)))]
+        )),
+        Err(SchemaError::Invalid(refused.to_string()))
+    );
+    // a long text is refused by its length alone
+    assert_eq!(
+        run(one("x".repeat(1_000_000))),
+        Err(SchemaError::Invalid(refused.to_string()))
+    );
+    // an empty mapping is two bytes
+    let empty = run(module_value("r", MAGIC, vec![("args", yaml("{}"))])).unwrap();
+    assert_eq!(module_of(&empty).args, Some(Default::default()));
+}
+
+#[test]
+fn wck2_args_types_and_integer_edges() {
+    let types = "rule r args: only strings, integers, booleans, null, lists and mappings";
+    let args =
+        |text: &str| validate_rule_input(&module_value("r", MAGIC, vec![("args", yaml(text))]));
+    let int = |text: &str| {
+        let r = args(&format!("{{ n: {text} }}")).unwrap();
+        module_of(&r).args.as_ref().unwrap()["n"].clone()
+    };
+    assert_eq!(
+        int("9007199254740992"),
+        ArgValue::Int(9_007_199_254_740_992)
+    );
+    assert_eq!(
+        int("-9007199254740992"),
+        ArgValue::Int(-9_007_199_254_740_992)
+    );
+    assert_eq!(int("0"), ArgValue::Int(0));
+    assert_eq!(int("-1"), ArgValue::Int(-1));
+    for bad in [
+        "{ n: 9007199254740993 }",
+        "{ n: -9007199254740993 }",
+        "{ n: 18446744073709551615 }",
+        "{ n: 1.5 }",
+        "{ n: 1.0 }",
+        "{ n: 1e3 }",
+        "{ n: .nan }",
+        "{ n: [1, 2.5] }",
+        "{ n: { m: -0.5 } }",
+        // keys that are not strings, at the top and nested
+        "{ 1: x }",
+        "{ true: x }",
+        "{ null: x }",
+        "{ n: { 2: x } }",
+        // tagged values
+        "{ n: !custom 1 }",
+        "!custom { n: 1 }",
+        // args is a mapping
+        "[1, 2]",
+        "text",
+        "7",
+        "true",
+    ] {
+        assert_eq!(
+            args(bad),
+            Err(SchemaError::Invalid(types.to_string())),
+            "{bad}"
+        );
+    }
+    // every allowed form, keys in byte order
+    let r = args("{ s: text, b: false, z: null, l: [x, 1, [true]], m: { y: 2, B: c } }").unwrap();
+    let got = module_of(&r).args.clone().unwrap();
+    assert_eq!(
+        got.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["b", "l", "m", "s", "z"]
+    );
+    assert_eq!(got["s"], ArgValue::Str("text".into()));
+    assert_eq!(got["b"], ArgValue::Bool(false));
+    assert_eq!(got["z"], ArgValue::Null);
+    assert_eq!(
+        got["l"],
+        ArgValue::List(vec![
+            ArgValue::Str("x".into()),
+            ArgValue::Int(1),
+            ArgValue::List(vec![ArgValue::Bool(true)])
+        ])
+    );
+    let ArgValue::Map(m) = &got["m"] else {
+        panic!("expected a mapping")
+    };
+    assert_eq!(m.keys().map(String::as_str).collect::<Vec<_>>(), ["B", "y"]);
+    // a quoted number is a string, kept as written
+    assert_eq!(
+        int("\"9007199254740993\""),
+        ArgValue::Str("9007199254740993".into())
+    );
+}
+
+#[test]
+fn wck2_depth_edges_and_default() {
+    let depth = |text: &str| input(&module_yaml("r", MAGIC, &format!("depth: {text}\n")));
+    for d in 0..=3u8 {
+        assert_eq!(module_of(&depth(&d.to_string()).unwrap()).depth, Some(d));
+    }
+    let absent = input(&module_yaml("r", MAGIC, "")).unwrap();
+    assert_eq!(module_of(&absent).depth, None);
+    assert_eq!(module_of(&absent).depth(), 1);
+    assert_eq!(module_of(&depth("0").unwrap()).depth(), 0);
+    assert_eq!(module_of(&depth("3").unwrap()).depth(), 3);
+    for bad in [
+        "-1",
+        "4",
+        "256",
+        "1.5",
+        "1.0",
+        "\"1\"",
+        "true",
+        "[1]",
+        "{}",
+        "!custom 1",
+    ] {
+        assert_eq!(
+            depth(bad),
+            Err(SchemaError::Invalid(
+                "rule r depth must be 0 to 3".to_string()
+            )),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        depth("null"),
+        Err(SchemaError::Invalid(
+            "rule r depth: null is not allowed".to_string()
+        ))
+    );
+}
+
+#[test]
+fn wck2_new_rule_keys_are_closed_and_suggest_near_keys() {
+    let yaml_error = |text: &str| match input(text) {
+        Err(SchemaError::Yaml(t)) => t,
+        other => panic!("expected the rule's key refusal, got {other:?}"),
+    };
+    for (typo, near) in [
+        ("modul", Some("module")),
+        ("modules", Some("module")),
+        ("arg", Some("args")),
+        ("dept", Some("depth")),
+        ("depths", Some("depth")),
+        ("requires", Some("require")),
+        ("selct", Some("select")),
+        ("zzzzzz", None),
+    ] {
+        let text = yaml_error(&module_yaml("r", MAGIC, &format!("{typo}: 1\n")));
+        assert!(
+            text.starts_with(&format!("unknown field `{typo}`")),
+            "{text}"
+        );
+        for key in ["`module`", "`args`", "`depth`", "`require`"] {
+            assert!(text.contains(key), "{text}");
+        }
+        match near {
+            Some(near) => assert!(text.ends_with(&format!("; did you mean {near}?")), "{text}"),
+            None => assert!(!text.contains("did you mean"), "{text}"),
+        }
+    }
+    // a rule is a mapping with its required keys, as the pack's parser has it
+    assert!(matches!(input("[1]"), Err(SchemaError::Yaml(_))));
+    assert!(matches!(
+        input(&module_yaml("r", MAGIC, "").replace("fix: f\n", "")),
+        Err(SchemaError::Yaml(_))
+    ));
+    assert!(matches!(
+        input(&module_yaml("r", "7", "")),
+        Err(SchemaError::Yaml(_))
+    ));
+
+    // the pack's own parser reads the same structure, with the same refusals
+    for (key, detail) in [
+        (
+            "module: AGFzbQEAAAA=",
+            "rule r takes require or module, not both",
+        ),
+        ("args: {}", "rule r args applies to module rules only"),
+        ("depth: 1", "rule r depth applies to module rules only"),
+    ] {
+        let e = resolve(&format!(
+            "  - {{ name: r, select: type = decision, require: has fields.x, {key}, message: m, fix: f }}\n"
+        ))
+        .unwrap_err();
+        assert_eq!(e, SchemaError::Invalid(detail.to_string()));
+    }
+    let e = resolve(
+        "  - { name: r, select: type = decision, modul: AGFzbQEAAAA=, message: m, fix: f }\n",
+    )
+    .unwrap_err();
+    let SchemaError::Yaml(text) = e else {
+        panic!("expected the pack's YAML error, got {e:?}")
+    };
+    assert!(text.starts_with("unknown field `modul`"), "{text}");
+    assert!(text.ends_with("; did you mean module?"), "{text}");
+}
+
+#[test]
+fn wck2_unset_module_keys_preserve_pack_bytes_and_digest() {
+    // the built-in pack: no rules, so no `rules` key
+    let builtin = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+    assert!(builtin.rules.is_empty());
+    let json = serde_json::to_vec(&builtin).unwrap();
+    assert!(!String::from_utf8_lossy(&json).contains("\"rules\""));
+
+    /// A filter rule as packs wrote it before module rules: the bytes a pack's digest read.
+    #[derive(serde::Serialize)]
+    struct FilterRule<'a> {
+        name: &'a str,
+        select: &'a str,
+        require: &'a str,
+        severity: RuleSeverity,
+        message: &'a str,
+        fix: &'a str,
+    }
+    fn filter_rule(r: &RuleInput) -> FilterRule<'_> {
+        let RuleTestSpec::Filter { require } = &r.test else {
+            panic!("a filter rule")
+        };
+        FilterRule {
+            name: &r.name,
+            select: &r.select,
+            require,
+            severity: r.severity,
+            message: &r.message,
+            fix: &r.fix,
+        }
+    }
+    let old = |r: &RuleInput| serde_json::to_string(&filter_rule(r)).unwrap();
+
+    // filter rules write the bytes they wrote before, in JSON (the digest input) and in YAML,
+    // the default severity included
+    let pack = resolve(
+        "  - { name: a, select: type = decision, require: has fields.x, message: m, fix: f }\n  - { name: b, select: type = decision, require: has fields.y, severity: blocking, message: \"m2\", fix: \"f2\" }\n",
+    )
+    .unwrap();
+    for rule in &pack.rules {
+        assert_eq!(serde_json::to_string(rule).unwrap(), old(rule));
+        assert_eq!(
+            serde_yaml_ng::to_string(rule).unwrap(),
+            serde_yaml_ng::to_string(&filter_rule(rule)).unwrap()
+        );
+        // and the structure reads them back as they were
+        assert_eq!(
+            &validate_rule_input(&serde_yaml_ng::to_value(rule).unwrap()).unwrap(),
+            rule
+        );
+    }
+    // the pack's JSON, the digest input, holds those bytes for its rules
+    let old_rules = format!(
+        "[{}]",
+        pack.rules.iter().map(old).collect::<Vec<_>>().join(",")
+    );
+    let pack_json = serde_json::to_string(&pack).unwrap();
+    assert_eq!(
+        pack_json.matches(&format!("\"rules\":{old_rules}")).count(),
+        1
+    );
+
+    // a module rule writes only the keys it sets, in the rule's key order, the module as
+    // standard base64 with no spaces
+    let keys = |r: &RuleInput| -> Vec<String> {
+        serde_json::to_value(r)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let plain = input(&module_yaml("r", "\"AGFz bQEA AAA=\"", "")).unwrap();
+    let json = serde_json::to_string(&plain).unwrap();
+    assert_eq!(
+        json,
+        "{\"name\":\"r\",\"select\":\"type = decision\",\"module\":\"AGFzbQEAAAA=\",\"severity\":\"advisory\",\"message\":\"m\",\"fix\":\"f\"}"
+    );
+    // explicit defaults stay written; omitted ones stay out
+    let explicit = input(&module_yaml("r", MAGIC, "args: {}\ndepth: 1\n")).unwrap();
+    let json = serde_json::to_string(&explicit).unwrap();
+    assert!(
+        json.contains(",\"module\":\"AGFzbQEAAAA=\",\"args\":{},\"depth\":1,\"severity\""),
+        "{json}"
+    );
+    let only_depth = input(&module_yaml("r", MAGIC, "depth: 1\n")).unwrap();
+    assert!(!keys(&only_depth).contains(&"args".to_string()));
+    let only_args = input(&module_yaml("r", MAGIC, "args: { b: [1, null], a: x }\n")).unwrap();
+    assert!(!keys(&only_args).contains(&"depth".to_string()));
+    assert!(
+        serde_json::to_string(&only_args)
+            .unwrap()
+            .contains("\"args\":{\"a\":\"x\",\"b\":[1,null]}")
+    );
+    // each round-trips through the structure
+    for r in [&plain, &explicit, &only_depth, &only_args] {
+        let back = validate_rule_input(&serde_yaml_ng::to_value(r).unwrap()).unwrap();
+        assert_eq!(&back, r);
+        assert_eq!(
+            serde_yaml_ng::to_string(&back).unwrap(),
+            serde_yaml_ng::to_string(r).unwrap()
+        );
+    }
+    // the module, args and depth each move the bytes
+    let bytes = |r: &RuleInput| serde_json::to_vec(r).unwrap();
+    let other = input(&module_yaml("r", "AGFzbQEAAAE=", "")).unwrap();
+    assert_ne!(bytes(&other), bytes(&plain));
+    assert_ne!(bytes(&only_depth), bytes(&plain));
+    assert_ne!(bytes(&explicit), bytes(&only_depth));
+    let deeper = input(&module_yaml("r", MAGIC, "depth: 2\n")).unwrap();
+    assert_ne!(bytes(&deeper), bytes(&only_depth));
+}
+
+/// A global allocator that records the allocation requests of the observing thread, so a test
+/// can see what a call allocates before it returns an error. Other threads, and the observing
+/// thread outside [`alloc_probe::observe`], allocate as usual and are not recorded.
+mod alloc_probe {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub struct Probe;
+
+    thread_local! {
+        /// Whether this thread's requests are recorded.
+        static ON: Cell<bool> = const { Cell::new(false) };
+        /// The largest single request (bytes) while recording.
+        static LARGEST: Cell<usize> = const { Cell::new(0) };
+        /// The sum of every request (bytes) while recording.
+        static TOTAL: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn note(size: usize) {
+        let _ = ON.try_with(|on| {
+            if on.get() {
+                LARGEST.with(|l| l.set(l.get().max(size)));
+                TOTAL.with(|t| t.set(t.get().saturating_add(size)));
+            }
+        });
+    }
+
+    // SAFETY: every call goes to `System` with the caller's arguments unchanged; recording only
+    // touches const-initialised thread-locals, which never allocate.
+    #[allow(unsafe_code)]
+    unsafe impl GlobalAlloc for Probe {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc` requires.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc_zeroed` requires.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from `System` with `layout` (every allocation here is System's).
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note(new_size);
+            // SAFETY: `ptr` came from `System` with `layout`; the caller's new size.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// What one observed call requested: the largest single request and the sum, in bytes.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Seen {
+        pub largest: usize,
+        pub total: usize,
+    }
+
+    /// Runs `f` with this thread's requests recorded.
+    pub fn observe<T>(f: impl FnOnce() -> T) -> (T, Seen) {
+        LARGEST.with(|l| l.set(0));
+        TOTAL.with(|t| t.set(0));
+        ON.with(|on| on.set(true));
+        let out = f();
+        ON.with(|on| on.set(false));
+        let seen = Seen {
+            largest: LARGEST.with(Cell::get),
+            total: TOTAL.with(Cell::get),
+        };
+        (out, seen)
+    }
+}
+
+#[global_allocator]
+static ALLOC: alloc_probe::Probe = alloc_probe::Probe;
+
+/// The most any refusal below may request in one allocation: far under each oversized input.
+const SMALL: usize = 64 * 1024;
+
+#[test]
+fn wck2_module_and_args_bounds_refuse_before_copying() {
+    // a module text past the size bound: its length is checked on the borrowed text
+    let long = "A".repeat(4_000_000);
+    let rule = module_value("r", &long, vec![]);
+    let (got, seen) = alloc_probe::observe(|| validate_rule_input(&rule));
+    assert_eq!(
+        got,
+        Err(SchemaError::Invalid(
+            "rule r module is 3000000 bytes; a module takes at most 1048576".to_string()
+        ))
+    );
+    assert!(seen.largest < SMALL && seen.total < SMALL, "{seen:?}");
+
+    // args past the byte bound: a long string, a long list and a wide mapping
+    let mut wide = Mapping::new();
+    for i in 0..200_000 {
+        wide.insert(Value::String(format!("k{i}")), Value::Null);
+    }
+    for args in [
+        Value::Mapping(Mapping::from_iter([(
+            Value::String("k".into()),
+            Value::String("x".repeat(4_000_000)),
+        )])),
+        Value::Mapping(Mapping::from_iter([(
+            Value::String("k".into()),
+            Value::Sequence(vec![Value::Null; 1_000_000]),
+        )])),
+        Value::Mapping(wide),
+    ] {
+        let rule = module_value("r", MAGIC, vec![("args", args)]);
+        let (got, seen) = alloc_probe::observe(|| validate_rule_input(&rule));
+        assert_eq!(
+            got,
+            Err(SchemaError::Invalid(
+                "rule r args: at most 8192 bytes".to_string()
+            ))
+        );
+        assert!(seen.largest < SMALL && seen.total < SMALL, "{seen:?}");
+    }
+}
+
+#[test]
+fn wck2_rule_count_and_texts_refuse_before_copying() {
+    let base = resolve(&rule("r", ANY, ANY)).unwrap();
+    let long = RuleInput {
+        message: "m".repeat(1_000_000),
+        ..base.rules[0].clone()
+    };
+    // 65 rules: the count is refused before any rule is read
+    let mut many = base.clone();
+    many.rules = (0..65)
+        .map(|i| RuleInput {
+            name: format!("r{i:03}"),
+            ..long.clone()
+        })
+        .collect();
+    let (got, seen) = alloc_probe::observe(|| compile_rules(&many));
+    assert_eq!(got, Err("a pack takes at most 64 rules".to_string()));
+    assert!(seen.largest < SMALL && seen.total < SMALL, "{seen:?}");
+    // one rule with a long message: its texts are checked on the borrowed rule
+    let mut one = base.clone();
+    one.rules = vec![long];
+    let (got, seen) = alloc_probe::observe(|| compile_rules(&one));
+    assert_eq!(
+        got,
+        Err("rule r: message must have 1 to 2000 characters".to_string())
+    );
+    assert!(seen.largest < SMALL && seen.total < SMALL, "{seen:?}");
+}
+
+/// A module rule `name` built in memory, as a host builds typed rules: `test` as given, never
+/// read from a pack file.
+fn typed_module(name: &str, test: ModuleTest) -> RuleInput {
+    RuleInput {
+        name: name.to_string(),
+        select: "type = decision".to_string(),
+        test: RuleTestSpec::Module(test),
+        severity: RuleSeverity::Advisory,
+        message: "m".to_string(),
+        fix: "f".to_string(),
+    }
+}
+
+#[test]
+fn wck2_typed_module_rules_keep_the_pack_file_limits() {
+    use std::collections::BTreeMap;
+    let pack = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+    let ok = ModuleTest {
+        module: MAGIC_BYTES.to_vec(),
+        args: None,
+        depth: None,
+    };
+    let wide = BTreeMap::from([("k".to_string(), ArgValue::Str("x".repeat(MAX_ARGS_BYTES)))]);
+    let huge = BTreeMap::from([(
+        "k".to_string(),
+        ArgValue::List(vec![ArgValue::Int(rdy_schema::MAX_ARGS_INT + 1)]),
+    )]);
+    let cases = [
+        (
+            ModuleTest {
+                module: vec![0; MAX_MODULE_BYTES + 1],
+                ..ok.clone()
+            },
+            "rule r module is 1048577 bytes; a module takes at most 1048576",
+        ),
+        (
+            ModuleTest {
+                depth: Some(4),
+                ..ok.clone()
+            },
+            "rule r depth must be 0 to 3",
+        ),
+        (
+            ModuleTest {
+                args: Some(wide),
+                ..ok.clone()
+            },
+            "rule r args: at most 8192 bytes",
+        ),
+        (
+            ModuleTest {
+                args: Some(huge),
+                ..ok.clone()
+            },
+            "rule r args: only strings, integers, booleans, null, lists and mappings",
+        ),
+    ];
+    for (test, want) in cases {
+        assert_eq!(
+            rdy_schema::check_module_test("r", &test),
+            Err(want.to_string())
+        );
+        assert_eq!(
+            check_resolved_rules(&pack, &[typed_module("r", test)]),
+            Err(SchemaError::Invalid(want.to_string()))
+        );
+    }
+    // the limits themselves pass, with the same byte count a pack file's args get
+    let at = ModuleTest {
+        module: vec![0; MAX_MODULE_BYTES],
+        args: Some(BTreeMap::from([(
+            "k".to_string(),
+            ArgValue::Str("x".repeat(MAX_ARGS_BYTES - 8)),
+        )])),
+        depth: Some(3),
+    };
+    assert_eq!(rdy_schema::check_module_test("r", &at), Ok(()));
+    let text = module_yaml(
+        "r",
+        MAGIC,
+        &format!("args: {{k: {}}}\n", "x".repeat(MAX_ARGS_BYTES - 8)),
+    );
+    assert!(input(&text).is_ok());
+    let text = module_yaml(
+        "r",
+        MAGIC,
+        &format!("args: {{k: {}}}\n", "x".repeat(MAX_ARGS_BYTES - 7)),
+    );
+    assert_eq!(input_refused(&text), "rule r args: at most 8192 bytes");
+    let mut over = at.clone();
+    over.args = Some(BTreeMap::from([(
+        "k".to_string(),
+        ArgValue::Str("x".repeat(MAX_ARGS_BYTES - 7)),
+    )]));
+    assert_eq!(
+        rdy_schema::check_module_test("r", &over),
+        Err("rule r args: at most 8192 bytes".to_string())
+    );
 }

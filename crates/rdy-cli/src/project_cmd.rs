@@ -3,7 +3,7 @@ use crate::output::{carried_targets, num, open_warnings, print_error, text};
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
 use rdy_engine::{
-    E_BAD_INPUT, E_CONFIG, E_NO_PROJECT, Rdy, check_path, lexical_path, project_pack,
+    E_BAD_INPUT, E_CONFIG, E_NO_PROJECT, Rdy, check_path, lexical_path, project_pack_compiled,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -72,7 +72,10 @@ pub(crate) fn init(
 
 pub(crate) fn pack(env: &Env, cmd: PackCmd) -> Result<(Value, String), ErrorReply> {
     let PackCmd::Check = cmd;
-    let pack = project_pack(&env.project)?;
+    // the rules compile as the open compiles them: a module that does not load fails here, and
+    // none runs
+    let (pack, rules) = project_pack_compiled(&env.project)?;
+    let modules = rdy_engine::check::rules::module_metadata(&rules);
     let classes: serde_json::Map<String, Value> = pack
         .block_types
         .keys()
@@ -93,8 +96,15 @@ pub(crate) fn pack(env: &Env, cmd: PackCmd) -> Result<(Value, String), ErrorRepl
             text.push_str(&format!(" ({})", a.description));
         }
     }
+    // D-ZRXY0: one line per module rule, in rule name order
+    for m in &modules {
+        text.push_str(&format!(
+            "\nrule {} module sha256:{} {} bytes, interface {}",
+            m.rule, m.sha256, m.bytes, m.interface
+        ));
+    }
     Ok((
-        json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len(), "classes": classes, "areas": areas}),
+        json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len(), "classes": classes, "areas": areas, "modules": modules}),
         text,
     ))
 }

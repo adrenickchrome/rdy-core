@@ -1,0 +1,13 @@
+[package]
+name = "rdy-check-wasm"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# The only rdy crate that links the interpreter; it depends on no rdy crate.
+wasmi.workspace = true
+
+[lints]
+workspace = true

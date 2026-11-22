@@ -1,6 +1,7 @@
 //! Published read states (snap1): what a reader holds is an immutable `ReadState`, built lazily
 //! and shared. The writer publishes a new one after every write, before the write returns, and
 //! seeds the cells it can fill in O(ops) (the written view after a commit, canon after a landing).
+use crate::check::rules::CompiledRules;
 use crate::coverage::{CoverageMemo, Structural};
 use crate::error::*;
 use crate::lexicon::Lexicon;
@@ -658,6 +659,17 @@ pub(crate) fn check_records(store: &rdy_store::Store) -> bool {
     store.has_feature_now(rdy_store::format::FEATURE_CHECK_REQUEST)
 }
 
+/// The compiled rules a state judges with ([`ReadState::compiled_rules`]).
+#[derive(Clone)]
+pub(crate) enum StateRules {
+    /// The loaded pack's, compiled when it was loaded and shared by every state published under
+    /// it.
+    Loaded(Arc<CompiledRules>),
+    /// An explicit candidate's, under a pack its caller gives that is not the loaded one:
+    /// compiled from that pack, in memory, on first use. No project file is read.
+    Given(Arc<OnceLock<Result<Arc<CompiledRules>, RdyError>>>),
+}
+
 /// An immutable published state of the project: the heads, view sets and tags it was published
 /// with, and lazily built materializations. A held state never follows a later write.
 pub struct ReadState {
@@ -675,6 +687,8 @@ pub struct ReadState {
     pub(crate) pack: Arc<Pack>,
     /// The pack's areas, compiled once (arn1).
     pub(crate) areas: Arc<AreaMatcher>,
+    /// The pack's rules, compiled once per loaded pack, with that pack's verdict cache.
+    pub(crate) rules: StateRules,
     /// The project directory.
     pub(crate) root: Arc<std::path::Path>,
     /// Whether reads may look at files under `root` or the user's config (a linked checkout's
@@ -767,6 +781,18 @@ impl ReadState {
 
     pub fn pack(&self) -> &Pack {
         &self.pack
+    }
+
+    /// The pack's rules, compiled: the handle the loaded pack was compiled into, the same for
+    /// every state published under it. An explicit candidate under another pack compiles that
+    /// pack's rules once, on first use; its refusal is the pack's `E_CONFIG`.
+    pub fn compiled_rules(&self) -> Result<Arc<CompiledRules>, RdyError> {
+        match &self.rules {
+            StateRules::Loaded(rules) => Ok(Arc::clone(rules)),
+            StateRules::Given(cell) => cell
+                .get_or_init(|| crate::check::rules::compile_pack_rules(&self.pack))
+                .clone(),
+        }
     }
 
     pub fn root(&self) -> &std::path::Path {
@@ -1073,6 +1099,12 @@ impl ReadState {
         changes: &[Hash],
         inputs: &crate::landing_check::CheckInputs,
     ) -> ReadState {
+        // the loaded pack's compiled rules when the candidate is judged under that pack
+        let rules = if inputs.pack == *self.pack {
+            self.rules.clone()
+        } else {
+            StateRules::Given(Arc::default())
+        };
         let pack = Arc::new(inputs.pack.clone());
         let head = ViewHead {
             head: candidate_head(base, view, changes),
@@ -1102,6 +1134,7 @@ impl ReadState {
             views,
             tags: Arc::clone(&self.tags),
             areas: Arc::new(pack.area_matcher()),
+            rules,
             reader: self.reader.with_tracking(pack.tracking()),
             pack,
             root: Arc::clone(&self.root),
