@@ -1890,5 +1890,1044 @@
       "log2": "c09095ba69b8fa1b",
       "x": "00000000000017b8"
     }
-  ]
+  ],
+  "store": {
+    "about": "What a store of these blocks gives through its own reads: under like, each content source's like hits in the reply's order, each with its shown score, its exact score bits, its words and its links; under relevance, the order and scores of one sort relevance query; under advice, the briefing rows (with exact score bits) and a write receipt of the fixed project in tests/engine_read/engine_vector_determinism.rs. Ids are as written; created ids are named by their placeholders.",
+    "advice": {
+      "covers": [
+        "t-00001",
+        "c-00001",
+        "c-00002",
+        "c-00003",
+        "c-00004"
+      ],
+      "receipt": {
+        "vector_neighbors": [
+          {
+            "block": "c-00011",
+            "doc": "d-0000B",
+            "for": "$n2",
+            "links": [],
+            "score": 0.673,
+            "words": [
+              "graze",
+              "reef",
+              "urchins",
+              "kelp",
+              "the"
+            ]
+          },
+          {
+            "block": "c-00012",
+            "doc": "d-0000B",
+            "for": "$n2",
+            "links": [],
+            "score": 0.255,
+            "words": [
+              "at",
+              "reef",
+              "the"
+            ]
+          }
+        ],
+        "vector_neighbors_skipped": null
+      },
+      "vector_neighbors": [
+        {
+          "block": "c-00015",
+          "doc": "d-0000B",
+          "exact": "3fd9b4a960ac54ae",
+          "for": "c-00002",
+          "links": [],
+          "score": 0.402,
+          "summary": "Kelp forests and otters keep urchins in check.",
+          "words": [
+            "in",
+            "forests",
+            "kelp",
+            "urchins"
+          ]
+        },
+        {
+          "block": "c-00016",
+          "doc": "d-0000B",
+          "exact": "3fd9b4a960ac54ae",
+          "for": "c-00002",
+          "links": [],
+          "score": 0.402,
+          "summary": "Kelp forests and otters keep urchins in check.",
+          "words": [
+            "in",
+            "forests",
+            "kelp",
+            "urchins"
+          ]
+        }
+      ],
+      "vector_neighbors_skipped": null
+    },
+    "like": {
+      "c-00001": [
+        {
+          "exact": "3fdef9140d3c6620",
+          "id": "c-00009",
+          "links": [],
+          "score": 0.484,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fde3dc7cdf34fd6",
+          "id": "f-00001",
+          "links": [],
+          "score": 0.473,
+          "words": [
+            "the",
+            "to",
+            "request",
+            "gateway",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fdd7b342f70ced5",
+          "id": "c-00011",
+          "links": [],
+          "score": 0.461,
+          "words": [
+            "routes"
+          ]
+        },
+        {
+          "exact": "3fdcc9f68b999734",
+          "id": "c-00002",
+          "links": [],
+          "score": 0.45,
+          "words": [
+            "the",
+            "gateway",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fdc30fe10bbe8e6",
+          "id": "c-00003",
+          "links": [],
+          "score": 0.44,
+          "words": [
+            "the",
+            "every",
+            "ledger",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fd2897c40417dfe",
+          "id": "r-00001",
+          "links": [],
+          "score": 0.29,
+          "words": [
+            "every",
+            "the",
+            "request",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fd13561825e3260",
+          "id": "p-00002",
+          "links": [],
+          "score": 0.269,
+          "words": [
+            "request"
+          ]
+        },
+        {
+          "exact": "3fcef9140d3c6620",
+          "id": "en-00002",
+          "links": [],
+          "score": 0.242,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fcef9140d3c6620",
+          "id": "c-00007",
+          "links": [],
+          "score": 0.242,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fcdc2cd8fb6d394",
+          "id": "c-00006",
+          "links": [],
+          "score": 0.233,
+          "words": [
+            "the",
+            "gateway"
+          ]
+        },
+        {
+          "exact": "3fb9db80620e458d",
+          "id": "tb-00001",
+          "links": [],
+          "score": 0.101,
+          "words": [
+            "gateway",
+            "ledger"
+          ]
+        }
+      ],
+      "c-00002": [
+        {
+          "exact": "3fde6de3fdfa15cc",
+          "id": "c-00009",
+          "links": [],
+          "score": 0.475,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fdcc9f68b999734",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.45,
+          "words": [
+            "the",
+            "gateway",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fd6e728a26546e8",
+          "id": "f-00001",
+          "links": [],
+          "score": 0.358,
+          "words": [
+            "the",
+            "gateway",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fd657c9b8d925ab",
+          "id": "c-00006",
+          "links": [],
+          "score": 0.349,
+          "words": [
+            "gateway",
+            "the"
+          ]
+        },
+        {
+          "exact": "3fd0e80c6789a0ea",
+          "id": "p-00002",
+          "links": [],
+          "score": 0.264,
+          "words": [
+            "request"
+          ]
+        },
+        {
+          "exact": "3fce36bca4fa14ef",
+          "id": "dg-00001",
+          "links": [],
+          "score": 0.236,
+          "words": [
+            "gateway"
+          ]
+        },
+        {
+          "exact": "3fcd7f09293769f9",
+          "id": "c-00003",
+          "links": [],
+          "score": 0.23,
+          "words": [
+            "the",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fc632eb78a3417d",
+          "id": "en-00001",
+          "links": [],
+          "score": 0.173,
+          "words": [
+            "gateway"
+          ]
+        },
+        {
+          "exact": "3fc13fa78c909fb1",
+          "id": "r-00001",
+          "links": [],
+          "score": 0.135,
+          "words": [
+            "the",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fc06ab2b4e258ec",
+          "id": "tb-00001",
+          "links": [],
+          "score": 0.128,
+          "words": [
+            "gateway"
+          ]
+        }
+      ],
+      "c-00003": [
+        {
+          "exact": "3fdc30fe10bbe8e6",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.44,
+          "words": [
+            "the",
+            "every",
+            "ledger",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fd7b3c336988aa4",
+          "id": "en-00002",
+          "links": [],
+          "score": 0.37,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fd7b3c336988aa4",
+          "id": "c-00007",
+          "links": [],
+          "score": 0.37,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fd7b3c336988aa4",
+          "id": "c-00009",
+          "links": [],
+          "score": 0.37,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fd0d1b0948045c0",
+          "id": "f-00001",
+          "links": [],
+          "score": 0.263,
+          "words": [
+            "the",
+            "request",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fd04325c263c309",
+          "id": "r-00001",
+          "links": [],
+          "score": 0.254,
+          "words": [
+            "every",
+            "ledger",
+            "the",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fcd7f09293769f9",
+          "id": "c-00002",
+          "links": [],
+          "score": 0.23,
+          "words": [
+            "the",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fca567989880d11",
+          "id": "p-00002",
+          "links": [],
+          "score": 0.206,
+          "words": [
+            "request"
+          ]
+        },
+        {
+          "exact": "3fbe5dc3918303e0",
+          "id": "c-00006",
+          "links": [],
+          "score": 0.119,
+          "words": [
+            "the"
+          ]
+        }
+      ],
+      "c-00004": [
+        {
+          "exact": "3fd790345f7f0e85",
+          "id": "s-00001",
+          "links": [],
+          "score": 0.368,
+          "words": [
+            "words"
+          ]
+        }
+      ],
+      "c-00005": [],
+      "c-00006": [
+        {
+          "exact": "3fd657c9b8d925ab",
+          "id": "c-00002",
+          "links": [],
+          "score": 0.349,
+          "words": [
+            "gateway",
+            "the"
+          ]
+        },
+        {
+          "exact": "3fd47f9fc609c80c",
+          "id": "c-00009",
+          "links": [],
+          "score": 0.32,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fd18fbb85cc8740",
+          "id": "n-00005",
+          "links": [
+            "en-00001",
+            "en-00002"
+          ],
+          "score": 0.274,
+          "words": []
+        },
+        {
+          "exact": "3fd1558407659463",
+          "id": "p-00001",
+          "links": [],
+          "score": 0.271,
+          "words": [
+            "and"
+          ]
+        },
+        {
+          "exact": "3fcdc2cd8fb6d394",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.233,
+          "words": [
+            "the",
+            "gateway"
+          ]
+        },
+        {
+          "exact": "3fc5a37d3fa6d0d5",
+          "id": "f-00001",
+          "links": [],
+          "score": 0.169,
+          "words": [
+            "the",
+            "gateway"
+          ]
+        },
+        {
+          "exact": "3fbf7ebd6a6d8ef2",
+          "id": "dg-00001",
+          "links": [],
+          "score": 0.123,
+          "words": [
+            "gateway"
+          ]
+        },
+        {
+          "exact": "3fbe5dc3918303e0",
+          "id": "c-00003",
+          "links": [],
+          "score": 0.119,
+          "words": [
+            "the"
+          ]
+        }
+      ],
+      "c-00007": [
+        {
+          "exact": "3ff0000000000000",
+          "id": "en-00002",
+          "links": [],
+          "score": 1.0,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fd7b3c336988aa4",
+          "id": "c-00003",
+          "links": [],
+          "score": 0.37,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fcef9140d3c6620",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.242,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fcab6ffa9ddce1a",
+          "id": "tb-00001",
+          "links": [],
+          "score": 0.209,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc66e1dd087c68e",
+          "id": "r-00001",
+          "links": [],
+          "score": 0.175,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc2d8639b9d1200",
+          "id": "f-00001",
+          "links": [],
+          "score": 0.147,
+          "words": [
+            "ledger"
+          ]
+        }
+      ],
+      "c-00008": [],
+      "c-00009": [
+        {
+          "exact": "3fdef9140d3c6620",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.484,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fde6de3fdfa15cc",
+          "id": "c-00002",
+          "links": [],
+          "score": 0.475,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fd85b6eb4e00d9c",
+          "id": "f-00001",
+          "links": [],
+          "score": 0.381,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fd7b3c336988aa4",
+          "id": "c-00003",
+          "links": [],
+          "score": 0.37,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fd47f9fc609c80c",
+          "id": "c-00006",
+          "links": [],
+          "score": 0.32,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fc66e1dd087c68e",
+          "id": "r-00001",
+          "links": [],
+          "score": 0.175,
+          "words": [
+            "the"
+          ]
+        }
+      ],
+      "c-00010": [],
+      "c-00011": [
+        {
+          "exact": "3fdd7b342f70ced5",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.461,
+          "words": [
+            "routes"
+          ]
+        }
+      ],
+      "cd-00001": [],
+      "f-00001": [
+        {
+          "exact": "3fde3dc7cdf34fd6",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.473,
+          "words": [
+            "the",
+            "to",
+            "request",
+            "gateway",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fd85b6eb4e00d9c",
+          "id": "c-00009",
+          "links": [],
+          "score": 0.381,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fd6e728a26546e8",
+          "id": "c-00002",
+          "links": [],
+          "score": 0.358,
+          "words": [
+            "the",
+            "gateway",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fd4f0d7c6ee10f8",
+          "id": "p-00002",
+          "links": [],
+          "score": 0.327,
+          "words": [
+            "request"
+          ]
+        },
+        {
+          "exact": "3fd0d1b0948045c0",
+          "id": "c-00003",
+          "links": [],
+          "score": 0.263,
+          "words": [
+            "the",
+            "request",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc5a37d3fa6d0d5",
+          "id": "c-00006",
+          "links": [],
+          "score": 0.169,
+          "words": [
+            "the",
+            "gateway"
+          ]
+        },
+        {
+          "exact": "3fc3fe7ad0c7fafe",
+          "id": "r-00001",
+          "links": [],
+          "score": 0.156,
+          "words": [
+            "the",
+            "request",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc2d8639b9d1200",
+          "id": "en-00002",
+          "links": [],
+          "score": 0.147,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc2d8639b9d1200",
+          "id": "c-00007",
+          "links": [],
+          "score": 0.147,
+          "words": [
+            "ledger"
+          ]
+        }
+      ],
+      "n-00001": [
+        {
+          "exact": "3fc8a2d504c2b681",
+          "id": "p-00001",
+          "links": [],
+          "score": 0.192,
+          "words": [
+            "and"
+          ]
+        },
+        {
+          "exact": "3fc5d797b328586c",
+          "id": "r-00001",
+          "links": [
+            "c-00001"
+          ],
+          "score": 0.171,
+          "words": []
+        },
+        {
+          "exact": "3fc5d797b328586c",
+          "id": "n-00003",
+          "links": [
+            "c-00001"
+          ],
+          "score": 0.171,
+          "words": []
+        }
+      ],
+      "n-00002": [
+        {
+          "exact": "3fcd9a81f594f496",
+          "id": "n-00005",
+          "links": [],
+          "score": 0.231,
+          "words": [
+            "links"
+          ]
+        }
+      ],
+      "n-00003": [
+        {
+          "exact": "3fd999999999999a",
+          "id": "r-00001",
+          "links": [
+            "c-00001"
+          ],
+          "score": 0.4,
+          "words": []
+        },
+        {
+          "exact": "3fc5d797b328586c",
+          "id": "n-00001",
+          "links": [
+            "c-00001"
+          ],
+          "score": 0.171,
+          "words": []
+        }
+      ],
+      "n-00004": [],
+      "n-00005": [
+        {
+          "exact": "3fd18fbb85cc8740",
+          "id": "c-00006",
+          "links": [
+            "en-00001",
+            "en-00002"
+          ],
+          "score": 0.274,
+          "words": []
+        },
+        {
+          "exact": "3fcd9a81f594f496",
+          "id": "n-00002",
+          "links": [],
+          "score": 0.231,
+          "words": [
+            "links"
+          ]
+        }
+      ],
+      "p-00001": [
+        {
+          "exact": "3fd1558407659463",
+          "id": "c-00006",
+          "links": [],
+          "score": 0.271,
+          "words": [
+            "and"
+          ]
+        },
+        {
+          "exact": "3fc8a2d504c2b681",
+          "id": "n-00001",
+          "links": [],
+          "score": 0.192,
+          "words": [
+            "and"
+          ]
+        },
+        {
+          "exact": "3fc09ebc8c987ca7",
+          "id": "r-00002",
+          "links": [],
+          "score": 0.13,
+          "words": [
+            "and"
+          ]
+        }
+      ],
+      "p-00002": [
+        {
+          "exact": "3fd4f0d7c6ee10f8",
+          "id": "f-00001",
+          "links": [],
+          "score": 0.327,
+          "words": [
+            "request"
+          ]
+        },
+        {
+          "exact": "3fd13561825e3260",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.269,
+          "words": [
+            "request"
+          ]
+        },
+        {
+          "exact": "3fd0e80c6789a0ea",
+          "id": "c-00002",
+          "links": [],
+          "score": 0.264,
+          "words": [
+            "request"
+          ]
+        },
+        {
+          "exact": "3fca567989880d11",
+          "id": "c-00003",
+          "links": [],
+          "score": 0.206,
+          "words": [
+            "request"
+          ]
+        },
+        {
+          "exact": "3fc8ec9e38dbc3ea",
+          "id": "r-00001",
+          "links": [],
+          "score": 0.195,
+          "words": [
+            "request"
+          ]
+        }
+      ],
+      "p-00003": [],
+      "r-00001": [
+        {
+          "exact": "3fd999999999999a",
+          "id": "n-00003",
+          "links": [
+            "c-00001"
+          ],
+          "score": 0.4,
+          "words": []
+        },
+        {
+          "exact": "3fd2897c40417dfe",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.29,
+          "words": [
+            "every",
+            "the",
+            "request",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fd04325c263c309",
+          "id": "c-00003",
+          "links": [],
+          "score": 0.254,
+          "words": [
+            "every",
+            "ledger",
+            "the",
+            "request"
+          ]
+        },
+        {
+          "exact": "3fc8ec9e38dbc3ea",
+          "id": "p-00002",
+          "links": [],
+          "score": 0.195,
+          "words": [
+            "request"
+          ]
+        },
+        {
+          "exact": "3fc66e1dd087c68e",
+          "id": "en-00002",
+          "links": [],
+          "score": 0.175,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc66e1dd087c68e",
+          "id": "c-00007",
+          "links": [],
+          "score": 0.175,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc66e1dd087c68e",
+          "id": "c-00009",
+          "links": [],
+          "score": 0.175,
+          "words": [
+            "the"
+          ]
+        },
+        {
+          "exact": "3fc5d797b328586c",
+          "id": "n-00001",
+          "links": [
+            "c-00001"
+          ],
+          "score": 0.171,
+          "words": []
+        },
+        {
+          "exact": "3fc5a58cd754578a",
+          "id": "tb-00001",
+          "links": [],
+          "score": 0.169,
+          "words": [
+            "5",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc3fe7ad0c7fafe",
+          "id": "f-00001",
+          "links": [],
+          "score": 0.156,
+          "words": [
+            "the",
+            "request",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc13fa78c909fb1",
+          "id": "c-00002",
+          "links": [],
+          "score": 0.135,
+          "words": [
+            "the",
+            "request"
+          ]
+        }
+      ],
+      "r-00002": [
+        {
+          "exact": "3fc09ebc8c987ca7",
+          "id": "p-00001",
+          "links": [],
+          "score": 0.13,
+          "words": [
+            "and"
+          ]
+        }
+      ],
+      "tb-00001": [
+        {
+          "exact": "3fcab6ffa9ddce1a",
+          "id": "en-00002",
+          "links": [],
+          "score": 0.209,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fcab6ffa9ddce1a",
+          "id": "c-00007",
+          "links": [],
+          "score": 0.209,
+          "words": [
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc5a58cd754578a",
+          "id": "r-00001",
+          "links": [],
+          "score": 0.169,
+          "words": [
+            "5",
+            "ledger"
+          ]
+        },
+        {
+          "exact": "3fc06ab2b4e258ec",
+          "id": "c-00002",
+          "links": [],
+          "score": 0.128,
+          "words": [
+            "gateway"
+          ]
+        },
+        {
+          "exact": "3fb9db80620e458d",
+          "id": "c-00001",
+          "links": [],
+          "score": 0.101,
+          "words": [
+            "gateway",
+            "ledger"
+          ]
+        }
+      ]
+    },
+    "relevance": {
+      "matches": [
+        {
+          "also": [],
+          "id": "c-00001",
+          "score": 0.435
+        },
+        {
+          "also": [],
+          "id": "f-00001",
+          "score": 0.366
+        }
+      ],
+      "query": "gateway request ledger"
+    }
+  }
 }
