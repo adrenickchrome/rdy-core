@@ -3031,6 +3031,7 @@ fn cli_runtime() -> Value {
     cli_markdown_probes(&mut seen, &env);
     cli_export_probes(&mut seen, &env);
     cli_vector_probes(&mut seen, &env);
+    cli_search_mode_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -5172,6 +5173,78 @@ fn cli_vector_probes(seen: &mut Seen, env: &[(String, String)]) {
         }
         cli_probe(seen, dir.path(), env, "brief", &args)
     });
+}
+
+/// vxs8 (D-76Y9H, D-5VGAS): the three search modes at the command line, in a project of their
+/// own: two tusk claims describe one term. `--sort relevance` scores each hit; `--like` the
+/// first finds its twin, whose hit carries `score`, `words` and `links`, and the result echoes
+/// the source; a `--like-text` that names the term finds both. Two sources, a sort with a like
+/// mode, a long `--like-text` and an unknown `--like` id are refused.
+fn cli_search_mode_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let (dir, mut r) = project();
+    let w = rdy_qa::fixtures::write(
+        &mut r,
+        "tusks",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "tusks", "title": "Tusks", "doc_type": "overview"}},
+            {"op": "create", "type": "term", "id": "$t", "parent": "$d", "fields": {"name": "Tusk sensor"}, "body": "Senses the water."},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$d", "body": "Narwhal tusks sense the cold water.", "links": {"describes": [{"target": "$t"}]}},
+            {"op": "create", "type": "claim", "parent": "$d", "body": "Narwhal tusks sense the salt.", "links": {"describes": [{"target": "$t"}]}}
+        ]),
+    )
+    .expect("write the tusks");
+    rdy_qa::fixtures::land(&mut r, "tusks").expect("land the tusks");
+    r.close().expect("close");
+    std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").expect("the person");
+    let dir = dir.path();
+    let source = w.created["$a"].clone();
+    let ranked = cli_probe(
+        seen,
+        dir,
+        env,
+        "search relevance",
+        &["search", "Narwhal tusks", "--sort", "relevance"],
+    );
+    assert!(ranked["matches"][0]["score"].is_number(), "{ranked}");
+    // a hit with a score, shared words and a shared link
+    let linked = |v: &Value| {
+        v["matches"].as_array().is_some_and(|m| {
+            m.iter().any(|hit| {
+                hit["score"].is_number()
+                    && hit["words"].as_array().is_some_and(|w| !w.is_empty())
+                    && hit["links"].as_array().is_some_and(|l| !l.is_empty())
+            })
+        })
+    };
+    let like = cli_probe(
+        seen,
+        dir,
+        env,
+        "search like",
+        &["search", "--like", &source],
+    );
+    assert_eq!(like["like"], json!(source), "{like}");
+    assert!(linked(&like), "{like}");
+    let text = cli_probe(
+        seen,
+        dir,
+        env,
+        "search like_text",
+        &["search", "--like-text", "A Tusk sensor in narwhal tusks."],
+    );
+    assert!(text["like_text"].is_string(), "{text}");
+    assert!(text["total"].as_u64().is_some_and(|n| n >= 2), "{text}");
+    assert!(linked(&text), "{text}");
+    let long = "w".repeat(16_385);
+    for args in [
+        vec!["search", "narwhal", "--like", &source],
+        vec!["search", "--like-text", "narwhal", "--sort", "relevance"],
+        vec!["search", "--like-text", &long],
+        vec!["search", "--like", "c-ZZZZZ"],
+    ] {
+        let refused = cli_probe(seen, dir, env, "search like refused", &args);
+        assert!(refused["code"].is_string(), "{args:?}: {refused}");
+    }
 }
 
 fn mcp_row() -> Value {

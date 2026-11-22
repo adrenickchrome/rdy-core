@@ -3154,6 +3154,154 @@
             }
           }
         },
+        "search like": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "ignore_case": "bool",
+            "like": "string",
+            "matches": [
+              {
+                "confidence": "string",
+                "coverage": "number",
+                "id": "string",
+                "issues": "number",
+                "lines": [
+                  {
+                    "field": "string",
+                    "line": "number",
+                    "text": "string"
+                  }
+                ],
+                "links": [
+                  "string"
+                ],
+                "path": "string",
+                "score": "number",
+                "type": "string",
+                "words": [
+                  "string"
+                ]
+              }
+            ],
+            "query": "string",
+            "regex": "bool",
+            "total": "number",
+            "totals": {
+              "docs": [
+                {
+                  "hits": "number",
+                  "path": "string"
+                }
+              ],
+              "types": {
+                "claim": "number",
+                "doc": "number",
+                "term": "number"
+              }
+            }
+          }
+        },
+        "search like refused": {
+          "exits": [
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          }
+        },
+        "search like_text": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "ignore_case": "bool",
+            "like_text": "string",
+            "matches": [
+              {
+                "confidence": "string",
+                "coverage": "number",
+                "id": "string",
+                "issues": "number",
+                "lines": [
+                  {
+                    "field": "string",
+                    "line": "number",
+                    "text": "string"
+                  }
+                ],
+                "links": [
+                  "string"
+                ],
+                "path": "string",
+                "score": "number",
+                "type": "string",
+                "words": [
+                  "string"
+                ]
+              }
+            ],
+            "query": "string",
+            "regex": "bool",
+            "total": "number",
+            "totals": {
+              "docs": [
+                {
+                  "hits": "number",
+                  "path": "string"
+                }
+              ],
+              "types": {
+                "claim": "number",
+                "doc": "number",
+                "term": "number"
+              }
+            }
+          }
+        },
+        "search relevance": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "ignore_case": "bool",
+            "matches": [
+              {
+                "confidence": "string",
+                "coverage": "number",
+                "id": "string",
+                "issues": "number",
+                "lines": [
+                  {
+                    "field": "string",
+                    "line": "number",
+                    "text": "string"
+                  }
+                ],
+                "path": "string",
+                "score": "number",
+                "type": "string"
+              }
+            ],
+            "query": "string",
+            "regex": "bool",
+            "total": "number",
+            "totals": {
+              "docs": [
+                {
+                  "hits": "number",
+                  "path": "string"
+                }
+              ],
+              "types": {
+                "claim": "number"
+              }
+            }
+          }
+        },
         "setup": {
           "exits": [
             0
@@ -4502,9 +4650,26 @@
               "index": 1,
               "num_args": "1",
               "positional": true,
-              "required": true,
               "value_names": [
                 "QUERY"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "like",
+              "long": "like",
+              "num_args": "1",
+              "value_names": [
+                "ID"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "like_text",
+              "long": "like-text",
+              "num_args": "1",
+              "value_names": [
+                "TEXT"
               ]
             },
             {
@@ -4748,6 +4913,8 @@
                 "governed_by",
                 "ignore_case",
                 "lifecycle",
+                "like",
+                "like_text",
                 "linked_to",
                 "max_tokens",
                 "mentions",
