@@ -371,6 +371,21 @@ class Boundaries(unittest.TestCase):
         self.assertIn('-m pip install --require-hashes -r "$RUNNER_TEMP/ci-tests-requirements.txt"\n', block)
         self.assertNotIn('-r tests/ci/requirements-release-producers.txt', block)
 
+    def test_platform_macos_test_parser_installs_before_the_checkout_from_its_own_copy(self):
+        # platform.yml's macOS job needs PyYAML for the gate's Python CI tests, as the candidate does. It
+        # installs the same hash-pinned copy before the checkout, so main's advisory run fails only when the
+        # candidate would (release checklist step 7 reads these jobs).
+        block = jobs_of(text_of('platform.yml'))['native']
+        self.assertIn("    steps:\n      - name: Test parser\n        if: runner.os == 'macOS'\n", block)
+        self.assertEqual(block.count('      - name: Test parser\n'), 1)
+        copy = re.search(r"cat > \"\$RUNNER_TEMP/ci-tests-requirements\.txt\" <<'REQ'\n(.*?)\n          REQ\n",
+                         block, re.S)
+        self.assertIsNotNone(copy)
+        lines = [re.sub(r'^ {10}', '', line) for line in copy.group(1).split('\n')]
+        source = (ROOT / 'tests/ci/requirements-release-producers.txt').read_text().splitlines()
+        self.assertEqual(lines, [line for line in source if line and not line.startswith('#')])
+        self.assertIn('-m pip install --require-hashes -r "$RUNNER_TEMP/ci-tests-requirements.txt"\n', block)
+
     def test_rsig8_candidate_never_exports_test_trust(self):
         # The sign job holds the real release key's public line and verifies the real signature; every
         # other candidate job stays free of trust material.

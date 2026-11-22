@@ -935,7 +935,7 @@ if len(sys.argv) != 3 or sys.argv[1] != 'show':
     sys.exit(99)
 path = sys.argv[2]
 if not os.stat(path).st_mode & 0o400:
-    os.kill(os.getpid(), signal.SIGILL)
+    os.kill(os.getpid(), signal.SIGKILL)  # SIGKILL: no macOS crash report or "quit unexpectedly" alert
 with open(path, 'rb') as profile:
     kind = profile.read().split(b'|')[0].decode()
 if kind == 'good':
