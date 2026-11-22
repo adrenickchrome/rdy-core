@@ -9,6 +9,8 @@
 //! Its 0600 credential fixtures in private config directories go through `rdy_store::pio`
 //! (FW-XP1 D-1RXEA).
 use crate::common;
+use crate::hub_tls;
+use rdy_engine::hub_http::HttpHubTransport;
 
 use rdy_engine::hub_config::{
     BAD_REMOTE_NAME_FIX, BAD_REMOTE_NAME_MESSAGE, Credential, CredentialFile, HubConfig,
@@ -20,13 +22,13 @@ use rdy_engine::hub_publish::{
 };
 use rdy_engine::hub_publish_files::ArtifactSource;
 use rdy_engine::hub_publish_wire::{
-    Candidate, Discovery, FileBatch, FileIdentity, ObjectPut, ProfileIdentity, PublicationInputs,
-    PublishState, PublishWire, StateRequest, UploadContext, encode_publish,
+    Candidate, Discovery, FileBatch, FileIdentity, HttpPublishWire, ObjectPut, ProfileIdentity,
+    PublicationInputs, PublishState, PublishWire, StateRequest, UploadContext, encode_publish,
 };
 use rdy_engine::hub_remotes::{RemoteLevel, RemoteService};
 use rdy_engine::hub_types::{
     HubCall, HubClock, HubFailure, HubMetadata, HubOperation, HubReply, HubTransport, MeReply,
-    Origin, RefreshReply, RequestClaim, Secret, TokenPair,
+    Origin, OriginFence, RefreshReply, RequestClaim, Secret, TokenPair,
 };
 use rdy_engine::publication::{self, Audience, Resolved, reference_summary};
 use rdy_engine::publication_manifest::{
@@ -115,6 +117,11 @@ fn install() -> &'static str {
 
 fn other_install() -> &'static str {
     &origins()[1]
+}
+
+/// The URL of a second publish remote on the install.
+fn second_remote() -> String {
+    format!("{}/second", install())
 }
 
 fn candidate_url() -> String {
@@ -490,6 +497,8 @@ struct Call {
     claim: RequestClaim,
     sync_base: Option<String>,
     push: Option<String>,
+    /// Whether the context let a put body go as zstd.
+    zstd: bool,
 }
 
 type Hook = Box<dyn FnMut(&'static str) + Send>;
@@ -507,6 +516,8 @@ struct Wire {
     batches: Mutex<Vec<Vec<u8>>>,
     files: Mutex<BTreeMap<Hash, Vec<u8>>>,
     published: Mutex<Vec<(Value, Option<bool>)>>,
+    /// Whether the hub already holds every artifact file (files/known answers none missing).
+    holds_files: Mutex<bool>,
 }
 
 fn base_state() -> PublishState {
@@ -525,6 +536,7 @@ fn base_state() -> PublishState {
         audience: None,
         artifact_bytes: 201_326_592,
         artifact_files: 32_000,
+        zstd: false,
     }
 }
 
@@ -543,6 +555,7 @@ impl Wire {
             batches: Mutex::new(Vec::new()),
             files: Mutex::new(BTreeMap::new()),
             published: Mutex::new(Vec::new()),
+            holds_files: Mutex::new(false),
         }
     }
 
@@ -581,6 +594,7 @@ impl Wire {
             claim: cx.claim.clone(),
             sync_base: cx.sync_base.clone(),
             push: push.map(str::to_string),
+            zstd: cx.zstd,
         });
         if let Some(h) = self.hook.lock().unwrap().as_mut() {
             h(step);
@@ -594,7 +608,10 @@ impl Wire {
 
 impl PublishWire for Wire {
     fn discovery(&self, cx: &UploadContext, remote: &str) -> Result<Discovery, RdyError> {
-        assert_eq!(remote, install(), "discovery reads the remote's URL");
+        assert!(
+            remote == install() || remote == second_remote(),
+            "discovery reads the remote's URL"
+        );
         self.enter("discovery", cx, None)?;
         Ok(Discovery {
             sync_base: format!("{}{SYNC_PATH}", install()),
@@ -650,6 +667,9 @@ impl PublishWire for Wire {
         files: &[FileIdentity],
     ) -> Result<Vec<Hash>, RdyError> {
         self.enter("files_known", cx, Some(push))?;
+        if *self.holds_files.lock().unwrap() {
+            return Ok(Vec::new());
+        }
         Ok(files.iter().map(|f| f.hash).collect())
     }
 
@@ -719,6 +739,8 @@ impl PublishWire for Wire {
 struct Mem {
     manifest: Manifest,
     files: BTreeMap<String, Vec<u8>>,
+    /// How often each path was opened; every open is read whole.
+    opens: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl ArtifactSource for Mem {
@@ -731,6 +753,7 @@ impl ArtifactSource for Mem {
     }
 
     fn open(&self, path: &str) -> Result<Box<dyn Read + '_>, RdyError> {
+        *self.opens.lock().unwrap().entry(path.into()).or_default() += 1;
         Ok(Box::new(std::io::Cursor::new(self.files[path].as_slice())))
     }
 }
@@ -763,7 +786,11 @@ fn page_artifact(profile: &str) -> Mem {
             },
         ],
     };
-    Mem { manifest, files }
+    Mem {
+        manifest,
+        files,
+        opens: Arc::default(),
+    }
 }
 
 /// What the fake renderer was asked: the scope, the tag and the profile of each render.
@@ -772,6 +799,8 @@ struct Renderer {
     captures: AtomicUsize,
     renders: Mutex<Vec<(Scope, String, String)>>,
     manifest_hash: Mutex<Option<Hash>>,
+    /// The opens of every artifact this renderer made.
+    opens: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl PublishRenderer for Renderer {
@@ -792,7 +821,8 @@ impl PublishRenderer for Renderer {
             .lock()
             .unwrap()
             .push((scope.clone(), tag.to_string(), profile.to_string()));
-        let artifact = page_artifact(profile);
+        let mut artifact = page_artifact(profile);
+        artifact.opens = Arc::clone(&self.opens);
         *self.manifest_hash.lock().unwrap() =
             Some(manifest_hash(&artifact.manifest, MANIFEST_RECIPE).unwrap());
         Ok(RenderedUpload {
@@ -955,6 +985,161 @@ fn hpb14_end_to_end_upload_returns_candidate_and_writes_no_project_record() {
     let published = wire.published.lock().unwrap().clone();
     assert_eq!(published[0].1, None);
     assert!(published[0].0.get("keep_latest").is_none());
+}
+
+/// A publish reads each artifact file once for its check, and once more only while it is sent:
+/// the check is not repeated before the files go up.
+#[test]
+fn hpb14_each_file_is_checked_once() {
+    let e = env();
+    let paths = ["assets/site.css", "index.html"];
+    for (holds, want) in [(false, 2), (true, 1)] {
+        let wire = Wire::new();
+        *wire.holds_files.lock().unwrap() = holds;
+        let renderer = Renderer::default();
+        run_with(
+            &e,
+            &Api::default(),
+            &Clock::at(T0),
+            &wire,
+            &agent(),
+            standard(),
+            &renderer,
+        )
+        .unwrap();
+        let opens = renderer.opens.lock().unwrap().clone();
+        let want: BTreeMap<String, usize> = paths.iter().map(|p| (p.to_string(), want)).collect();
+        assert_eq!(opens, want, "hub holds the files: {holds}");
+        let sent = wire.files.lock().unwrap().len();
+        assert_eq!(sent, if holds { 0 } else { paths.len() });
+    }
+}
+
+/// Two small files for a real tar body.
+struct TwoFiles {
+    files: Vec<FileIdentity>,
+    bodies: Vec<std::io::Cursor<Vec<u8>>>,
+}
+
+impl FileBatch for TwoFiles {
+    fn files(&self) -> &[FileIdentity] {
+        &self.files
+    }
+    fn media_type(&self, _: usize) -> &str {
+        "text/plain"
+    }
+    fn read(&mut self, index: usize, out: &mut [u8]) -> std::io::Result<usize> {
+        self.bodies[index].read(out)
+    }
+}
+
+/// A proxy's 502 page answering a write, at each write phase: the real HTTPS wire turns it into
+/// the uncertain error with its status, and the publish keeps that status as a second issue
+/// beside the phase's. No byte of the page reaches the error.
+#[test]
+fn hpb14_a_non_hub_reply_names_its_status_in_every_write_phase() {
+    let e = env();
+    // The record and manifest a real publish request carries.
+    let done = run(&e, &Wire::new(), standard()).unwrap();
+    let manifest = page_artifact("implicit:org").manifest;
+
+    let mut server = hub_tls::Server::start();
+    let dir = private_dir();
+    let ca = dir.path().join("ca.pem");
+    fs::write(&ca, server.ca_pem()).unwrap();
+    let origin = Origin::parse(server.origin()).unwrap();
+    let http = HttpPublishWire::new(
+        HttpHubTransport::new(OriginFence::new(origin.clone(), []).unwrap()).unwrap(),
+    );
+    let cx = UploadContext {
+        install: origin.clone(),
+        sync_base: Some(format!("{origin}{SYNC_PATH}")),
+        ca_file: Some(ca),
+        claim: RequestClaim::from_session(&agent()).unwrap(),
+        bearer: Secret::new(access1()),
+        zstd: false,
+    };
+    let page = b"<html><body>502 Bad Gateway from the proxy</body></html>";
+    let headers = [
+        "content-type: text/html".to_string(),
+        format!("content-length: {}", page.len()),
+        "connection: close".to_string(),
+    ];
+    let mut proxied = |call: &dyn Fn() -> RdyError| {
+        server.reply(hub_tls::Reply::with_headers(502, &headers, page));
+        server.accept_n(1);
+        call()
+    };
+    let push = "0123456789abcdefghjkmnpqrs";
+    let objects = proxied(&|| {
+        let mut b = std::io::Cursor::new(b"abc".to_vec());
+        http.put_objects(&cx, push, &mut b, 3).unwrap_err()
+    });
+    let files = proxied(&|| {
+        let bodies: [&[u8]; 2] = [b"ab", b"cd"];
+        let mut batch = TwoFiles {
+            files: bodies
+                .iter()
+                .map(|b| FileIdentity {
+                    hash: Hash::of(b),
+                    size: b.len() as u64,
+                })
+                .collect(),
+            bodies: bodies
+                .iter()
+                .map(|b| std::io::Cursor::new(b.to_vec()))
+                .collect(),
+        };
+        http.put_files(&cx, push, &mut batch).unwrap_err()
+    });
+    let publish = proxied(&|| {
+        http.publish(&cx, push, SITE, &done.record, &manifest, None)
+            .unwrap_err()
+    });
+
+    for (phase, step, wire_error) in [
+        ("objects", "objects", objects),
+        ("files", "file", files),
+        ("publish", "publish", publish),
+    ] {
+        assert_eq!(wire_error.code, E_UPSTREAM_UNCERTAIN, "{phase}");
+        let wire = Wire::new().failing(step, wire_error);
+        let err = run(&e, &wire, standard()).unwrap_err();
+        let push = wire
+            .calls()
+            .iter()
+            .find_map(|c| c.push.clone())
+            .expect("a push id was sent");
+        let fix = format!("check push {push} on the hub before publishing again");
+        assert_eq!(
+            triple(&err),
+            (
+                E_UPSTREAM_UNCERTAIN,
+                "the publication upload may have completed",
+                fix.as_str()
+            ),
+            "{phase}"
+        );
+        let issue = |message: String| Issue {
+            severity: Severity::Error,
+            code: E_UPSTREAM_UNCERTAIN,
+            block: None,
+            message,
+            fix: fix.clone(),
+        };
+        assert_eq!(
+            err.issues,
+            vec![
+                issue(format!("upload phase {phase}")),
+                issue("upstream answered 502".to_string()),
+            ],
+            "{phase}"
+        );
+        let text = format!("{err:?} {}", serde_json::to_string(&err).unwrap());
+        for body in ["Bad Gateway", "<html", "proxy"] {
+            assert!(!text.contains(body), "{phase}: {text}");
+        }
+    }
 }
 
 /// The site's profile resolves at the tag, not in current canon: the tag's revision, its
@@ -1830,4 +2015,365 @@ fn hpb14_the_request_is_strict_and_keep_latest_is_optional() {
     let mut extra = base;
     extra["profile"] = json!("implicit:org");
     assert!(parse(extra).is_err(), "no caller profile");
+}
+
+// ---------------------------------------------------------------------------------------------
+// upfast: zstd put bodies and publish resume (D-SEGWK)
+// ---------------------------------------------------------------------------------------------
+
+/// The state reply's `zstd: true` reaches the context of every request after the state step
+/// (the wire compresses only the objects and files bodies; hpb7's upfast tests pin that), and
+/// discovery and state go without it. The batches and the files are the same with zstd and
+/// without, since the limits count the bytes before compression.
+#[test]
+fn upfast_zstd_reaches_only_the_put_steps_and_leaves_the_plan_unchanged() {
+    let e = env();
+    let small = |s: &mut PublishState| s.batch_records = 3;
+    let plain = Wire::new().with_state(small);
+    run(&e, &plain, standard()).unwrap();
+    let zstd = Wire::new().with_state(|s| {
+        small(s);
+        s.zstd = true;
+    });
+    run(&e, &zstd, standard()).unwrap();
+    assert!(plain.calls().iter().all(|c| !c.zstd));
+    for c in zstd.calls() {
+        assert_eq!(
+            c.zstd,
+            !matches!(c.step, "discovery" | "state"),
+            "{}",
+            c.step
+        );
+    }
+    assert_eq!(plain.steps(), zstd.steps());
+    assert!(
+        zstd.steps().iter().filter(|s| **s == "objects").count() > 1,
+        "several batches"
+    );
+    assert_eq!(
+        *plain.batches.lock().unwrap(),
+        *zstd.batches.lock().unwrap()
+    );
+    assert_eq!(*plain.files.lock().unwrap(), *zstd.files.lock().unwrap());
+}
+
+/// Where a stopped publish keeps its push id: the project's local state, outside the log.
+fn resume_file(e: &Env) -> PathBuf {
+    e.project.join(".rdy").join("publish-resume.json")
+}
+
+/// The one push id every upload request of `wire` named.
+#[track_caller]
+fn push_of(wire: &Wire) -> String {
+    let pushes: std::collections::BTreeSet<String> =
+        wire.calls().into_iter().filter_map(|c| c.push).collect();
+    assert_eq!(pushes.len(), 1, "one push id: {pushes:?}");
+    pushes.into_iter().next().unwrap()
+}
+
+/// A run of `req` that stops at the objects step; its push id.
+fn stopped(e: &Env, req: PublishRequest) -> String {
+    let wire = Wire::new().failing("objects", upstream_uncertain());
+    let err = run(e, &wire, req).unwrap_err();
+    assert_eq!(err.code, E_UPSTREAM_UNCERTAIN);
+    push_of(&wire)
+}
+
+/// The hub's refusal of a write, as the real wire reads it: a 409 hub error object.
+fn hub_refusal(e: &Env) -> RdyError {
+    hub_refusal_of(e, 409, "E_HUB_SITE_AUDIENCE", None)
+}
+
+/// The hub's refusal `code` at `status`, with `retry_after` when given, as the real wire reads
+/// it from a publish reply.
+fn hub_refusal_of(e: &Env, status: u16, code: &str, retry_after: Option<u64>) -> RdyError {
+    let done = run(e, &Wire::new(), standard()).unwrap();
+    let manifest = page_artifact("implicit:org").manifest;
+    let mut server = hub_tls::Server::start();
+    let dir = private_dir();
+    let ca = dir.path().join("ca.pem");
+    fs::write(&ca, server.ca_pem()).unwrap();
+    let origin = Origin::parse(server.origin()).unwrap();
+    let http = HttpPublishWire::new(
+        HttpHubTransport::new(OriginFence::new(origin.clone(), []).unwrap()).unwrap(),
+    );
+    let cx = UploadContext {
+        install: origin.clone(),
+        sync_base: Some(format!("{origin}{SYNC_PATH}")),
+        ca_file: Some(ca),
+        claim: RequestClaim::from_session(&agent()).unwrap(),
+        bearer: Secret::new(access1()),
+        zstd: false,
+    };
+    let mut body = json!({"code": code, "message": "the hub refused it",
+        "fix": "do what the code says", "request_id": "req_00000000000000000000000009",
+        "issues": []});
+    if let Some(n) = retry_after {
+        body["retry_after"] = json!(n);
+    }
+    server.reply(hub_tls::Reply::json(status, &body.to_string()));
+    server.accept_n(1);
+    let push = "0123456789abcdefghjkmnpqrs";
+    let refused = http
+        .publish(&cx, push, SITE, &done.record, &manifest, None)
+        .unwrap_err();
+    assert_eq!(refused.code, code);
+    assert_eq!(server.finish(), 0);
+    refused
+}
+
+/// A publish that stops before its publish write keeps its push id, with the remote, the hub
+/// repo, the root tag and the redaction epoch, in the project's local state and not in the log:
+/// written before the first known request. The next publish of the same tag to the same remote
+/// and repo at the same epoch names that push id, until a reply to the publish write.
+#[test]
+fn upfast_a_stopped_publish_resumes_under_its_push_id() {
+    let e = env();
+    let path = resume_file(&e);
+    let refs_before = e.r.read().reader().refs_with_prefix("").unwrap();
+    let store_before = tree(&e.project.join(".rdy").join("store"));
+
+    // the record is in place when the first known request goes
+    let wire = Wire::new().failing("known", upstream_transport());
+    let seen: Arc<Mutex<Option<Option<Vec<u8>>>>> = Arc::default();
+    {
+        let (path, seen) = (path.clone(), Arc::clone(&seen));
+        wire.on_step(move |step| {
+            let mut seen = seen.lock().unwrap();
+            if step == "known" && seen.is_none() {
+                *seen = Some(fs::read(&path).ok());
+            }
+        });
+    }
+    assert_eq!(
+        run(&e, &wire, standard()).unwrap_err().code,
+        E_UPSTREAM_TRANSPORT
+    );
+    let first = push_of(&wire);
+    let at_known = seen.lock().unwrap().clone().expect("known was sent");
+    let at_known = String::from_utf8(at_known.expect("the record was written first")).unwrap();
+    assert!(at_known.contains(&first), "{at_known}");
+
+    // every transport failure, lost reply or rdy-side stop before the publish write keeps it
+    let refusal = hub_refusal(&e);
+    assert!(!path.exists(), "the publish reply cleared it");
+    let wire = Wire::new().failing("known", upstream_transport());
+    run(&e, &wire, standard()).unwrap_err();
+    let first = push_of(&wire);
+    for (step, failure) in [
+        ("known", upstream_uncertain()),
+        ("objects", upstream_uncertain()),
+        ("objects", upstream_transport()),
+        ("files_known", upstream_transport()),
+        ("file", upstream_uncertain()),
+        // a publish request certainly not sent
+        ("publish", upstream_transport()),
+    ] {
+        let wire = Wire::new().failing(step, failure);
+        run(&e, &wire, standard()).unwrap_err();
+        assert_eq!(push_of(&wire), first, "{step}");
+        assert!(path.exists(), "{step}");
+    }
+    let _ = refusal;
+    // the record is local state: no log record, ref or store byte changed
+    assert_eq!(
+        e.r.read().reader().refs_with_prefix("").unwrap(),
+        refs_before
+    );
+    assert_eq!(tree(&e.project.join(".rdy").join("store")), store_before);
+
+    // the next whole publish resumes it, and its reply clears it
+    let wire = Wire::new();
+    let done = run(&e, &wire, standard()).unwrap();
+    assert_eq!(done.push, first);
+    assert_eq!(push_of(&wire), first);
+    assert!(!path.exists());
+    let wire = Wire::new();
+    let next = run(&e, &wire, standard()).unwrap();
+    assert_ne!(
+        next.push, first,
+        "a finished publish leaves nothing to resume"
+    );
+}
+
+/// A reply to the publish write clears the record: the candidate, the hub's refusal, and a
+/// reply that breaks the candidate contract. So does `E_UPSTREAM_UNCERTAIN` on that write, and
+/// the error still names the push id. The publish after each takes a new push id.
+#[test]
+fn upfast_a_publish_reply_or_an_uncertain_publish_write_clears_the_record() {
+    let e = env();
+    let path = resume_file(&e);
+    let refusal = hub_refusal(&e);
+    let outside = Wire::new();
+    outside.candidate.lock().unwrap().url = format!("{}/app/c", other_install());
+    let cases: [(&str, Wire); 4] = [
+        ("the candidate", Wire::new()),
+        ("the hub's refusal", Wire::new().failing("publish", refusal)),
+        ("a reply outside the contract", outside),
+        (
+            "an uncertain write",
+            Wire::new().failing("publish", upstream_uncertain()),
+        ),
+    ];
+    for (case, wire) in cases {
+        let kept = stopped(&e, standard());
+        assert!(path.exists(), "{case}");
+        let r = run(&e, &wire, standard());
+        assert_eq!(push_of(&wire), kept, "{case}: resumed");
+        assert!(!path.exists(), "{case}: cleared");
+        if let Err(err) = r
+            && err.code == E_UPSTREAM_UNCERTAIN
+        {
+            assert!(err.fix.contains(&kept), "{case}: {err:?}");
+        }
+        let wire = Wire::new();
+        assert_ne!(run(&e, &wire, standard()).unwrap().push, kept, "{case}");
+    }
+}
+
+/// Another tag, another remote, another hub repo or another redaction epoch takes a new push id
+/// and replaces the record, so the publish after it does not resume the first.
+#[test]
+fn upfast_another_tag_remote_repo_or_epoch_takes_a_new_push_id() {
+    let mut e = env();
+    let path = resume_file(&e);
+    tag(&mut e.r, "v1.1.0");
+    RemoteService::new(&e.project, &e.user_file)
+        .add(
+            "second",
+            &second_remote(),
+            RemoteMode::Publish,
+            RemoteLevel::Project,
+        )
+        .unwrap();
+    let v1 = standard();
+    let v11 = request("v1.1.0", "hub", SITE);
+    let second = request("v1.0.0", "second", SITE);
+
+    // another tag, then the first again
+    let a = stopped(&e, v1.clone());
+    assert_eq!(stopped(&e, v1.clone()), a, "the same publish resumes");
+    let b = stopped(&e, v11.clone());
+    assert_ne!(b, a, "another tag");
+    let c = stopped(&e, v1.clone());
+    assert!(c != a && c != b, "the record was replaced");
+    // another remote, then the first again
+    let d = stopped(&e, second.clone());
+    assert_ne!(d, c, "another remote");
+    let f = stopped(&e, v1.clone());
+    assert!(f != c && f != d);
+
+    // another hub repo, then another epoch, as the record names them
+    let edit = |member: &str, value: Value| {
+        let mut v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(v.get(member).is_some(), "{member}: {v}");
+        v[member] = value;
+        fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    };
+    let g = stopped(&e, v1.clone());
+    assert_eq!(g, f);
+    edit("repo_id", json!(RepoId([7; 16]).to_string()));
+    let h = stopped(&e, v1.clone());
+    assert_ne!(h, g, "another hub repo");
+    let v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    edit("epoch", json!(v["epoch"].as_u64().unwrap() + 1));
+    let i = stopped(&e, v1.clone());
+    assert_ne!(i, h, "another epoch");
+
+    // a real redaction moves the epoch
+    assert_eq!(stopped(&e, v1.clone()), i);
+    let target = e.ids.b.to_string();
+    redact(&mut e.r, &[target]);
+    let j = stopped(&e, v1.clone());
+    assert_ne!(j, i, "a redaction landed since");
+    assert_eq!(stopped(&e, v1), j);
+}
+
+/// D-YXX9Y: the hub's refusal of a known or put request removes the record, and the run still
+/// stops with the hub's code; the next publish takes a new push id. A transport failure or a
+/// lost reply at the same step keeps it.
+#[test]
+fn upfast_a_hub_refusal_at_known_or_put_clears_the_record() {
+    let e = env();
+    let path = resume_file(&e);
+    let refusal = hub_refusal(&e);
+    for step in ["known", "objects", "files_known", "file"] {
+        let kept = stopped(&e, standard());
+        // a transport failure keeps it
+        let wire = Wire::new().failing(step, upstream_transport());
+        run(&e, &wire, standard()).unwrap_err();
+        assert_eq!(push_of(&wire), kept, "{step}");
+        assert!(path.exists(), "{step}: a transport failure keeps it");
+        // the hub's refusal clears it
+        let wire = Wire::new().failing(step, refusal.clone());
+        let err = run(&e, &wire, standard()).unwrap_err();
+        assert_eq!(err.code, "E_HUB_SITE_AUDIENCE", "{step}");
+        assert_eq!(push_of(&wire), kept, "{step}");
+        assert!(!path.exists(), "{step}: the hub's refusal clears it");
+        assert_ne!(stopped(&e, standard()), kept, "{step}: a new push id");
+    }
+}
+
+/// D-YXX9Y: a publish write refused with a retry code keeps the record, so the next publish
+/// names the same push id; any other refusal of the publish write clears it.
+#[test]
+fn upfast_a_retry_code_on_the_publish_write_keeps_the_record() {
+    let e = env();
+    let path = resume_file(&e);
+    for (status, code) in [
+        (503, "E_HUB_BUSY"),
+        (429, "E_HUB_OVER_BUDGET"),
+        (503, "E_HUB_READ_ONLY"),
+    ] {
+        let refused = hub_refusal_of(&e, status, code, Some(30));
+        let kept = stopped(&e, standard());
+        let wire = Wire::new().failing("publish", refused);
+        assert_eq!(run(&e, &wire, standard()).unwrap_err().code, code);
+        assert_eq!(push_of(&wire), kept, "{code}");
+        assert!(path.exists(), "{code} keeps it");
+        let wire = Wire::new();
+        assert_eq!(run(&e, &wire, standard()).unwrap().push, kept, "{code}");
+    }
+    let other = hub_refusal(&e);
+    let kept = stopped(&e, standard());
+    let wire = Wire::new().failing("publish", other);
+    run(&e, &wire, standard()).unwrap_err();
+    assert!(!path.exists(), "another refusal clears it");
+    assert_ne!(stopped(&e, standard()), kept);
+}
+
+/// A record that is not exactly one record (corrupt, oversized, or naming a bad push id) gives
+/// a new push id, and the record rdy writes is private to its owner (0600).
+#[test]
+fn upfast_a_bad_record_gives_a_new_push_id_and_the_record_is_private() {
+    let e = env();
+    let path = resume_file(&e);
+    let first = stopped(&e, standard());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    let good: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut bad_id = good.clone();
+    bad_id["push"] = json!("NOT-A-PUSH-ID");
+    let mut extra = good.clone();
+    extra["account"] = json!("acc_1");
+    let mut padded = serde_json::to_vec(&good).unwrap();
+    padded.resize(5000, b' ');
+    let mut last = first;
+    for (case, bytes) in [
+        ("corrupt", b"{\"push\":".to_vec()),
+        ("oversized", padded),
+        ("a bad push id", serde_json::to_vec(&bad_id).unwrap()),
+        ("an unknown member", serde_json::to_vec(&extra).unwrap()),
+    ] {
+        // the record as it stands resumes; the bad one does not
+        assert_eq!(stopped(&e, standard()), last, "{case}");
+        fs::write(&path, bytes).unwrap();
+        let next = stopped(&e, standard());
+        assert_ne!(next, last, "{case}");
+        last = next;
+    }
 }

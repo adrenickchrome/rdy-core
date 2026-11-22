@@ -109,6 +109,7 @@ impl Hub {
             ca_file: Some(self.ca.clone()),
             claim: claim(),
             bearer: Secret::new(ACCESS),
+            zstd: false,
         }
     }
 

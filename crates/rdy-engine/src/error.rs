@@ -646,6 +646,10 @@ pub struct RdyError {
     /// Warnings that ride on this refusal (W_DAEMON_BUILD on the first tool result).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Box<Vec<serde_json::Value>>>,
+    /// The HTTP status of a reply that was not the hub's, on the uncertain error of a write
+    /// step; the caller that rewraps the error names it again. Never serialized.
+    #[serde(skip)]
+    pub upstream_status: Option<u16>,
 }
 
 impl RdyError {
@@ -658,6 +662,7 @@ impl RdyError {
             corrected: None,
             briefing: None,
             warnings: None,
+            upstream_status: None,
         }
     }
 

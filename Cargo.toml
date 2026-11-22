@@ -98,6 +98,9 @@ subtle = { version = "=2.6.1", default-features = false }
 hyper = { version = "=1.11.1", default-features = false, features = ["server", "http1"] }
 # MCP over HTTP: the Tokio adapter for that bridge's socket. Its Tokio I/O adapter only.
 hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
+# Hub client: one zstd frame per files/put and objects/put body when the hub takes zstd.
+# The bundled C library; no default features (no legacy formats, no dictionary builder).
+zstd = { version = "=0.14.3", default-features = false }
 # Test-only: the local TLS fixture.
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 # Test-only: the local TLS fixture's generated certificates.
