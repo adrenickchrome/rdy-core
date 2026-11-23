@@ -533,8 +533,9 @@ fn hpt4_local_and_dump_ports_match() {
     let mut c = mcp(s);
     let mut replies = vec![];
     let mut tok = String::new();
-    // a change of the later landing first, then the earlier landing: oldest first, once each
-    let sel = vec![src[2].clone(), l2.clone(), l3.clone()];
+    // the later landing's change first, then both landings: oldest first, once each
+    assert_eq!(src.len(), 2);
+    let sel = vec![src[1].clone(), l2.clone(), l3.clone()];
     for (view, via, from) in [
         ("cli-project", Via::Cli, &w.project),
         ("cli-dump", Via::Cli, &w.dump),
