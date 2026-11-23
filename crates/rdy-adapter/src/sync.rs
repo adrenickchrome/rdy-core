@@ -129,6 +129,14 @@ impl CheckedQuarantine {
         self.landings.contains_key(landing)
     }
 
+    /// The landing head of a check of a stored head ([`Snapshot::check_stored_head`]): a canon
+    /// quarantine whose push holds no landing of its own. None for a view head or a pushed
+    /// chain.
+    pub(crate) fn stored_head(&self) -> Option<Hash> {
+        (self.landings.is_empty() && self.facts.purpose == StreamPurpose::CanonHistory)
+            .then_some(self.facts.head)
+    }
+
     /// The scratch holder of this quarantine on `snap`, its snapshot: made at the first call
     /// ([`Scratch::make`]) and kept.
     pub(crate) fn scratch(&self, snap: &Snapshot) -> Result<Arc<Scratch>, RdyError> {

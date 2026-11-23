@@ -65,7 +65,9 @@ impl Snapshot {
     /// that neither the push nor the snapshot's captured histories hold fails the whole call as
     /// [`Snapshot::landings`] fails it. `checked` must have been checked on this snapshot
     /// (`E_BAD_INPUT` otherwise). At most 100000 hashes, as for [`Snapshot::landings`]. A
-    /// removal since the snapshot is `E_REDACTED_STATE`.
+    /// removal since the snapshot is `E_REDACTED_STATE`. For a check of a stored head
+    /// ([`Snapshot::check_stored_head`]), the captured histories include that head's chain, so
+    /// a `held/` chain's landings read here.
     pub fn pushed_landings(
         &self,
         checked: &CheckedQuarantine,
@@ -74,6 +76,12 @@ impl Snapshot {
         checked.ensure_bound(self)?;
         let read = self.read_state();
         read.ensure_current_epoch()?;
+        if let Some(head) = checked.stored_head() {
+            // a stored head's chain (a `held/` chain, say) is in the holder: read it from there
+            let mut heads = self.history_heads();
+            heads.push(head);
+            return history_facts::landings(read, &heads, hashes);
+        }
         if hashes.len() > history_facts::MAX_KEYS || !hashes.iter().any(|h| checked.pushes(h)) {
             return self.landings(hashes);
         }
