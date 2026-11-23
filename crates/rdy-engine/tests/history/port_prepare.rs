@@ -780,7 +780,9 @@ fn deliver(r: &mut Rdy, link: &str, x: &Block) {
                 .unwrap(),
         },
     };
-    r.store_mut().put_foreign(&entry, &[x.clone()]).unwrap();
+    r.store_mut()
+        .put_foreign(&entry, std::slice::from_ref(x))
+        .unwrap();
     r.publish_after_foreign_for_tests().unwrap();
 }
 
@@ -923,7 +925,7 @@ fn hpr2_port_drops_intent_and_alternative() {
             &writer(),
             Some("w"),
             None,
-            &[dc.clone()],
+            std::slice::from_ref(&dc),
             "edit the note",
             None,
         )
