@@ -101,9 +101,11 @@ fn workspace_root() -> PathBuf {
 /// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json`,
 /// `disclosure-review-v1.json`, `sd1-v1.json`, `sync-client-v1.json`, `sync-client-b-v1.json` and
 /// `m5b-v1.json`, all frozen) with the additions since. A capture writes this file, never a
-/// baseline. It starts as a byte copy of its predecessor `m5b-v1.json`, whose bytes
-/// `release_m5b_contract.rs` and `release_disclosure_contract.rs` pin; a later contract change is
-/// a successor fixture.
+/// baseline. It started as a byte copy of its predecessor `m5b-v1.json`, whose bytes
+/// `release_m5b_contract.rs` and `release_disclosure_contract.rs` pin. Its delta from that
+/// predecessor is the fork flag of `rdy clone`, its probes, the hidden-list form and the fork
+/// and lineage probes, and `release_hub_forks_contract.rs` pins it leaf by leaf. A later contract
+/// change is a successor fixture.
 fn fixture_path() -> PathBuf {
     qa_root().join("fixtures/contracts/hub-forks-v1.json")
 }
@@ -255,7 +257,7 @@ fn merge_shape(a: &Value, b: &Value) -> Value {
 
 /// Replaces what varies between runs: absolute temporary paths and random ports. Ids, hashes
 /// and dates are fixed by the seed helpers, so they stay in the text and are pinned with it.
-fn normalize(text: &str, paths: &[&Path]) -> String {
+pub(super) fn normalize(text: &str, paths: &[&Path]) -> String {
     let mut out = text.to_string();
     // a path as it stands in JSON text too: on Windows its backslashes are doubled there
     let mut replace = |s: &str| {
@@ -1154,6 +1156,8 @@ fn dump_load_row() -> Value {
         "project_file_probes": probes,
         "fixture_digests": digests(&dump_dir, |_| true),
         "empty_target": empty_target,
+        // hfp5 (D-99CWC, D-HX6BX): a project forked at a tag, through a reindex and a load
+        "fork_at": super::release_hub_forks_contract::fork_probe().facts.clone(),
     })
 }
 
@@ -1588,6 +1592,8 @@ fn signatures_row() -> Value {
         "statements": statements,
         "vectors": vectors,
         "carried": carried_signature(),
+        // hfp5 (D-HX6BX, D-CDQF7): the lineage of a hub fork, for baselines and signatures
+        "hub_fork_lineage": super::release_hub_forks_contract::lineage_probe().clone(),
     })
 }
 
@@ -2082,10 +2088,6 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     (
         "checkout",
         "working copy: the working_copy row records its replies",
-    ),
-    (
-        "clone",
-        "writes a second project; the dump_load row covers the bytes",
     ),
     (
         "commit",
@@ -2667,6 +2669,70 @@ fn cli_export_probes(seen: &mut Seen, env: &[(String, String)]) {
     assert!(v["docs"].as_u64().is_some_and(|n| n > 1), "{v}");
 }
 
+/// hfp5 (D-99CWC, D-HX6BX): `rdy clone --fork --at TAG` of a project with two tagged landings,
+/// once with no daemon and once through its daemon, noted under one label. Each reply is the
+/// load's summary of the fork: the new repo id and `forked_from` with the tag and its landing.
+/// The fork holds the first version only, so its `chain` and `stopped_at` stay as a load with
+/// no dump file leaves them.
+fn cli_clone_probes(seen: &mut Seen, env: &[(String, String)]) {
+    use super::release_hub_forks_contract::populate_tagged;
+    let check = |v: &Value, v1: &rdy_model::Hash| {
+        assert_eq!(v["fork"], true, "{v}");
+        assert_eq!(v["forked_from"]["tag"], "v1.0.0", "{v}");
+        assert_eq!(v["forked_from"]["landing"], v1.to_string(), "{v}");
+        assert_ne!(v["repo_id"], v["forked_from"]["repo_id"], "{v}");
+        assert_eq!((&v["tags"], &v["landings"]), (&json!(1), &json!(1)), "{v}");
+        assert!(
+            v.get("origin").is_none() && v.get("warnings").is_none(),
+            "{v}"
+        );
+    };
+    // no daemon
+    let (dir, mut project) = project();
+    let (v1, _) = populate_tagged(&mut project);
+    project.close().expect("close the source");
+    let out = tempfile::tempdir().expect("an output folder");
+    let to = out.path().join("direct").to_string_lossy().into_owned();
+    let from = dir.path().to_string_lossy().into_owned();
+    let v = cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "clone at",
+        &["clone", &from, &to, "--fork", "--at", "v1.0.0"],
+    );
+    check(&v, &v1);
+    // through the daemon of a served project
+    let s = rdy_qa::daemon::Served::new();
+    let mut project = rdy_engine::Rdy::open(s.dir.path()).expect("open the served project");
+    let (v1, _) = populate_tagged(&mut project);
+    project.close().expect("close the served project");
+    let scratch = rdy_qa::daemon::short_tempdir();
+    let to = scratch
+        .path()
+        .join("through")
+        .to_string_lossy()
+        .into_owned();
+    let from = s.dir.path().to_string_lossy().into_owned();
+    let served_env = s.env_pairs();
+    let mut cmd = rdy_qa::daemon::human_command(
+        scratch.path(),
+        &served_env,
+        &["--json", "clone", &from, &to, "--fork", "--at", "v1.0.0"],
+    );
+    let o = output_within(&mut cmd, Duration::from_secs(120)).expect("run rdy");
+    let v = note_cli(
+        seen,
+        "clone at",
+        o.status.code().unwrap_or(-1),
+        &String::from_utf8_lossy(&o.stdout),
+        &String::from_utf8_lossy(&o.stderr),
+    );
+    check(&v, &v1);
+    assert!(s.daemon_pid().is_some(), "the fork went through the daemon");
+    s.stop();
+}
+
 fn cli_hook_probes(seen: &mut Seen) {
     let h = HookWorld::new();
     let root = h.root.clone();
@@ -3031,6 +3097,7 @@ fn cli_runtime() -> Value {
     cli_hook_probes(&mut seen);
     cli_markdown_probes(&mut seen, &env);
     cli_export_probes(&mut seen, &env);
+    cli_clone_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -3289,7 +3356,6 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     ),
     ("rdy_asset", "stores a file"),
     ("rdy_auth", "signs in to a hosted service"),
-    ("rdy_clone", "writes a second project to disk"),
     (
         "rdy_dispute",
         "a person's act on a landing; mcp_dispute pins its replies",
@@ -4603,6 +4669,37 @@ fn mcp_publication_probes(seen: &mut Seen) {
             json!({"profile": profile, "against": "tag:v1.0.0"}),
         );
     }
+    // hfp5 (D-B2AC3): the hidden-list form of a first check, alone. It is the form the engine
+    // prints (`HiddenList::to_json`), which the adapter exposes as the same method.
+    let reply = ok_of(&c.call("rdy_publication_check", json!({"profile": "plan"})));
+    let hidden = reply["hidden_planned"].clone();
+    drop(c);
+    assert_eq!(
+        shape_keys(&hidden),
+        ["blocks", "docs", "omitted_rows", "rows"],
+        "{hidden}"
+    );
+    assert!(
+        hidden["rows"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()
+                && rows.iter().all(|r| shape_keys(r)
+                    == ["doc", "doc_hidden", "hidden_blocks", "redacted", "title"])),
+        "{hidden}"
+    );
+    let engine = rdy_engine::Rdy::open(dir.path()).expect("open the project");
+    let printed = rdy_engine::publication::check(&engine.read(), "plan", None, None, None)
+        .expect("the engine's check");
+    assert_eq!(
+        printed["hidden_planned"], hidden,
+        "the tool prints the engine's form"
+    );
+    engine.close().expect("close the project");
+    seen.note(
+        "rdy_publication_check hidden form",
+        "ok",
+        json!({"hidden_planned": shape(&hidden)}),
+    );
 }
 
 /// drv6: the review probes over the chat tool, as the CLI probes run them.
@@ -4672,6 +4769,39 @@ fn mcp_export_probes(seen: &mut Seen) {
         json!({"out": at("tree"), "format": "md"}),
     ));
     assert!(v["docs"].as_u64().is_some_and(|n| n > 1), "{v}");
+}
+
+/// hfp5 (D-99CWC): `rdy_clone` with `fork` and `at`, through the proxy of a served project. The
+/// reply is the CLI's: a populated fork at the first of two tags. Its refusals are pinned in
+/// `errors_warnings.fork_at`, so none is noted here.
+fn mcp_clone_probes(seen: &mut Seen) {
+    let s = rdy_qa::daemon::Served::new();
+    let mut project = rdy_engine::Rdy::open(s.dir.path()).expect("open the served project");
+    let (v1, _) = super::release_hub_forks_contract::populate_tagged(&mut project);
+    project.close().expect("close the served project");
+    let out = rdy_qa::daemon::short_tempdir();
+    let mut c = rdy_qa::mcp::McpClient::start_proxy(&s);
+    let opened = c.call(
+        "rdy_session",
+        json!({"actor": "agent:fork", "run": "fork", "role": "writer"}),
+    );
+    assert!(opened.is_ok(), "the session opens");
+    let to = out.path().join("forked").to_string_lossy().into_owned();
+    let v = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_clone",
+        "rdy_clone",
+        json!({"dir": to, "fork": true, "at": "v1.0.0"}),
+    ));
+    assert_eq!(v["fork"], true, "{v}");
+    assert_eq!(v["forked_from"]["tag"], "v1.0.0", "{v}");
+    assert_eq!(v["forked_from"]["landing"], v1.to_string(), "{v}");
+    assert_eq!((&v["tags"], &v["landings"]), (&json!(1), &json!(1)), "{v}");
+    assert!(
+        v.get("origin").is_none() && v.get("warnings").is_none(),
+        "{v}"
+    );
 }
 
 /// The `rdy_links` reads over a project that holds a live link, a revoked one and a repo no link
@@ -4835,6 +4965,7 @@ fn mcp_row() -> Value {
     mcp_links_probes(&mut seen);
     mcp_hook_probes(&mut seen);
     mcp_export_probes(&mut seen);
+    mcp_clone_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());
@@ -5064,6 +5195,8 @@ fn errors_row() -> Value {
         "templates": templates,
         "error_rows": rows,
         "envelope": envelope,
+        // hfp5 (D-99CWC): the refusals of a fork at a tag, each with the code, message and fix
+        "fork_at": super::release_hub_forks_contract::fork_probe().errors.clone(),
         "follower_refusal": follower_refusal(),
         "daemon_build_warning": rdy_mcp::server::DaemonBuildWarning {
             version: "1.2.3".into(),
@@ -7353,6 +7486,9 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// nothing. m4a3: setup with hook options runs in the same clean home, so its own warnings stay
 /// empty; the warnings of its hooks are in `hooks`. m4bc5: the Markdown import's reply holds the
 /// same empty write-report arrays as the format-3 import's, and its refusal states no issue rows.
+/// hfp5: a fork at a tag reads a project, not a dump file, so `chain` lists no input and
+/// `stopped_at` is null. It writes into a new directory, so `files_kept` is empty. The load
+/// summary keeps both fields as they are.
 /// drv6: the old publication probes' docs hold no section and no decision, and their profiles
 /// cite no decision outside the selection, so the review's outline, decision titles, decision
 /// rows and dropped decisions are empty there; the review rows probe fills each of them.
@@ -7367,6 +7503,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/brief/stdout/lineage",
     "cli/brief/stdout/suspects",
     "cli/brief/stdout/will_go_stale[]/states",
+    "cli/clone at/stdout/chain",
+    "cli/clone at/stdout/files_kept",
     "cli/compact/stdout/notes",
     "cli/coverage/stdout/kinds",
     "cli/coverage/stdout/similar_kinds",
@@ -7495,6 +7633,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_brief/ok/lineage",
     "mcp/rdy_brief/ok/suspects",
     "mcp/rdy_brief/ok/will_go_stale[]/states",
+    "mcp/rdy_clone/ok/chain",
+    "mcp/rdy_clone/ok/files_kept",
     "mcp/rdy_compact/ok/notes",
     "mcp/rdy_context/ok/children",
     "mcp/rdy_context/ok/suspects",

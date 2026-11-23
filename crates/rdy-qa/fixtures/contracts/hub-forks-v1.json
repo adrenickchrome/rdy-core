@@ -13,7 +13,6 @@
         "auth": "signs in to a hosted service",
         "check": "checks a file; the config row records its refusal",
         "checkout": "working copy: the working_copy row records its replies",
-        "clone": "writes a second project; the dump_load row covers the bytes",
         "commit": "working copy: the working_copy row records its replies",
         "dispute": "a person's act on a landing; cli_dispute pins its replies and lines",
         "dump": "writes a file; the dump_load row covers the bytes",
@@ -307,6 +306,58 @@
                 "via": "string"
               }
             ]
+          }
+        },
+        "clone at": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "batches": "number",
+            "chain": [],
+            "dump_format": "number",
+            "files_kept": [],
+            "files_written": [
+              "string"
+            ],
+            "fork": "bool",
+            "forked_from": {
+              "landing": "string",
+              "repo_id": "string",
+              "tag": "string"
+            },
+            "frames": "number",
+            "fsck": {
+              "alt_sets": "number",
+              "frames": "number",
+              "intents": "number",
+              "landed_changes": "number",
+              "landings": "number",
+              "reviews": "number",
+              "transitions": "number",
+              "unlogged_moves": "number",
+              "versions": "number",
+              "views": "number"
+            },
+            "landings": "number",
+            "next": "string",
+            "project": "string",
+            "repo_id": "string",
+            "stopped_at": "null",
+            "store_format": {
+              "features": {
+                "features": [
+                  {
+                    "class": "string",
+                    "name": "string",
+                    "required_rdy": "string"
+                  }
+                ],
+                "manifest_version": "number"
+              }
+            },
+            "tags": "number",
+            "views": "number"
           }
         },
         "compact": {
@@ -14099,6 +14150,15 @@
               ]
             },
             {
+              "action": "set",
+              "id": "at",
+              "long": "at",
+              "num_args": "1",
+              "value_names": [
+                "TAG"
+              ]
+            },
+            {
               "action": "set_true",
               "defaults": [
                 "false"
@@ -14145,6 +14205,7 @@
           "groups": [
             {
               "args": [
+                "at",
                 "dir",
                 "fork",
                 "source"
@@ -19584,6 +19645,18 @@
       "v4-f1-e1.expect.json": "457228 26dd1b3eac47340d062b8293d29012f433de440c40d646b535c03b4f20795082",
       "v4-f1-e1.rdydump": "232974 35b141c49c82442ea87a3b2919796f277e91779ffd1f1fc1471bd40547d7fea0"
     },
+    "fork_at": {
+      "canon_at_tag": true,
+      "load_equal": true,
+      "new_repo_id": true,
+      "no_source_views": true,
+      "only_chain_tag_refs": true,
+      "origin_matches": true,
+      "proof_landing_unreachable": true,
+      "reindex_equal": true,
+      "removal_applied": true,
+      "replay_refused": true
+    },
     "magic": "RDYDUMP\n",
     "project_file_probes": [
       [
@@ -20665,6 +20738,28 @@
       "fix": "write through the source store",
       "message": "this store is a read-only follower of <repo id>"
     },
+    "fork_at": {
+      "destination_not_empty": {
+        "code": "E_ALREADY_EXISTS",
+        "fix": "fork into a new directory, or an empty one",
+        "message": "<path> is not empty"
+      },
+      "evidence_replay": {
+        "code": "E_NOT_FOUND",
+        "fix": "check the id with rdy view show <view>",
+        "message": "no change <short hash>"
+      },
+      "needs_fork": {
+        "code": "E_BAD_INPUT",
+        "fix": "add --fork, or remove --at",
+        "message": "a clone keeps the whole history; --at needs --fork"
+      },
+      "needs_project": {
+        "code": "E_BAD_INPUT",
+        "fix": "load the dump, then fork the loaded project",
+        "message": "--at needs a project"
+      }
+    },
     "redaction_warning": {
       "copies": "This removes bytes from this store. It cannot erase exports, renders, dumps, clones, published files, working copies, backups, or filesystem snapshots.",
       "inventory": "Dumps, clones, exports, renders, and published versions may hold copies. Their locations are unknown to rdy.",
@@ -20721,6 +20816,10 @@
       "CHAIN_LIMIT_FIX": "\"exclude the replayed change and import the source tree into a new view\"",
       "CHALLENGE_EXPIRED_FIX": "\"start key binding again\"",
       "CHALLENGE_EXPIRED_MESSAGE": "\"the key binding challenge expired\"",
+      "CLONE_AT_NEEDS_FORK_FIX": "\"add --fork, or remove --at\"",
+      "CLONE_AT_NEEDS_FORK_MESSAGE": "\"a clone keeps the whole history; --at needs --fork\"",
+      "CLONE_AT_NEEDS_PROJECT_FIX": "\"load the dump, then fork the loaded project\"",
+      "CLONE_AT_NEEDS_PROJECT_MESSAGE": "\"--at needs a project\"",
       "CLONE_NO_CANON_FIX": "\"make the project with rdy init, add this hub repo as a share remote, then push\"",
       "CLONE_NO_CANON_MESSAGE": "\"hub repo <url> has no canon to clone\"",
       "CLONE_SETTING_MESSAGE": "\"the <member> of hub repo <url> comes from rdy <captured> and does not fit rdy <this>\"",
@@ -20748,6 +20847,7 @@
       "EXPORT_ASSETS_MESSAGE": "\"--assets applies to --format md --layout single only\"",
       "EXPORT_CHAIN_FIX": "\"follow the newest file of this store's chain, or start a new chain with rdy dump\"",
       "FILTER_FIX": "\"read the filter guide in rdy_schema, or run rdy q --help\"",
+      "FORK_DESTINATION_FIX": "\"fork into a new directory, or an empty one\"",
       "GONE_FIX": "\"check rdy status; a write may or may not have committed; it is not retried\"",
       "GROUP_FIX": "\"give the entities distinct names and aliases\"",
       "HAS_POLICY_FIX": "\"change it with rdy_write / rdy edit, with implements a decision\"",
@@ -21752,6 +21852,55 @@
               "via": "string"
             }
           ]
+        }
+      },
+      "rdy_clone": {
+        "ok": {
+          "batches": "number",
+          "chain": [],
+          "dump_format": "number",
+          "files_kept": [],
+          "files_written": [
+            "string"
+          ],
+          "fork": "bool",
+          "forked_from": {
+            "landing": "string",
+            "repo_id": "string",
+            "tag": "string"
+          },
+          "frames": "number",
+          "fsck": {
+            "alt_sets": "number",
+            "frames": "number",
+            "intents": "number",
+            "landed_changes": "number",
+            "landings": "number",
+            "reviews": "number",
+            "transitions": "number",
+            "unlogged_moves": "number",
+            "versions": "number",
+            "views": "number"
+          },
+          "landings": "number",
+          "next": "string",
+          "project": "string",
+          "repo_id": "string",
+          "stopped_at": "null",
+          "store_format": {
+            "features": {
+              "features": [
+                {
+                  "class": "string",
+                  "name": "string",
+                  "required_rdy": "string"
+                }
+              ],
+              "manifest_version": "number"
+            }
+          },
+          "tags": "number",
+          "views": "number"
         }
       },
       "rdy_compact": {
@@ -23420,6 +23569,24 @@
           },
           "status": "string",
           "warnings": []
+        }
+      },
+      "rdy_publication_check hidden form": {
+        "ok": {
+          "hidden_planned": {
+            "blocks": "number",
+            "docs": "number",
+            "omitted_rows": "number",
+            "rows": [
+              {
+                "doc": "string",
+                "doc_hidden": "bool",
+                "hidden_blocks": "number",
+                "redacted": "bool",
+                "title": "string"
+              }
+            ]
+          }
         }
       },
       "rdy_publication_check review rows": {
@@ -26052,7 +26219,6 @@
       "rdy_accept": "takes suggestions from a write or search reply and writes links",
       "rdy_asset": "stores a file",
       "rdy_auth": "signs in to a hosted service",
-      "rdy_clone": "writes a second project to disk",
       "rdy_dispute": "a person's act on a landing; mcp_dispute pins its replies",
       "rdy_dump": "writes a file; the dump_load row covers the bytes",
       "rdy_key_bind": "changes the signing key",
@@ -26585,6 +26751,13 @@
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "properties": {
+            "at": {
+              "description": "A version of this project, such as v1.2.0: the fork keeps only the history up to that tag. Needs fork true; not with file or url.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "dir": {
               "description": "The directory to clone into: absolute, or relative to the project directory. It must have no rdy store.",
               "type": "string"
@@ -32115,6 +32288,15 @@
       "statement_rule": "the statement rebuilt from the subject with its base set to that landing's base; every other signed field is the subject's"
     },
     "envelope": "SSHSIG blob over the statement bytes, in the namespace of the statement kind",
+    "hub_fork_lineage": {
+      "ancestor_verified": true,
+      "fork_to_source": true,
+      "grandchild_to_main": true,
+      "late_origin_ignored": true,
+      "main_to_grandchild": true,
+      "source_to_fork": true,
+      "unrelated_foreign": true
+    },
     "key_representation": "SHA256:<43 base64 characters> fingerprint of the OpenSSH public key",
     "limits": {
       "namespace": 64,

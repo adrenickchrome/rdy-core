@@ -1,8 +1,8 @@
 //! The Release 1 contract of the command line (D-TXFHR: the contract surfaces include the CLI's
 //! commands, flags, positional arguments and defaults). This test-only module walks the real clap
 //! `Command` tree, hidden commands and hidden flags included, and compares it with the `cli.tree`
-//! member of the current contract fixture (`rdy-qa/fixtures/contracts/hub-forks-v1.json`, a byte
-//! copy of its frozen predecessor `m5b-v1.json` with the additions since; the earlier
+//! member of the current contract fixture (`rdy-qa/fixtures/contracts/hub-forks-v1.json`, the
+//! successor of the frozen `m5b-v1.json`; the earlier
 //! `release-1.json`, `repo-links-v1.json`, `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`,
 //! `readme-from-rdy-v1.json`, `disclosure-review-v1.json`, `sd1-v1.json`, `sync-client-v1.json`,
 //! `sync-client-b-v1.json` and `m5b-v1.json` stay frozen). It adds no command,
