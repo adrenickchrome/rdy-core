@@ -109,7 +109,9 @@ fn all_refs(r: &Rdy) -> Vec<(String, Vec<u8>)> {
     r.store().reader().refs_with_prefix("").unwrap()
 }
 
-/// Whether some file under `dir` holds `needle`.
+/// Whether some file under `dir` holds `needle`. Call it only on a closed store: an open store
+/// holds byte-range locks on its lock file and its index, and on Windows a read of a locked
+/// file fails (OS error 33), so a scan of an open store cannot read every file.
 fn bytes_hold(dir: &Path, needle: &[u8]) -> bool {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -293,7 +295,9 @@ fn hfp3_project_fork_keeps_only_tag_history() {
     assert_eq!((r.store().log_end(), all_refs(&r)), before);
     r.close().unwrap();
 
-    // the fork's shape holds after a reopen, after a reindex, and in a dump's load
+    // the fork's shape holds after a reopen, after a reindex, and in a dump's load; the secret
+    // stays removed at each stage (each scan runs on the closed store)
+    assert!(!bytes_hold(&dir.join(".rdy"), SECRET));
     let mut f = Rdy::open(&dir).unwrap();
     fork_shape(&s, &f, &out.repo_id);
     f.reindex().unwrap();
@@ -301,6 +305,7 @@ fn hfp3_project_fork_keeps_only_tag_history() {
     let file = s.at("f.rdydump");
     f.read().dump(&file).unwrap();
     f.close().unwrap();
+    assert!(!bytes_hold(&dir.join(".rdy"), SECRET));
     let loaded = s.at("loaded");
     rdy_engine::load::load(&file, &loaded).unwrap();
     let l = Rdy::open(&loaded).unwrap();
@@ -352,7 +357,7 @@ fn fork_shape(s: &Source, f: &Rdy, repo: &str) {
         .map(|v| v.name)
         .collect();
     assert_eq!(names, ["v1.0.0"]);
-    // the dispute of v1.0.0 comes with it, and the secret stays removed
+    // the dispute of v1.0.0 comes with it
     assert_eq!(
         reader
             .disputes_of(&s.p1, f.store().log_end())
@@ -362,7 +367,6 @@ fn fork_shape(s: &Source, f: &Rdy, repo: &str) {
     );
     drop(reader);
     f.fsck().unwrap();
-    assert!(!bytes_hold(&f.root().join(".rdy"), SECRET));
 }
 
 // ---------------------------------------------------------------------------------------------
