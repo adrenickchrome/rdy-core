@@ -21,9 +21,22 @@
 //!
 //! A refusal or failure at any step removes the staging directory and the batch file, and
 //! leaves the source and the target as they were. Nothing is retried as a full clone.
-use crate::clone::{check_new_dir, install, io_at, staging_beside};
-use crate::error::{E_INTERNAL, E_NOT_FOUND, RdyError};
+//!
+//! A project fork ([`fork_project_at`], `rdy clone --fork --at`) takes the same steps, with
+//! these differences:
+//! - Step 1: the source is a project (a holder is a clone's holder refusal).
+//! - Step 5: the staging directory gets the source's project files (`crate::dump::project_files`:
+//!   `.rdy.yaml`, `.rdyignore` and packs, never `.rdy/local.yaml`), then a new project store with
+//!   a new repo id (`rdy_store::Store::create_fork_project`). The project opens as any project
+//!   does. Its take's batch writes the origins after the records, so a removal it carries reads
+//!   as fetched.
+//! - Step 6: the seed is one batch of refs, `canon` and the selected tags
+//!   (`rdy_store::Store::seed_project_fork`). No source view comes, so the default view is fresh,
+//!   as after `rdy init`: the first write makes it on the fork's canon.
+use crate::clone::{check_new_dir, holder_source, install, io_at, staging_beside};
+use crate::error::{E_INTERNAL, E_NOT_FOUND, FORK_DESTINATION_FIX, RdyError};
 use crate::holder::is_a_project;
+use crate::load::LoadSummary;
 use crate::read_state::ReadState;
 use crate::stream_take::{move_error, republish};
 use crate::version::parse_version;
@@ -98,7 +111,28 @@ fn prepare_fork(
     let selected = captured_tag(read, tag)?;
     read.ensure_current_epoch()?;
     crate::load::inside_source_rdy(&read.root().join(".rdy"), dir)?;
-    check_new_dir(dir, "fork into a new directory, or an empty one")?;
+    check_new_dir(dir, FORK_DESTINATION_FIX)?;
+    let (source, origins) = lineage(read, &selected)?;
+    let named: BTreeSet<Hash> = read.tags.iter().map(|(_, t)| t.id()).collect();
+    let (target, staging) = staging_beside(dir, STAGING_PREFIX)?;
+    let batch = export(read, &selected, staging.path())?;
+    hook(ForkStep::Exported(batch.path()))?;
+    let files = [File::open(batch.path()).map_err(|e| io_at(batch.path(), &e))?];
+    let mut rdy = Rdy::create_holder_with_origins(staging.path(), RepoId::new(), &origins)?;
+    let built = build(&mut rdy, &files, &selected, source, &named, &mut *hook);
+    // the staging holder closes on every path, so its directory can go or move
+    let closed = rdy.close();
+    built?;
+    closed?;
+    drop(files);
+    drop(batch);
+    Ok(Prepared { target, staging })
+}
+
+/// Step 3: the source's repo id, and the fork's origins: the source's counted origins before
+/// its captured end, oldest first, then the fork's own (D-HX6BX).
+fn lineage(read: &ReadState, selected: &Tag) -> Result<(RepoId, Vec<Origin>), RdyError> {
+    let reader = read.reader();
     let Some(source) = reader.repo_id()? else {
         return Err(RdyError::new(
             E_INTERNAL,
@@ -113,9 +147,17 @@ fn prepare_fork(
         tag: Some(selected.name.clone()),
         landing: Some(selected.landing),
     });
-    let named: BTreeSet<Hash> = read.tags.iter().map(|(_, t)| t.id()).collect();
-    let (target, staging) = staging_beside(dir, STAGING_PREFIX)?;
-    let parent = staging.path().parent().unwrap_or(Path::new("."));
+    Ok((source, origins))
+}
+
+/// Step 4: the canon history at the selected tag's landing, with no base and no known key, up
+/// to the state's captured end, in a batch file beside the staging directory `staging`.
+fn export(
+    read: &ReadState,
+    selected: &Tag,
+    staging: &Path,
+) -> Result<tempfile::NamedTempFile, RdyError> {
+    let parent = staging.parent().unwrap_or(Path::new("."));
     let batch = tempfile::Builder::new()
         .prefix(STAGING_PREFIX)
         .suffix(".rdysync")
@@ -133,17 +175,7 @@ fn prepare_fork(
         )?;
         out.flush().map_err(|e| io_at(batch.path(), &e))?;
     }
-    hook(ForkStep::Exported(batch.path()))?;
-    let files = [File::open(batch.path()).map_err(|e| io_at(batch.path(), &e))?];
-    let mut rdy = Rdy::create_holder_with_origins(staging.path(), RepoId::new(), &origins)?;
-    let built = build(&mut rdy, &files, &selected, source, &named, &mut *hook);
-    // the staging holder closes on every path, so its directory can go or move
-    let closed = rdy.close();
-    built?;
-    closed?;
-    drop(files);
-    drop(batch);
-    Ok(Prepared { target, staging })
+    Ok(batch)
 }
 
 /// Step 5's take and step 6's seed and check, in the staging holder `rdy`.
@@ -161,7 +193,7 @@ fn build(
     rdy.store_mut().set_held(false)?;
     let taken = rdy
         .store_mut()
-        .import_fork::<RdyError>(files, selected.landing, source);
+        .import_fork::<RdyError>(files, selected.landing, source, &[]);
     rdy.store_mut().set_held(true)?;
     taken.map_err(move_error)?;
     republish(rdy, epoch)?;
@@ -198,6 +230,154 @@ fn install_fork(read: &ReadState, prepared: Prepared, hook: ForkHook<'_>) -> Res
     install(prepared.staging, &prepared.target)?;
     Rdy::open_holder_with_policy(&prepared.target, OpenPolicy::RequireCurrent)
 }
+
+/// What a project fork made: its summary, the origin it records last, and its new repo id.
+pub(crate) type ProjectFork = (LoadSummary, Origin, RepoId);
+
+/// What a project fork's next step is: it carries no working copy, as a clone does.
+const PROJECT_NEXT: &str = "run rdy checkout to bind a working copy; a clone carries none";
+
+/// Forks the project whose published state is `read` at its captured tag `tag` into `dir`, a
+/// new project (`rdy clone --fork --at`, D-99CWC). See the module docs. Returns the summary,
+/// the fork's own origin and its new repo id.
+pub(crate) fn fork_project_at(
+    read: &ReadState,
+    tag: &str,
+    dir: &Path,
+) -> Result<ProjectFork, RdyError> {
+    let reader = read.reader();
+    if reader.mode()? == StoreMode::Holder {
+        return Err(holder_source());
+    }
+    let selected = captured_tag(read, tag)?;
+    read.ensure_current_epoch()?;
+    crate::load::inside_source_rdy(&read.root().join(".rdy"), dir)?;
+    check_new_dir(dir, FORK_DESTINATION_FIX)?;
+    let (source, origins) = lineage(read, &selected)?;
+    let named: BTreeSet<Hash> = read.tags.iter().map(|(_, t)| t.id()).collect();
+    let files = crate::dump::project_files(read.root())?;
+    let (target, staging) = staging_beside(dir, STAGING_PREFIX)?;
+    let batch = export(read, &selected, staging.path())?;
+    // step 5: the project files, then the new store with its origins, then the open
+    let written = write_files(staging.path(), &files)?;
+    let repo = RepoId::new();
+    let store = staging
+        .path()
+        .join(".rdy")
+        .join(rdy_store::layout::STORE_DIR);
+    Store::create_fork_project(&store, repo)?.close()?;
+    let taken = [File::open(batch.path()).map_err(|e| io_at(batch.path(), &e))?];
+    let mut rdy = Rdy::open(staging.path())?;
+    let built = build_project(&mut rdy, &taken, &selected, source, &origins, &named);
+    // the staging project closes on every path, so its directory can go or move
+    let closed = rdy.close();
+    let built = built?;
+    closed?;
+    drop(taken);
+    drop(batch);
+    // step 7
+    read.ensure_current_epoch()?;
+    install(staging, &target)?;
+    let origin = origins
+        .last()
+        .cloned()
+        .expect("the fork's own origin is last");
+    let load = LoadSummary {
+        project: target.display().to_string(),
+        dump_format: rdy_store::dump::DUMP_FORMAT,
+        store_format: rdy_store::format::DumpStore::Features(built.features),
+        batches: built.batches,
+        frames: built.fsck.frames as u64,
+        files_written: written,
+        files_kept: Vec::new(),
+        landings: built.fsck.landings,
+        tags: built.tags,
+        views: built.views,
+        fsck: built.fsck,
+        next: PROJECT_NEXT.to_string(),
+        chain: Vec::new(),
+        stopped_at: None,
+        warnings: Vec::new(),
+    };
+    Ok((load, origin, repo))
+}
+
+/// Writes the project files `files` (path and bytes) into the new project `root`, each durable;
+/// returns their paths.
+fn write_files(root: &Path, files: &[(String, Vec<u8>)]) -> Result<Vec<String>, RdyError> {
+    let packs = root.join(".rdy").join("packs");
+    rdy_store::fsutil::create_dir_durable(&packs).map_err(|e| io_at(&packs, &e))?;
+    let mut out = Vec::with_capacity(files.len());
+    for (path, bytes) in files {
+        let file = root.join(path);
+        rdy_store::fsutil::write_durable(&file, bytes).map_err(|e| io_at(&file, &e))?;
+        out.push(path.clone());
+    }
+    Ok(out)
+}
+
+/// What a project fork's build found: the fork's features, its batches, `fsck`, and its tags
+/// and views.
+struct Built {
+    features: rdy_store::format::StoreFeatures,
+    batches: u64,
+    fsck: crate::fsck::FsckReport,
+    tags: usize,
+    views: usize,
+}
+
+/// Step 5's take and step 6's seed and check, in the staging project `rdy`.
+fn build_project(
+    rdy: &mut Rdy,
+    files: &[File],
+    selected: &Tag,
+    source: RepoId,
+    origins: &[Origin],
+    named: &BTreeSet<Hash>,
+) -> Result<Built, RdyError> {
+    rdy.seal_open()?;
+    let epoch = rdy.store().redaction_epoch();
+    // the take seals its own batch, as the store's other self-sealing writes do
+    rdy.store_mut().set_held(false)?;
+    let taken = rdy
+        .store_mut()
+        .import_fork::<RdyError>(files, selected.landing, source, origins);
+    rdy.store_mut().set_held(true)?;
+    taken.map_err(move_error)?;
+    republish(rdy, epoch)?;
+    rdy.seal_open()?;
+    let epoch = rdy.store().redaction_epoch();
+    rdy.store_mut().seed_project_fork(selected.landing, named)?;
+    republish(rdy, epoch)?;
+    rdy.seal_open()?;
+    let fsck = rdy.fsck()?;
+    let store = rdy.store();
+    let mut batches = 0u64;
+    // the walk that passes removed frames by their headers: the take holds the approved drops
+    store
+        .reader()
+        .for_each_record_from(LOG_START, store.log_end(), |_, frame, _| {
+            if let rdy_store::redaction::StoredFrame::Present { kind, .. } = frame
+                && kind == rdy_store::kinds::BATCH_COMMIT
+            {
+                batches += 1;
+            }
+            Ok(())
+        })?;
+    Ok(Built {
+        features: store.features().clone(),
+        batches,
+        fsck,
+        tags: store.count_refs(rdy_store::holder::TAG_REF)?,
+        views: store.count_refs(rdy_store::hub_canon::VIEW_REF)?,
+    })
+}
+
+/// Where a log starts.
+const LOG_START: rdy_store::segment::Location = rdy_store::segment::Location {
+    segment: 0,
+    offset: 0,
+};
 
 /// The tag of `read` that names `name`'s version, as `tag:<version>` reads it.
 fn captured_tag(read: &ReadState, name: &str) -> Result<Tag, RdyError> {

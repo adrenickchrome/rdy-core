@@ -1309,3 +1309,303 @@ fn scc3_tagged_local_landing_survives_clean_replay_and_dump() {
 fn scc3_tagged_local_landing_survives_take_and_dump() {
     tagged_divergent_pull(true);
 }
+
+// ---- hfp3 (D-99CWC): a remainder's sources come from the state before the pull ----
+
+const URL_X: &str = "https://127.0.0.1:9/r/x";
+
+/// A copy of the hub as it stands, open, at `x`.
+fn copy_hub(w: &mut World) -> Rdy {
+    let spare = w.dir.path().join("spare-hub");
+    if !spare.exists() {
+        drop(Rdy::init(&spare, "rdy-standard").unwrap());
+    }
+    drop(std::mem::replace(&mut w.hub, Rdy::open(&spare).unwrap()));
+    let a = w.dir.path().join("hub");
+    let x = w.dir.path().join("x");
+    copy_dir(&a, &x);
+    w.hub = Rdy::open(&a).unwrap();
+    Rdy::open(&x).unwrap()
+}
+
+/// Lands `landings` (each a doc name, or a title for the shared doc when it starts with `=`)
+/// in a copy of the hub, then takes them into local canon by a fetch and a fast-forward pull of
+/// remote `x`. Local canon then holds landings that no local view wrote, untagged. Returns them.
+fn local_without_views(w: &mut World, landings: &[&str]) -> Vec<Hash> {
+    let mut x = copy_hub(w);
+    let doc = w.doc.clone();
+    let mut out = vec![];
+    for l in landings {
+        out.push(match l.strip_prefix('=') {
+            Some(title) => land_title(&mut x, &doc, title),
+            None => land_doc(&mut x, l),
+        });
+    }
+    let state = SyncCanon {
+        repo_id: w.repo(),
+        url: URL_X.into(),
+        fetched: Some(w.base),
+        applied: Some(w.base),
+        held: None,
+    };
+    w.local
+        .store_mut()
+        .write_sync("x", vec![SyncStep::Canon(state)])
+        .unwrap();
+    let tip = *out.last().unwrap();
+    let mut bytes = Vec::new();
+    stream_export::write_history(
+        &x.read(),
+        StreamPurpose::CanonHistory,
+        tip,
+        Some(w.base),
+        &BTreeSet::new(),
+        &mut bytes,
+    )
+    .unwrap();
+    let path = w.dir.path().join("x-batch");
+    std::fs::write(&path, bytes).unwrap();
+    let target = FetchTarget {
+        remote: "x".into(),
+        url: URL_X.into(),
+        purpose: StreamPurpose::CanonHistory,
+        root: tip,
+        view: None,
+    };
+    sync_fetch::fetch(&mut w.local, &[File::open(&path).unwrap()], &target).unwrap();
+    let repo = w.repo();
+    let out_x = sync_replay::pull(
+        &mut w.local,
+        &puller(),
+        &PullRequest {
+            remote: "x".into(),
+            hub: HubState {
+                repo_id: Some(repo),
+                canon: Some(tip),
+            },
+            take: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+    assert!(out_x.replayed.is_empty() && out_x.view.is_none() && out_x.replaced.is_none());
+    assert_eq!(chain(&w.local)[1..], out[..]);
+    out
+}
+
+/// The changes of `landings` in `w`'s local project.
+fn changes_of(w: &World, landings: &[Hash]) -> Vec<Hash> {
+    landings.iter().flat_map(|l| w.landing(l).changes).collect()
+}
+
+/// Every root but canon misses `changes`: no tag, and no view's chain holds one.
+fn only_canon_reaches(w: &World, changes: &[Hash]) {
+    let reader = w.local.store().reader();
+    assert!(reader.refs_with_prefix("tag/").unwrap().is_empty());
+    assert!(reader.refs_with_prefix("replaced/").unwrap().is_empty());
+    for (name, _) in reader.refs_with_prefix("view/").unwrap() {
+        let view = name.strip_prefix("view/").unwrap();
+        let head = reader.view_head(view).unwrap().unwrap();
+        for (_, op) in reader.view_chain(view, &head.head).unwrap() {
+            let held: Vec<Hash> = match op.op {
+                rdy_store::view::ViewOpKind::Commit { change } => vec![change],
+                rdy_store::view::ViewOpKind::Include { changes }
+                | rdy_store::view::ViewOpKind::Exclude { changes }
+                | rdy_store::view::ViewOpKind::Fork { changes, .. } => changes,
+                rdy_store::view::ViewOpKind::Rebase {
+                    dropped, remaining, ..
+                } => dropped.into_iter().chain(remaining).collect(),
+                _ => vec![],
+            };
+            assert!(held.iter().all(|c| !changes.contains(c)), "{view}");
+        }
+    }
+}
+
+/// The remainder `pull-1` of `out`: owned by the caller, on canon now, and holding one replay
+/// of each of `sources`, linked to it.
+fn assert_remainder(w: &World, out: &PullOutcome, sources: &[Hash]) {
+    assert_eq!(out.view.as_deref(), Some("pull-1"));
+    let reader = w.local.store().reader();
+    let head = reader.view_head("pull-1").unwrap().unwrap();
+    assert_eq!(
+        head.owner.as_ref().map(|o| o.actor.as_str()),
+        Some("human:puller")
+    );
+    assert_eq!(head.base, w.canon());
+    let held = w.local.store().included("pull-1").unwrap();
+    let from: Vec<Hash> = held
+        .iter()
+        .map(|c| w.change(c).links.replayed_from.unwrap())
+        .collect();
+    assert_eq!(sorted(from), sorted(sources.to_vec()));
+    for c in held.iter() {
+        assert_eq!(w.change(c).provenance.actor, "human:puller");
+    }
+}
+
+/// D-99CWC, D-QCE8M: a stopped pull replays its remainder from the sources that the state
+/// before the pull reached. The local landings are untagged and in no view's history, so only
+/// the old canon reaches them; the new canon and the `replaced/` mark written after the replay
+/// do not. The prefix stays, `pull-1` holds the rest, and the old tip is marked.
+#[test]
+fn hfp3_stopped_pull_keeps_untagged_sources() {
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    let local = local_without_views(&mut w, &["first", "=Local title", "third"]);
+    let [l1, l2, l3] = local[..] else {
+        unreachable!()
+    };
+    only_canon_reaches(&w, &changes_of(&w, &local));
+    w.applied(w.base);
+    let doc = w.doc.clone();
+    let t = land_title(&mut w.hub, &doc, "Hub title");
+    let out = w.pull();
+    assert_eq!(out.status, PULLED_WITH_CONFLICTS);
+    let [r1] = out.replayed.as_slice() else {
+        panic!("{out:?}")
+    };
+    assert_eq!(r1.source, l1.to_string());
+    assert_eq!(w.landing(&h(&r1.landing)).prev, Some(t));
+    let reasons: Vec<(String, StopReason)> = out
+        .not_replayed
+        .iter()
+        .map(|n| (n.landing.clone(), n.reason))
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            (l2.to_string(), StopReason::Conflict),
+            (l3.to_string(), StopReason::AfterStop)
+        ]
+    );
+    assert_remainder(&w, &out, &changes_of(&w, &[l2, l3]));
+    let mark = w.replaced(&l3).expect("replaced mark");
+    assert_eq!(mark.by, w.canon().unwrap());
+    assert_eq!(out.replaced, Some(l3.to_string()));
+    assert_eq!(w.applied_tip(), Some(t));
+    w.reopen();
+    assert_remainder(&w, &out, &changes_of(&w, &[l2, l3]));
+}
+
+/// D-99CWC, D-3RSCW: a pull with no sync state puts the local suffix into `pull-1` from the
+/// sources that the state before the pull reached, though no tag or view reaches them.
+#[test]
+fn hfp3_no_sync_state_keeps_untagged_sources() {
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    let local = local_without_views(&mut w, &["a-local", "b-local"]);
+    let [a, b] = local[..] else { unreachable!() };
+    only_canon_reaches(&w, &changes_of(&w, &local));
+    let t = land_doc(&mut w.hub, "hub");
+    let out = w.pull();
+    assert!(out.no_sync_state);
+    assert_eq!(out.status, PULLED_WITH_CONFLICTS);
+    assert!(out.replayed.is_empty());
+    assert_eq!(chain(&w.local), [w.base, t]);
+    assert_eq!(out.left_canon, [a.to_string(), b.to_string()]);
+    assert!(
+        out.not_replayed
+            .iter()
+            .all(|n| n.reason == StopReason::NoSyncState)
+    );
+    assert_remainder(&w, &out, &changes_of(&w, &local));
+    assert_eq!(w.replaced(&b).unwrap().by, t);
+    assert_eq!(out.replaced, Some(b.to_string()));
+    assert_eq!(w.applied_tip(), Some(t));
+}
+
+/// Replays `sources` into a new view `name` that `puller` owns; returns the replay's sources.
+fn replay_into(r: &mut Rdy, name: &str, sources: &[Hash]) -> Result<Vec<String>, RdyError> {
+    if !r.read().has_view(name) {
+        r.view_create(&puller(), name, None, false).unwrap();
+    }
+    let input: Vec<String> = sources.iter().map(Hash::to_string).collect();
+    r.view_replay(&puller(), name, &input)
+        .map(|out| out.replayed.into_iter().map(|r| r.source).collect())
+}
+
+/// D-99CWC, D-QCE8M, D-4E32E: a `replaced/` mark keeps its chain's changes sources, by the
+/// mark's kind. A landing mark: a take leaves local landings off canon, untagged and in no
+/// view. A view-op mark: a view moved back to its first op leaves its commit off every chain.
+/// Each replays after a reopen, after a reindex, and in a dump's load.
+#[test]
+fn hfp3_replay_keeps_replaced_histories() {
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    // the landing mark
+    let local = local_without_views(&mut w, &["mine"]);
+    w.applied(w.base);
+    let t = land_doc(&mut w.hub, "theirs");
+    let out = w.pull_with(true, false).unwrap();
+    assert_eq!(out.replaced, Some(local[0].to_string()));
+    assert_eq!(chain(&w.local), [w.base, t]);
+    let landed = changes_of(&w, &local);
+    assert!(
+        landed
+            .iter()
+            .all(|c| w.local.store().reader().landing_of(c).unwrap().is_none())
+    );
+    // the view-op mark: `v` commits `cv`, then its ref goes back to its first op
+    let cv: Hash = write_in(
+        &mut w.local,
+        "v",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "kept", "title": "Kept", "doc_type": "page"}}]),
+        "kept",
+    )
+    .change
+    .parse()
+    .unwrap();
+    let reader = w.local.store().reader();
+    let head = reader.view_head("v").unwrap().unwrap();
+    let ops = reader.view_chain("v", &head.head).unwrap();
+    let (root, _) = ops.last().unwrap().clone();
+    drop(reader);
+    let back = rdy_store::view::ViewHead {
+        head: root,
+        len: 0,
+        ..head.clone()
+    };
+    w.local.store_mut().view_set_head("v", &back).unwrap();
+    let canon = w
+        .local
+        .store()
+        .reader()
+        .sync_canon("origin")
+        .unwrap()
+        .unwrap();
+    let mark = Replaced {
+        kind: rdy_store::hub_canon::ReplacedKind::ViewOp,
+        by: root,
+        at_ms: 1_000_000,
+    };
+    w.local
+        .store_mut()
+        .write_pull_refs(
+            "origin",
+            canon,
+            vec![(replaced_ref(&head.head), mark.encode())],
+        )
+        .unwrap();
+    w.reopen();
+    assert!(w.local.read().included("v").is_empty());
+    // each source replays: after the reopen, after a reindex, and in a dump's load
+    let check = |r: &mut Rdy, n: usize| {
+        let a = replay_into(r, &format!("lands-{n}"), &landed).unwrap();
+        assert_eq!(
+            sorted(a.iter().map(|s| h(s)).collect()),
+            sorted(landed.clone())
+        );
+        let b = replay_into(r, &format!("ops-{n}"), &[cv]).unwrap();
+        assert_eq!(b, [cv.to_string()]);
+    };
+    check(&mut w.local, 1);
+    w.local.reindex().unwrap();
+    check(&mut w.local, 2);
+    let file = w.dir.path().join("replaced.rdydump");
+    w.local.read().dump(&file).unwrap();
+    let to = w.dir.path().join("loaded");
+    rdy_engine::load::load(&file, &to).unwrap();
+    let mut loaded = Rdy::open(&to).unwrap();
+    check(&mut loaded, 3);
+}

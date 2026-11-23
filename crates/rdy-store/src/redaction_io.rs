@@ -553,8 +553,9 @@ struct Pending {
     /// The FOREIGN frames of the batch: place, raw kind, hash and, when it was read, payload. A
     /// batch with no apply keeps none of them.
     foreign: Vec<(Location, u8, Hash, Option<Vec<u8>>)>,
-    /// Whether the batch writes a `meta/sync/` ref: a fetch's batch (D-FNRXT), whose requests and
-    /// applies came from another store. Read only for a batch that holds a request or an apply.
+    /// Whether the batch writes a `meta/sync/` ref (a fetch's batch, D-FNRXT) or a fork origin
+    /// (a project fork's take, D-99CWC): its requests and applies came from another store. Read
+    /// only for a batch that holds a request or an apply.
     sync: bool,
 }
 
@@ -698,7 +699,7 @@ impl Collected {
             kinds::REF_UPDATE => {
                 if let Some(b) = payload.filter(|b| Hash::of(b) == hash)
                     && let Ok(u) = crate::store::decode::<kinds::RefUpdate>(b)
-                    && crate::sync_state::is_sync_ref(&u.name)
+                    && (crate::sync_state::is_sync_ref(&u.name) || is_fork_origin(&u))
                 {
                     p.sync = true;
                 }
@@ -709,9 +710,17 @@ impl Collected {
     }
 }
 
+/// Whether `u` writes a fork origin: `meta/origin` with a value that names a fork. A project
+/// fork's take writes its origins after the records it takes (D-99CWC), so a batch that holds a
+/// request or an apply and then such a ref is a fetched batch, as a fetch's is.
+fn is_fork_origin(u: &kinds::RefUpdate) -> bool {
+    u.name == crate::meta::REF_ORIGIN
+        && crate::meta::decode_origin(&u.value).is_some_and(|o| o.fork)
+}
+
 /// Whether the header pass reads the payload of a `REF_UPDATE` frame of `len` bytes in the
 /// batch `p` collects: only in a batch that holds a request or an apply, and only within the
-/// sync ref bound, so it can tell a fetch's batch (D-FNRXT).
+/// sync ref bound, so it can tell a fetch's batch (D-FNRXT) or a project fork's take.
 fn reads_ref(p: &Pending, len: u32) -> bool {
     (!p.applies.is_empty() || !p.requests.is_empty())
         && (len as usize) <= crate::sync_state::MAX_VALUE_BYTES + 4_096

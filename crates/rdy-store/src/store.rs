@@ -1216,20 +1216,31 @@ fn apply_upgrade(
     }
 }
 
-/// What a new holder's first sealed batch names (`Store::create_holder_with_origins`): its repo
-/// id, and the fork origins it counts, in the order they are written.
+/// What a new store's first sealed batch names (`Store::create_holder_with_origins`,
+/// `Store::create_fork_project`): its mode, its repo id, and the fork origins it counts, in the
+/// order they are written. A project fork's store names none: its take writes them.
 #[derive(Clone, Copy)]
-struct NewHolder<'a> {
+struct NewStore<'a> {
+    mode: StoreMode,
     repo_id: RepoId,
     origins: &'a [crate::meta::Origin],
 }
 
-/// The refusal of a holder's creation where a store, or anything else, already is.
-fn already_exists(dir: &Path) -> StoreError {
+/// The words that name a new store of `mode` in [`already_exists`].
+fn what_store(mode: StoreMode) -> &'static str {
+    match mode {
+        StoreMode::Holder => "a holder",
+        StoreMode::Project => "a project fork",
+    }
+}
+
+/// The refusal of a holder's or a fork project's creation where a store, or anything else,
+/// already is. `what` names the store: `a holder` or `a project fork`.
+fn already_exists(dir: &Path, what: &str) -> StoreError {
     StoreError::Io(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
         format!(
-            "{} already holds something: a holder is created only in an empty directory",
+            "{} already holds something: {what} is created only in an empty directory",
             dir.display()
         ),
     ))
@@ -1395,16 +1406,43 @@ impl Store {
         crate::follower::refuse_follower(dir)?;
         let mut synced = match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() && std::fs::read_dir(dir)?.next().is_none() => vec![],
-            Ok(_) => return Err(already_exists(dir)),
+            Ok(_) => return Err(already_exists(dir, what_store(StoreMode::Holder))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => fsutil::create_dir_durable(dir)?,
             Err(e) => return Err(e.into()),
         };
         synced.push(dir.to_path_buf());
-        let holder = NewHolder { repo_id, origins };
+        let holder = NewStore {
+            mode: StoreMode::Holder,
+            repo_id,
+            origins,
+        };
         let mut store = Store::open_current_format(dir, synced, None, Some(holder))?;
         format::write_format_file(dir, &store.features)?;
         store.synced.push(dir.to_path_buf());
         Ok(store)
+    }
+
+    /// Creates a project store as [`Store::create`] does, with repo id `repo_id` and no origin:
+    /// a project fork's store, before its take. The take's batch writes the fork's origins
+    /// ([`Store::import_fork`]), so a removal it carries reads as fetched. The directory must
+    /// not exist or be wholly empty (a directory holding anything is `StoreError::Io` of kind
+    /// `AlreadyExists`). It creates only a fresh store.
+    pub fn create_fork_project(dir: &Path, repo_id: RepoId) -> Result<Store, StoreError> {
+        crate::follower::refuse_follower(dir)?;
+        let mut synced = match std::fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_dir() && std::fs::read_dir(dir)?.next().is_none() => vec![],
+            Ok(_) => return Err(already_exists(dir, what_store(StoreMode::Project))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fsutil::create_dir_durable(dir)?,
+            Err(e) => return Err(e.into()),
+        };
+        format::write_format_file(dir, &format::creation_baseline())?;
+        synced.push(dir.to_path_buf());
+        let project = NewStore {
+            mode: StoreMode::Project,
+            repo_id,
+            origins: &[],
+        };
+        Store::open_current_format(dir, synced, None, Some(project))
     }
 
     /// Test hook: [`Store::create`] of a store that predates snapshot deltas, as an older rdy
@@ -1844,12 +1882,12 @@ impl Store {
 
     /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`). With
     /// `holder`, the log must be empty (`AlreadyExists` otherwise): its first batch makes the
-    /// store a holder with that repo id and those origins.
+    /// store of that mode, with that repo id and those origins.
     fn open_current_format(
         dir: &Path,
         synced: Vec<PathBuf>,
         held: Option<StoreLock>,
-        holder: Option<NewHolder<'_>>,
+        holder: Option<NewStore<'_>>,
     ) -> Result<Store, StoreError> {
         Store::open_current_format_with(dir, synced, held, holder, false)
     }
@@ -1860,7 +1898,7 @@ impl Store {
         dir: &Path,
         synced: Vec<PathBuf>,
         held: Option<StoreLock>,
-        holder: Option<NewHolder<'_>>,
+        holder: Option<NewStore<'_>>,
         upgrade_pending: bool,
     ) -> Result<Store, StoreError> {
         Store::open_current_format_as(
@@ -1879,7 +1917,7 @@ impl Store {
         dir: &Path,
         mut synced: Vec<PathBuf>,
         held: Option<StoreLock>,
-        holder: Option<NewHolder<'_>>,
+        holder: Option<NewStore<'_>>,
         upgrade_pending: bool,
         access: Access,
     ) -> Result<Store, StoreError> {
@@ -1952,8 +1990,10 @@ impl Store {
         let (log, quarantined) = SegmentLog::open_authorized(&segments, SEGMENT_MAX, acked)?;
         // the mode comes from the log's first batch, before any other ref is judged
         let creation = read_creation(&log)?;
-        if holder.is_some() && log.end() != ORIGIN {
-            return Err(already_exists(dir));
+        if let Some(n) = holder
+            && log.end() != ORIGIN
+        {
+            return Err(already_exists(dir, what_store(n.mode)));
         }
         let report = OpenReport {
             quarantined,
@@ -2378,9 +2418,9 @@ impl Store {
     /// before that leaves `FORMAT` and an empty log, which the next open finishes.
     /// (`create_holder` writes `FORMAT` only after this.)
     ///
-    /// With `holder`, the new store's batch is a holder's: the features, the repo id `holder`
-    /// names and `meta/store_mode`, then each origin it names, in its order.
-    fn ensure_format(&mut self, holder: Option<NewHolder<'_>>) -> Result<(), StoreError> {
+    /// With `holder`, the new store's batch is the one it names: the features, its repo id, a
+    /// holder's `meta/store_mode`, then each origin it names, in its order.
+    fn ensure_format(&mut self, holder: Option<NewStore<'_>>) -> Result<(), StoreError> {
         let held_frames = self.log.end()
             != Location {
                 segment: 0,
@@ -2410,8 +2450,8 @@ impl Store {
                 // baseline for a holder, whose FORMAT comes after this batch; a store with no
                 // FORMAT predates snapshot deltas
                 let features = match holder {
-                    Some(_) => format::creation_baseline(),
-                    None => format::read_format_file(&self.dir)?
+                    Some(n) if n.mode == StoreMode::Holder => format::creation_baseline(),
+                    _ => format::read_format_file(&self.dir)?
                         .unwrap_or_else(format::legacy_baseline_features),
                 };
                 // one batch of the features and the repo id (D-DAGNB): set_refs refuses meta/
@@ -2425,12 +2465,14 @@ impl Store {
                         ),
                     ),
                 ];
-                // a holder's mode is the creation's (D-BPYN8): this batch is the only place
                 if let Some(h) = holder {
-                    refs.push((
-                        crate::holder::REF_STORE_MODE.into(),
-                        crate::holder::HOLDER_MODE.to_vec(),
-                    ));
+                    // a holder's mode is the creation's (D-BPYN8): this batch is the only place
+                    if h.mode == StoreMode::Holder {
+                        refs.push((
+                            crate::holder::REF_STORE_MODE.into(),
+                            crate::holder::HOLDER_MODE.to_vec(),
+                        ));
+                    }
                     // its counted fork origins (D-HX6BX): in the order given, after the mode
                     for o in h.origins {
                         refs.push((
@@ -2442,11 +2484,7 @@ impl Store {
                 let items = self.ref_items(refs);
                 self.write_refs(items, RefWrite::Unchecked)?;
                 self.creation = Creation {
-                    mode: if holder.is_some() {
-                        StoreMode::Holder
-                    } else {
-                        StoreMode::Project
-                    },
+                    mode: holder.map_or(StoreMode::Project, |h| h.mode),
                     end: self.log.end(),
                 };
                 self.features = features;
@@ -5737,15 +5775,20 @@ impl Store {
     }
 
     /// A fresh fork's take of its source's canon history (D-99CWC): [`Store::take_history`]'s
-    /// guards and checks, with the stream's repo `source` and not this holder's own. A holder
-    /// with canon, or with any batch after its creating batch, is refused, so only a fresh
-    /// fork takes a history of another repo. The batch writes the records and approved drops
-    /// and moves no ref. `crate::fork` is its one caller.
+    /// guards and checks, with the stream's repo `source` and not this store's own. The store
+    /// is a holder or a project. One with canon, with any batch after its creating batch, or (a
+    /// project) with a tag or a view is refused, so only a fresh fork takes a history of another
+    /// repo. The batch writes the records and approved drops and moves no ref. A project's batch
+    /// then writes `origins`, its fork origins in the order given (D-HX6BX), after the records:
+    /// so its header pass reads the removals it carries as fetched (`crate::redaction_io`). A
+    /// holder's origins are its creating batch's, so a holder refuses any. `crate::fork` is its
+    /// one caller.
     pub(crate) fn take_fork_history<E>(
         &mut self,
         files: &[File],
         target: &crate::take_batch::HistoryTarget,
         source: RepoId,
+        origins: &[crate::meta::Origin],
     ) -> Result<crate::take_batch::HistoryTaken, crate::take_batch::TakeError<E>> {
         use crate::take_batch::{Receiver, TakeError};
         self.refuse_follower_write().map_err(TakeError::Store)?;
@@ -5772,21 +5815,39 @@ impl Store {
         if self.held || self.open.is_some() {
             return Err(TakeError::Store(batch_open("before a take")));
         }
-        if self.creation.mode != StoreMode::Holder {
-            return Err(TakeError::ModeMismatch);
+        // a fresh fork only: no canon and nothing after the creating batch; a project also has
+        // no tag and no view (A7)
+        let fresh = self.log.end() == self.creation.end
+            && self.reader().canon_head()?.is_none()
+            && (self.creation.mode == StoreMode::Holder
+                || (self.count_refs(crate::holder::TAG_REF)? == 0
+                    && self.count_refs(crate::hub_canon::VIEW_REF)? == 0));
+        if !fresh {
+            return Err(TakeError::Store(StoreError::Refused(format!(
+                "a fork takes its source's history only into {}",
+                match self.creation.mode {
+                    StoreMode::Holder => "a new holder",
+                    StoreMode::Project => "a new project",
+                }
+            ))));
         }
-        // a fresh fork only: no canon and nothing after the creating batch
-        if self.log.end() != self.creation.end || self.reader().canon_head()?.is_some() {
+        if self.creation.mode == StoreMode::Holder && !origins.is_empty() {
             return Err(TakeError::Store(StoreError::Refused(
-                "a fork takes its source's history only into a new holder".into(),
+                "a holder's fork origins are its creating batch's".into(),
             )));
         }
         let repo = self
             .repo_id()?
             .ok_or_else(|| StoreError::Decode("a holder has no meta/repo_id".into()))?;
+        // each origin names a fork of another repo (`check_meta`'s rule, before any write)
+        if origins.iter().any(|o| !o.fork || o.repo_id == repo) {
+            return Err(TakeError::Store(StoreError::Refused(
+                "a fork's origin names a fork of another repo".into(),
+            )));
+        }
         let reader = self.reader();
         let auth = Arc::clone(self.log.authorization());
-        let plan = crate::take_batch::prepare_fork_history(
+        let mut plan = crate::take_batch::prepare_fork_history(
             &Receiver {
                 reader: &reader,
                 log: self.log.readers(),
@@ -5800,6 +5861,13 @@ impl Store {
             source,
         )?;
         drop(reader);
+        // the origins come after every record: a removal's request or apply precedes them
+        plan.refs.extend(origins.iter().map(|o| {
+            (
+                crate::meta::REF_ORIGIN.to_string(),
+                crate::meta::encode_origin(o),
+            )
+        }));
         let (end, frames) = self.seal_take(files, &plan, RefWrite::Take)?;
         let empty = plan.writes.is_empty() && plan.refs.is_empty();
         Ok(crate::take_batch::HistoryTaken {

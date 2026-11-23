@@ -50,6 +50,9 @@ pub(crate) struct CloneArgs {
     /// Give the clone a new repo id, and record forked_from.
     #[arg(long)]
     fork: bool,
+    /// With --fork: fork a project at this version (such as v1.2.0), with only the history up to that tag.
+    #[arg(long, value_name = "TAG")]
+    at: Option<String>,
 }
 
 /// `rdy dump`: through the daemon, as `rdy export` goes. With `--after` the daemon writes the
@@ -144,23 +147,39 @@ pub(crate) fn clone(
     a: CloneArgs,
     project: Option<PathBuf>,
 ) -> Result<(Value, String), ErrorReply> {
-    let CloneArgs { source, dir, fork } = a;
+    let CloneArgs {
+        source,
+        dir,
+        fork,
+        at,
+    } = a;
+    // a fork at a tag (D-99CWC): the fork first, then the source form, then the tag and target
+    if at.is_some() && !fork {
+        return Err(rdy_engine::clone::at_needs_fork().into());
+    }
     let dir = dir.or(project).unwrap_or_else(|| env.cwd.clone());
     let v = match source_kind(&source)? {
         SourceKind::Url => return clone_url(&source, &dir, fork),
+        SourceKind::File if at.is_some() => {
+            return Err(rdy_engine::clone::at_needs_project().into());
+        }
         SourceKind::File => {
             let s = rdy_engine::clone::clone(CloneSource::File(&source), &dir, fork)?;
             serde_json::to_value(&s).expect("a reply serializes")
         }
         SourceKind::Project => {
-            let at = Env {
+            let project_env = Env {
                 project: env.cwd.join(&source),
                 cwd: env.cwd.clone(),
                 no_daemon: env.no_daemon,
                 place: None,
             };
             // the op resolves a relative dir against this session's working directory
-            call(&at, "clone", json!({"dir": path_arg(&dir)?, "fork": fork}))?
+            let mut args = json!({"dir": path_arg(&dir)?, "fork": fork});
+            if let Some(tag) = &at {
+                args["at"] = json!(tag);
+            }
+            call(&project_env, "clone", args)?
         }
     };
     let t = format!(

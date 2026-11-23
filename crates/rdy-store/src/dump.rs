@@ -733,7 +733,7 @@ impl RemovalTally {
             let mut removal = false;
             b.frames.iter().any(|f| match f {
                 Frame::Present { kind, payload, .. } if *kind == kinds::REF_UPDATE => {
-                    removal && is_sync_ref_update(payload)
+                    removal && (is_sync_ref_update(payload) || is_fork_origin_update(payload))
                 }
                 Frame::Present { kind, .. } => {
                     removal |= *kind == kinds::REDACTION_APPLY
@@ -1686,6 +1686,18 @@ pub(crate) fn is_sync_ref_update(payload: &[u8]) -> bool {
     payload.len() <= crate::sync_state::MAX_VALUE_BYTES + 4_096
         && wire::ref_name(payload)
             .is_some_and(|n| n.starts_with(crate::sync_state::SYNC_REF.as_bytes()))
+}
+
+/// Whether the `REF_UPDATE` payload `payload` writes a fork origin (`meta/origin` naming a fork)
+/// within the sync value bound. A project fork's take writes its origins after the removals it
+/// carries (D-99CWC), so the store's header pass reads that batch as fetched
+/// (`crate::redaction_io`); the dump's readers keep that rule.
+pub(crate) fn is_fork_origin_update(payload: &[u8]) -> bool {
+    payload.len() <= crate::sync_state::MAX_VALUE_BYTES + 4_096
+        && wire::ref_name(payload) == Some(crate::meta::REF_ORIGIN.as_bytes())
+        && wire::ref_value(payload)
+            .and_then(crate::meta::decode_origin)
+            .is_some_and(|o| o.fork)
 }
 
 /// Adds one record to the bytes the trailer's digest covers: `kind || len (u64) || hash`. Its
