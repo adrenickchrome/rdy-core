@@ -5,6 +5,7 @@ mod dump_after;
 mod export_walk_known;
 mod follower_follow;
 mod follower_seed;
+mod fork_at;
 mod hub_compare;
 mod hub_contract;
 mod hub_renders;

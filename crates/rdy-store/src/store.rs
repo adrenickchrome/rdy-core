@@ -5736,6 +5736,83 @@ impl Store {
         })
     }
 
+    /// A fresh fork's take of its source's canon history (D-99CWC): [`Store::take_history`]'s
+    /// guards and checks, with the stream's repo `source` and not this holder's own. A holder
+    /// with canon, or with any batch after its creating batch, is refused, so only a fresh
+    /// fork takes a history of another repo. The batch writes the records and approved drops
+    /// and moves no ref. `crate::fork` is its one caller.
+    pub(crate) fn take_fork_history<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::HistoryTarget,
+        source: RepoId,
+    ) -> Result<crate::take_batch::HistoryTaken, crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{Receiver, TakeError};
+        self.refuse_follower_write().map_err(TakeError::Store)?;
+        if files.is_empty() {
+            return Err(TakeError::Stream(
+                crate::stream_error::StreamError::bad_record(
+                    0,
+                    0,
+                    crate::stream_error::Reason::NoBatchFiles,
+                ),
+            ));
+        }
+        if files.len() > crate::sync_stream::MAX_BATCH_FILES {
+            return Err(TakeError::Stream(crate::stream_error::StreamError::limit(
+                None,
+                0,
+                crate::sync_stream::LIMIT_BATCH_FILES,
+            )));
+        }
+        self.ensure_writable().map_err(TakeError::Store)?;
+        if self.poisoned {
+            return Err(TakeError::Store(self.poisoned_err()));
+        }
+        if self.held || self.open.is_some() {
+            return Err(TakeError::Store(batch_open("before a take")));
+        }
+        if self.creation.mode != StoreMode::Holder {
+            return Err(TakeError::ModeMismatch);
+        }
+        // a fresh fork only: no canon and nothing after the creating batch
+        if self.log.end() != self.creation.end || self.reader().canon_head()?.is_some() {
+            return Err(TakeError::Store(StoreError::Refused(
+                "a fork takes its source's history only into a new holder".into(),
+            )));
+        }
+        let repo = self
+            .repo_id()?
+            .ok_or_else(|| StoreError::Decode("a holder has no meta/repo_id".into()))?;
+        let reader = self.reader();
+        let auth = Arc::clone(self.log.authorization());
+        let plan = crate::take_batch::prepare_fork_history(
+            &Receiver {
+                reader: &reader,
+                log: self.log.readers(),
+                auth: &auth,
+                end: self.log.end(),
+                repo,
+                features: &self.features,
+            },
+            files,
+            target,
+            source,
+        )?;
+        drop(reader);
+        let (end, frames) = self.seal_take(files, &plan, RefWrite::Take)?;
+        let empty = plan.writes.is_empty() && plan.refs.is_empty();
+        Ok(crate::take_batch::HistoryTaken {
+            new_objects: plan.writes.len() as u64,
+            frames,
+            redacted_objects: if empty { 0 } else { plan.redacted_objects },
+            applies: plan.applies,
+            end,
+            min_rdy_before: plan.min_rdy.0,
+            min_rdy_after: plan.min_rdy.1,
+        })
+    }
+
     /// The batch of a canon or view move whose pushed history carries a removal
     /// (`Store::move_canon_with`, D-FNRXT): the take's checks over the holder
     /// (`crate::take_batch::prepare_history`), then one sealed batch of its own, held batches on

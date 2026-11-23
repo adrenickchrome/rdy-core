@@ -425,7 +425,7 @@ pub fn clone_url_checked(
     before_checks: Option<BeforeChecks>,
 ) -> Result<UrlCloneSummary, RdyError> {
     let url = RemoteUrl::parse(url)?;
-    check_new_dir(dir)?;
+    check_new_dir(dir, "clone a hub URL into a new directory, or an empty one")?;
     let settings = HubConfig::load(None, Some(user_file))?;
     let api = HttpHubTransport::new(settings.fence(url.origin())?)?;
     let wire = HttpSyncWire::new(HttpHubTransport::new(settings.fence(url.origin())?)?);
@@ -463,9 +463,10 @@ fn no_render() -> RdyError {
     )
 }
 
-/// The target of a URL clone: absent, or an empty directory with no store, outside any `.rdy`,
-/// with no daemon.
-fn check_new_dir(dir: &Path) -> Result<(), RdyError> {
+/// The target of a URL clone or a hub fork: absent, or an empty directory with no store,
+/// outside any `.rdy`, with no daemon. A target that holds anything else is `E_ALREADY_EXISTS`
+/// with `fix`.
+pub(crate) fn check_new_dir(dir: &Path, fix: &str) -> Result<(), RdyError> {
     crate::load::check_target(dir, &[])?;
     match std::fs::read_dir(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -479,7 +480,7 @@ fn check_new_dir(dir: &Path) -> Result<(), RdyError> {
             Some(_) => Err(RdyError::new(
                 E_ALREADY_EXISTS,
                 format!("{} is not empty", dir.display()),
-                "clone a hub URL into a new directory, or an empty one",
+                fix,
             )),
         },
     }
@@ -766,15 +767,7 @@ fn clone_from(
     };
     let bundle = read_bundle(&service.clone_settings(t, &base_url)?, &t.url)?;
     // the first write: a temporary directory beside the target, on its file system
-    let target = std::path::absolute(dir).map_err(|e| io_at(dir, &e))?;
-    let parent = target
-        .parent()
-        .ok_or_else(|| io_at(dir, &std::io::Error::other("it has no parent")))?;
-    rdy_store::fsutil::create_dir_durable(parent).map_err(|e| io_at(parent, &e))?;
-    let tmp = tempfile::Builder::new()
-        .prefix(".rdy-clone-")
-        .tempdir_in(parent)
-        .map_err(|e| io_at(parent, &e))?;
+    let (target, tmp) = staging_beside(dir, ".rdy-clone-")?;
     let project = tmp.path().to_path_buf();
     let origin = Origin {
         fork: false,
@@ -817,7 +810,26 @@ fn clone_from(
     })
 }
 
-fn io_at(path: &Path, e: &std::io::Error) -> RdyError {
+/// The absolute target `dir` and a new temporary directory beside it, on its file system, whose
+/// name starts with `prefix`. The target's parent is made when it is missing. Dropping the
+/// temporary directory removes it.
+pub(crate) fn staging_beside(
+    dir: &Path,
+    prefix: &str,
+) -> Result<(PathBuf, tempfile::TempDir), RdyError> {
+    let target = std::path::absolute(dir).map_err(|e| io_at(dir, &e))?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| io_at(dir, &std::io::Error::other("it has no parent")))?;
+    rdy_store::fsutil::create_dir_durable(parent).map_err(|e| io_at(parent, &e))?;
+    let tmp = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(parent)
+        .map_err(|e| io_at(parent, &e))?;
+    Ok((target, tmp))
+}
+
+pub(crate) fn io_at(path: &Path, e: &std::io::Error) -> RdyError {
     RdyError::new(
         E_IO,
         format!("{}: {e}", path.display()),
@@ -950,7 +962,7 @@ fn check_project(
 /// empty directory. A system that renames no directory onto an empty one (Windows) refuses the
 /// first rename: the empty target then goes, the rename runs again, and a failure makes the
 /// empty target again. On a failure the temporary directory goes and the target stays.
-fn install(tmp: tempfile::TempDir, target: &Path) -> Result<(), RdyError> {
+pub(crate) fn install(tmp: tempfile::TempDir, target: &Path) -> Result<(), RdyError> {
     if let Err(first) = std::fs::rename(tmp.path(), target) {
         if !target.is_dir() {
             return Err(io_at(target, &first));
