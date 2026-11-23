@@ -11,6 +11,10 @@
 //! 5. the view-head compare: an existing view is [`PortOutcome::Behind`], with no write;
 //! 6. the target removals, the op checks and the briefing ([`port::prepare_port`]).
 //!
+//! A holder holds no foreign entry, so the take checks no delivery for a foreign pin (D-FK58A):
+//! it writes foreign links and pins as the source wrote them, with no foreign entry and no
+//! pinned version. A client that pulls the view checks each pin when a person lands it.
+//!
 //! The batch holds the objects the target lacks, one `Create` on hub canon's tip and one
 //! `Commit` per change. It moves through the checked canon move with `SetViewHead`, expected
 //! head none, so the compare and the set are one durable batch. The view head has no owner and

@@ -13,7 +13,10 @@
 //!
 //! The checks of a take, after the view-head compare, run in this order: the target removals,
 //! then for each op its foreign pin and then its missing-base delete, then the briefing. The
-//! parent rule and the parent loop follow, on the merged result.
+//! parent rule and the parent loop follow, on the merged result. A holder target checks no
+//! foreign pin: it holds no foreign entry and its checks read portable refs only (D-FK58A), so
+//! the client checks each pin where a person lands (D-DAPR8). A project target checks each pin
+//! against its own deliveries. A port never brings a delivery.
 //!
 //! A ported change copies its source's ops, justification and message. It records its source in
 //! `links.ported_from` and the target's briefing in `links.briefing`. Its `replayed_from` stays
@@ -580,9 +583,9 @@ impl PreparedPort {
 /// Prepares the port of `bundle` into a new view `view` of the target `st` (a hub's store,
 /// read under its writer), authored by `by`. The view starts on canon's tip. Core makes the
 /// target briefing at that root and registers it in `reg`. The checks run in the take order:
-/// the target removals ([`check_target_removals`]), then per op the foreign pin and the
-/// missing-base delete, then the briefing, then the parent rule and the parent loop. Nothing
-/// is written.
+/// the target removals ([`check_target_removals`]), then per op the foreign pin (a project
+/// target only) and the missing-base delete, then the briefing, then the parent rule and the
+/// parent loop. Nothing is written.
 pub fn prepare_port(
     st: &ReadState,
     bundle: &PortBundle,
@@ -663,7 +666,8 @@ struct Draft {
 
 /// The port of `sources` into `target` on `st`, as the new changes of view `view` by `by`
 /// (D-1QT23, D-08M5W, D-7AT4S). Each source becomes one new change, in order. Per op, the
-/// foreign pin is checked first, then the missing-base rule: a held base stays; a create or
+/// foreign pin is checked first (in a project target; a holder checks none, D-FK58A), then the
+/// missing-base rule: a held base stays; a create or
 /// update whose base the target lacks becomes `Op::Create`; such a delete is dropped when the
 /// target lacks the block and refused when it holds it. A change keeps its place with no op.
 /// Then the briefing, then the parent rule and the parent loop on the merged view. Deps follow
@@ -696,6 +700,10 @@ pub(crate) fn prepare_changes(
                 )
             }
         };
+    // a holder holds no foreign entry and checks portable refs only (D-FK58A): a hub carry
+    // writes foreign links and pins as written, and the client checks each pin where a person
+    // lands (D-DAPR8). A project target keeps the delivery check.
+    let check_pins = reader.mode()? != StoreMode::Holder;
     let m = st.materialized(&scope)?;
     let conflicted: HashSet<BlockId> = match target {
         PortTarget::Root(_) => HashSet::new(),
@@ -732,8 +740,8 @@ pub(crate) fn prepare_changes(
         let mut ordinary: Vec<Op> = Vec::new();
         let mut mine: HashSet<BlockId> = HashSet::new();
         for op in source.ops {
-            // D-7AT4S: the foreign pin first
-            if let Op::Create { block } | Op::Update { block, .. } = op {
+            // D-7AT4S: the foreign pin first, in a project target
+            if check_pins && let Op::Create { block } | Op::Update { block, .. } = op {
                 st.check_held_pins(&scope, std::iter::once(block))?;
             }
             // then the missing-base rule (D-1QT23)

@@ -1355,12 +1355,65 @@ fn foreign_trace(dir: &Path) -> (usize, bool) {
     (n, held)
 }
 
-/// D-08M5W, D-A3H7S: foreign links and pins travel through the bytes in a create and an
-/// update. The bytes round-trip exactly. The target writes the parts as the source wrote them
-/// when it holds the delivery, and refuses with the existing foreign-version triple when it does
-/// not. A refusal writes nothing; a success imports no delivery and no pinned version.
+/// The records a store at `dir` appended in `[from, upto)`, as (logical kind, hash), less the
+/// batch markers.
+fn appended(
+    dir: &Path,
+    from: rdy_store::segment::Location,
+    upto: rdy_store::segment::Location,
+) -> Vec<(u8, Hash)> {
+    let mut out = Vec::new();
+    rdy_store::segment::SegmentReader::open(&dir.join("segments"))
+        .for_each_from::<std::io::Error>(from, upto, |_, kind, hash, _, _| {
+            let kind = rdy_store::codec::logical_kind(kind);
+            if kind != rdy_store::kinds::BATCH_COMMIT {
+                out.push((kind, hash));
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+/// The ops of every change of the landings `ls` of the project at `dir`, in landing order.
+fn landed_ops(dir: &Path, ls: &[Hash]) -> Vec<Vec<rdy_model::Op>> {
+    let r = Rdy::open(dir).unwrap();
+    let reader = r.store().reader();
+    let out = ls
+        .iter()
+        .flat_map(|l| reader.landing(l).unwrap().changes)
+        .map(|c| reader.change(&c).unwrap().ops)
+        .collect();
+    drop(reader);
+    r.close().unwrap();
+    out
+}
+
+/// The block versions `ops` write.
+fn written(ops: &[rdy_model::Op]) -> Vec<Hash> {
+    ops.iter()
+        .filter_map(|op| match op {
+            rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } => {
+                Some(block.version_hash())
+            }
+            rdy_model::Op::Delete { .. } => None,
+        })
+        .collect()
+}
+
+/// D-08M5W, D-A3H7S, D-FK58A, D-DAPR8 (ruling task-3): foreign links and pins travel through
+/// the bytes in a create and an update, and the bytes round-trip exactly. A hub carry into a
+/// holder checks no delivery: a holder holds no foreign entry, and its checks read portable refs
+/// only. It writes the parts as the source wrote them, with no foreign entry, no pinned version
+/// and no object outside the portable closure. A client that holds no delivery pulls the carried
+/// view with the parts as written; the bundle brings it no delivery.
 #[test]
 fn hpc3_foreign_bundle_bytes_roundtrip() {
+    use rdy_engine::sync_fetch::{self, HubState};
+    use rdy_engine::sync_views::{self, ViewPullRequest};
+    use rdy_store::sync_state::{SyncCanon, SyncStep};
+    use rdy_store::take_batch::FetchTarget;
+    const URL: &str = "https://127.0.0.1:9/r/line";
     let _clock = rdy_engine::pin_clock(AT);
     let mut w = lines();
     let x = cited_x();
@@ -1397,57 +1450,155 @@ fn hpc3_foreign_bundle_bytes_roundtrip() {
     let back = PortBundle::from_bytes(&bytes).unwrap();
     assert_eq!(back.to_bytes(), &bytes[..]);
     assert_eq!(back.facts(), made.facts());
-    let source_block = {
-        let r = Rdy::open(&w.at("p")).unwrap();
-        let b = r
-            .read()
-            .materialized(&rdy_engine::Scope::Canon)
-            .unwrap()
-            .get(&rdy_model::BlockId::parse(&claim).unwrap())
-            .unwrap()
-            .clone();
-        r.close().unwrap();
-        b
-    };
-    assert!(!source_block.foreign.pins.is_empty(), "{source_block:?}");
-    assert!(!source_block.foreign.links.is_empty(), "{source_block:?}");
-    let ld = w.at("l");
+    // the source's create and update both hold the foreign link and pin
+    let source_ops = landed_ops(&w.at("p"), &[lc, lu]);
+    assert_eq!(source_ops.len(), 2);
+    assert!(matches!(source_ops[0][..], [rdy_model::Op::Create { .. }]));
+    assert!(matches!(source_ops[1][..], [rdy_model::Op::Update { .. }]));
+    for ops in &source_ops {
+        for op in ops {
+            if let rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } = op {
+                assert_eq!(block.foreign.pins.len(), 1, "{block:?}");
+                assert_eq!(block.foreign.links.len(), 1, "{block:?}");
+            }
+        }
+    }
+    let (md, ld, cd, file) = (w.at("m"), w.at("l"), w.at("c"), w.at("view.rdysync"));
     let m = w.m;
     m.close().unwrap();
-
-    // the line holds no delivery: the existing triple, and no write
-    let before = state(&w.l, &[]);
-    let e = w.l.port_into_view(&back, "carry", PERSON).unwrap_err();
-    let short = &content_of(&x).to_string()[..12];
-    assert_eq!(
-        refusal(&e),
-        (
-            "E_FOREIGN_VERSION",
-            format!("core:d-FRGNX has no delivered version {short}").as_str(),
-            "wait for the delivery that holds it, or pin a delivered version: rdy_links {op: \"show\", alias} / rdy links show core"
-        )
-    );
-    assert_eq!(state(&w.l, &[]), before);
-    // a holder takes no delivery, so no hub line can hold the pinned version
     w.l.close().unwrap();
-    let trace = foreign_trace(&ld);
-    assert_eq!(trace, (0, false), "no foreign entry, no pinned version");
-    {
-        let mut r = Rdy::open_holder(&ld).unwrap();
-        let e = r
-            .store_mut()
-            .put_foreign(&delivery(&w.link, &x), std::slice::from_ref(&x))
-            .unwrap_err();
-        assert_eq!(e.to_string(), "a holder store holds no foreign entry");
+    // no delivery anywhere a hub holds: neither main nor the line
+    assert_eq!(foreign_trace(&md), (0, false));
+    assert_eq!(foreign_trace(&ld), (0, false));
+    let (store_dir, from) = {
+        let r = Rdy::open_holder(&ld).unwrap();
+        let out = (r.store().dir().to_path_buf(), r.store().log_end());
         r.close().unwrap();
-    }
-    assert_eq!(foreign_trace(&ld), trace, "nothing imported");
-    // the same bytes again, decoded once more, refuse the same way
+        out
+    };
+
+    // the carry succeeds with no delivery: links and pins as the source wrote them
     let l = StoreHandle::open_holder(&ld).unwrap();
-    let again = PortBundle::from_bytes(back.to_bytes()).unwrap();
+    let v = created(l.port_into_view(&back, "carry", PERSON).unwrap());
+    assert_eq!(v.ported.len(), 2);
+    assert!(v.conflicts.is_empty(), "{:?}", v.conflicts);
+    let snap = l.snapshot().unwrap();
+    snap.write_history(
+        StreamPurpose::ViewHistory,
+        v.head,
+        None,
+        &BTreeSet::<ObjectKey>::new(),
+        std::fs::File::create(&file).unwrap(),
+    )
+    .unwrap();
+    drop(snap);
+    l.close().unwrap();
+    let (upto, target_ops) = {
+        let r = Rdy::open_holder(&ld).unwrap();
+        let reader = r.store().reader();
+        let ops: Vec<Vec<rdy_model::Op>> = v
+            .ported
+            .iter()
+            .map(|p| reader.change(&p.change).unwrap().ops)
+            .collect();
+        drop(reader);
+        let end = r.store().log_end();
+        r.close().unwrap();
+        (end, ops)
+    };
     assert_eq!(
-        l.port_into_view(&again, "carry", PERSON).unwrap_err().code,
-        "E_FOREIGN_VERSION"
+        target_ops, source_ops,
+        "the written blocks, links and pins exactly"
     );
-    let _ = source_block;
+    // no foreign entry, no pinned version, and nothing outside the portable closure
+    assert_eq!(foreign_trace(&ld), (0, false));
+    let mut want: BTreeSet<(u8, Hash)> = BTreeSet::new();
+    for ops in &target_ops {
+        want.extend(
+            written(ops)
+                .into_iter()
+                .map(|h| (rdy_store::kinds::BLOCK, h)),
+        );
+    }
+    want.extend(
+        v.ported
+            .iter()
+            .map(|p| (rdy_store::kinds::CHANGE, p.change)),
+    );
+    let got = appended(&store_dir, from, upto);
+    use rdy_store::kinds::{BLOCK, CHANGE, REF_UPDATE, VIEW_OP};
+    assert!(
+        got.iter()
+            .all(|(k, _)| [BLOCK, CHANGE, VIEW_OP, REF_UPDATE].contains(k)),
+        "objects, view ops and ref moves only: {got:?}"
+    );
+    let objects: BTreeSet<(u8, Hash)> = got
+        .iter()
+        .copied()
+        .filter(|(k, _)| [BLOCK, CHANGE].contains(k))
+        .collect();
+    assert_eq!(objects, want, "{got:?}");
+    assert_eq!(
+        got.iter().filter(|(k, _)| *k == VIEW_OP).count(),
+        3,
+        "a Create and two Commits"
+    );
+
+    // the client pulls the carried view; its land checks each pin
+    let mut c = Rdy::open(&cd).unwrap();
+    c.store_mut()
+        .write_sync(
+            "origin",
+            vec![SyncStep::Canon(SyncCanon {
+                repo_id: w.l_repo,
+                url: URL.into(),
+                fetched: Some(w.l_tip),
+                applied: Some(w.l_tip),
+                held: None,
+            })],
+        )
+        .unwrap();
+    sync_fetch::fetch(
+        &mut c,
+        &crate::hub_world::files(&[&file]),
+        &FetchTarget {
+            remote: "origin".into(),
+            url: URL.into(),
+            purpose: StreamPurpose::ViewHistory,
+            root: v.head,
+            view: Some("carry".into()),
+        },
+    )
+    .unwrap();
+    let person = rdy_engine::Session {
+        actor: PERSON.into(),
+        run: None,
+        role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
+    };
+    sync_views::pull_views(
+        &mut c,
+        &person,
+        &ViewPullRequest {
+            remote: "origin".into(),
+            hub: HubState {
+                repo_id: Some(w.l_repo),
+                canon: Some(w.l_tip),
+            },
+            views: vec![("carry".into(), Some(v.head))],
+            take: false,
+        },
+    )
+    .unwrap();
+    // the client holds the pulled changes as written, and no delivery of the pinned content
+    let reader = c.store().reader();
+    let pulled: Vec<Vec<rdy_model::Op>> = v
+        .ported
+        .iter()
+        .map(|p| reader.change(&p.change).unwrap().ops)
+        .collect();
+    assert_eq!(pulled, source_ops);
+    assert!(reader.refs_with_prefix("foreign/").unwrap().is_empty());
+    drop(reader);
+    c.close().unwrap();
 }
