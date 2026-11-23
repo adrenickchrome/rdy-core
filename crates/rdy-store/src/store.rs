@@ -149,6 +149,9 @@ enum Access {
     Follower {
         repo_id: RepoId,
     },
+    /// The source of a port (D-G4PZX), opened by [`Store::open_source_read_only`]: it reads as a
+    /// read-only store, and every write refuses (E_STORE_READ_ONLY, `StoreError::PortSource`).
+    PortSource,
 }
 
 /// What every reader of a read-only store holds: the store's lock, so no process writes or
@@ -1525,7 +1528,14 @@ impl Store {
             required_rdy,
         } = Store::check_access(dir)?
         {
-            return Store::open_read_only(dir, held.cloned(), feature, required_rdy);
+            return Store::open_read_only(
+                dir,
+                held.cloned(),
+                Access::ReadOnly {
+                    feature,
+                    required_rdy,
+                },
+            );
         }
         // A format refusal of the planner keeps the open's own refusal: the open judges the
         // same store again, with its own text. An open that finds nothing to refuse returns
@@ -2127,6 +2137,16 @@ impl Store {
         Ok(store)
     }
 
+    /// Opens the store at `dir` as the source of a port (D-G4PZX), for reading only, whatever
+    /// its features permit: the read-only open of [`Store::open_read_only`]. It never upgrades,
+    /// reconciles or repairs the source, and no byte of the source store changes. A store this
+    /// rdy cannot read, a follower and a missing store keep the ordinary open's refusals. Every
+    /// write through the handle refuses (E_STORE_READ_ONLY, `StoreError::PortSource`).
+    pub fn open_source_read_only(dir: &Path) -> Result<Store, StoreError> {
+        Store::check_access(dir)?;
+        Store::open_read_only(dir, None, Access::PortSource)
+    }
+
     /// Opens the store at `dir`, whose features permit reads only (D-WWAK7), for reading only:
     /// no byte of the source store changes. It takes the existing lock file's exclusive lock
     /// without creating it (a missing one is `ReadOnlyNoLock`), or uses `held`, and every
@@ -2141,11 +2161,13 @@ impl Store {
     /// open uses, and removed when the last reader drops (or at once, when the replay fails).
     /// An authorized removal that has not finished is `RedactionPending` before the store is
     /// returned.
+    ///
+    /// `access` is what the open permits: `ReadOnly` with the store's first unknown read-only
+    /// feature, or `PortSource` for [`Store::open_source_read_only`].
     fn open_read_only(
         dir: &Path,
         held: Option<StoreLock>,
-        feature: String,
-        required_rdy: String,
+        access: Access,
     ) -> Result<Store, StoreError> {
         let segments = dir.join("segments");
         let lock = match held {
@@ -2199,10 +2221,7 @@ impl Store {
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
-                access: Access::ReadOnly {
-                    feature,
-                    required_rdy,
-                },
+                access,
                 _hold: Some(ReadOnlyHold {
                     _lock: lock.clone(),
                     dir: private,
@@ -3956,7 +3975,9 @@ impl StoreReader {
     pub fn access(&self) -> format::StoreAccess {
         match self.shared.access {
             Access::ReadWrite => format::StoreAccess::ReadWrite,
-            Access::ReadOnly { .. } | Access::Follower { .. } => format::StoreAccess::ReadOnly,
+            Access::ReadOnly { .. } | Access::Follower { .. } | Access::PortSource => {
+                format::StoreAccess::ReadOnly
+            }
         }
     }
 
@@ -3991,6 +4012,7 @@ impl StoreReader {
                 feature: feature.clone(),
                 required_rdy: required_rdy.clone(),
             }),
+            Access::PortSource => Err(StoreError::PortSource),
         }
     }
 

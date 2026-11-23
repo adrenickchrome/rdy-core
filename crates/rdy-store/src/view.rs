@@ -945,11 +945,37 @@ impl Store {
         changes: &[Change],
         by: &Provenance,
     ) -> Result<(Hash, Vec<Hash>), StoreError> {
+        self.prepared_include(name, changes, Prepared::Replay, by)
+    }
+
+    /// Stores the blob frames `blobs` and `changes`, each prepared by the caller as a port
+    /// (D-G4PZX: `links.ported_from` set, `links.replayed_from` empty, its deps final), and one
+    /// `Include` of them all into view `name`, in one write, as [`Store::view_replay_prepared`]
+    /// does. `blobs` are `(raw kind, payload)` frames of blob chunks and manifests the store
+    /// lacks, chunks first; only those kinds are taken. The same refusals apply, and a change
+    /// that is no port is refused. Returns the `Include`'s id and the changes' ids, in order.
+    pub fn view_port_prepared(
+        &mut self,
+        name: &str,
+        changes: &[Change],
+        blobs: &[(u8, Vec<u8>)],
+        by: &Provenance,
+    ) -> Result<(Hash, Vec<Hash>), StoreError> {
+        self.prepared_include(name, changes, Prepared::Port(blobs), by)
+    }
+
+    /// The one write of [`Store::view_replay_prepared`] and [`Store::view_port_prepared`]:
+    /// `kind` says which link each change must carry, and which blob frames go first.
+    fn prepared_include(
+        &mut self,
+        name: &str,
+        changes: &[Change],
+        kind: Prepared<'_>,
+        by: &Provenance,
+    ) -> Result<(Hash, Vec<Hash>), StoreError> {
         self.ensure_writable()?;
         if changes.is_empty() {
-            return Err(StoreError::Decode(
-                "view_replay_prepared: no changes".into(),
-            ));
+            return Err(StoreError::Decode(format!("{}: no changes", kind.name())));
         }
         let head = self
             .view_head(name)?
@@ -958,14 +984,28 @@ impl Store {
             return Err(StoreError::ViewClosed(name.to_string()));
         }
         let mut items: Frames = vec![];
+        if let Prepared::Port(blobs) = kind {
+            for (raw, payload) in blobs {
+                let k = crate::codec::logical_kind(*raw);
+                if k != kinds::BLOB_CHUNK && k != kinds::BLOB_MANIFEST {
+                    return Err(StoreError::Decode(format!(
+                        "{}: a blob frame of kind {k}",
+                        kind.name()
+                    )));
+                }
+                items.push((*raw, payload.clone()));
+            }
+        }
         let mut ids: Vec<Hash> = vec![];
         let mut seen: HashSet<Hash> = HashSet::new();
         for change in changes {
             self.refuse_projection(change)?;
-            if change.links.replayed_from.is_none() {
-                return Err(StoreError::Decode(
-                    "view_replay_prepared: a change is no replay".into(),
-                ));
+            if !kind.carries(change) {
+                return Err(StoreError::Decode(format!(
+                    "{}: a change is no {}",
+                    kind.name(),
+                    kind.what()
+                )));
             }
             for d in &change.deps {
                 if !seen.contains(d) && !self.has_kind(kinds::CHANGE, d)? {
@@ -981,7 +1021,8 @@ impl Store {
             let id = Hash::of(&item.1);
             if id != change.id() {
                 return Err(StoreError::Decode(format!(
-                    "view_replay_prepared: change {} encodes as {id}",
+                    "{}: change {} encodes as {id}",
+                    kind.name(),
                     change.id()
                 )));
             }
@@ -1046,6 +1087,39 @@ impl Store {
             }
         }
         Ok(false)
+    }
+}
+
+/// What a prepared include stores ([`Store::view_replay_prepared`],
+/// [`Store::view_port_prepared`]): replays, or ports with the blob frames they bring.
+#[derive(Clone, Copy)]
+enum Prepared<'a> {
+    Replay,
+    Port(&'a [(u8, Vec<u8>)]),
+}
+
+impl Prepared<'_> {
+    fn name(&self) -> &'static str {
+        match self {
+            Prepared::Replay => "view_replay_prepared",
+            Prepared::Port(_) => "view_port_prepared",
+        }
+    }
+
+    fn what(&self) -> &'static str {
+        match self {
+            Prepared::Replay => "replay",
+            Prepared::Port(_) => "port",
+        }
+    }
+
+    /// Whether `c` is the kind of change this include stores: a replay names its stored
+    /// source; a port names its source in `ported_from` and no stored source.
+    fn carries(&self, c: &Change) -> bool {
+        match self {
+            Prepared::Replay => c.links.replayed_from.is_some(),
+            Prepared::Port(_) => c.links.ported_from.is_some() && c.links.replayed_from.is_none(),
+        }
     }
 }
 

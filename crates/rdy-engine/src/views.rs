@@ -17,11 +17,13 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 pub(crate) mod own;
+pub mod port;
 pub(crate) mod replay;
 mod resolve;
 mod undo;
 
 pub use own::{OwnInfo, StaleClose};
+pub use port::{PortSource, read_source};
 pub use replay::{
     MAX_REPLAY_BYTES, MAX_REPLAY_CHANGES, MAX_REPLAY_OPS, ReplayResult, ReplayedChange,
     replay_order_for_tests,

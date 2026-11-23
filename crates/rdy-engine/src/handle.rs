@@ -149,6 +149,21 @@ impl Rdy {
         Rdy::open_with_policy(project, OpenPolicy::AutoUpgrade)
     }
 
+    /// Opens `project` as the source of a port (D-G4PZX), for reading only: its project files
+    /// are read as [`Rdy::open`] reads them, and its store opens through
+    /// `Store::open_source_read_only`. Nothing in the project changes: no start lock is taken
+    /// or created, and the store is never upgraded, reconciled or repaired. Every write through
+    /// the handle refuses with E_STORE_READ_ONLY. A holder is refused as [`Rdy::open`] refuses
+    /// it.
+    pub fn open_source_read_only(project: &Path) -> Result<Rdy, RdyError> {
+        let context = project_context(project)?;
+        let store = Store::open_source_read_only(&project.join(".rdy").join(layout::STORE_DIR))?;
+        if store.mode()? == StoreMode::Holder {
+            return Err(crate::holder::is_a_holder());
+        }
+        Rdy::from_store(project, store, context)
+    }
+
     /// Opens `project` as [`Rdy::open`] does, under `start`, the project's start lock, which the
     /// caller holds and keeps across the open (a daemon's start): the open and any upgrade it runs
     /// borrow the guard and never take that lock again. A guard of another project is `E_LOCKED`.

@@ -26,6 +26,13 @@ pub enum ViewCmd {
     Replay {
         /// The open view you own.
         view: String,
+        /// Port landed changes from another project on this machine, or from a dump of one:
+        /// the changes then name landings or changes on that project's canon.
+        #[arg(long, value_name = "PROJECT_OR_DUMP")]
+        from: Option<std::path::PathBuf>,
+        /// With --from: the briefing token of the target blocks (rdy brief).
+        #[arg(long, value_name = "TOKEN")]
+        brief: Option<String>,
         /// The changes to replay, from any view.
         #[arg(required = true, num_args = 1..)]
         changes: Vec<String>,
@@ -127,8 +134,22 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
         ViewCmd::Include { view, changes } => {
             json!({"op": "include", "view": view, "changes": changes})
         }
-        ViewCmd::Replay { view, changes } => {
-            json!({"op": "replay", "view": view, "changes": changes})
+        ViewCmd::Replay {
+            view,
+            from,
+            brief,
+            changes,
+        } => {
+            let mut v = json!({"op": "replay", "view": view, "changes": changes});
+            // the source path as this process sees it: the daemon runs elsewhere
+            if let Some(from) = from {
+                v["from"] = json!(source_path(from));
+            }
+            // a brief with no source reaches the dispatcher, which refuses it
+            if let Some(brief) = brief {
+                v["brief"] = json!(brief);
+            }
+            v
         }
         ViewCmd::Exclude {
             view,
@@ -177,6 +198,14 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
                 "relayed_by": relayed_by})
         }
     }
+}
+
+/// `path` made absolute against this process's working directory, as text.
+fn source_path(path: &std::path::Path) -> String {
+    std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// The `ViewRequest` JSON for `rdy undo`; no `view` means the session's own.
@@ -416,8 +445,11 @@ fn show_text(v: &Value, all: bool) -> String {
             short(text(&c["id"])),
             text(&c["actor"]),
             if message.is_empty() { "-" } else { message },
-            // a replay's nonce is its own: only a working-copy commit is marked
-            if c["client_nonce"].is_string() && c["replayed_from"].is_null() {
+            // a replay's or a port's nonce is its own: only a working-copy commit is marked
+            if c["client_nonce"].is_string()
+                && c["replayed_from"].is_null()
+                && c["ported_from"].is_null()
+            {
                 " [wc]"
             } else {
                 ""
@@ -426,6 +458,13 @@ fn show_text(v: &Value, all: bool) -> String {
         ));
         if let Some(source) = c["replayed_from"].as_str() {
             out.push_str(&format!(" replayed from {}", short(source)));
+        }
+        if let Some(change) = c["ported_from"]["change"].as_str() {
+            out.push_str(&format!(
+                " ported from {} {}",
+                text(&c["ported_from"]["repo_id"]),
+                short(change)
+            ));
         }
     }
     out.push_str("\nconflicts:");
@@ -730,6 +769,72 @@ mod tests {
             "{replayed}"
         );
         assert!(line(&"12".repeat(6)).contains("from files [wc]"), "{t}");
+    }
+
+    /// hpt4: a ported change is labelled by its source project and change, never `[wc]`.
+    #[test]
+    fn hpt4_a_ported_change_is_labelled_by_its_source() {
+        let mut d = detail(1);
+        d["changes"] = json!([
+            {"id": "cd".repeat(32), "actor": "human:qa", "run": null, "at_ms": 1,
+             "message": "edit the note", "blocks": ["c-00001"], "client_nonce": "port:0",
+             "replayed_from": null,
+             "ported_from": {"repo_id": "0a".repeat(16), "change": "ef".repeat(32)}}
+        ]);
+        let t = show_text(&d, false);
+        let line = t
+            .lines()
+            .find(|l| l.starts_with(&format!("  {}", "cd".repeat(6))))
+            .unwrap();
+        assert!(!line.contains("[wc]"), "{line}");
+        assert!(
+            line.ends_with(&format!(
+                "edit the note [c-00001] ported from {} {}",
+                "0a".repeat(16),
+                "ef".repeat(6)
+            )),
+            "{line}"
+        );
+    }
+
+    /// hpt4: `rdy view replay --from` sends the source as an absolute path, and `--brief` as
+    /// the briefing; without them the request is a plain replay's.
+    #[test]
+    fn hpt4_replay_from_sends_an_absolute_source_and_the_brief() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(subcommand)]
+            cmd: ViewCmd,
+        }
+        let parse = |args: &[&str]| {
+            let mut all = vec!["view"];
+            all.extend_from_slice(args);
+            args_of(&W::try_parse_from(all).unwrap().cmd)
+        };
+        let c = "ab".repeat(32);
+        let v = parse(&[
+            "replay",
+            "mine",
+            "--from",
+            "s.rdydump",
+            "--brief",
+            "tok",
+            &c,
+        ]);
+        let want = std::env::current_dir().unwrap().join("s.rdydump");
+        assert_eq!(
+            v,
+            json!({"op": "replay", "view": "mine", "changes": [c],
+                "from": want.to_string_lossy(), "brief": "tok"})
+        );
+        assert!(std::path::Path::new(v["from"].as_str().unwrap()).is_absolute());
+        let v = parse(&["replay", "mine", &c]);
+        assert_eq!(v, json!({"op": "replay", "view": "mine", "changes": [c]}));
+        // a brief alone reaches the dispatcher, which refuses it
+        let v = parse(&["replay", "mine", "--brief", "tok", &c]);
+        assert_eq!(v["brief"], "tok");
+        assert!(v.get("from").is_none());
     }
 
     /// Final-review fix round 1: a close op prints its reason, and `view ls --all` prints why

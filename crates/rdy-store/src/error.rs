@@ -112,6 +112,10 @@ pub enum StoreError {
         feature: String,
         required_rdy: String,
     },
+    /// A write through a store opened as a port's source (E_STORE_READ_ONLY,
+    /// `Store::open_source_read_only`).
+    #[error("this store was opened as a read-only port source")]
+    PortSource,
     /// A read-only open of a store with no lock file (E_STORE_READ_ONLY): the open never
     /// creates one in the source store.
     #[error("the read-only store has no lock file")]

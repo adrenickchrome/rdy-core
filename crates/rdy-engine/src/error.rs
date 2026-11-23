@@ -886,6 +886,11 @@ impl From<StoreError> for RdyError {
                 format!("store feature {feature} permits reads only"),
                 format!("open the project with rdy {required_rdy} or later to write"),
             ),
+            StoreError::PortSource => RdyError::new(
+                E_STORE_READ_ONLY,
+                "this store was opened as a read-only port source",
+                "open the target project for writes instead",
+            ),
             StoreError::ReadOnlyNoLock => RdyError::new(
                 E_STORE_READ_ONLY,
                 "the read-only store has no lock file",
