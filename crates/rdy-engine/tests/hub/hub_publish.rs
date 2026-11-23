@@ -2349,12 +2349,9 @@ fn upfast_a_bad_record_gives_a_new_push_id_and_the_record_is_private() {
     let e = env();
     let path = resume_file(&e);
     let first = stopped(&e, standard());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-    }
+    // Private as rdy makes a private file (on Unix, mode 0o600), read through the pio seam.
+    let privacy = pio::privacy(&fs::File::open(&path).unwrap()).unwrap();
+    assert!(privacy.mine && privacy.private, "{privacy:?}");
     let good: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     let mut bad_id = good.clone();
     bad_id["push"] = json!("NOT-A-PUSH-ID");

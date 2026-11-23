@@ -1503,8 +1503,9 @@ mod tests {
     use super::*;
     use crate::release_install::{MANIFEST_FILE, SIGNATURE_FILE, archive_name};
 
-    /// The crates.io packages the Windows release binary links (measured).
-    const WINDOWS_CRATES: usize = 201;
+    /// The crates.io packages the Windows release binary links (measured; 204 with the publish
+    /// body codec zstd, zstd-safe and zstd-sys).
+    const WINDOWS_CRATES: usize = 204;
 
     #[cfg(unix)]
     mod unix_tests;
@@ -1779,8 +1780,9 @@ mod tests {
             // bridge (hyper, hyper-util, atomic-waker, httpdate), plus the Markdown parser
             // (pulldown-cmark, unicase), plus the check-module interpreter (wasmi, wasmi_core,
             // wasmi_ir, wasmi_collections, wasmparser, libm; and spin, which Linux already
-            // links): macOS 203, Linux 201
-            let linked = if target == TARGETS[0] { 203 } else { 201 };
+            // links), plus the publish body codec (zstd, zstd-safe, zstd-sys; its build-only
+            // jobserver and pkg-config link nothing): macOS 206, Linux 204
+            let linked = if target == TARGETS[0] { 206 } else { 204 };
             assert_eq!(crates.len(), linked, "{target}: linked crates.io packages");
             for absent in [
                 // build-only and proc-macro (or proc-macro-only) packages
