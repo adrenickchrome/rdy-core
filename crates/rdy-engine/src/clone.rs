@@ -1001,7 +1001,19 @@ fn check_project(
 /// empty directory. A system that renames no directory onto an empty one (Windows) refuses the
 /// first rename: the empty target then goes, the rename runs again, and a failure makes the
 /// empty target again. On a failure the temporary directory goes and the target stays.
+///
+/// An entry at the target that is not a directory (a file, or a link of any kind) is refused
+/// before the rename, and the target stays as it is. Unix refuses that rename itself
+/// (`ENOTDIR`). Windows' rename (std calls `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`)
+/// replaces a file with the directory, so it would delete a file that the user put at the
+/// target after the destination check.
 pub(crate) fn install(tmp: tempfile::TempDir, target: &Path) -> Result<(), RdyError> {
+    if let Ok(meta) = std::fs::symlink_metadata(target)
+        && !meta.file_type().is_dir()
+    {
+        let e = std::io::Error::new(std::io::ErrorKind::NotADirectory, "not a directory");
+        return Err(io_at(target, &e));
+    }
     if let Err(first) = std::fs::rename(tmp.path(), target) {
         if !target.is_dir() {
             return Err(io_at(target, &first));

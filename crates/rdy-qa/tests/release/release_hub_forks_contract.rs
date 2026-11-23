@@ -441,7 +441,9 @@ fn ref_names(r: &Rdy, prefix: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether some file under `dir` holds `needle`.
+/// Whether some file under `dir` holds `needle`. Call it only on a closed store: an open store
+/// holds byte-range locks on its lock file and its index, and on Windows a read of a locked
+/// file fails (OS error 33), so a scan of an open store cannot read every file.
 fn bytes_hold(dir: &Path, needle: &[u8]) -> bool {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -587,7 +589,6 @@ struct Kept {
     tag_ids: Vec<Hash>,
     views: Vec<String>,
     other_refs: Vec<String>,
-    secret_stored: bool,
 }
 
 fn kept(r: &Rdy) -> Kept {
@@ -613,7 +614,6 @@ fn kept(r: &Rdy) -> Kept {
             .collect(),
         views: ref_names(r, "view/"),
         other_refs: other,
-        secret_stored: bytes_hold(&r.root().join(".rdy"), SECRET),
     }
 }
 
@@ -661,6 +661,8 @@ fn run_fork_probe() -> ForkProbe {
     let s = source();
     let to = s.at("f");
     let out = fork_at(&s.root(), "v1.0.0", &to).expect("a fork at v1.0.0");
+    // each secret scan runs on the closed store (see `bytes_hold`)
+    let mut secret_stored = bytes_hold(&to.join(".rdy"), SECRET);
     let mut f = Rdy::open(&to).expect("the fork");
     let first = kept(&f);
 
@@ -694,12 +696,14 @@ fn run_fork_probe() -> ForkProbe {
     let file = s.at("f.rdydump");
     f.read().dump(&file).expect("a dump");
     f.close().expect("a close");
+    secret_stored |= bytes_hold(&to.join(".rdy"), SECRET);
     let loaded_to = s.at("loaded");
     rdy_engine::load::load(&file, &loaded_to).expect("a load");
     let l = Rdy::open(&loaded_to).expect("the loaded fork");
     let loaded = kept(&l);
     l.close().expect("a close");
-    let removal_applied = !first.secret_stored && !reindexed.secret_stored && !loaded.secret_stored;
+    secret_stored |= bytes_hold(&loaded_to.join(".rdy"), SECRET);
+    let removal_applied = !secret_stored;
 
     // the refusals, each through the engine's own entry
     let r = Rdy::open(&s.root()).expect("a project");
