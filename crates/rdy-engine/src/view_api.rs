@@ -108,14 +108,11 @@ impl ViewRequest {
     /// The port source a replay names: `from` or `from_file`, never both. `brief` needs one.
     fn port_source(&self) -> Result<Option<&str>, RdyError> {
         match (self.from.as_deref(), self.from_file.as_deref()) {
-            (Some(_), Some(_)) => Err(needs(
-                "replay takes only one source",
-                "pass from or from_file, not both",
-            )),
+            (Some(_), Some(_)) => Err(needs(PORT_TWO_SOURCES_MESSAGE, PORT_TWO_SOURCES_FIX)),
             (Some(p), None) | (None, Some(p)) => Ok(Some(p)),
             (None, None) if self.brief.is_some() => Err(needs(
-                "replay without a source does not take brief",
-                "remove brief, or name a port source",
+                PORT_BRIEF_NO_SOURCE_MESSAGE,
+                PORT_BRIEF_NO_SOURCE_FIX,
             )),
             (None, None) => Ok(None),
         }
@@ -131,6 +128,16 @@ impl ViewRequest {
         }
     }
 }
+
+/// A replay that names both port sources (D-G4PZX).
+pub const PORT_TWO_SOURCES_MESSAGE: &str = "replay takes only one source";
+pub const PORT_TWO_SOURCES_FIX: &str = "pass from or from_file, not both";
+/// A replay with a briefing and no port source.
+pub const PORT_BRIEF_NO_SOURCE_MESSAGE: &str = "replay without a source does not take brief";
+pub const PORT_BRIEF_NO_SOURCE_FIX: &str = "remove brief, or name a port source";
+/// A port source field (`from` off fork, `from_file`, `brief`) on a view op other than replay.
+pub const PORT_SOURCE_FIELD_MESSAGE: &str = "<op> does not take <field>";
+pub const PORT_SOURCE_FIELD_FIX: &str = "use the source field only with replay";
 
 /// The view ops `run_view` knows.
 const VIEW_OPS: [&str; 12] = [
@@ -176,8 +183,10 @@ pub fn run_view(
         && let Some(field) = req.source_field_on(&req.op)
     {
         return Err(needs(
-            &format!("{} does not take {field}", req.op),
-            "use the source field only with replay",
+            &PORT_SOURCE_FIELD_MESSAGE
+                .replace("<op>", &req.op)
+                .replace("<field>", field),
+            PORT_SOURCE_FIELD_FIX,
         ));
     }
     let relays = req.relay() != RelayInput::default();

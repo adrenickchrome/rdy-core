@@ -888,8 +888,8 @@ impl From<StoreError> for RdyError {
             ),
             StoreError::PortSource => RdyError::new(
                 E_STORE_READ_ONLY,
-                "this store was opened as a read-only port source",
-                "open the target project for writes instead",
+                crate::views::port::PORT_SOURCE_WRITE_MESSAGE,
+                crate::views::port::PORT_SOURCE_WRITE_FIX,
             ),
             StoreError::ReadOnlyNoLock => RdyError::new(
                 E_STORE_READ_ONLY,

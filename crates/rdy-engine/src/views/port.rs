@@ -82,12 +82,21 @@ fn limit() -> RdyError {
     )
 }
 
+/// A selected source change that the source's canon does not carry.
+pub const PORT_NOT_LANDED_MESSAGE: &str = "change <hash> has not landed in <project>";
+pub const PORT_NOT_LANDED_FIX: &str = "land it there first, or replay it inside that project";
+/// A write through a source handle ([`Rdy::open_source_read_only`]).
+pub const PORT_SOURCE_WRITE_MESSAGE: &str = "this store was opened as a read-only port source";
+pub const PORT_SOURCE_WRITE_FIX: &str = "open the target project for writes instead";
+
 /// `E_BAD_INPUT`: a source change that the source's canon does not carry.
 fn not_landed(c: &Hash, project: &str) -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
-        format!("change {c} has not landed in {project}"),
-        "land it there first, or replay it inside that project",
+        PORT_NOT_LANDED_MESSAGE
+            .replace("<hash>", &c.to_string())
+            .replace("<project>", project),
+        PORT_NOT_LANDED_FIX,
     )
 }
 
