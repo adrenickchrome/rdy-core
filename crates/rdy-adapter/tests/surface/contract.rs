@@ -343,6 +343,8 @@ fn cra1_adapter_names(
 fn crb1_adapter_names(snap: &Snapshot) {
     let _: Result<rdy_adapter::Compare, RdyError> = snap.compare(Some("canon"), "canon");
     let _: Result<rdy_adapter::Diff, RdyError> = snap.diff(Some("canon"), "canon");
+    let _: Result<rdy_adapter::CompareSize, RdyError> =
+        snap.compare_size(Some("canon"), "canon", 1);
     let _: Option<(
         rdy_adapter::compare::Compare,
         rdy_adapter::compare::CompareEntry,
@@ -350,8 +352,10 @@ fn crb1_adapter_names(snap: &Snapshot) {
         rdy_adapter::compare::DiffChange,
         rdy_adapter::compare::DiffEntry,
         rdy_adapter::compare::DiffCounts,
+        rdy_adapter::compare::CompareSize,
     )> = None;
     let _: Option<(
+        rdy_adapter::CompareSize,
         rdy_adapter::CompareEntry,
         rdy_adapter::DiffChange,
         rdy_adapter::DiffEntry,

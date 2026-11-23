@@ -241,6 +241,59 @@ pub fn compare_states(a: &Materialized, b: &Materialized) -> Compare {
     out
 }
 
+/// Whether `x` and `y` differ in a field, the type, the body or the links: the blocks for which
+/// [`differing`] lists a name, without a position. A pure move differs in none of them.
+fn content_differs(x: &Block, y: &Block) -> bool {
+    x.fields != y.fields || x.block_type != y.block_type || x.body != y.body || x.links != y.links
+}
+
+/// How many rows [`compare_states`] lists for `a` against `b`, up to `limit`, and whether more
+/// rows exist past it. A moved and changed block is two rows, as `compare_states` lists it. The
+/// walk builds no entry, path or field name, merges the two sorted id lists lazily and ends at
+/// the first row past `limit`. The count is the limit when the second value is true.
+pub fn count_states(a: &Materialized, b: &Materialized, limit: usize) -> (usize, bool) {
+    let (mut left, mut right) = (a.ids().peekable(), b.ids().peekable());
+    let mut count = 0usize;
+    loop {
+        // the next id of either side, each once
+        let id: &BlockId = match (left.peek().copied(), right.peek().copied()) {
+            (None, None) => return (count, false),
+            (Some(l), None) => l,
+            (None, Some(r)) => r,
+            (Some(l), Some(r)) => l.min(r),
+        };
+        if left.peek().copied() == Some(id) {
+            left.next();
+        }
+        if right.peek().copied() == Some(id) {
+            right.next();
+        }
+        #[cfg(test)]
+        COUNT_VISITS.with(|n| n.set(n.get() + 1));
+        let rows = match (a.get(id), b.get(id)) {
+            (Some(_), None) | (None, Some(_)) => 1,
+            (Some(x), Some(y)) if a.version_of(id) != b.version_of(id) => {
+                if x.parent != y.parent {
+                    1 + usize::from(content_differs(x, y))
+                } else {
+                    1
+                }
+            }
+            _ => 0,
+        };
+        if rows > limit - count {
+            return (limit, true);
+        }
+        count += rows;
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many block ids [`count_states`] visited on this thread since a test last read it.
+    pub(crate) static COUNT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl ReadState {
     /// Every view (open ones only unless `all`), sorted by name. A view is idle when it is open
     /// and its last write is more than `idle_days` days before `now_ms`.
@@ -640,5 +693,106 @@ impl ReadState {
             out.conflicted.push(e);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdy_model::Op;
+
+    fn block(i: usize, parent: Option<usize>, body: &str) -> Block {
+        let id = |n: usize| BlockId::parse(&format!("c-{n:05}")).unwrap();
+        Block {
+            id: id(i),
+            block_type: "prose".to_string(),
+            parent: parent.map(id),
+            order: "a0".to_string(),
+            fields: BTreeMap::new(),
+            body: body.to_string(),
+            links: BTreeMap::new(),
+            pins: BTreeMap::new(),
+            foreign: Default::default(),
+            read_identity: None,
+        }
+    }
+
+    fn state(blocks: Vec<Block>) -> Materialized {
+        let ops: Vec<Op> = blocks
+            .into_iter()
+            .map(|block| Op::Create { block })
+            .collect();
+        Materialized::default().with(&ops)
+    }
+
+    fn visits() -> usize {
+        COUNT_VISITS.with(|n| n.replace(0))
+    }
+
+    /// The count of every row of `compare_states`, a moved and changed block twice.
+    fn rows(c: &Compare) -> usize {
+        c.added.len() + c.deleted.len() + c.changed.len() + c.moved.len() + c.conflicted.len()
+    }
+
+    #[test]
+    fn cs1_count_stops_early() {
+        // 300 blocks only in `a`, so every block is one added row
+        let a = state((1..=300).map(|i| block(i, None, "text")).collect());
+        let empty = Materialized::default();
+        assert_eq!(rows(&compare_states(&a, &empty)), 300);
+        visits();
+        assert_eq!(count_states(&a, &empty, usize::MAX), (300, false));
+        assert_eq!(visits(), 300, "the full walk visits every block");
+        // one past the limit ends the walk: it visits the limit and one block more
+        assert_eq!(count_states(&a, &empty, 1), (1, true));
+        assert_eq!(visits(), 2);
+        assert_eq!(count_states(&a, &empty, 0), (0, true));
+        assert_eq!(visits(), 1);
+        assert_eq!(count_states(&a, &empty, 299), (299, true));
+        assert_eq!(visits(), 300);
+        assert_eq!(count_states(&a, &empty, 300), (300, false));
+        assert_eq!(visits(), 300);
+        // the walk is lazy on both sides: deleted rows stop early too
+        assert_eq!(count_states(&empty, &a, 2), (2, true));
+        assert_eq!(visits(), 3);
+    }
+
+    #[test]
+    fn cs1_count_matches_compare_states_rows() {
+        // x: unchanged, y: changed, z: moved only, m: moved and changed, n: retyped and moved,
+        // gone: only in `b`, new: only in `a`
+        let p1 = block(1, None, "one");
+        let p2 = block(2, None, "two");
+        let old = state(vec![
+            p1.clone(),
+            p2.clone(),
+            block(10, Some(1), "x"),
+            block(11, Some(1), "y"),
+            block(12, Some(1), "z"),
+            block(13, Some(1), "m"),
+            block(14, Some(1), "n"),
+            block(15, Some(1), "gone"),
+        ]);
+        let mut n = block(14, Some(2), "n");
+        n.block_type = "note".to_string();
+        let new = state(vec![
+            p1,
+            p2,
+            block(10, Some(1), "x"),
+            block(11, Some(1), "y, edited"),
+            block(12, Some(2), "z"),
+            block(13, Some(2), "m, edited"),
+            n,
+            block(16, Some(1), "new"),
+        ]);
+        for (a, b) in [(&new, &old), (&old, &new), (&new, &new)] {
+            let want = rows(&compare_states(a, b));
+            for limit in 0..=want + 1 {
+                let got = count_states(a, b, limit);
+                assert_eq!(got, (want.min(limit), want > limit), "limit {limit}");
+            }
+        }
+        // new against old: changed y, m, n; moved z, m, n; added 16; deleted 15
+        assert_eq!(rows(&compare_states(&new, &old)), 8);
     }
 }

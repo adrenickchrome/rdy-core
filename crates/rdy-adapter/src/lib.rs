@@ -39,7 +39,9 @@ pub mod take;
 mod value;
 pub mod version_tests;
 
-pub use compare::{Compare, CompareEntry, Diff, DiffChange, DiffCounts, DiffEntry, DiffQuery};
+pub use compare::{
+    Compare, CompareEntry, CompareSize, Diff, DiffChange, DiffCounts, DiffEntry, DiffQuery,
+};
 pub use follower::Follower;
 pub use foreign_removal::{ForeignRemovalTaken, RemovalTaken};
 pub use landing_check::LandingCheck;
