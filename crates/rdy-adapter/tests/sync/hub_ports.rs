@@ -1600,5 +1600,173 @@ fn hpc3_foreign_bundle_bytes_roundtrip() {
     assert_eq!(pulled, source_ops);
     assert!(reader.refs_with_prefix("foreign/").unwrap().is_empty());
     drop(reader);
+    let writer = crate::hub_world::session(Role::Writer);
+    let approver = crate::hub_world::session(Role::Approver);
+    let p = c
+        .propose(&writer, "carry", "carry", Some("test summary"))
+        .unwrap();
+    // without the delivery: the existing triple, and no write
+    let before = c.store().log_end();
+    let e = c.land(&approver, &p.id).unwrap_err();
+    let short = &content_of(&x).to_string()[..12];
+    assert_eq!(
+        refusal(&e),
+        (
+            "E_FOREIGN_VERSION",
+            format!("core:d-FRGNX has no delivered version {short}").as_str(),
+            "wait for the delivery that holds it, or pin a delivered version: rdy_links {op: \"show\", alias} / rdy links show core"
+        )
+    );
+    assert_eq!(c.store().log_end(), before);
+    assert_eq!(c.read().canon_head(), Some(w.l_tip));
+    // the client project takes its own delivery; the same land succeeds
+    deliver(&mut c, &w.link, &x);
+    let landed: Hash = c.land(&approver, &p.id).unwrap().parse().unwrap();
+    let st = c.read();
+    assert_eq!(st.canon_head(), Some(landed));
+    let got = st
+        .materialized(&rdy_engine::Scope::Canon)
+        .unwrap()
+        .get(&rdy_model::BlockId::parse(&claim).unwrap())
+        .unwrap()
+        .clone();
+    drop(st);
+    let rdy_model::Op::Update { block: want, .. } = &source_ops[1][0] else {
+        unreachable!()
+    };
+    assert_eq!(&got, want, "the landed block holds the link and pin");
+    c.close().unwrap();
+}
+
+/// A plain pushed view (no port) whose foreign pin the client holds no delivery for: the land
+/// refuses with the existing triple and writes nothing (ruling task-3, ruling 2). The pin check
+/// is the land's own, apart from ports.
+#[test]
+fn hpc3_pushed_view_unheld_pin_refused_at_land() {
+    use rdy_engine::sync_fetch::{self, HubState};
+    use rdy_engine::sync_views::{self, ViewPullRequest};
+    use rdy_store::sync_state::{SyncCanon, SyncStep};
+    use rdy_store::take_batch::FetchTarget;
+    const URL: &str = "https://127.0.0.1:9/r/line";
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = lines();
+    let x = cited_x();
+    let (cd, qd) = (w.at("c"), w.at("q"));
+    let (pushed, served) = (w.at("pushed.rdysync"), w.at("served.rdysync"));
+    let (l_repo, l_tip, doc) = (w.l_repo, w.l_tip, w.doc.clone());
+    // Q, a copy of C, holds the delivery and writes a claim that pins the cited page
+    copy_dir(&cd, &qd);
+    let (head, root) = {
+        let mut q = Rdy::open(&qd).unwrap();
+        deliver(&mut q, &w.link, &x);
+        write_in(
+            &mut q,
+            "pin",
+            json!([{"op": "create", "type": "claim", "id": "$f", "parent": doc,
+                "body": "Per {{core:d-FRGNX}}.",
+                "links": {"describes": [{"target": "core:d-FRGNX"}]}}]),
+        );
+        let head = crate::hub_world::view_head_of(&q, "pin");
+        let mut root = head;
+        while let Some(prev) = q.store().reader().view_op(&root).unwrap().prev {
+            root = prev;
+        }
+        q.close().unwrap();
+        (head, root)
+    };
+    // Q pushes the view to L; L serves it
+    export(&qd, StreamPurpose::ViewHistory, head, None, &pushed);
+    let s = w.l.snapshot().unwrap();
+    let c = check(&s, &[&pushed]).unwrap();
+    let set = CanonMove::SetViewHead {
+        name: "pin".into(),
+        root,
+    };
+    assert_eq!(w.l.move_canon(&c, set, None).unwrap(), moved(head));
+    drop((s, c));
+    let snap = w.l.snapshot().unwrap();
+    snap.write_history(
+        StreamPurpose::ViewHistory,
+        head,
+        None,
+        &BTreeSet::<ObjectKey>::new(),
+        std::fs::File::create(&served).unwrap(),
+    )
+    .unwrap();
+    drop(snap);
+    w.m.close().unwrap();
+    w.l.close().unwrap();
+
+    // C (no delivery) fetches and pulls the pushed view
+    let mut c = Rdy::open(&cd).unwrap();
+    c.store_mut()
+        .write_sync(
+            "origin",
+            vec![SyncStep::Canon(SyncCanon {
+                repo_id: l_repo,
+                url: URL.into(),
+                fetched: Some(l_tip),
+                applied: Some(l_tip),
+                held: None,
+            })],
+        )
+        .unwrap();
+    sync_fetch::fetch(
+        &mut c,
+        &crate::hub_world::files(&[&served]),
+        &FetchTarget {
+            remote: "origin".into(),
+            url: URL.into(),
+            purpose: StreamPurpose::ViewHistory,
+            root: head,
+            view: Some("pin".into()),
+        },
+    )
+    .unwrap();
+    let person = rdy_engine::Session {
+        actor: PERSON.into(),
+        run: None,
+        role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
+    };
+    sync_views::pull_views(
+        &mut c,
+        &person,
+        &ViewPullRequest {
+            remote: "origin".into(),
+            hub: HubState {
+                repo_id: Some(l_repo),
+                canon: Some(l_tip),
+            },
+            views: vec![("pin".into(), Some(head))],
+            take: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        c.store()
+            .reader()
+            .refs_with_prefix("foreign/")
+            .unwrap()
+            .is_empty()
+    );
+    let writer = crate::hub_world::session(Role::Writer);
+    let approver = crate::hub_world::session(Role::Approver);
+    let p = c
+        .propose(&writer, "pin", "pin", Some("test summary"))
+        .unwrap();
+    let before = c.store().log_end();
+    let e = c.land(&approver, &p.id).unwrap_err();
+    let short = &content_of(&x).to_string()[..12];
+    assert_eq!(
+        refusal(&e),
+        (
+            "E_FOREIGN_VERSION",
+            format!("core:d-FRGNX has no delivered version {short}").as_str(),
+            "wait for the delivery that holds it, or pin a delivered version: rdy_links {op: \"show\", alias} / rdy links show core"
+        )
+    );
+    assert_eq!(c.store().log_end(), before, "no write");
+    assert_eq!(c.read().canon_head(), Some(l_tip));
     c.close().unwrap();
 }
