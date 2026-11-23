@@ -1,6 +1,6 @@
 //! cview1: `rdy view *` and `rdy undo`. The commands build one `ViewRequest` JSON for the ctl
 //! `view` op; the renderers turn the op's reply into text. `--json` prints the reply as it is.
-use crate::conn::{Env, call};
+use crate::conn::{Conn, Env, call, human_session};
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
 use serde_json::{Value, json};
@@ -30,7 +30,8 @@ pub enum ViewCmd {
         /// the changes then name landings or changes on that project's canon.
         #[arg(long, value_name = "PROJECT_OR_DUMP")]
         from: Option<std::path::PathBuf>,
-        /// With --from: the briefing token of the target blocks (rdy brief).
+        /// With --from: the briefing token of the target blocks (rdy brief). An agent session
+        /// needs one; the person's session briefs the target itself when it is left out.
         #[arg(long, value_name = "TOKEN")]
         brief: Option<String>,
         /// The changes to replay, from any view.
@@ -672,9 +673,73 @@ pub(crate) fn view(env: &Env, cmd: ViewCmd) -> Result<(Value, String), ErrorRepl
     {
         return Err(run_without_owner());
     }
-    let v = call(env, "view", args_of(&cmd))?;
+    let args = args_of(&cmd);
+    let v = match &cmd {
+        ViewCmd::Replay {
+            view,
+            from: Some(_),
+            brief: None,
+            ..
+        } if human_session(env)? => port_briefed(env, view, args)?,
+        _ => call(env, "view", args)?,
+    };
     let t = render_view(&cmd, &v);
     Ok((v, t))
+}
+
+/// A port by the person's session that cites no briefing (FW-E3, as a commit briefs itself):
+/// it briefs the target `view` on the port's own connection and cites that token. A briefing
+/// lives in the process that made it, so this works in a direct process too.
+///
+/// The first briefing covers the target's first top-level block: a port of drafts needs only a
+/// current briefing of the target. A port of stable content refuses with the blocks a briefing
+/// must cover; the session briefs those and ports once more. When the view cannot be read, or
+/// holds no block, the port goes without a briefing and refuses with its own rule.
+fn port_briefed(env: &Env, view: &str, args: Value) -> Result<Value, ErrorReply> {
+    let mut conn = Conn::open(env)?;
+    let out = port_with_own_briefing(&mut conn, view, args);
+    conn.close();
+    out
+}
+
+fn port_with_own_briefing(
+    conn: &mut Conn,
+    view: &str,
+    mut args: Value,
+) -> Result<Value, ErrorReply> {
+    let top = conn
+        .op("ls", json!({"scope": format!("view:{view}"), "depth": 0}))
+        .ok()
+        .and_then(|t| t[0]["id"].as_str().map(str::to_string));
+    let Some(top) = top else {
+        return conn.op("view", args);
+    };
+    args["brief"] = json!(own_token(conn, view, &[top])?);
+    match conn.op("view", args.clone()) {
+        Err(e) if e.code == rdy_engine::E_BRIEF_REQUIRED => {
+            let ids: Vec<String> = e
+                .extra
+                .get("briefing")
+                .and_then(|b| b["ids"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect();
+            if ids.is_empty() {
+                return Err(e);
+            }
+            args["brief"] = json!(own_token(conn, view, &ids)?);
+            conn.op("view", args)
+        }
+        out => out,
+    }
+}
+
+/// The token of a fresh briefing of `ids` in the write target `view`, registered on `conn`.
+/// `None` when the briefing carries none: the port then refuses as one that cites none.
+fn own_token(conn: &mut Conn, view: &str, ids: &[String]) -> Result<Option<String>, ErrorReply> {
+    let b = conn.op("brief", json!({"ids": ids, "view": view}))?;
+    Ok(b["base"]["token"].as_str().map(str::to_string))
 }
 
 #[cfg(test)]

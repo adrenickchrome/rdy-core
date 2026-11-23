@@ -2,15 +2,20 @@
 //! another project, or of a dump of one, into an open view. `rdy view replay <view> --from
 //! <project-or-dump> --brief <token> <change-or-landing>...` and `rdy_view {op: "replay",
 //! from | from_file, brief, changes}` go through the shared dispatcher and one port: the replies
-//! match, the source never changes, and a refusal writes nothing. A direct process (`--no-daemon`)
-//! holds no briefing of its own, so it refuses at the briefing, before any write.
+//! match, the source never changes, and a refusal writes nothing. The person's session may leave
+//! out `--brief`: it briefs the target itself on the port's connection, in a direct process
+//! (`--no-daemon`) too. An agent session without `--brief`, and a token from an earlier process,
+//! refuse at the briefing, before any write.
 use rdy_daemon::{OpContext, dispatch};
 use rdy_engine::clone::{CloneSource, clone};
 use rdy_engine::engine::Local;
 use rdy_engine::*;
+use rdy_model::BlockId;
 use rdy_qa::daemon::Served;
+use rdy_qa::edit_loop::brief_of;
 use rdy_qa::fixtures::*;
 use rdy_qa::mcp::{McpClient, Reply};
+use rdy_qa::tensions::j_typo;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,12 +37,13 @@ const REPLAY_KEYS: [&str; 10] = [
 ];
 
 /// The seed of the source line, which the target clones: a draft doc `notes` with claim `dc`
-/// and the sections `a` and `b`.
+/// and the sections `a` and `b`, and a stable doc `spec` with claim `c`.
 struct Seed {
     notes: String,
     dc: String,
     a: String,
     b: String,
+    c: String,
 }
 
 /// A served target, a closed source project and its dump.
@@ -60,17 +66,27 @@ fn world<L>(
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("s");
     let mut src = Rdy::init(&project, "rdy-standard").unwrap();
-    let w = write(
-        &mut src,
-        "seed",
-        json!([
-            {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
-            {"op": "create", "type": "claim", "id": "$dc", "parent": "$n", "body": "A draft note."},
-            {"op": "create", "type": "section", "id": "$a", "parent": "$n", "fields": {"title": "Section A"}},
-            {"op": "create", "type": "section", "id": "$b", "parent": "$n", "fields": {"title": "Section B"}}
-        ]),
-    )
-    .unwrap();
+    let w = src
+        .write_briefed(
+            &writer(),
+            WriteRequest {
+                view: "seed".into(),
+                ops: parse_test_ops(json!([
+                    {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+                    {"op": "create", "type": "claim", "id": "$dc", "parent": "$n", "body": "A draft note."},
+                    {"op": "create", "type": "section", "id": "$a", "parent": "$n", "fields": {"title": "Section A"}},
+                    {"op": "create", "type": "section", "id": "$b", "parent": "$n", "fields": {"title": "Section B"}},
+                    {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview", "lifecycle": "stable"}},
+                    {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Refunds"}},
+                    {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Refunds take five days."}
+                ]))
+                .unwrap(),
+                justification: j_typo(),
+                message: String::new(),
+            },
+            None,
+        )
+        .unwrap();
     land(&mut src, "seed").unwrap();
     let id = |k: &str| w.created[k].clone();
     let seed = Seed {
@@ -78,6 +94,7 @@ fn world<L>(
         dc: id("$dc"),
         a: id("$a"),
         b: id("$b"),
+        c: id("$c"),
     };
     let s = Served::seeded(|p| {
         clone(CloneSource::State(&src.read()), p, true).unwrap();
@@ -282,10 +299,16 @@ fn norm(v: &Value, view: &str, sources: &[(String, String)]) -> Value {
     }
 }
 
-/// The direct process: the daemon stops, and `rdy --no-daemon` ports into `view`. It refuses
-/// at the briefing, with no token and with the daemon's token alike, and writes nothing.
-fn direct_refuses(s: &Served, from: &Path, view: &str, daemon_token: &str, sel: &[String]) {
-    let before = show(s, view);
+/// The direct process: the daemon stops, and `rdy --no-daemon view replay <view> --from <from>`
+/// ports `sel` as `actor` (the person when `None`), citing `brief` when given.
+fn direct(
+    s: &Served,
+    actor: Option<&str>,
+    from: &Path,
+    view: &str,
+    brief: Option<&str>,
+    sel: &[String],
+) -> Result<Value, Value> {
     s.stop();
     let mut args = vec![
         "--json".to_string(),
@@ -296,14 +319,24 @@ fn direct_refuses(s: &Served, from: &Path, view: &str, daemon_token: &str, sel: 
         "--from".into(),
         path(from),
     ];
+    if let Some(b) = brief {
+        args.extend(["--brief".to_string(), b.to_string()]);
+    }
     args.extend(sel.iter().cloned());
-    let run = |args: &[String]| {
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let (ok, e) = cli(s, &args);
-        assert!(!ok, "{e}");
-        e
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (ok, v) = match actor {
+        Some(a) => s.json_as(a, Some(RUN), &args),
+        None => s.json(&args),
     };
-    let e = run(&args);
+    if ok { Ok(v) } else { Err(v) }
+}
+
+/// The direct process refuses at the briefing, before any write: an agent session that cites no
+/// briefing, into its own view `agent_view`; and the person, into `view`, citing the token of a
+/// briefing of `id` that an earlier process made.
+fn direct_refuses(s: &Served, from: &Path, agent_view: &str, view: &str, id: &str, sel: &[String]) {
+    let before = (show(s, agent_view), show(s, view));
+    let e = direct(s, Some(A), from, agent_view, None, sel).unwrap_err();
     assert_eq!(
         triple(&e),
         (
@@ -314,15 +347,18 @@ fn direct_refuses(s: &Served, from: &Path, view: &str, daemon_token: &str, sel: 
         "{}",
         from.display()
     );
-    args.splice(7..7, ["--brief".to_string(), daemon_token.to_string()]);
-    let e = run(&args);
+    s.stop();
+    let (ok, b) = s.json(&["--json", "--no-daemon", "brief", id]);
+    assert!(ok, "{b}");
+    let earlier = b["base"]["token"].as_str().unwrap().to_string();
+    let e = direct(s, None, from, view, Some(&earlier), sel).unwrap_err();
     assert_eq!(
         triple(&e),
         (
             "E_BRIEF_STALE",
             format!(
                 "the cited briefing {} is unknown: the daemon restarted, or the briefing was evicted",
-                &daemon_token[..8]
+                &earlier[..8]
             )
             .as_str(),
             "brief these blocks (rdy_brief) and retry with the token"
@@ -330,7 +366,11 @@ fn direct_refuses(s: &Served, from: &Path, view: &str, daemon_token: &str, sel: 
         "{}",
         from.display()
     );
-    assert_eq!(show(s, view), before, "nothing written");
+    assert_eq!(
+        (show(s, agent_view), show(s, view)),
+        before,
+        "nothing written"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -339,16 +379,30 @@ fn direct_refuses(s: &Served, from: &Path, view: &str, daemon_token: &str, sel: 
 #[test]
 fn hpc4_project_and_dump_parent_checks() {
     const CASES: [&str; 4] = ["missing", "clean", "conflicted", "loop"];
-    const SURFACES: [&str; 4] = ["cli-project", "cli-dump", "mcp-project", "mcp-dump"];
-    let views: Vec<String> = CASES
-        .iter()
-        .flat_map(|c| SURFACES.iter().map(move |s| format!("{c}-{s}")))
-        .chain(["direct".to_string()])
-        .collect();
-    let names: Vec<&str> = views.iter().map(String::as_str).collect();
+    // the agent's surfaces through the daemon, then the person's direct process
+    const SURFACES: [&str; 6] = [
+        "cli-project",
+        "cli-dump",
+        "mcp-project",
+        "mcp-dump",
+        "direct-project",
+        "direct-dump",
+    ];
+    let views = |direct: bool| -> Vec<String> {
+        CASES
+            .iter()
+            .flat_map(|c| SURFACES.iter().map(move |s| format!("{c}-{s}")))
+            .filter(|v| v.contains("-direct-") == direct)
+            .collect()
+    };
+    let (agent_views, person_views) = (views(false), views(true));
+    let names: Vec<&str> = agent_views.iter().map(String::as_str).collect();
     let (w, (sec, l2, l3, l4, l5)) = world(
         &names,
         |t, seed| {
+            for v in &person_views {
+                t.view_create(&writer(), v, None, false).unwrap();
+            }
             // the target retitles the notes doc its own way and puts b under a, on canon
             write(
                 t,
@@ -407,13 +461,16 @@ fn hpc4_project_and_dump_parent_checks() {
     let notes = w.seed.notes.clone();
     let (a, b) = (w.seed.a.clone(), w.seed.b.clone());
     let before_source = tree(&w.project);
-    let mut c = mcp(s);
-    let mut last = String::new();
+    let mut c = Some(mcp(s));
     for surface in SURFACES {
         let via = if surface.starts_with("cli") {
-            Via::Cli
+            Some(Via::Cli)
+        } else if surface.starts_with("mcp") {
+            Some(Via::Mcp)
         } else {
-            Via::Mcp
+            // the direct process opens the store itself: no daemon, no MCP session
+            c = None;
+            None
         };
         let from = if surface.ends_with("project") {
             &w.project
@@ -422,11 +479,16 @@ fn hpc4_project_and_dump_parent_checks() {
         };
         let mut run = |case: &str, sel: &[&String]| {
             let view = format!("{case}-{surface}");
-            let tok = token(&mut c, &view, &[&notes]);
-            last = tok.clone();
             let before = show(s, &view);
             let sel: Vec<String> = sel.iter().map(|x| x.to_string()).collect();
-            let out = port(s, &mut c, via, from, &view, &tok, &sel);
+            let out = match (via, c.as_mut()) {
+                (Some(via), Some(c)) => {
+                    let tok = token(c, &view, &[&notes]);
+                    port(s, c, via, from, &view, &tok, &sel)
+                }
+                // the person's session briefs the target itself
+                _ => direct(s, None, from, &view, None, &sel),
+            };
             if out.is_err() {
                 assert_eq!(show(s, &view), before, "{view}: a refusal writes nothing");
             }
@@ -476,11 +538,6 @@ fn hpc4_project_and_dump_parent_checks() {
             "{surface}: {e}"
         );
     }
-    drop(c);
-    // the direct process reaches the same port and refuses before any write
-    for from in [&w.project, &w.dump] {
-        direct_refuses(s, from, "direct", &last, std::slice::from_ref(&l3));
-    }
     same_tree(&before_source, &w.project);
 }
 
@@ -494,11 +551,22 @@ fn hpt4_local_and_dump_ports_match() {
         "cli-dump",
         "mcp-project",
         "mcp-dump",
-        "direct",
+        "agent-direct",
     ];
-    let (w, (repo, l2, l3, src)) = world(
+    // the person's views: through the daemon, through the direct process, and one refused
+    const PERSON: [&str; 4] = [
+        "person-daemon",
+        "direct-project",
+        "direct-dump",
+        "direct-refused",
+    ];
+    let (w, (repo, l2, l3, src, (l4, stable))) = world(
         &VIEWS,
-        |_, _| {},
+        |t, _| {
+            for v in PERSON {
+                t.view_create(&writer(), v, None, false).unwrap();
+            }
+        },
         |s, seed| {
             write(
                 s,
@@ -519,7 +587,32 @@ fn hpt4_local_and_dump_ports_match() {
             let l3 = land(s, "b").unwrap();
             let mut src = changes_of(s, &l2);
             src.extend(changes_of(s, &l3));
-            (s.read().repo_id().unwrap().to_string(), l2, l3, src)
+            // l4 edits stable content under the source's own briefing
+            let c = BlockId::parse(&seed.c).unwrap();
+            let tok = brief_of(s, &Scope::Canon, &[&c]).base.token;
+            s.write_briefed(
+                &writer(),
+                WriteRequest {
+                    view: "st".into(),
+                    ops: parse_test_ops(
+                        json!([{"op": "update", "id": seed.c, "body": "Refunds take three days."}]),
+                    )
+                    .unwrap(),
+                    justification: j_typo(),
+                    message: String::new(),
+                },
+                Some(tok),
+            )
+            .unwrap();
+            let l4 = land(s, "st").unwrap();
+            let stable = changes_of(s, &l4);
+            (
+                s.read().repo_id().unwrap().to_string(),
+                l2,
+                l3,
+                src,
+                (l4, stable),
+            )
         },
     );
     let s = &w.s;
@@ -536,15 +629,8 @@ fn hpt4_local_and_dump_ports_match() {
     // the later landing's change first, then both landings: oldest first, once each
     assert_eq!(src.len(), 2);
     let sel = vec![src[1].clone(), l2.clone(), l3.clone()];
-    for (view, via, from) in [
-        ("cli-project", Via::Cli, &w.project),
-        ("cli-dump", Via::Cli, &w.dump),
-        ("mcp-project", Via::Mcp, &w.project),
-        ("mcp-dump", Via::Mcp, &w.dump),
-    ] {
-        tok = token(&mut c, view, &[&w.seed.notes]);
-        let reply =
-            port(s, &mut c, via, from, view, &tok, &sel).unwrap_or_else(|e| panic!("{view}: {e}"));
+    // one reply, its show rows and its text label, for each port of `sel` into `view`
+    let mut check = |view: &str, reply: Value| {
         for key in REPLAY_KEYS {
             assert!(reply.get(key).is_some(), "{view}: no {key}: {reply}");
         }
@@ -587,14 +673,67 @@ fn hpt4_local_and_dump_ports_match() {
             assert!(!line.contains("[wc]"), "{line}");
         }
         replies.push(norm(&reply, view, &sources));
+    };
+    for (view, via, from) in [
+        ("cli-project", Via::Cli, &w.project),
+        ("cli-dump", Via::Cli, &w.dump),
+        ("mcp-project", Via::Mcp, &w.project),
+        ("mcp-dump", Via::Mcp, &w.dump),
+    ] {
+        tok = token(&mut c, view, &[&w.seed.notes]);
+        let reply =
+            port(s, &mut c, via, from, view, &tok, &sel).unwrap_or_else(|e| panic!("{view}: {e}"));
+        check(view, reply);
+    }
+    drop(c);
+    // the person's session cites no briefing: it briefs the target itself, through the daemon
+    let mut args = vec![
+        "--json".to_string(),
+        "view".into(),
+        "replay".into(),
+        "person-daemon".into(),
+        "--from".into(),
+        path(&w.project),
+    ];
+    args.extend(sel.iter().cloned());
+    let (ok, reply) = s.json(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(ok, "person-daemon: {reply}");
+    check("person-daemon", reply);
+    // and in the direct process, from a project and from a dump
+    for (view, from) in [("direct-project", &w.project), ("direct-dump", &w.dump)] {
+        let reply =
+            direct(s, None, from, view, None, &sel).unwrap_or_else(|e| panic!("{view}: {e}"));
+        check(view, reply);
     }
     // one shape and one result on every surface
+    assert_eq!(replies.len(), 7);
     for r in &replies[1..] {
         assert_eq!(r, &replies[0]);
     }
-    drop(c);
-    direct_refuses(s, &w.project, "direct", &tok, std::slice::from_ref(&l2));
-    direct_refuses(s, &w.dump, "direct", &tok, std::slice::from_ref(&l2));
+    // a port of stable content: the person's session briefs the blocks the port names
+    for (view, from) in [("direct-project", &w.project), ("direct-dump", &w.dump)] {
+        let reply = direct(s, None, from, view, None, std::slice::from_ref(&l4))
+            .unwrap_or_else(|e| panic!("{view} stable: {e}"));
+        let sources: Vec<&str> = reply["replayed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["source"].as_str().unwrap())
+            .collect();
+        assert_eq!(sources, stable, "{view}: {reply}");
+        assert_eq!(reply["conflicts"], json!([]), "{view}: {reply}");
+    }
+    // the direct process refuses at the briefing without one it can use, before any write
+    for from in [&w.project, &w.dump] {
+        direct_refuses(
+            s,
+            from,
+            "agent-direct",
+            "direct-refused",
+            &w.seed.notes,
+            std::slice::from_ref(&l2),
+        );
+    }
     // the source and its dump did not change
     same_tree(&before_source, &w.project);
     assert_eq!(std::fs::read(&w.dump).unwrap(), dump_bytes);
