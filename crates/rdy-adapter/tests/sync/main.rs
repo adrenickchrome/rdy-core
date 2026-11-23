@@ -9,6 +9,7 @@ mod follower_seed;
 mod fork_at;
 mod hub_compare;
 mod hub_contract;
+mod hub_ports;
 mod hub_renders;
 mod hub_scopes;
 mod hub_tests;

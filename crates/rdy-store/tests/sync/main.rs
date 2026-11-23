@@ -20,6 +20,7 @@ mod foreign_verdicts;
 mod fork_origins;
 mod holder;
 mod hub_canon;
+mod hub_ports;
 mod ingest_chain;
 mod link_delivery_stream;
 mod port_merge;

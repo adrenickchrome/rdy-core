@@ -27,6 +27,7 @@ mod load_chain_scan;
 mod markdown_import_files;
 mod markdown_import_parse;
 mod port_bundle;
+mod port_hub;
 mod port_prepare;
 mod reconstructed;
 mod replay;

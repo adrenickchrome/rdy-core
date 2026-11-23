@@ -7,6 +7,11 @@
 //! the snapshot is refused. The chains are newest first and bounded at 100000 landings. Many
 //! landings by hash are read in one walk of one snapshot (`landings`), never one call per hash.
 //! No trust verdict is computed, and no current gate policy or assurance is recomputed.
+//!
+//! A landing's facts list each ported change with its source (`LandingFacts::ported_changes`,
+//! [`PortedChangeFact`]): the source repo and change, in landing order. A ported change with no
+//! op is listed too. A replay of a port keeps its source, so pull replays, landings and removal
+//! projections keep these pairs. The field is read as stored: no replay ancestry is walked.
 
 use crate::store::{Snapshot, StoreHandle};
 use crate::sync::CheckedQuarantine;
@@ -17,13 +22,13 @@ use std::collections::HashMap;
 
 pub use rdy_engine::history_facts::{
     BlockOp, BlockWrite, DisputeFacts, LandingFacts, LandingPlace, LandingPlaceFact,
-    ObjectPresence, SignatureFact,
+    ObjectPresence, PortedChangeFact, SignatureFact,
 };
 pub use rdy_model::dispute::{Dispute, DisputeOutcome, DisputeResolution};
 pub use rdy_model::signature::Signature;
 pub use rdy_model::{
-    ActorRun, AltChoice, ApprovalEvidence, Assurance, EvidenceKind, LandingRecord, Provenance,
-    RelayEvidence, Role,
+    ActorRun, AltChoice, ApprovalEvidence, Assurance, EvidenceKind, LandingRecord, PortedFrom,
+    Provenance, RelayEvidence, Role,
 };
 pub use rdy_store::object_refs::ObjectKey;
 

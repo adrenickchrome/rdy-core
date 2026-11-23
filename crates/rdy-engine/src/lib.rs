@@ -103,6 +103,7 @@ pub mod plan;
 pub mod policy;
 pub mod policy_verdict;
 pub mod port;
+pub mod port_hub;
 pub mod port_wire;
 pub mod proposal_show;
 pub mod publication;

@@ -643,3 +643,77 @@ fn hfp4_adapter_hidden_list_has_the_json_form() {
         serde_json::json!({"docs": 0, "blocks": 0, "rows": [], "omitted_rows": 0})
     );
 }
+
+/// hpt3 (D-A3H7S): a hub carries a port with the adapter's own names alone: the two calls,
+/// the bundle and its facts, the outcome and the landing provenance facts.
+#[test]
+fn hpt3_adapter_consumer_needs_only_adapter() {
+    use rdy_adapter::history::{LandingFacts, PortedChangeFact};
+    use rdy_adapter::port::{
+        PortBundle, PortBundleFacts, PortLandingFacts, PortOutcome, PortedChange, PortedFrom,
+        PortedView,
+    };
+    let make: fn(&Snapshot, &[Hash]) -> Result<PortBundle, RdyError> = Snapshot::port_bundle;
+    let take: fn(&StoreHandle, &PortBundle, &str, &str) -> Result<PortOutcome, RdyError> =
+        StoreHandle::port_into_view;
+    let to_bytes: fn(&PortBundle) -> &[u8] = PortBundle::to_bytes;
+    let from_bytes: fn(&[u8]) -> Result<PortBundle, RdyError> = PortBundle::from_bytes;
+    let facts: fn(&PortBundle) -> &PortBundleFacts = PortBundle::facts;
+    let _ = (to_bytes, facts);
+    fn fields(f: &PortBundleFacts, l: &PortLandingFacts, v: &PortedView, c: &PortedChange) {
+        let _: (
+            &RepoId,
+            &Vec<RepoId>,
+            &Vec<PortLandingFacts>,
+            usize,
+            usize,
+            &Hash,
+        ) = (
+            &f.source,
+            &f.fork_origins,
+            &f.landings,
+            f.changes,
+            f.bytes,
+            &f.bundle_hash,
+        );
+        let _: (&Hash, &Vec<Hash>) = (&l.landing, &l.changes);
+        let _: (
+            &String,
+            &Hash,
+            &Hash,
+            &Hash,
+            &Vec<PortedChange>,
+            &Vec<BlockId>,
+        ) = (&v.view, &v.root, &v.head, &v.base, &v.ported, &v.conflicts);
+        let from: &PortedFrom = &c.source;
+        let _: (&RepoId, &Hash, &Hash) = (&from.repo_id, &from.change, &c.change);
+    }
+    fn provenance(f: &LandingFacts) -> Vec<(Hash, PortedFrom)> {
+        f.ported_changes
+            .iter()
+            .map(|p: &PortedChangeFact| (p.change, p.ported_from))
+            .collect()
+    }
+    let _ = (fields, provenance);
+    let behind = PortOutcome::Behind { head: None };
+    assert!(matches!(behind, PortOutcome::Behind { head: None }));
+
+    // a project answers through the same types: it is not a holder
+    let dir = project();
+    let handle: StoreHandle = open(dir.path()).unwrap();
+    let snap: Snapshot = handle.snapshot().unwrap();
+    let e: RdyError = make(&snap, &[]).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_BAD_INPUT",
+            "a hub port needs a holder",
+            "open the line's hub store"
+        )
+    );
+    let e: RdyError = from_bytes(b"not a bundle").unwrap_err();
+    assert_eq!(e.message, "the port bundle does not verify");
+    let _ = take;
+    drop(snap);
+    handle.close().unwrap();
+}
