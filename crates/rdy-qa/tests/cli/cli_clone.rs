@@ -454,7 +454,7 @@ fn hfp3_at_refusals_match_on_all_surfaces() {
         want: (&'static str, Option<String>, Option<String>),
     }
     let own = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-    let rows = vec![
+    let rows = [
         Row {
             cli: own(&[&src, &to_arg, "--at", "v1.0.0"]),
             mcp: json!({"dir": &to_arg, "at": "v1.0.0"}),
