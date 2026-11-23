@@ -330,6 +330,16 @@ fn hpt1_feature_appears_in_the_first_committed_port_batch() {
         format::read_format_file(&dir).unwrap(),
         Some(baseline_features())
     );
+    // a valid port whose append fails also writes nothing and turns nothing on
+    s.fail_next_append_after(40);
+    s.commit_to_view("work", plain_port("c-00001")).unwrap_err();
+    assert_eq!(s.log_end(), end);
+    assert!(!log_manifest(&s).has(FEATURE_PORTED_CHANGE));
+    assert!(!s.has_feature_now(FEATURE_PORTED_CHANGE));
+    assert_eq!(
+        format::read_format_file(&dir).unwrap(),
+        Some(baseline_features())
+    );
     // the first committed port turns it on in its own sealed batch, and FORMAT mirrors it
     let p = plain_port("c-00001");
     let item = codec::item(kinds::CHANGE, &p).unwrap();
