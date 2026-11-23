@@ -2765,6 +2765,38 @@ fn compressible(n: usize) -> Vec<u8> {
         .collect()
 }
 
+/// zw1: the hub refuses a zstd frame whose window is over 8 MiB (window log 23), so a put body
+/// of more than 8 MiB must still decode with the window capped at 23 bits.
+#[test]
+fn zw1_a_large_put_body_keeps_the_zstd_window_at_8_mib_or_less() {
+    use std::io::{Read, Seek, SeekFrom};
+    let len: usize = 15 * 1024 * 1024;
+    assert!(len > 8 * 1024 * 1024);
+    assert!(len as u64 <= rdy_engine::hub_http::MAX_UPLOAD_BODY_BYTES);
+    // Non-repeating bytes from a 16-symbol alphabet: no long matches, but a frame still smaller
+    // than the body, so the wire sends the frame.
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let plain: Vec<u8> = (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 32) as u8 & 0x0f
+        })
+        .collect();
+    let (mut file, n, encoding) =
+        rdy_engine::hub_http::zstd_frame(&mut Cursor::new(&plain), len as u64).unwrap();
+    assert_eq!(encoding, rdy_engine::hub_http::BodyEncoding::Zstd);
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut dec = zstd::stream::read::Decoder::new(&mut file).unwrap();
+    dec.window_log_max(23).unwrap();
+    let mut out = Vec::with_capacity(len);
+    dec.read_to_end(&mut out)
+        .expect("the frame decodes with the window capped at 8 MiB");
+    assert_eq!(out.len(), len);
+    assert!(n < len as u64);
+}
+
 /// The state reply's `zstd` member: true says the hub takes zstd bodies; false or absent says
 /// it does not; any other value is outside the contract.
 #[test]
