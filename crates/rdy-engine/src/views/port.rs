@@ -100,18 +100,22 @@ fn not_owned() -> RdyError {
     )
 }
 
+/// Tests only: what [`on_staging_for_tests`] installs.
+#[cfg(feature = "test-support")]
+type StagingHook = Box<dyn FnMut(&Path)>;
+
 #[cfg(feature = "test-support")]
 thread_local! {
     /// Tests only: called with each staging directory a dump port makes on this thread.
-    static ON_STAGING: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+    static ON_STAGING: std::cell::RefCell<Option<StagingHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Tests only: `hook` runs with the path of each staging directory a dump port makes on this
-/// thread, once the dump has loaded there.
+/// thread, after the load, whether the load succeeded or not, and before the directory goes.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub fn on_staging_for_tests(hook: Box<dyn FnMut(&Path)>) {
+pub fn on_staging_for_tests(hook: StagingHook) {
     ON_STAGING.with(|h| *h.borrow_mut() = Some(hook));
 }
 
