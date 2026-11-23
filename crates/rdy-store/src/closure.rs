@@ -764,9 +764,23 @@ impl ObjectSource for StoreSource<'_> {
                 Ok(None) => return Err(err(StoreError::corrupt_at(loc))),
                 Err(e) => return Err(err(StoreError::Io(e))),
             };
-            let encoding = crate::dump::dropped_encoding(raw).map_err(|_| {
+            let unknown = || {
                 StreamError::bad_record(0, 0, Reason::UnknownEncodingVersion).with_object(Some(key))
-            })?;
+            };
+            let mut encoding = crate::dump::dropped_encoding(raw).map_err(|_| unknown())?;
+            // a marked removed change has the encoding its residue records (a foreign change 2,
+            // a port 3 or 4): the header's marker alone does not tell them apart
+            if encoding != 0
+                && let Some(r) = s.span.residue
+            {
+                let residue: rdy_model::redaction::RedactionResidue = self
+                    .reader
+                    .get_typed(kinds::REDACTION_RESIDUE, &r)
+                    .map_err(err)?;
+                encoding = crate::redaction::source_encoding(&residue)
+                    .filter(|e| *e != 0)
+                    .ok_or_else(unknown)?;
+            }
             return Ok(Some(StreamRecord::Dropped {
                 key,
                 encoding,

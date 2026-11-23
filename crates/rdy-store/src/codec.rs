@@ -43,6 +43,12 @@
 //! `SemanticTensionV1`, `AssessmentV2`, `crate::transition::TransitionsV1`) read every encoding
 //! of their kind.
 //!
+//! Hub ports (store feature `ported_change`) register three more encodings ([`PORT_ENCODINGS`]),
+//! also chosen by value: CHANGE 3 for a port, CHANGE 4 for a port that embeds a block with a
+//! foreign part, and REDACTION_RESIDUE 2 for the residue of a removed port. A reader holds each
+//! frame to its value's own encoding (`Change::encoding`, `RedactionResidue::encoding`). These
+//! are not optional encodings: the repo-links rule ([`OPTIONAL`]) stays the foreign copy's.
+//!
 //! A typed read of a CHANGE or a LANDING keeps the identity of its frame
 //! (`Change::read_identity`, `LandingRecord::read_identity`). [`encode`] writes such a stored read
 //! in its own encoding and refuses it when its bytes do not hash to the identity: a caller that
@@ -53,9 +59,11 @@ use crate::kinds;
 use crate::transition::{Transitions, TransitionsV1};
 use rdy_model::assessment::{Assessment, AssessmentV2};
 use rdy_model::encoding::{
-    ANSWER_FOREIGN_ENCODING, ASSESSMENT_FOREIGN_ENCODING, BLOCK_FOREIGN_ENCODING,
-    CHANGE_FOREIGN_ENCODING, EncodedIdentity, ForeignBlockV1, ForeignChangeV2, LegacyChangeV0,
-    LegacyLandingV0, LegacyRedactionResidueV0, PAIR_FOREIGN_ENCODING, REDACTION_FOREIGN_ENCODING,
+    ANSWER_FOREIGN_ENCODING, ASSESSMENT_FOREIGN_ENCODING, BLOCK_FOREIGN_ENCODING, CHANGE_ENCODING,
+    CHANGE_FOREIGN_ENCODING, CHANGE_PORT_ENCODING, CHANGE_PORT_FOREIGN_ENCODING, EncodedIdentity,
+    ForeignBlockV1, ForeignChangeV2, LegacyChangeV0, LegacyLandingV0, LegacyRedactionResidueV0,
+    PAIR_FOREIGN_ENCODING, PortChangeV3, PortForeignChangeV4, PortResidueV2,
+    REDACTION_FOREIGN_ENCODING, RESIDUE_ENCODING, RESIDUE_PORT_ENCODING,
     TRANSITION_FOREIGN_ENCODING, encoded_hash,
 };
 use rdy_model::redaction::{Redaction, RedactionResidue};
@@ -191,15 +199,35 @@ pub const OPTIONAL: &[(u8, u16)] = &[
     (kinds::ASSESSMENT, ASSESSMENT_FOREIGN_ENCODING),
 ];
 
+/// The port encodings (store feature `ported_change`): (logical kind, version). A value takes one
+/// only when its own value chooses it (`Change::encoding`, `RedactionResidue::encoding`). A frame
+/// of one needs `ported_change` (`crate::format::required_features`); CHANGE 4 also needs
+/// `foreign_copy`.
+pub const PORT_ENCODINGS: &[(u8, u16)] = &[
+    (kinds::CHANGE, CHANGE_PORT_ENCODING),
+    (kinds::CHANGE, CHANGE_PORT_FOREIGN_ENCODING),
+    (kinds::REDACTION_RESIDUE, RESIDUE_PORT_ENCODING),
+];
+
+/// Whether `version` of logical kind `kind` is a port encoding ([`PORT_ENCODINGS`]).
+pub fn is_port_encoding(kind: u8, version: u16) -> bool {
+    PORT_ENCODINGS.contains(&(kind, version))
+}
+
 /// The optional encoding of logical kind `kind` ([`OPTIONAL`]), if it has one.
 pub fn optional(kind: u8) -> Option<u16> {
     OPTIONAL.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
 }
 
-/// The newest encoding of logical kind `kind` that this rdy reads: its latest encoding or its
-/// optional one, whichever is higher. A frame of a higher version is an unknown encoding.
+/// The newest encoding of logical kind `kind` that this rdy reads: the highest of its latest
+/// encoding, its optional one and its port ones ([`PORT_ENCODINGS`]). A frame of a higher
+/// version is an unknown encoding.
 pub fn newest(kind: u8) -> u16 {
-    latest(kind).max(optional(kind).unwrap_or(0))
+    PORT_ENCODINGS
+        .iter()
+        .filter(|(k, _)| *k == kind)
+        .map(|(_, v)| *v)
+        .fold(latest(kind).max(optional(kind).unwrap_or(0)), u16::max)
 }
 
 /// The first encoding of logical kind `kind`: 1 for a kind registered after encodings existed
@@ -253,7 +281,7 @@ fn is_test_version(kind: u8, version: u16) -> bool {
 
 /// Splits a stored frame: an unmarked raw kind is encoding 0 and its whole payload; a marked one
 /// needs its two version bytes (`Decode`), a nonzero version (`NoncanonicalVersion`) that its
-/// kind registers, latest or optional (`UnknownVersion`), and a kind that may be versioned
+/// kind registers, latest, optional or port (`UnknownVersion`), and a kind that may be versioned
 /// (`Kind`).
 pub fn split(kind: u8, payload: &[u8]) -> Result<ObjectBytes<'_>, RecordError> {
     if kind & VERSIONED == 0 {
@@ -336,25 +364,17 @@ fn mismatch() -> StoreError {
     StoreError::Refused(IDENTITY_MISMATCH.into())
 }
 
-/// The body of change `c` in encoding `version`: the frozen encoding-0 shape, the current
-/// shape (encoding 1, a change that embeds no foreign block), or the foreign shape (encoding 2,
-/// a change that embeds one). A change with no form in `version` is the mismatch refusal.
+/// The body of change `c` in encoding `version`: the frozen encoding-0 shape, or the one shape of
+/// encodings 1 to 4 that `c` chooses by its value (`rdy_model::encoding::change_body`). A change
+/// with no form in `version` is the mismatch refusal.
 fn change_body(c: &Change, version: u16) -> Result<Vec<u8>, StoreError> {
-    match version {
-        0 => Ok(postcard_of(
-            &LegacyChangeV0::from_current(c).ok_or_else(mismatch)?,
-        )),
-        CHANGE_FOREIGN_ENCODING if c.embeds_foreign() => Ok(postcard_of(&ForeignChangeV2::of(c))),
-        CHANGE_FOREIGN_ENCODING => Err(mismatch()),
-        _ if c.embeds_foreign() => Err(mismatch()),
-        _ => Ok(postcard_of(c)),
-    }
+    rdy_model::encoding::change_body(c, version).ok_or_else(mismatch)
 }
 
 /// The encoding and body of a new `value` whose body is not its own postcard encoding in its
 /// kind's latest encoding: a value with a shape that needs its kind's optional encoding
-/// ([`OPTIONAL`]), or a registered wire value with no such shape, written in its runtime form.
-/// None for every other value.
+/// ([`OPTIONAL`]), a port or a port's residue ([`PORT_ENCODINGS`]), or a registered wire value
+/// with no such shape, written in its runtime form. None for every other value.
 fn shaped_body<T: Serialize + 'static>(kind: u8, value: &T) -> Option<(u16, Vec<u8>)> {
     let any: &dyn Any = value;
     let local = latest(kind);
@@ -363,12 +383,16 @@ fn shaped_body<T: Serialize + 'static>(kind: u8, value: &T) -> Option<(u16, Vec<
             .then(|| (BLOCK_FOREIGN_ENCODING, postcard_of(&ForeignBlockV1::of(b))));
     }
     if let Some(c) = as_change(any) {
-        return c.embeds_foreign().then(|| {
-            (
-                CHANGE_FOREIGN_ENCODING,
-                postcard_of(&ForeignChangeV2::of(c)),
-            )
+        // a foreign change takes the optional encoding, a port a port encoding
+        let version = c.encoding();
+        return (version != CHANGE_ENCODING).then(|| {
+            let body = rdy_model::encoding::change_body(c, version)
+                .expect("a change has a form in the encoding it chooses");
+            (version, body)
         });
+    }
+    if let Some(r) = any.downcast_ref::<RedactionResidue>() {
+        return PortResidueV2::of(r).map(|p| (RESIDUE_PORT_ENCODING, postcard_of(&p)));
     }
     if let Some(a) = any.downcast_ref::<Answer>() {
         return a
@@ -518,10 +542,14 @@ fn landing_body(l: &LandingRecord, version: u16) -> Result<Vec<u8>, StoreError> 
 }
 
 /// The body of residue `r` in encoding `version`: encoding 0 is the frozen shape, which has no
-/// source encoding and no encoding-1 link option. `None` when `r` has no form there.
+/// source encoding and no encoding-1 link option. From encoding 1 on, `r` has a form only in the
+/// encoding its value chooses (`RedactionResidue::encoding`): 1 for every residue but a port's,
+/// 2 ([`PortResidueV2`]) for a port's. `None` when `r` has no form there.
 pub fn residue_body(r: &RedactionResidue, version: u16) -> Option<Vec<u8>> {
     match version {
         0 => LegacyRedactionResidueV0::from_current(r).map(|v| postcard_of(&v)),
+        RESIDUE_PORT_ENCODING => PortResidueV2::of(r).map(|p| postcard_of(&p)),
+        _ if r.encoding() != RESIDUE_ENCODING => None,
         _ => Some(postcard_of(r)),
     }
 }
@@ -791,24 +819,31 @@ fn body_of<T: DeserializeOwned + 'static>(
     let wrong = BodyError::Record(RecordError::Kind);
     match (o.kind, o.version) {
         (kinds::CHANGE, version) => {
-            let c = if version == 0 {
-                reader
+            let c = match version {
+                0 => reader
                     .read::<LegacyChangeV0>(o.body)?
-                    .into_current(identity())
-            } else if version == CHANGE_FOREIGN_ENCODING {
-                // encoding 2 embeds a foreign block; a change that embeds none is encoding 1
-                let c = reader
+                    .into_current(identity()),
+                // encoding 2 embeds a foreign block, 3 is a port, 4 a port that embeds one
+                CHANGE_FOREIGN_ENCODING => reader
                     .read::<ForeignChangeV2>(o.body)?
-                    .into_current(identity());
-                if !c.embeds_foreign() {
-                    return Err(BodyError::Record(RecordError::Decode));
+                    .into_current(identity()),
+                CHANGE_PORT_ENCODING => reader
+                    .read::<PortChangeV3>(o.body)?
+                    .into_current(identity()),
+                CHANGE_PORT_FOREIGN_ENCODING => reader
+                    .read::<PortForeignChangeV4>(o.body)?
+                    .into_current(identity()),
+                _ => {
+                    let mut c: Change = reader.read(o.body)?;
+                    c.read_identity = Some(ChangeReadIdentity::Stored(identity()));
+                    c
                 }
-                c
-            } else {
-                let mut c: Change = reader.read(o.body)?;
-                c.read_identity = Some(ChangeReadIdentity::Stored(identity()));
-                c
             };
+            // each encoding from 1 on holds only the values that choose it: a change that
+            // embeds no foreign block is never encoding 2, an unported one never 3 or 4
+            if version >= CHANGE_ENCODING && c.encoding() != version {
+                return Err(BodyError::Record(RecordError::Decode));
+            }
             cast(c).ok_or(wrong)
         }
         (kinds::LANDING, version) => {
@@ -829,6 +864,18 @@ fn body_of<T: DeserializeOwned + 'static>(
                 .into_current(),
         )
         .ok_or(wrong),
+        (kinds::REDACTION_RESIDUE, version) => {
+            let r = if version == RESIDUE_PORT_ENCODING {
+                reader.read::<PortResidueV2>(o.body)?.into_current()
+            } else {
+                reader.read::<RedactionResidue>(o.body)?
+            };
+            // encoding 2 holds only a port's residue, encoding 1 never one
+            if r.encoding() != version {
+                return Err(BodyError::Record(RecordError::Decode));
+            }
+            cast(r).ok_or(wrong)
+        }
         (kinds::BLOCK, _) => shaped::<Block, ForeignBlockV1, T>(
             o,
             reader,

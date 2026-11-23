@@ -357,6 +357,7 @@ fn replayed_changes(
                 imported_by: None,
                 replayed_from: Some(*c),
                 briefing: src.links.briefing,
+                ported_from: src.links.ported_from,
             },
             read_identity: None,
         };

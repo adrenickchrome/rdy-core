@@ -1129,11 +1129,17 @@ pub(crate) fn compute_excluding(
                     } else {
                         RedactionResidue::Change(ChangeResidue::of(&reader.change(&f.hash)?))
                     };
-                    // the residue's id is its frame's hash in the latest encoding, as the
-                    // store writes it (`rdy_store::codec`)
-                    let body = encode_into(&r, &mut buf).map_err(|_| over(limit::RECORD))?;
+                    // the residue's id is its frame's hash in the encoding its value chooses
+                    // (2 for a port's residue), as the store writes it (`rdy_store::codec`)
+                    let body = r.body_into(&mut buf).map_err(|_| over(limit::RECORD))?;
                     let id = Hash::of(
-                        &rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, body.to_vec()).1,
+                        &rdy_store::codec::frame(
+                            kinds::REDACTION_RESIDUE,
+                            r.encoding(),
+                            body.to_vec(),
+                        )
+                        .expect("a residue frames in the encoding it chooses")
+                        .1,
                     );
                     residue_ids.insert(f.hash, id);
                     residues.push(r);

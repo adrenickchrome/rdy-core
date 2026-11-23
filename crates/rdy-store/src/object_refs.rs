@@ -303,7 +303,9 @@ impl Edges {
     }
 
     /// A change's links: its intent and alternative set, and the change it replays (a
-    /// reference, never one of its deps). The briefing is a token identity: no edge.
+    /// reference, never one of its deps). The briefing is a token identity: no edge. A port's
+    /// source (`ported_from`) names a change of another store: data, no edge, so no check or
+    /// export needs the source change.
     fn links(&mut self, links: &ChangeLinks) {
         self.opt(INTENT, links.intent);
         self.alt(&links.alternative);

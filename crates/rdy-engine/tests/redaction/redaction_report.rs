@@ -3245,3 +3245,99 @@ fn wx12a_redaction_and_reindex_keep_acknowledged_bytes() {
         );
     }
 }
+
+/// A port's removal: the report names the port's residue by the frame the store writes for it
+/// (encoding 2, its source after the encoding-1 body), so the request records and the removal
+/// applies.
+#[test]
+fn hpr1_report_uses_the_stored_residue_id() {
+    use rdy_model::redaction::{ChangeResidue, RedactionResidue};
+    use rdy_model::{Change, ChangeLinks, Op, PortedFrom, RepoId};
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    // a port rewrites the prose block in view work; its source is in no store here
+    let source = PortedFrom {
+        repo_id: RepoId([9; 16]),
+        change: Hash::of(b"source change"),
+    };
+    let old =
+        p.r.read()
+            .block(&Scope::View("work".into()), &p.prose)
+            .unwrap();
+    let mut block = old.clone();
+    block.read_identity = None;
+    block.body = format!("{SECRET} Ported.");
+    let port = Change {
+        view: "work".into(),
+        ops: vec![Op::Update {
+            base: old.version_hash(),
+            block,
+        }],
+        deps: vec![p.change],
+        provenance: prov("human:t"),
+        justification: None,
+        message: "a port".into(),
+        links: ChangeLinks {
+            ported_from: Some(source),
+            ..Default::default()
+        },
+        read_identity: None,
+    };
+    let port_id = p.r.store_mut().commit_to_view("work", port).unwrap();
+    p.r.seal_open().unwrap();
+    p.r.invalidate();
+    let stored = p.r.read().reader().change(&port_id).unwrap();
+    let residue = RedactionResidue::Change(ChangeResidue::of(&stored));
+    let (raw, payload) = rdy_store::codec::item_new(kinds::REDACTION_RESIDUE, &residue);
+    assert_eq!(rdy_store::codec::split(raw, &payload).unwrap().version, 2);
+    let residue_id = Hash::of(&payload);
+
+    // the report's span of the port names that exact residue id
+    let t = vec![p.prose.to_string()];
+    let d = dry(&p.r, &t);
+    let res = p.r.redact(&writer(), input(&t, false)).unwrap();
+    assert_eq!(res.report, d);
+    let st = p.r.read();
+    let req = st
+        .reader()
+        .redaction_request(&res.redaction.unwrap())
+        .unwrap();
+    let span = req
+        .manifest
+        .spans
+        .iter()
+        .find(|s| s.kind == kinds::CHANGE && s.hash == port_id)
+        .expect("the port's span");
+    assert_eq!(span.residue, Some(residue_id));
+    assert_eq!(
+        st.reader()
+            .get_kind_raw(kinds::REDACTION_RESIDUE, &residue_id)
+            .unwrap(),
+        (raw, payload)
+    );
+    drop(st);
+
+    // the approved removal applies, and the port's read keeps its source
+    let prop =
+        p.r.propose(
+            &writer(),
+            "work",
+            "Remove the code",
+            Some("Removes the code."),
+        )
+        .unwrap();
+    p.r.land(&approver(), &prop.id).unwrap();
+    let st = p.r.read();
+    let c = st.reader().change(&port_id).unwrap();
+    assert!(c.is_projection());
+    assert_eq!(c.links.ported_from, Some(source));
+    assert_eq!(
+        st.reader().redaction_of(kinds::CHANGE, &port_id).unwrap(),
+        Some(req_id(&req))
+    );
+}
+
+/// The hash of request `r`, as the store frames it.
+fn req_id(r: &rdy_model::redaction::Redaction) -> Hash {
+    Hash::of(&rdy_store::codec::item_new(kinds::REDACTION, r).1)
+}

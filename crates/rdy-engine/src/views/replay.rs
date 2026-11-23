@@ -213,6 +213,7 @@ fn replayed(
             imported_by: None,
             replayed_from: Some(src),
             briefing: source.links.briefing,
+            ported_from: source.links.ported_from,
         },
         read_identity: None,
     }

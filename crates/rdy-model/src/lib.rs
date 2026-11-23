@@ -35,7 +35,7 @@ pub use canon::{
 };
 pub use change::{
     AltChoice, Change, ChangeLinks, ChangeReadIdentity, EditorialClass, Justification, Op,
-    Provenance, Role,
+    PortedFrom, Provenance, Role,
 };
 pub use coord::{AltMember, AltSet, AltStatus, Intent, IntentStatus};
 pub use hash::Hash;

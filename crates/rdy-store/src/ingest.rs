@@ -868,8 +868,10 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
     /// The batch holds the residues of `residues` that the log does not hold yet, once each and
     /// sorted by residue hash, then `records` in the caller's order (its validated source-apply
     /// order). A residue is framed in the encoding whose frame hash a record names (a residue
-    /// written before content-2 keeps encoding 0), else in its kind's latest encoding. Before a
-    /// byte is written:
+    /// written before content-2 keeps encoding 0), else in the encoding its value chooses
+    /// (`RedactionResidue::encoding`: 2 for a port's residue). A residue frame uses its features
+    /// (`format::required_features`) like any ingested record: a port's residue alone uses
+    /// `ported_change`. Before a byte is written:
     ///
     /// - each record keeps its bounds (`redaction_carried::check_bounds`: more than 100,000
     ///   spans is `RedactionLimit` `100000 carried spans`, more than 16,777,216 encoded bytes
@@ -913,16 +915,15 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
                 .iter()
                 .flat_map(|r| r.spans.iter().filter_map(|s| s.residue))
                 .collect();
-            let latest = crate::codec::latest(kinds::REDACTION_RESIDUE);
+            let newest = crate::codec::newest(kinds::REDACTION_RESIDUE);
             let mut buf = rdy_model::redaction::record_buffer().map_err(|_| record_too_big())?;
             for r in residues {
-                let bytes =
-                    rdy_model::redaction::encode_into(r, &mut buf).map_err(|_| record_too_big())?;
+                let bytes = r.body_into(&mut buf).map_err(|_| record_too_big())?;
                 // the residue's frame in the encoding whose hash a record names (an old
-                // residue keeps encoding 0, in its frozen shape), else in its kind's latest
-                // encoding
+                // residue keeps encoding 0, in its frozen shape), else in the encoding its
+                // value chooses
                 let frame_in = |v: u16| {
-                    let body = if v == latest {
+                    let body = if v == r.encoding() {
                         Some(bytes.to_vec())
                     } else {
                         crate::codec::residue_body(r, v)
@@ -932,11 +933,11 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
                             .expect("a registered encoding of a residue frames")
                     })
                 };
-                let frame = (0..latest)
+                let frame = (0..=newest)
                     .filter_map(frame_in)
                     .find(|f| named.contains(&Hash::of(&f.1)))
-                    .or_else(|| frame_in(latest))
-                    .expect("the latest encoding holds every residue");
+                    .or_else(|| frame_in(r.encoding()))
+                    .expect("the encoding a residue chooses holds it");
                 let h = Hash::of(&frame.1);
                 if !c.residue_at.contains_key(&h) && !missing.contains_key(&h) {
                     missing.insert(h, frame);
@@ -962,6 +963,9 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
         let placed = self.log_mut().append_frames(&frames, false)?;
         self.log_mut()
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
+        for (kind, payload) in &frames {
+            self.uses(format::required_features(*kind, payload));
+        }
         self.has_carried = true;
         self.carried_done = true;
         Ok(())

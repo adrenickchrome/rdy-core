@@ -78,6 +78,9 @@ pub const HUB_CANON_REQUIRED_RDY: &str = "0.53.0";
 /// The first rdy that knows [`FEATURE_SYNC_STATE`] (D-3RSCW): the release that first ships a
 /// project's sync state. It never moves.
 pub const SYNC_STATE_REQUIRED_RDY: &str = "0.53.0";
+/// The first rdy that knows [`FEATURE_PORTED_CHANGE`]: the release that first stores a port.
+/// It never moves.
+pub const PORTED_CHANGE_REQUIRED_RDY: &str = "0.58.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -93,6 +96,10 @@ pub const FEATURE_OBJECT_ENCODING: &str = "object_encoding";
 pub const FEATURE_PLAN_TENSION: &str = "plan_tension";
 /// A replayed change (`ChangeLinks::replayed_from`).
 pub const FEATURE_VIEW_REPLAY: &str = "view_replay";
+/// A ported change (D-RHYNQ) and a removed port's residue (D-PKC71): any frame in a port
+/// encoding (`crate::codec::PORT_ENCODINGS`), CHANGE 3 or 4 or REDACTION_RESIDUE 2. The first
+/// committed batch that stores one activates it, a batch that stores only a port's residue too.
+pub const FEATURE_PORTED_CHANGE: &str = "ported_change";
 /// The foreign copy of repo links (D-FK58A, D-2WY7Y): a FOREIGN entry, a block with a foreign
 /// part or a `repo_link` block, and every record in a kind's optional repo-links encoding
 /// (`crate::codec::OPTIONAL`). A local instruction alone never uses it.
@@ -114,9 +121,9 @@ pub const FEATURE_HUB_CANON: &str = "hub_canon";
 pub const FEATURE_SYNC_STATE: &str = "sync_state";
 
 /// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM; D-DZDB7;
-/// D-3RSCW), sorted by name. Each is `incompatible` and needs its own minimum
-/// ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 12] = [
+/// D-3RSCW; hub ports, D-RHYNQ), sorted by name. Each is `incompatible` and needs its own
+/// minimum ([`required_rdy`]).
+pub const REGISTERED_FEATURES: [&str; 13] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
@@ -126,6 +133,7 @@ pub const REGISTERED_FEATURES: [&str; 12] = [
     FEATURE_HUB_CANON,
     FEATURE_OBJECT_ENCODING,
     FEATURE_PLAN_TENSION,
+    FEATURE_PORTED_CHANGE,
     FEATURE_SNAPSHOT_DELTA,
     FEATURE_SYNC_STATE,
     FEATURE_VIEW_REPLAY,
@@ -134,8 +142,8 @@ pub const REGISTERED_FEATURES: [&str; 12] = [
 /// The first rdy that knows registered feature `name`: [`FOREIGN_COPY_REQUIRED_RDY`] for
 /// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`,
 /// [`SNAPSHOT_DELTA_REQUIRED_RDY`] for `snapshot_delta`, [`HUB_CANON_REQUIRED_RDY`] for
-/// `hub_canon`, [`SYNC_STATE_REQUIRED_RDY`] for `sync_state`, [`FEATURE_REQUIRED_RDY`] for the
-/// seven of O11.
+/// `hub_canon`, [`SYNC_STATE_REQUIRED_RDY`] for `sync_state`, [`PORTED_CHANGE_REQUIRED_RDY`] for
+/// `ported_change`, [`FEATURE_REQUIRED_RDY`] for the seven of O11.
 pub fn required_rdy(name: &str) -> &'static str {
     match name {
         FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
@@ -143,6 +151,7 @@ pub fn required_rdy(name: &str) -> &'static str {
         FEATURE_SNAPSHOT_DELTA => SNAPSHOT_DELTA_REQUIRED_RDY,
         FEATURE_HUB_CANON => HUB_CANON_REQUIRED_RDY,
         FEATURE_SYNC_STATE => SYNC_STATE_REQUIRED_RDY,
+        FEATURE_PORTED_CHANGE => PORTED_CHANGE_REQUIRED_RDY,
         _ => FEATURE_REQUIRED_RDY,
     }
 }
@@ -1059,7 +1068,10 @@ pub fn registered_features() -> Vec<StoreFeature> {
 ///   change;
 /// - `figure_dark`: a `figure` block that sets `dark_blob`, alone or in a change's create or
 ///   update ([`is_dark_figure`]);
-/// - `snapshot_delta`: a SNAPSHOT_DELTA.
+/// - `snapshot_delta`: a SNAPSHOT_DELTA;
+/// - `ported_change`: any frame in a port encoding (`crate::codec::PORT_ENCODINGS`): a ported
+///   CHANGE (3, or 4 with a foreign part, which also uses `foreign_copy`), or the residue of a
+///   removed port (REDACTION_RESIDUE 2, which uses no `foreign_copy` whatever its source).
 ///
 /// A frame that does not split or decode uses nothing here: its own checks refuse it.
 pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
@@ -1084,6 +1096,14 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
     // a kind's optional encoding is the foreign copy's alone, by its version
     if o.kind == kinds::FOREIGN || crate::codec::optional(o.kind) == Some(o.version) {
         add(FEATURE_FOREIGN_COPY);
+    }
+    // a port encoding is the port's, by its version; a port with a foreign part needs both
+    if crate::codec::is_port_encoding(o.kind, o.version) {
+        add(FEATURE_PORTED_CHANGE);
+        if o.kind == kinds::CHANGE && o.version == rdy_model::encoding::CHANGE_PORT_FOREIGN_ENCODING
+        {
+            add(FEATURE_FOREIGN_COPY);
+        }
     }
     // a repo_link block, alone or in a change, turns the foreign copy on (D-2WY7Y); a change
     // is decoded once, and an encoding-0 one has no carried field

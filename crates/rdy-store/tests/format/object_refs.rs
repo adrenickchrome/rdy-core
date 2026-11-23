@@ -161,6 +161,7 @@ fn links(of: &str) -> ChangeLinks {
         imported_by: Some(actor_run(&format!("{of}.imported_by"))),
         replayed_from: None,
         briefing: None,
+        ported_from: None,
     }
 }
 
@@ -368,6 +369,7 @@ fn change_residue() -> ChangeResidue {
             imported_by: Some(actor_run("residue.imported_by")),
             replayed_from: None,
             briefing: None,
+            ported_from: None,
         },
         source_encoding: 1,
     }

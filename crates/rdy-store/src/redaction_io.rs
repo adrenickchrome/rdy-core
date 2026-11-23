@@ -945,15 +945,16 @@ pub(crate) fn read_versioned(
     Ok(None)
 }
 
-/// The residue record with hash `hash` at `loc`, of any encoding its kind registers, read and
-/// hash-checked through `access`, and the encoding its frame records. None when the frame there
-/// is no residue of that hash; a residue that does not decode is `None` too.
+/// The residue record with hash `hash` at `loc`, of any encoding its kind registers (a port's
+/// residue in encoding 2 included), read and hash-checked through `access`, and the encoding
+/// its frame records. None when the frame there is no residue of that hash; a residue that does
+/// not decode is `None` too.
 pub(crate) fn read_residue(
     access: &mut dyn RecordAccess,
     loc: Location,
     hash: &Hash,
 ) -> Result<Option<(RedactionResidue, u16)>, StoreError> {
-    for version in 0..=crate::codec::latest(kinds::REDACTION_RESIDUE) {
+    for version in 0..=crate::codec::newest(kinds::REDACTION_RESIDUE) {
         let raw = crate::codec::raw_kind(kinds::REDACTION_RESIDUE, version);
         if let Some(payload) = access.record(loc, raw, hash)? {
             return Ok(

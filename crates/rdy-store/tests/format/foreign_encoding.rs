@@ -609,7 +609,7 @@ fn rpl3_feature_first_use_is_atomic() {
         format::required_rdy(FEATURE_FOREIGN_COPY),
         FOREIGN_COPY_REQUIRED_RDY
     );
-    assert_eq!(registered.len(), 12);
+    assert_eq!(registered.len(), 13);
     // figure_dark (D-MKSFF), snapshot_delta (D-RP6SM), hub_canon (D-DZDB7) and sync_state
     // (D-3RSCW) have their own minima too
     assert_eq!(
@@ -623,6 +623,7 @@ fn rpl3_feature_first_use_is_atomic() {
             && f.name != format::FEATURE_SNAPSHOT_DELTA
             && f.name != format::FEATURE_HUB_CANON
             && f.name != format::FEATURE_SYNC_STATE
+            && f.name != format::FEATURE_PORTED_CHANGE
     }) {
         assert_eq!(f.required_rdy, FEATURE_REQUIRED_RDY, "{}", f.name);
         assert_eq!(f.class, FeatureClass::Incompatible, "{}", f.name);
@@ -1177,14 +1178,16 @@ fn rpl3_unknown_encoding_is_bounded() {
     ] {
         assert_eq!(codec::latest(kind), latest, "kind {kind}");
         assert_eq!(codec::optional(kind), Some(optional), "kind {kind}");
-        assert_eq!(codec::newest(kind), optional, "kind {kind}");
+        // CHANGE also reads the port encodings 3 and 4 (`codec::PORT_ENCODINGS`)
+        let newest = if kind == kinds::CHANGE { 4 } else { optional };
+        assert_eq!(codec::newest(kind), newest, "kind {kind}");
     }
     assert_eq!(codec::optional(kinds::LANDING), None);
     // one past the newest encoding: a split refusal, and the store's E_STORE_FORMAT
     for (kind, name, version) in [
         (kinds::FOREIGN, "FOREIGN", 2u16),
         (kinds::BLOCK, "BLOCK", 2),
-        (kinds::CHANGE, "CHANGE", 3),
+        (kinds::CHANGE, "CHANGE", 5),
         (kinds::TRANSITION, "TRANSITION", 2),
         (kinds::REVIEW, "REVIEW", 2),
         (kinds::TENSION, "TENSION", 2),
