@@ -1346,11 +1346,7 @@ fn deliver(r: &mut Rdy, link: &str, x: &rdy_model::Block) {
 fn foreign_trace(dir: &Path) -> (usize, bool) {
     let r = Rdy::open_holder(dir).unwrap();
     let reader = r.store().reader();
-    let n = reader
-        .refs_with_prefix("foreign/")
-        .unwrap()
-        .into_iter()
-        .count();
+    let n = reader.refs_with_prefix("foreign/").unwrap().len();
     let held = reader
         .has_kind(rdy_store::kinds::BLOCK, &version_of(&cited_x()))
         .unwrap();
