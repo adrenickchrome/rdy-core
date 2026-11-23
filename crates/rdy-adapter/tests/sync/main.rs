@@ -15,6 +15,7 @@ mod hub_world;
 mod link_export;
 mod link_take;
 mod load_chain;
+mod move_removal_reads;
 mod repo_links_journey;
 mod stream;
 mod sync;
