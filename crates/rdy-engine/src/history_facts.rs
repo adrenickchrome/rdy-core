@@ -16,7 +16,7 @@ use crate::signature_check::state_signatures;
 use crate::stream_error::{Reason, StreamError, to_rdy};
 use rdy_model::dispute::{Dispute, DisputeResolution, DisputeState, landing_state};
 use rdy_model::signature::{Signature, parse_statement};
-use rdy_model::{BlockId, Hash, LandingRecord, Op};
+use rdy_model::{BlockId, Hash, LandingRecord, Op, PortedFrom};
 use rdy_store::StoreError;
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
@@ -82,6 +82,16 @@ pub struct LandingFacts {
     pub record: LandingRecord,
     pub blocks: Vec<BlockWrite>,
     pub signatures: Vec<SignatureFact>,
+    /// Each ported change of the landing with its source, in landing order: one with no ops
+    /// too. A replay of a port keeps the source, so its landing lists it as well.
+    pub ported_changes: Vec<PortedChangeFact>,
+}
+
+/// One ported change of a landing and the source it records (`links.ported_from`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortedChangeFact {
+    pub change: Hash,
+    pub ported_from: PortedFrom,
 }
 
 /// One dispute of a landing as recorded, with its resolution when it has one (O26): the dispute's
@@ -186,8 +196,15 @@ fn facts(read: &ReadState, hash: Hash) -> Result<LandingFacts, RdyError> {
     let reader = read.reader();
     let record = reader.landing(&hash)?;
     let mut blocks = Vec::new();
+    let mut ported_changes = Vec::new();
     for change_hash in &record.changes {
         let change = reader.change(change_hash)?;
+        if let Some(ported_from) = change.links.ported_from {
+            ported_changes.push(PortedChangeFact {
+                change: *change_hash,
+                ported_from,
+            });
+        }
         for op in &change.ops {
             blocks.push(match op {
                 Op::Create { block } => BlockWrite {
@@ -223,6 +240,7 @@ fn facts(read: &ReadState, hash: Hash) -> Result<LandingFacts, RdyError> {
         record,
         blocks,
         signatures,
+        ported_changes,
     })
 }
 

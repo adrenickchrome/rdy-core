@@ -8,7 +8,7 @@ use crate::views::{
     ConflictInfo, OwnerInfo, ViewHeadInfo, conflict_infos, head_info, kind_name, net_undone,
 };
 use crate::{Materialized, Scope};
-use rdy_model::{Block, BlockId, Change, Hash, StateSnapshot, tree};
+use rdy_model::{Block, BlockId, Change, Hash, PortedFrom, StateSnapshot, tree};
 use rdy_store::view::{ViewOp, ViewOpKind};
 use rdy_store::{MergeChange, merge_on_blocks};
 use serde::Serialize;
@@ -69,6 +69,9 @@ pub struct ChangeSummary {
     pub alternative: Option<AltRef>,
     /// The full hash of the change this one replays, or null for any other change.
     pub replayed_from: Option<String>,
+    /// The source of a ported change: its repo and change. Left out for any other change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ported_from: Option<PortedFrom>,
 }
 
 /// One op of a view's chain.
@@ -415,7 +418,7 @@ impl ReadState {
                 id: *id,
                 deps: &c.deps,
                 ops: &c.ops,
-                is_replay: c.links.replayed_from.is_some(),
+                is_replay: c.is_replay_like(),
             })
             .collect();
         let deleters =
@@ -603,6 +606,7 @@ impl ReadState {
                     member: a.member,
                 }),
                 replayed_from: change.links.replayed_from.map(|h| h.to_string()),
+                ported_from: change.links.ported_from,
             });
         }
         let head: Hash = info

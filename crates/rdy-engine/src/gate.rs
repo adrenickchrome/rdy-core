@@ -871,7 +871,7 @@ pub(crate) fn blocking_conflicts(
             id: *id,
             deps: &c.deps,
             ops: &c.ops,
-            is_replay: c.links.replayed_from.is_some(),
+            is_replay: c.is_replay_like(),
         })
         .collect();
     let deleters = st.merge_deleters(base, &state, &touched)?;

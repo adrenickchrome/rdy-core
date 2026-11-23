@@ -102,6 +102,8 @@ pub mod pending;
 pub mod plan;
 pub mod policy;
 pub mod policy_verdict;
+pub mod port;
+pub mod port_wire;
 pub mod proposal_show;
 pub mod publication;
 pub mod publication_manifest;
@@ -193,6 +195,10 @@ pub use load::{LoadSummary, LoadedChainFile, StoppedAt};
 pub use materialize::{Materialized, PathMiss};
 pub use mention_review::{MentionReviewInfo, MentionVerdict};
 pub use paths::TreeNode;
+pub use port::{
+    PortBrief, PortBundle, PortBundleFacts, PortLandingFacts, PortedChange, PreparedPort,
+    make_bundle, prepare_port, verify_bundle,
+};
 pub use proposal_show::{
     ProposalChangeRow, ProposalShow, ProposalVersionRow, is_proposal_ref, proposal_text,
 };

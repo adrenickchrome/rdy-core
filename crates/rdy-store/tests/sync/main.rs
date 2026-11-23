@@ -22,6 +22,7 @@ mod holder;
 mod hub_canon;
 mod ingest_chain;
 mod link_delivery_stream;
+mod port_merge;
 mod reflects_stream;
 mod snapshot_delta;
 mod snapshot_delta_land;

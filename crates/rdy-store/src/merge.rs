@@ -21,7 +21,8 @@ pub struct MergeChange<'a> {
     pub id: Hash,
     pub deps: &'a [Hash],
     pub ops: &'a [Op],
-    /// Whether the change replays another (`ChangeLinks::replayed_from` is set). A replay
+    /// Whether the change merges as a replay (`Change::is_replay_like`): it replays another
+    /// (`ChangeLinks::replayed_from` is set) or is a port (`ChangeLinks::ported_from` is set). A replay
     /// applies after the ordinary changes that do not wait for it. Its op on a clean block
     /// follows the ordinary rules: an equal base applies, an equal result agrees whatever the
     /// bases and whoever wrote the version (the op is already satisfied), a base version that
