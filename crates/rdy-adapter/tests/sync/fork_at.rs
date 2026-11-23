@@ -978,10 +978,8 @@ fn hfp2_baselines_cross_main_line_and_grandchild_both_ways() {
         Moved::Moved { tip: removal }
     );
     drop((s, c));
-    // main is opened again before its baseline is remade: a handle that moved with a removal
-    // keeps reads it built before the removal (the move does not start its read caches over)
-    m.close().unwrap();
-    let m = StoreHandle::open_holder(&dir.path().join("m")).unwrap();
+    // the same handle remakes the baseline: the move that carried the removal started its read
+    // caches over, so no read built before the removal is reused
     let ms = m.snapshot().unwrap();
     let m2 = base(&ms, "v2.0.0");
     assert_eq!(m2.redactions().len(), 1);

@@ -57,6 +57,7 @@ use crate::version::parse_version;
 use crate::{Delta, Rdy};
 use rdy_model::{Hash, Tag};
 use rdy_schema::{Issue, Severity};
+use rdy_store::hub_canon::{CanonMove, MoveBatch, Moved};
 use rdy_store::sync_proof::ObjectSource;
 use rdy_store::take_batch::{
     BatchTaken, TagChoice, TakeError, UploadFacts, UploadTarget, check_input_bounds,
@@ -226,12 +227,18 @@ fn lost_result() -> RdyError {
 /// advanced the redaction epoch (or sealed a removal it could not finish) starts the shared
 /// caches over, as a native removal does, so no read of the new state reuses an old build.
 pub(crate) fn republish(rdy: &mut Rdy, epoch: u64) -> Result<(), RdyError> {
+    renew_after_removal(rdy, epoch);
+    rdy.publish(Delta::Full)
+}
+
+/// Starts the shared caches over when the redaction epoch moved past `epoch`, or a removal is
+/// sealed and its erasure unfinished. The next publish then builds nothing from the old epoch.
+fn renew_after_removal(rdy: &mut Rdy, epoch: u64) {
     let pending = rdy.store.reader().check_redaction_epoch().is_err();
     if pending || rdy.store.redaction_epoch() != epoch {
         rdy.renew_epoch_caches();
         rdy.logged = None;
     }
-    rdy.publish(Delta::Full)
 }
 
 fn outcome(t: BatchTaken) -> TakeOutcome {
@@ -319,6 +326,37 @@ pub fn move_error(e: TakeError<RdyError>) -> RdyError {
             "use the holder for the stream's repo",
         ),
     }
+}
+
+/// Moves canon on the holder `rdy`: `mv` of `batch`, expecting the tip or head `expected`
+/// (`rdy_store::Store::move_canon_with`, with the tag rule [`move_tag_choice`]). A move is a
+/// batch of its own, so a batch that a raw write left open is sealed first.
+///
+/// A move that wrote publishes the state again, as [`Rdy::invalidate`] does. A move that carried
+/// a removal advances the redaction epoch. It then starts the shared caches over, as a take does.
+/// So no read of the new state reuses a build from before the removal. A move that sealed a
+/// removal but could not finish its erasure does the same, and returns its error.
+pub fn move_canon(
+    rdy: &mut Rdy,
+    batch: &MoveBatch,
+    mv: &CanonMove,
+    expected: Option<Hash>,
+    at_ms: i64,
+) -> Result<Moved, RdyError> {
+    rdy.seal_open()?;
+    let epoch = rdy.store.redaction_epoch();
+    let out = rdy
+        .store
+        .move_canon_with(batch, mv, expected, at_ms, move_tag_choice);
+    let wrote = match &out {
+        Ok(moved) => matches!(moved, Moved::Moved { .. }),
+        Err(e) => matches!(e, TakeError::Store(StoreError::RedactionPending)),
+    };
+    if wrote {
+        renew_after_removal(rdy, epoch);
+        rdy.invalidate();
+    }
+    out.map_err(move_error)
 }
 
 /// E_REDACTION_STALE: change `h` embeds a block version an imported removal removes, and no

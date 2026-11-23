@@ -645,22 +645,9 @@ impl StoreHandle {
                 }
                 state.ensure_current_epoch()?;
             }
-            // a move is a batch of its own: one a raw write left open is sealed first
-            rdy.seal_open()?;
-            let out = rdy
-                .store_mut()
-                .move_canon_with(
-                    &batch,
-                    &mv,
-                    expected,
-                    at_ms,
-                    rdy_engine::stream_take::move_tag_choice,
-                )
-                .map_err(rdy_engine::stream_take::move_error)?;
-            if matches!(out, Moved::Moved { .. }) {
-                rdy.invalidate();
-            }
-            Ok(out)
+            // core seals an open batch, moves, and publishes again; a move that carried a
+            // removal starts the read caches over, so this handle reuses no older read
+            rdy_engine::stream_take::move_canon(rdy, &batch, &mv, expected, at_ms)
         })
     }
 }
