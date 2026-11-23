@@ -9,6 +9,7 @@ use super::select::{Limits, limit};
 use crate::error::*;
 use crate::materialize::Materialized;
 use rdy_model::{Block, BlockId, tree};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One doc of a hidden list. `hidden_blocks` counts the hidden blocks under the doc, its own
@@ -32,6 +33,27 @@ pub struct HiddenList {
     pub blocks: u64,
     pub rows: Vec<HiddenRow>,
     pub omitted_rows: u64,
+}
+
+impl HiddenList {
+    /// The one JSON form of a hidden list: `{docs, blocks, rows, omitted_rows}`. Each row is
+    /// `{doc, title, redacted, hidden_blocks, doc_hidden}`. The publication check, the review's
+    /// `newly_hidden_planned` and the adapter's first list all print this form. Each key is
+    /// written by name, so a field added to a row later never reaches it by accident.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "docs": self.docs,
+            "blocks": self.blocks,
+            "rows": self.rows.iter().map(|r| json!({
+                "doc": r.doc.to_string(),
+                "title": r.title,
+                "redacted": r.redacted,
+                "hidden_blocks": r.hidden_blocks,
+                "doc_hidden": r.doc_hidden,
+            })).collect::<Vec<_>>(),
+            "omitted_rows": self.omitted_rows,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,5 +310,54 @@ mod tests {
         // the report keeps its own bound and reserve
         assert_eq!(super::super::report::REPORT_BYTES, 8_388_608);
         assert_eq!(super::super::report::REPORT_ROWS, 200);
+    }
+
+    /// hfp4: a captured list keeps the redacted flag, the doc id as a removed title, the row cap
+    /// and the omitted count in the shared form.
+    #[test]
+    fn hfp4_captured_list_form_keeps_redaction_and_cap() {
+        let mut blocks = BTreeMap::new();
+        let mut hidden = BTreeSet::new();
+        for n in 0..201 {
+            let id = format!("d-F{n:04}");
+            let b = if n == 1 {
+                Block::redacted(
+                    BlockId::parse(&id).unwrap(),
+                    "doc".into(),
+                    None,
+                    "a".into(),
+                    rdy_model::RedactedBlockIdentity {
+                        version: rdy_model::Hash::of(b"v"),
+                        content_hash: rdy_model::Hash::of(b"c"),
+                        frozen: false,
+                        request: rdy_model::Hash::of(b"r"),
+                    },
+                )
+            } else {
+                block(&id, "doc", None, Some("Title"))
+            };
+            hidden.insert(b.id.clone());
+            blocks.insert(b.id.clone(), b);
+        }
+        let m = Materialized::build(
+            StateSnapshot {
+                blocks: BTreeMap::new(),
+            },
+            blocks,
+        );
+        let form = HiddenPlanned::capture(&m, &hidden, &Limits::default())
+            .unwrap()
+            .full()
+            .to_json();
+        assert_eq!(form["docs"], 201);
+        assert_eq!(form["blocks"], 0);
+        assert_eq!(form["omitted_rows"], 1);
+        let rows = form["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), REPORT_ROWS);
+        assert_eq!(
+            rows[1],
+            json!({"doc": "d-F0001", "title": "d-F0001", "redacted": true, "hidden_blocks": 0, "doc_hidden": true})
+        );
+        assert_eq!(rows[0]["redacted"], false);
     }
 }

@@ -2,7 +2,7 @@
 //! publication gets `first_hidden_planned`; a later one gets `newly_hidden_planned` in its
 //! comparison. Both read the captured tag, the profile's stable id and the host's binding.
 
-use rdy_adapter::publication::{HiddenList, PreviousPublication};
+use rdy_adapter::publication::{HiddenList, HiddenRow, PreviousPublication};
 use rdy_adapter::{BlockId, StoreHandle};
 use rdy_engine::publication::{self, disclosure_diff};
 use rdy_engine::{Rdy, Session, SessionKind, WriteRequest};
@@ -160,4 +160,202 @@ fn relc4_adapter_first_and_later_publications_use_captured_tags() {
     assert!(snap.disclosure("v9.9.9", "site", None).is_err());
     assert_eq!(HiddenList::default().rows, vec![]);
     handle.close().unwrap();
+}
+
+/// The publication tool's own `hidden_planned` and `disclosure.newly_hidden_planned` values for
+/// the candidate `tag`, read straight from the engine.
+fn tool_values(dir: &std::path::Path, tag: &str, against: Option<&str>) -> (Value, Value) {
+    let r = Rdy::open(dir).unwrap();
+    let st = r.read();
+    let scope = format!("tag:{tag}");
+    let against = against.map(|a| format!("tag:{a}"));
+    let v = publication::check(&st, "site", Some(&scope), against.as_deref(), None).unwrap();
+    drop(st);
+    r.close().unwrap();
+    (v["hidden_planned"].clone(), v["disclosure"].clone())
+}
+
+fn row(doc: &str, title: &str, redacted: bool, hidden_blocks: u64, doc_hidden: bool) -> HiddenRow {
+    HiddenRow {
+        doc: BlockId::parse(doc).unwrap(),
+        title: title.into(),
+        redacted,
+        hidden_blocks,
+        doc_hidden,
+    }
+}
+
+/// hfp4 (D-B2AC3): the method gives the form the publication tool prints, for an empty list,
+/// a list with a fully hidden doc and a partly hidden doc, and the new list of a comparison.
+#[test]
+fn hfp4_hidden_form_equals_the_publication_tool() {
+    let (dir, _) = fixture();
+    let (tool_v1, _) = tool_values(dir.path(), "v1.0.0", None);
+    let (tool_v2, tool_diff) = tool_values(dir.path(), "v2.0.0", Some("v1.0.0"));
+    let (_, v1_identity) = direct(dir.path(), "v1.0.0");
+    let (v1, _) = direct(dir.path(), "v1.0.0");
+    let handle = StoreHandle::open(dir.path()).unwrap();
+    let snap = handle.snapshot().unwrap();
+
+    // the empty list
+    assert_eq!(
+        HiddenList::default().to_json(),
+        json!({"docs": 0, "blocks": 0, "rows": [], "omitted_rows": 0})
+    );
+
+    // a full doc (Ghost) beside a partly hidden doc (Guide): the exact form, rows by doc id
+    let first = snap.disclosure("v1.0.0", "site", None).unwrap();
+    let list = first.first_hidden_planned.as_ref().unwrap();
+    let form = list.to_json();
+    assert_eq!(form, tool_v1);
+    assert_eq!(
+        first.first_hidden_planned.as_ref().map(HiddenList::to_json),
+        Some(tool_v1)
+    );
+    assert_eq!(form["docs"], 2);
+    assert_eq!(form["blocks"], 2);
+    assert_eq!(form["omitted_rows"], 0);
+    let rows = form["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    for (json_row, typed) in rows.iter().zip(&list.rows) {
+        let mut keys: Vec<_> = json_row.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["doc", "doc_hidden", "hidden_blocks", "redacted", "title"]
+        );
+        assert_eq!(json_row["doc"], typed.doc.to_string());
+        assert_eq!(json_row["title"], typed.title);
+        assert_eq!(json_row["redacted"], false);
+        assert_eq!(json_row["hidden_blocks"], typed.hidden_blocks);
+        assert_eq!(json_row["doc_hidden"], typed.doc_hidden);
+    }
+    let by = |t: &str| rows.iter().find(|r| r["title"] == t).unwrap().clone();
+    assert_eq!(
+        (
+            by("Ghost")["doc_hidden"].clone(),
+            by("Ghost")["hidden_blocks"].clone()
+        ),
+        (json!(true), json!(1))
+    );
+    assert_eq!(
+        (
+            by("Guide")["doc_hidden"].clone(),
+            by("Guide")["hidden_blocks"].clone()
+        ),
+        (json!(false), json!(1))
+    );
+    let ids: Vec<_> = rows
+        .iter()
+        .map(|r| r["doc"].as_str().unwrap().to_string())
+        .collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "sorted by doc id");
+
+    // the second tag holds one more hidden block
+    let second = snap.disclosure("v2.0.0", "site", None).unwrap();
+    assert_eq!(
+        second
+            .first_hidden_planned
+            .as_ref()
+            .map(HiddenList::to_json),
+        Some(tool_v2)
+    );
+
+    // the new list of a comparison is the same form as the review's key
+    let previous = PreviousPublication {
+        tag: "v1.0.0".into(),
+        profile_version: v1.profile.version,
+        selection_identity: v1_identity,
+    };
+    let later = snap.disclosure("v2.0.0", "site", Some(&previous)).unwrap();
+    assert_eq!(later.first_hidden_planned, None);
+    let diff = later.comparison.as_ref().unwrap();
+    let newly = diff.newly_hidden_planned.to_json();
+    assert_eq!(newly["docs"], 1);
+    assert_eq!(newly["blocks"], 1);
+    assert_eq!(newly, later.review["disclosure"]["newly_hidden_planned"]);
+    assert_eq!(newly, tool_diff["newly_hidden_planned"]);
+    drop(snap);
+    handle.close().unwrap();
+}
+
+/// hfp4 (D-RDH1C): the review keeps its three keys. A first list rides beside it as a typed
+/// value and expands no key; a later check returns no first list.
+#[test]
+fn hfp4_first_list_does_not_expand_review() {
+    let (dir, _) = fixture();
+    let (v1, v1_identity) = direct(dir.path(), "v1.0.0");
+    let (v2, _) = direct(dir.path(), "v2.0.0");
+    let handle = StoreHandle::open(dir.path()).unwrap();
+    let snap = handle.snapshot().unwrap();
+    let keys = |c: &rdy_adapter::publication::PublicationCheck| {
+        let mut k: Vec<_> = c.review.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    };
+    let expected = ["disclosure", "included", "references"];
+
+    let first = snap.disclosure("v1.0.0", "site", None).unwrap();
+    assert_eq!(keys(&first), expected);
+    assert!(first.first_hidden_planned.is_some());
+    assert!(first.review["disclosure"].is_null());
+    assert!(!first.review.to_string().contains("hidden_planned"));
+
+    let previous = PreviousPublication {
+        tag: "v1.0.0".into(),
+        profile_version: v1.profile.version,
+        selection_identity: v1_identity,
+    };
+    let later = snap.disclosure("v2.0.0", "site", Some(&previous)).unwrap();
+    assert_eq!(keys(&later), expected);
+    assert_eq!(
+        later.first_hidden_planned.as_ref().map(HiddenList::to_json),
+        None
+    );
+    assert!(later.review["included"].is_null());
+
+    // the hidden lists change no status, hash or identity of the tag
+    assert_eq!(v2.selection_hash, v1.selection_hash);
+    assert_eq!(v2.selection_identity, v1_identity);
+    drop(snap);
+    handle.close().unwrap();
+}
+
+/// hfp4: the form keeps a redacted flag, a title that a removal replaced, the 200-row cap and
+/// the omitted count, whatever the list holds.
+#[test]
+fn hfp4_form_keeps_redaction_and_caps() {
+    let doc = |n: u32| format!("d-Q{n:04}");
+    let mut rows = vec![row(&doc(0), "Shown", false, 2, false)];
+    rows.push(row(&doc(1), &doc(1), true, 0, true));
+    for n in 2..200 {
+        rows.push(row(&doc(n), "More", false, 1, false));
+    }
+    let list = HiddenList {
+        docs: 203,
+        blocks: 1_000,
+        rows,
+        omitted_rows: 3,
+    };
+    let form = list.to_json();
+    assert_eq!(
+        (form["docs"].clone(), form["blocks"].clone()),
+        (json!(203), json!(1_000))
+    );
+    assert_eq!(form["omitted_rows"], 3);
+    let rows = form["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 200);
+    assert_eq!(
+        rows[0],
+        json!({"doc": "d-Q0000", "title": "Shown", "redacted": false, "hidden_blocks": 2, "doc_hidden": false})
+    );
+    // a removed title shows the doc id, and the flag says so
+    assert_eq!(
+        rows[1],
+        json!({"doc": "d-Q0001", "title": "d-Q0001", "redacted": true, "hidden_blocks": 0, "doc_hidden": true})
+    );
+    // the form holds exactly its four keys
+    let mut keys: Vec<_> = form.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["blocks", "docs", "omitted_rows", "rows"]);
 }

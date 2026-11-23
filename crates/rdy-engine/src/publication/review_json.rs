@@ -11,7 +11,7 @@
 use super::baseline::{Baseline, BaselineReviewSide};
 use super::diff::DisclosureDiff;
 use super::references::{ReferenceReport, ReferenceRow};
-use super::report::{doc_row, hash_or_null, hidden_json, reference_row};
+use super::report::{doc_row, hash_or_null, reference_row};
 use super::review_docs::included;
 use super::review_labels::{first_attachments, reference_labels, reference_review};
 use super::review_limits::{ReviewProjection, disclosure_review};
@@ -511,7 +511,7 @@ fn disclosure_json(
         "new_references": new_references,
         "new_reference_count": d.new_reference_count,
         "redactions": redactions,
-        "newly_hidden_planned": hidden_json(&d.newly_hidden_planned),
+        "newly_hidden_planned": d.newly_hidden_planned.to_json(),
         "omitted": omitted,
         "totals": value(&review.totals),
     });

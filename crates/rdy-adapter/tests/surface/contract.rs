@@ -628,3 +628,14 @@ fn hfp2_adapter_types_need_no_core_import() {
     handle.close().unwrap();
     hub.close().unwrap();
 }
+
+/// hfp4 (D-B2AC3): the adapter's own `HiddenList` has the shared JSON form as a method.
+#[test]
+fn hfp4_adapter_hidden_list_has_the_json_form() {
+    let form: fn(&rdy_adapter::publication::HiddenList) -> serde_json::Value =
+        rdy_adapter::publication::HiddenList::to_json;
+    assert_eq!(
+        form(&rdy_adapter::publication::HiddenList::default()),
+        serde_json::json!({"docs": 0, "blocks": 0, "rows": [], "omitted_rows": 0})
+    );
+}
