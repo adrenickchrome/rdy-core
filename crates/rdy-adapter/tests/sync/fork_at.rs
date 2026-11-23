@@ -594,7 +594,8 @@ fn hfp2_failure_leaves_source_and_target_unchanged() {
     assert!(!target.exists());
     assert!(staging_left(&target).is_empty());
 
-    // a placement that fails: the target becomes a file before the rename
+    // a placement that fails: the target becomes a file before the rename, and the install
+    // refuses it itself (Windows' rename would replace the file)
     let mut placed = |step: ForkStep<'_>| {
         if let ForkStep::Closed(at) = step {
             std::fs::write(at, b"not a directory").unwrap();
@@ -606,6 +607,7 @@ fn hfp2_failure_leaves_source_and_target_unchanged() {
         .err()
         .unwrap();
     assert_eq!(e.code, "E_IO", "{e:?}");
+    assert!(e.message.ends_with(": not a directory"), "{e:?}");
     assert_eq!(std::fs::read(&target).unwrap(), b"not a directory");
     std::fs::remove_file(&target).unwrap();
     assert!(staging_left(&target).is_empty());
