@@ -662,10 +662,9 @@ impl<'s> Eligibility<'s> {
         reader: &rdy_store::StoreReader,
         c: &Hash,
     ) -> Result<(), RdyError> {
+        // canon membership comes from the roots below (canon's chain and its replay ancestry),
+        // not the current-canon index: eligibility is the state's own history (D-QCE8M audit)
         if let Some(st) = self.from {
-            if st.reader().landing_of(c)?.is_some() {
-                return Ok(());
-            }
             if self.included.is_none() {
                 let mut all = HashSet::new();
                 for name in st.view_names() {
