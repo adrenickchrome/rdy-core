@@ -330,16 +330,16 @@ fn fork_shape(s: &Source, f: &Rdy, repo: &str) {
             landing: Some(s.p1),
         })
     );
-    assert_eq!(chain(&f), [s.p1]);
-    assert_eq!(ref_names(&f, "tag/"), ["tag/v1.0.0"]);
+    assert_eq!(chain(f), [s.p1]);
+    assert_eq!(ref_names(f, "tag/"), ["tag/v1.0.0"]);
     for prefix in ["view/", "held/", "replaced/", "meta/sync/"] {
-        assert!(ref_names(&f, prefix).is_empty(), "{prefix}");
+        assert!(ref_names(f, prefix).is_empty(), "{prefix}");
     }
     // the later landings are stored, and none is on canon or tagged
     for l in [s.p2, s.p3, s.p4] {
         assert!(reader.has_kind(kinds::LANDING, &l).unwrap(), "{l}");
     }
-    let ev = evidence(&s, &f);
+    let ev = evidence(s, f);
     assert!(!ev.is_empty());
     for c in &ev {
         assert_eq!(reader.landing_of(c).unwrap(), None, "{c}");
@@ -730,8 +730,13 @@ fn hfp3_include_closure_refuses_evidence_only_change() {
     let id: Hash = scratch.change.parse().unwrap();
     let pdoc = created(&f, &id, "doc").unwrap();
     let prose = created(&f, &id, "prose").unwrap();
-    f.view_exclude(&writer(), "scratch", &[scratch.change.clone()], false)
-        .unwrap();
+    f.view_exclude(
+        &writer(),
+        "scratch",
+        std::slice::from_ref(&scratch.change),
+        false,
+    )
+    .unwrap();
     let (update, _) = retitle(&eblock, "Creator");
     let k = commit_raw(
         &mut f,
@@ -756,7 +761,9 @@ fn hfp3_include_closure_refuses_evidence_only_change() {
     }
     // an eligible change whose closure is eligible is included as before
     let ok = doc(&mut f, "other", "Other", "Other words.").change;
-    let out = f.view_include(&writer(), "into", &[ok.clone()]).unwrap();
+    let out = f
+        .view_include(&writer(), "into", std::slice::from_ref(&ok))
+        .unwrap();
     assert_eq!(out.added, [ok]);
     f.close().unwrap();
 }
@@ -776,17 +783,21 @@ fn hfp3_replay_keeps_normal_view_sources() {
     let open = doc(&mut r, "va", "Open", "Open words.").change;
     let excluded = doc(&mut r, "vb", "Excluded", "Excluded words.").change;
     doc(&mut r, "vb", "Kept", "Kept words.");
-    r.view_exclude(&writer(), "vb", &[excluded.clone()], false)
+    r.view_exclude(&writer(), "vb", std::slice::from_ref(&excluded), false)
         .unwrap();
     let closed = doc(&mut r, "vc", "Closed", "Closed words.").change;
     r.view_close(&writer(), &["vc".to_string()], "").unwrap();
     owned(&mut r, "mine");
     for c in [&open, &excluded, &closed, &landed] {
-        let out = r.view_replay(&writer(), "mine", &[c.clone()]).unwrap();
+        let out = r
+            .view_replay(&writer(), "mine", std::slice::from_ref(c))
+            .unwrap();
         assert_eq!(out.replayed[0].source, *c);
     }
     for c in [&open, &excluded, &closed] {
-        let out = r.view_include(&writer(), "t", &[c.clone()]).unwrap();
+        let out = r
+            .view_include(&writer(), "t", std::slice::from_ref(c))
+            .unwrap();
         assert!(out.added.contains(c));
     }
     r.close().unwrap();
