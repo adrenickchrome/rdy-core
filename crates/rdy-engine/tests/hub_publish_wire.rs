@@ -90,6 +90,7 @@ impl Hub {
             ca_file: Some(self.ca.clone()),
             claim: claim(run),
             bearer: Secret::new(ACCESS),
+            zstd: false,
         }
     }
 
@@ -452,6 +453,7 @@ fn hpb7_wire_fixtures_match_every_endpoint() {
             audience: None,
             artifact_bytes: 201_326_592,
             artifact_files: 32_000,
+            zstd: false,
         }
     );
 
@@ -1626,6 +1628,68 @@ mod sized_alloc {
 #[global_allocator]
 static ALLOC: sized_alloc::Sized = sized_alloc::Sized;
 
+/// A write's reply from something other than the hub (a proxy's 502 page, say) stays
+/// `E_UPSTREAM_UNCERTAIN`, and its message names the status the upstream answered with. It never
+/// quotes the reply's body. A read step's such reply is still the bare protocol refusal.
+#[test]
+fn hpb7_a_non_hub_reply_to_a_write_names_its_status() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let files = [FileIdentity {
+        hash: h(1),
+        size: 1,
+    }];
+    let m = manifest();
+    let rec = record(None, &m);
+    let page = b"<html><body>502 Bad Gateway from the proxy</body></html>";
+    let headers = [
+        "content-type: text/html".to_string(),
+        format!("content-length: {}", page.len()),
+        "connection: close".to_string(),
+    ];
+    for status in [502u16, 503, 504, 500] {
+        let reply = || Reply::with_headers(status, &headers, page);
+        let mut b = Cursor::new(vec![7u8]);
+        let (file, _) = served(&mut s, reply(), || {
+            hub.wire
+                .put_file(&cx, PUSH, &files[0], "text/plain", &mut b)
+        });
+        let contents: [&[u8]; 2] = [b"ab", b"cd"];
+        let mut body = Mem::new(&contents);
+        let (batch, _) = served(&mut s, reply(), || hub.wire.put_files(&cx, PUSH, &mut body));
+        let mut b = Cursor::new(b"abc".to_vec());
+        let (objects, _) = served(&mut s, reply(), || {
+            hub.wire.put_objects(&cx, PUSH, &mut b, 3)
+        });
+        let (publish, _) = served(&mut s, reply(), || {
+            hub.wire.publish(&cx, PUSH, SITE, &rec, &m, None)
+        });
+        let want = format!("the hub request may have completed; upstream answered {status}");
+        for e in [err(file), err(batch), err(objects), err(publish)] {
+            assert_eq!(e.code, E_UPSTREAM_UNCERTAIN, "{status}");
+            assert_eq!(e.message, want);
+            assert_eq!(e.upstream_status, Some(status));
+            assert!(!format!("{e:?}").contains("proxy"), "{e:?}");
+        }
+        // A read step: the bare protocol refusal, with no status.
+        let (state, _) = served(&mut s, reply(), || hub.wire.state(&cx, &state_request()));
+        let (known, _) = served(&mut s, reply(), || hub.wire.known_files(&cx, PUSH, &files));
+        for e in [err(state), err(known)] {
+            assert_eq!(
+                (e.code, e.message.as_str(), e.fix.as_str()),
+                (
+                    E_UPSTREAM_PROTOCOL,
+                    UPSTREAM_PROTOCOL_MESSAGE,
+                    UPSTREAM_PROTOCOL_FIX
+                ),
+                "{status}"
+            );
+            assert_eq!(e.upstream_status, None);
+        }
+    }
+}
+
 /// A stored tag reads at any length up to HA1's upload bound (1,048,576 bytes); the live site's
 /// 256-byte limit on new names does not apply to a publication of an existing tag.
 #[test]
@@ -1859,6 +1923,7 @@ fn hpb7_debug_never_prints_untrusted_reply_text() {
                 ca_file: None,
                 claim: claim(Some("r7")),
                 bearer: Secret::new(REFRESH),
+                zstd: false,
             };
             for text in [format!("{d:?}"), format!("{cx:?}")] {
                 assert!(!text.contains(secret), "{text}");
@@ -1883,6 +1948,7 @@ fn hpb7_debug_never_prints_untrusted_reply_text() {
             audience: None,
             artifact_bytes: 1,
             artifact_files: 1,
+            zstd: false,
         };
         let text = format!("{st:?}");
         assert!(!text.contains(secret), "{text}");
@@ -2636,5 +2702,499 @@ fn crbp_tar_reply_is_read_item_by_item() {
     let mut batch = Mem::new(&[b"same", b"same"]);
     let r = unsent(&[&s], || hub.wire.put_files(&cx, PUSH, &mut batch));
     assert_eq!(err(r).code, E_BAD_INPUT);
+    assert_eq!(s.finish(), 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// upfast: zstd put bodies (rdyhub D-2TDK5)
+// ---------------------------------------------------------------------------------------------
+
+/// The zstd frame magic.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+impl Hub {
+    /// [`Hub::cx`] for a hub whose state reply holds `zstd: true`.
+    fn cx_zstd(&self) -> UploadContext {
+        let mut cx = self.cx();
+        cx.zstd = true;
+        cx
+    }
+}
+
+/// `state_reply("[]", "null")` with `member` added at its end.
+fn state_with(member: &str) -> String {
+    let base = state_reply("[]", "null");
+    format!("{},{member}}}", &base[..base.len() - 1])
+}
+
+/// `body` checked to be exactly one zstd frame that states its content size and has a checksum,
+/// decompressed.
+#[track_caller]
+fn one_frame(body: &[u8]) -> Vec<u8> {
+    assert_eq!(&body[..4], &ZSTD_MAGIC, "a zstd frame");
+    assert_eq!(
+        zstd::zstd_safe::find_frame_compressed_size(body),
+        Ok(body.len()),
+        "exactly one frame"
+    );
+    let plain = zstd::stream::decode_all(body).unwrap();
+    assert_eq!(
+        zstd::zstd_safe::get_frame_content_size(body).unwrap(),
+        Some(plain.len() as u64),
+        "the frame states its content size"
+    );
+    plain
+}
+
+/// The one level-3 frame of `plain` that the wire sends: content size and checksum included.
+fn level3(plain: &[u8]) -> Vec<u8> {
+    let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+    enc.include_checksum(true).unwrap();
+    enc.set_pledged_src_size(Some(plain.len() as u64)).unwrap();
+    std::io::Write::write_all(&mut enc, plain).unwrap();
+    enc.finish().unwrap()
+}
+
+/// Bytes that compress well: a short line repeated.
+fn compressible(n: usize) -> Vec<u8> {
+    b"rdy publishes a tagged history and its site. "
+        .iter()
+        .copied()
+        .cycle()
+        .take(n)
+        .collect()
+}
+
+/// zw1: the hub refuses a zstd frame whose window is over 8 MiB (window log 23), so a put body
+/// of more than 8 MiB must still decode with the window capped at 23 bits.
+#[test]
+fn zw1_a_large_put_body_keeps_the_zstd_window_at_8_mib_or_less() {
+    use std::io::{Read, Seek, SeekFrom};
+    let len: usize = 15 * 1024 * 1024;
+    assert!(len > 8 * 1024 * 1024);
+    assert!(len as u64 <= rdy_engine::hub_http::MAX_UPLOAD_BODY_BYTES);
+    // Non-repeating bytes from a 16-symbol alphabet: no long matches, but a frame still smaller
+    // than the body, so the wire sends the frame.
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let plain: Vec<u8> = (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 32) as u8 & 0x0f
+        })
+        .collect();
+    let (mut file, n, encoding) =
+        rdy_engine::hub_http::zstd_frame(&mut Cursor::new(&plain), len as u64).unwrap();
+    assert_eq!(encoding, rdy_engine::hub_http::BodyEncoding::Zstd);
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut dec = zstd::stream::read::Decoder::new(&mut file).unwrap();
+    dec.window_log_max(23).unwrap();
+    let mut out = Vec::with_capacity(len);
+    dec.read_to_end(&mut out)
+        .expect("the frame decodes with the window capped at 8 MiB");
+    assert_eq!(out.len(), len);
+    assert!(n < len as u64);
+}
+
+/// The state reply's `zstd` member: true says the hub takes zstd bodies; false or absent says
+/// it does not; any other value is outside the contract.
+#[test]
+fn upfast_the_state_reply_says_whether_the_hub_takes_zstd() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    for (reply, want) in [
+        (state_reply("[]", "null"), false),
+        (state_with(r#""zstd":true"#), true),
+        (state_with(r#""zstd":false"#), false),
+    ] {
+        let (r, _) = served(&mut s, Reply::json(200, &reply), || {
+            hub.wire.state(&cx, &state_request())
+        });
+        assert_eq!(r.unwrap().zstd, want, "{reply}");
+    }
+    for bad in [r#""zstd":null"#, r#""zstd":"yes""#, r#""zstd":1"#] {
+        let (r, _) = served(&mut s, Reply::json(200, &state_with(bad)), || {
+            hub.wire.state(&cx, &state_request())
+        });
+        protocol(r);
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// With zstd taken, each objects/put and files/put body goes as one level-3 zstd frame with
+/// `Content-Encoding: zstd`, its media type unchanged and its length the frame's; the replies
+/// still count the bytes before compression. Without it, and in every other step, the bodies go
+/// as they are, with no `Content-Encoding`.
+#[test]
+fn upfast_put_bodies_go_as_one_zstd_frame_only_when_the_hub_takes_zstd() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let (plain_cx, zstd_cx) = (hub.cx(), hub.cx_zstd());
+    let batch = compressible(10_000);
+
+    // objects/put
+    let objects = |cx: &UploadContext, s: &mut Server| {
+        let mut b = Cursor::new(batch.clone());
+        let (r, req) = served(
+            s,
+            Reply::json(201, r#"{"records":3,"bytes":10000}"#),
+            || hub.wire.put_objects(cx, PUSH, &mut b, 10_000),
+        );
+        assert_eq!(
+            r.unwrap(),
+            ObjectPut {
+                records: 3,
+                bytes: 10_000
+            }
+        );
+        assert_eq!(req.header("content-type"), Some("application/octet-stream"));
+        req
+    };
+    let req = objects(&zstd_cx, &mut s);
+    assert_eq!(req.header("content-encoding"), Some("zstd"));
+    assert_eq!(
+        req.header("content-length"),
+        Some(req.body.len().to_string().as_str())
+    );
+    assert!(req.body.len() < batch.len() / 10, "{}", req.body.len());
+    assert_eq!(one_frame(&req.body), batch);
+    assert_eq!(req.body, level3(&batch), "one frame at level 3");
+    let req = objects(&plain_cx, &mut s);
+    assert_eq!(req.header("content-encoding"), None);
+    assert_eq!(req.header("content-length"), Some("10000"));
+    assert_eq!(req.body, batch);
+
+    // files/put, the one-file form: the reply names the file by its size before compression
+    let page = compressible(5_000);
+    let file = FileIdentity {
+        hash: Hash::of(&page),
+        size: page.len() as u64,
+    };
+    let held = format!(r#"{{"hash":"{}","size":5000}}"#, file.hash);
+    let one = |cx: &UploadContext, s: &mut Server| {
+        let mut b = Cursor::new(page.clone());
+        let (r, req) = served(s, Reply::json(201, &held), || {
+            hub.wire.put_file(cx, PUSH, &file, "text/html", &mut b)
+        });
+        assert_eq!(r.unwrap(), file);
+        assert_eq!(req.header("content-type"), Some("text/html"));
+        req
+    };
+    let req = one(&zstd_cx, &mut s);
+    assert_eq!(req.header("content-encoding"), Some("zstd"));
+    assert_eq!(one_frame(&req.body), page);
+    let req = one(&plain_cx, &mut s);
+    assert_eq!(req.header("content-encoding"), None);
+    assert_eq!(req.body, page);
+
+    // files/put, the tar form: the whole tar body is one frame
+    let big = compressible(3_000);
+    let contents: [&[u8]; 2] = [b"\x89PNG", &big];
+    let files = Mem::new(&contents).files;
+    let items: Vec<String> = files.iter().map(crbp_held).collect();
+    let tar = |cx: &UploadContext, s: &mut Server| {
+        let mut m = Mem::new(&contents);
+        let (r, req) = served(s, Reply::json(201, &crbp_reply(&items)), || {
+            hub.wire.put_files(cx, PUSH, &mut m)
+        });
+        let answers: Vec<FileIdentity> = r.unwrap().into_iter().map(Result::unwrap).collect();
+        assert_eq!(answers, files);
+        assert_eq!(req.header("content-type"), Some("application/x-tar"));
+        req
+    };
+    let req = tar(&zstd_cx, &mut s);
+    assert_eq!(req.header("content-encoding"), Some("zstd"));
+    let body = one_frame(&req.body);
+    assert_eq!(body.len() as u64, tar_len(&files).unwrap());
+    let want: Vec<(String, Vec<u8>)> = files
+        .iter()
+        .zip(contents)
+        .map(|(f, c)| (f.hash.to_string(), c.to_vec()))
+        .collect();
+    assert_eq!(crbp_entries(&body), want);
+    let req = tar(&plain_cx, &mut s);
+    assert_eq!(req.header("content-encoding"), None);
+    assert_eq!(crbp_entries(&req.body), want);
+
+    // every other step stays uncompressed under a zstd context
+    let (r, req) = served(
+        &mut s,
+        Reply::json(200, &state_with(r#""zstd":true"#)),
+        || hub.wire.state(&zstd_cx, &state_request()),
+    );
+    r.unwrap();
+    assert_eq!(req.header("content-encoding"), None);
+    let keys = vec![key(rdy_store::kinds::BLOCK, 1)];
+    let (r, req) = served(&mut s, Reply::json(200, r#"{"missing":[]}"#), || {
+        hub.wire.known(&zstd_cx, PUSH, &keys)
+    });
+    r.unwrap();
+    assert_eq!(req.header("content-encoding"), None);
+    let (r, req) = served(&mut s, Reply::json(200, r#"{"missing":[]}"#), || {
+        hub.wire.known_files(&zstd_cx, PUSH, &files)
+    });
+    r.unwrap();
+    assert_eq!(req.header("content-encoding"), None);
+    let m = manifest();
+    let rec = record(None, &m);
+    let (r, req) = served(&mut s, Reply::json(201, CANDIDATE), || {
+        hub.wire.publish(&zstd_cx, PUSH, SITE, &rec, &m, None)
+    });
+    r.unwrap();
+    assert_eq!(req.header("content-encoding"), None);
+    assert!(req.body_text().starts_with('{'));
+    assert_eq!(s.finish(), 0);
+}
+
+/// A reader of `n` zero bytes that counts the bytes it yields.
+struct Zeros {
+    left: u64,
+    read: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl std::io::Read for Zeros {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = (out.len() as u64).min(self.left) as usize;
+        out[..n].fill(0);
+        self.left -= n as u64;
+        self.read
+            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+/// The upload bound counts the bytes before compression: a body over it is refused before a
+/// byte is read or a connection made, though its frame would be small. A body that ends early
+/// or runs long sends nothing either.
+#[test]
+fn upfast_the_upload_bound_counts_the_bytes_before_compression() {
+    let s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx_zstd();
+    let over = rdy_engine::hub_http::MAX_UPLOAD_BODY_BYTES + 1;
+    let read = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut zeros = Zeros {
+        left: over,
+        read: read.clone(),
+    };
+    let e = err(unsent(&[&s], || {
+        hub.wire.put_objects(&cx, PUSH, &mut zeros, over)
+    }));
+    assert_eq!(e.code, E_LIMIT, "{e:?}");
+    assert_eq!(read.load(std::sync::atomic::Ordering::Relaxed), 0);
+    let file = FileIdentity {
+        hash: h(1),
+        size: over,
+    };
+    let mut zeros = Zeros {
+        left: over,
+        read: read.clone(),
+    };
+    let e = err(unsent(&[&s], || {
+        hub.wire
+            .put_file(&cx, PUSH, &file, "text/plain", &mut zeros)
+    }));
+    assert_eq!(e.code, E_LIMIT, "{e:?}");
+    assert_eq!(read.load(std::sync::atomic::Ordering::Relaxed), 0);
+    // short and long bodies: nothing is sent
+    for (have, said) in [(2u64, 3u64), (4, 3)] {
+        let mut zeros = Zeros {
+            left: have,
+            read: read.clone(),
+        };
+        let e = err(unsent(&[&s], || {
+            hub.wire.put_objects(&cx, PUSH, &mut zeros, said)
+        }));
+        assert_eq!(e.code, rdy_engine::E_IO, "{have} for {said}: {e:?}");
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// An artifact whose bytes change after the check: the path's second open yields `later`.
+struct Changing {
+    manifest: Manifest,
+    first: std::collections::BTreeMap<String, Vec<u8>>,
+    later: std::collections::BTreeMap<String, Vec<u8>>,
+    opened: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+}
+
+impl Changing {
+    fn new(files: &[(&str, &[u8])]) -> Changing {
+        Changing {
+            manifest: Manifest {
+                files: files
+                    .iter()
+                    .map(|(path, bytes)| ManifestEntry {
+                        path: (*path).into(),
+                        hash: Hash::of(bytes),
+                        media_type: "text/plain".into(),
+                        size: bytes.len() as u64,
+                        notice_offset: None,
+                    })
+                    .collect(),
+            },
+            first: files
+                .iter()
+                .map(|(p, b)| ((*p).to_string(), b.to_vec()))
+                .collect(),
+            later: Default::default(),
+            opened: Default::default(),
+        }
+    }
+}
+
+impl rdy_engine::hub_publish_files::ArtifactSource for Changing {
+    fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+    fn paths(&self) -> Vec<&str> {
+        self.first.keys().map(String::as_str).collect()
+    }
+    fn open(&self, path: &str) -> Result<Box<dyn std::io::Read + '_>, RdyError> {
+        let mut opened = self.opened.lock().unwrap();
+        let n = opened.entry(path.to_string()).or_default();
+        *n += 1;
+        let bytes = match (*n, self.later.get(path)) {
+            (2.., Some(b)) => b.clone(),
+            _ => self.first[path].clone(),
+        };
+        Ok(Box::new(Cursor::new(bytes)))
+    }
+}
+
+/// With zstd taken, a file whose bytes changed after the check is still held back: the
+/// changed bytes are read before the request, so no files/put request is made, and the upload
+/// is the artifact mismatch. This holds for the one-file form and the tar form, at the same
+/// length and with more bytes.
+#[test]
+fn upfast_changed_bytes_are_held_back_under_zstd() {
+    use rdy_engine::hub_publish_files::{ArtifactLimits, upload_files};
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let limits = ArtifactLimits {
+        bytes: 1 << 20,
+        files: 100,
+    };
+    let two: [(&str, &[u8]); 2] = [("a.txt", b"aaaa"), ("b.txt", b"bbbb")];
+    for (files, path, later) in [
+        (&two[..1], "a.txt", b"aaab".to_vec()),
+        (&two[..1], "a.txt", b"aaaaa".to_vec()),
+        (&two[..], "b.txt", b"bbbc".to_vec()),
+        (&two[..], "a.txt", b"aaaaa".to_vec()),
+    ] {
+        let mut src = Changing::new(files);
+        src.later.insert(path.into(), later.clone());
+        let mut hashes: Vec<Hash> = files.iter().map(|(_, b)| Hash::of(b)).collect();
+        hashes.sort();
+        let missing: Vec<String> = hashes.iter().map(|h| format!("\"{h}\"")).collect();
+        let known = format!(r#"{{"missing":[{}]}}"#, missing.join(","));
+        let before = s.requests().len();
+        s.reply(Reply::json(200, &known));
+        s.accept_n(1);
+        let accepted = s.accepted();
+        let mut context = || Ok(hub.cx_zstd());
+        let e = err(upload_files(&src, PUSH, limits, &hub.wire, &mut context));
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (
+                E_BAD_INPUT,
+                "publication artifact does not match its manifest"
+            ),
+            "{path} {later:?}"
+        );
+        let log = s.requests();
+        assert_eq!(log.len(), before + 1, "only files/known was sent");
+        assert!(log[before].target.ends_with("/files/known"));
+        assert_eq!(s.accepted(), accepted + 1, "no files/put connection");
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// `n` bytes that zstd cannot shrink: a xorshift stream.
+fn incompressible(n: usize) -> Vec<u8> {
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 32) as u8
+        })
+        .collect()
+}
+
+/// D-YXX9Y: with zstd taken, a body whose frame is not smaller than the body goes as it is,
+/// with no `Content-Encoding`; a body that shrinks goes as its frame. This holds for objects
+/// and one file, and for the empty body. A tar body follows the same test on its whole bytes:
+/// its zero headers and end blocks shrink even around incompressible files.
+#[test]
+fn upfast_a_body_zstd_does_not_shrink_goes_as_identity() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx_zstd();
+    for (plain, shrinks) in [
+        (incompressible(20_000), false),
+        (Vec::new(), false),
+        (compressible(20_000), true),
+    ] {
+        let n = plain.len() as u64;
+        // objects/put
+        let mut b = Cursor::new(plain.clone());
+        let reply = format!(r#"{{"records":1,"bytes":{n}}}"#);
+        let (r, req) = served(&mut s, Reply::json(201, &reply), || {
+            hub.wire.put_objects(&cx, PUSH, &mut b, n)
+        });
+        r.unwrap();
+        // files/put, one file
+        let file = FileIdentity {
+            hash: Hash::of(&plain),
+            size: n,
+        };
+        let held = format!(r#"{{"hash":"{}","size":{n}}}"#, file.hash);
+        let mut b = Cursor::new(plain.clone());
+        let (r, one) = served(&mut s, Reply::json(201, &held), || {
+            hub.wire.put_file(&cx, PUSH, &file, "image/png", &mut b)
+        });
+        r.unwrap();
+        for req in [req, one] {
+            if shrinks {
+                assert_eq!(req.header("content-encoding"), Some("zstd"));
+                assert!(req.body.len() < plain.len());
+                assert_eq!(one_frame(&req.body), plain);
+            } else {
+                assert_eq!(req.header("content-encoding"), None, "{n} bytes");
+                assert_eq!(req.header("content-length"), Some(n.to_string().as_str()));
+                assert_eq!(req.body, plain);
+            }
+        }
+    }
+    // a tar body of incompressible files: the whole body is weighed, headers included
+    let a = incompressible(3000);
+    let b = incompressible(5000);
+    let contents: [&[u8]; 2] = [&a[..1500], &b];
+    let files = Mem::new(&contents).files;
+    let items: Vec<String> = files.iter().map(crbp_held).collect();
+    let mut m = Mem::new(&contents);
+    let (r, req) = served(&mut s, Reply::json(201, &crbp_reply(&items)), || {
+        hub.wire.put_files(&cx, PUSH, &mut m)
+    });
+    r.unwrap();
+    let tar_bytes = tar_len(&files).unwrap() as usize;
+    let mut plain_tar = Mem::new(&contents);
+    let mut whole = Vec::new();
+    for (i, c) in contents.iter().enumerate() {
+        whole.extend_from_slice(&tar_header(&plain_tar.files()[i]));
+        whole.extend_from_slice(c);
+        whole.resize(whole.len().next_multiple_of(512), 0);
+        let mut sink = vec![0u8; c.len()];
+        plain_tar.read(i, &mut sink).unwrap();
+    }
+    whole.resize(tar_bytes, 0);
+    assert!(level3(&whole).len() < tar_bytes, "the headers shrink");
+    assert_eq!(req.header("content-encoding"), Some("zstd"));
+    assert_eq!(one_frame(&req.body), whole);
+    assert_eq!(crbp_entries(&whole).len(), 2);
     assert_eq!(s.finish(), 0);
 }

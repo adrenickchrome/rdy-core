@@ -59,7 +59,7 @@ use crate::read_state::ReadState;
 use crate::readiness::Candidate;
 use crate::readiness::assessment::assess_wire;
 use crate::sync_fetch::HubState;
-use crate::views::owner_of;
+use crate::views::{Eligibility, owner_of};
 use crate::{Rdy, Scope, Session};
 use rdy_model::assessment::{AssessedPolicy, AssessmentV2, PolicyRef, PolicyVerdict};
 use rdy_model::{Assurance, Change, ChangeLinks, Hash, LandingRecord, Proposal, StateSnapshot};
@@ -628,6 +628,9 @@ fn remainder_changes(
 /// Makes the `pull-<n>` view on canon now, owned by `s`, replays `sources` into it by the
 /// ordinary view replay, then commits one text-free mark per block of `marks`
 /// ([`crate::sync_redaction::mark_change`]), in the open batch. Returns its name.
+///
+/// `eligible` holds the sources that the pull's published state reached before its canon moved
+/// (D-99CWC). The new view's state supplies the target only, never the source roots.
 fn remainder_view(
     rdy: &mut Rdy,
     s: &Session,
@@ -635,6 +638,7 @@ fn remainder_view(
     inputs: &CheckInputs,
     sources: &[Hash],
     marks: &[crate::sync_redaction::RemovalMark],
+    eligible: &mut Eligibility<'_>,
 ) -> Result<String, RdyError> {
     let name = free_view(&rdy.store.reader())?;
     let tip = rdy.store.canon_head()?;
@@ -651,6 +655,7 @@ fn remainder_view(
             &head.head.to_string(),
             sources,
             &by,
+            eligible,
         )?;
         rdy.store.view_replay_prepared(&name, &prepared, &by)?;
     }
@@ -704,7 +709,13 @@ pub fn pull(rdy: &mut Rdy, s: &Session, req: &PullRequest) -> Result<PullOutcome
         });
     }
     let inputs = CheckInputs::of_state(&st);
-    match second_batch(rdy, s, &st, &inputs, req, &plan, state) {
+    // the sources a remainder may replay, captured from the published state before the second
+    // batch moves canon (D-99CWC); only a stop or a pull with no sync state has a remainder
+    let mut eligible = match plan.kind {
+        PlanKind::NoState { .. } | PlanKind::Replay { .. } => Some(Eligibility::captured(&st)?),
+        PlanKind::UpToDate | PlanKind::FastForward | PlanKind::Take { .. } => None,
+    };
+    match second_batch(rdy, s, &st, &inputs, req, &plan, state, eligible.as_mut()) {
         Ok(outcome) => {
             drop(st);
             rdy.publish_chain_moved()?;
@@ -718,7 +729,9 @@ pub fn pull(rdy: &mut Rdy, s: &Session, req: &PullRequest) -> Result<PullOutcome
     }
 }
 
-/// The writes of the second batch, into the open batch (see [`pull`]).
+/// The writes of the second batch, into the open batch (see [`pull`]). `eligible` holds the
+/// remainder's sources as `st` reached them, captured before canon moves.
+#[allow(clippy::too_many_arguments)]
 fn second_batch(
     rdy: &mut Rdy,
     s: &Session,
@@ -727,6 +740,7 @@ fn second_batch(
     req: &PullRequest,
     plan: &PullPlan,
     state: SyncCanon,
+    eligible: Option<&mut Eligibility<'static>>,
 ) -> Result<PullOutcome, RdyError> {
     let reader = st.reader();
     let mut out = PullOutcome {
@@ -820,7 +834,16 @@ fn second_batch(
     if !remainder.is_empty() {
         let mut marks = vec![];
         let sources = remainder_changes(reader, &remainder, &mut out.removed, &mut marks)?;
-        out.view = Some(remainder_view(rdy, s, st, inputs, &sources, &marks)?);
+        let eligible = eligible.ok_or_else(|| {
+            RdyError::new(
+                crate::error::E_INTERNAL,
+                "a pull's remainder has no captured sources",
+                "report this as a bug",
+            )
+        })?;
+        out.view = Some(remainder_view(
+            rdy, s, st, inputs, &sources, &marks, eligible,
+        )?);
     }
     let mut refs = vec![];
     if mark && let (Some(old), Some(by)) = (plan.local_tip, tip) {

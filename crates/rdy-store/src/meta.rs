@@ -7,7 +7,9 @@
 use crate::Store;
 use crate::error::StoreError;
 use crate::format::{REF_STORE_FEATURES, REF_STORE_FORMAT, REF_UPGRADE, StoreFeatures};
-use crate::holder::REF_STORE_MODE;
+use crate::holder::{REF_STORE_MODE, StoreMode};
+use crate::kinds::{self, RefUpdate};
+use crate::segment::Location;
 use crate::store::{StoreReader, batch_open};
 use rdy_model::{Hash, RepoId};
 use serde::{Deserialize, Serialize};
@@ -16,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub const META_REF: &str = "meta/";
 /// The ref holding the project's repo id: its 16 bytes.
 pub const REF_REPO_ID: &str = "meta/repo_id";
-/// The ref holding a clone's origin (`Origin`, postcard).
+/// The ref holding a clone's origin, or a forked holder's (`Origin`, postcard).
 pub const REF_ORIGIN: &str = "meta/origin";
 /// The first store format whose stores hold a repo id.
 pub const FIRST_REPO_ID_STORE_FORMAT: u32 = 12;
@@ -67,6 +69,11 @@ pub fn decode_origin(v: &[u8]) -> Option<Origin> {
     }
 }
 
+/// A `meta/origin` value that counts for lineage: it decodes and names a fork.
+fn fork_origin(v: &[u8]) -> Option<Origin> {
+    decode_origin(v).filter(|o| o.fork)
+}
+
 fn bad(m: impl Into<String>) -> StoreError {
     StoreError::Decode(m.into())
 }
@@ -98,6 +105,45 @@ impl StoreReader {
         self.get_ref(REF_ORIGIN)?
             .map(|v| decode_origin(&v).ok_or_else(|| bad("meta/origin does not decode")))
             .transpose()
+    }
+
+    /// The fork origins this store's lineage counts (D-HX6BX), in log order: each `meta/origin`
+    /// update before `end` whose value decodes with `fork: true`. A project counts every such
+    /// update of its log. A holder counts only those of its first sealed batch, which its
+    /// creation wrote (`Store::create_holder_with_origins`): a later origin widens nothing. A
+    /// value that does not decode counts for nothing; the fsck still reports a damaged current
+    /// value (`check_meta`). Nothing is deduplicated or written.
+    pub fn counted_fork_origins_before(&self, end: Location) -> Result<Vec<Origin>, StoreError> {
+        let upto = end.min(self.index().indexed_upto()?);
+        let mut first = Vec::new();
+        let (creation, _) = self.walk_first_batch(upto, |kind, payload| {
+            if kind == kinds::REF_UPDATE
+                && let Some(u) = payload.and_then(crate::holder::decode_ref)
+                && u.name == REF_ORIGIN
+            {
+                first.push(u.value);
+            }
+        })?;
+        if creation.mode == StoreMode::Holder {
+            return Ok(first.iter().filter_map(|v| fork_origin(v)).collect());
+        }
+        // a project: every origin update before `end`, ordered by its frame's place in the log
+        // (the index's location of each stored update), never by object hash
+        let mut found: Vec<(Location, Vec<u8>)> = Vec::new();
+        self.for_each_object_of(kinds::REF_UPDATE, |hash| {
+            let update: RefUpdate = self.get_typed(kinds::REF_UPDATE, &hash)?;
+            if update.name != REF_ORIGIN {
+                return Ok(());
+            }
+            if let Some(at) = self.index().typed(kinds::REF_UPDATE, &hash)?
+                && at < upto
+            {
+                found.push((at, update.value));
+            }
+            Ok(())
+        })?;
+        found.sort_by_key(|(at, _)| *at);
+        Ok(found.iter().filter_map(|(_, v)| fork_origin(v)).collect())
     }
 
     /// fsck (closed), checked in this order (O22): (1) no `meta/` ref other than the six and a

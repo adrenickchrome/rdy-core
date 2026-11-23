@@ -561,25 +561,25 @@ pub(crate) fn dependents(
 }
 
 /// The deps `added` needs that are neither in `included`, in `added`, nor in base `base`, found
-/// breadth first from `added` (the closure an include completes), in discovery order.
-pub(crate) fn missing_deps(
-    st: &ReadState,
-    base: Option<Hash>,
-    included: &BTreeSet<Hash>,
-    added: &[Hash],
-) -> Result<Vec<Hash>, RdyError> {
-    Ok(missing_deps_rooted(st, base, included, added)?
-        .into_iter()
-        .map(|(d, _)| d)
-        .collect())
-}
-
-/// `missing_deps`, each dep with the change of `added` whose closure first reached it.
+/// breadth first from `added` (the closure an include completes), in discovery order. Each dep
+/// comes with the change of `added` whose closure first reached it.
 pub(crate) fn missing_deps_rooted(
     st: &ReadState,
     base: Option<Hash>,
     included: &BTreeSet<Hash>,
     added: &[Hash],
+) -> Result<Vec<(Hash, Hash)>, RdyError> {
+    missing_deps_admitted(st, base, included, added, &mut |_| Ok(()))
+}
+
+/// `missing_deps_rooted`, with `admit` called on each dep it finds, before the dep's contents
+/// are read: an error of `admit` stops the walk with it (an include's source check, D-99CWC).
+fn missing_deps_admitted(
+    st: &ReadState,
+    base: Option<Hash>,
+    included: &BTreeSet<Hash>,
+    added: &[Hash],
+    admit: &mut dyn FnMut(&Hash) -> Result<(), RdyError>,
 ) -> Result<Vec<(Hash, Hash)>, RdyError> {
     let reader = st.reader();
     let added_set: BTreeSet<Hash> = added.iter().copied().collect();
@@ -597,12 +597,200 @@ pub(crate) fn missing_deps_rooted(
             {
                 continue;
             }
+            admit(&d)?;
             found_set.insert(d);
             found.push((d, root));
             queue.push_back((d, root));
         }
     }
     Ok(found)
+}
+
+/// The refusal of a change that is no source here: absent, or carried only as evidence.
+pub(crate) fn no_change(c: &Hash) -> RdyError {
+    RdyError::new(
+        E_NOT_FOUND,
+        format!("no change {}", c.short()),
+        "check the id with rdy view show <view>",
+    )
+}
+
+/// D-99CWC: which changes an include or a replay may take, as a source or as a dependency an
+/// include brings along. A change is eligible when the state's own history reaches it. The roots
+/// are canon's chain, each tag's chain, each view's chain and each `replaced/` mark's chain, by
+/// the mark's stored kind. Excluded changes and closed views count. So do the changes their
+/// `replayed_from` links reach. A change that only a later removal or dispute record carries is
+/// not eligible: its bytes are evidence. Stored presence and proof records grant nothing.
+pub(crate) struct Eligibility<'s> {
+    /// The state whose cheap reads answer first; None for a set captured from a state before it
+    /// moved ([`Eligibility::captured`]).
+    from: Option<&'s ReadState>,
+    /// The changes the views of `from` include, read once when canon does not hold a change.
+    included: Option<HashSet<Hash>>,
+    /// The changes the roots reach, read once when the cheaper reads do not answer.
+    reach: Option<HashSet<Hash>>,
+    /// The changes that `reach`'s `replayed_from` links reach, read once on a change it lacks.
+    ancestry: Option<HashSet<Hash>>,
+}
+
+impl<'s> Eligibility<'s> {
+    /// The eligibility of `st`, read as far as each check needs.
+    pub(crate) fn lazy(st: &'s ReadState) -> Eligibility<'s> {
+        Eligibility {
+            from: Some(st),
+            included: None,
+            reach: None,
+            ancestry: None,
+        }
+    }
+
+    /// The eligibility of `st`, captured now: it holds after `st`'s store moves on (a pull's
+    /// remainder replays on the new canon with the sources the old state reached).
+    pub(crate) fn captured(st: &ReadState) -> Result<Eligibility<'static>, RdyError> {
+        Ok(Eligibility {
+            from: None,
+            included: None,
+            reach: Some(reach_of(st)?),
+            ancestry: None,
+        })
+    }
+
+    /// Refuses `c` with [`no_change`] when it is no eligible source. `reader` reads the change
+    /// contents that the `replayed_from` links need; contents never change.
+    pub(crate) fn check(
+        &mut self,
+        reader: &rdy_store::StoreReader,
+        c: &Hash,
+    ) -> Result<(), RdyError> {
+        // canon membership comes from the roots below (canon's chain and its replay ancestry),
+        // not the current-canon index: eligibility is the state's own history (D-QCE8M audit)
+        if let Some(st) = self.from {
+            if self.included.is_none() {
+                let mut all = HashSet::new();
+                for name in st.view_names() {
+                    all.extend(st.included(&name).iter().copied());
+                }
+                self.included = Some(all);
+            }
+            if self.included.as_ref().is_some_and(|i| i.contains(c)) {
+                return Ok(());
+            }
+            if self.reach.is_none() {
+                self.reach = Some(reach_of(st)?);
+            }
+        }
+        let reach = self.reach.get_or_insert_with(HashSet::new);
+        if reach.contains(c) {
+            return Ok(());
+        }
+        if self.ancestry.is_none() {
+            self.ancestry = Some(ancestry_of(reader, reach)?);
+        }
+        if self.ancestry.as_ref().is_some_and(|a| a.contains(c)) {
+            return Ok(());
+        }
+        Err(no_change(c))
+    }
+}
+
+/// The changes the roots of `st` reach (see [`Eligibility`]): the landings of canon's, each
+/// tag's and each landing mark's chain, and the view ops of each view's and each view-op mark's
+/// chain. Each landing and op is read once; a walk stops at one the store does not hold.
+fn reach_of(st: &ReadState) -> Result<HashSet<Hash>, RdyError> {
+    use rdy_store::hub_canon::{REPLACED_REF, Replaced, ReplacedKind};
+    let reader = st.reader();
+    let mut landings: Vec<Hash> = st.canon_head().into_iter().collect();
+    landings.extend(st.tags.iter().map(|(_, t)| t.landing));
+    let mut ops: Vec<Hash> = st
+        .view_names()
+        .iter()
+        .filter_map(|n| st.view_head(n).map(|h| h.head))
+        .collect();
+    for (name, value) in reader.refs_with_prefix(REPLACED_REF)? {
+        let Some(hash) = name
+            .strip_prefix(REPLACED_REF)
+            .and_then(|hex| hex.parse::<Hash>().ok())
+        else {
+            continue;
+        };
+        match Replaced::decode(&value).map(|m| m.kind) {
+            Ok(ReplacedKind::Landing) => landings.push(hash),
+            Ok(ReplacedKind::ViewOp) => ops.push(hash),
+            Err(_) => {}
+        }
+    }
+    let mut out = HashSet::new();
+    let mut seen = HashSet::new();
+    for tip in landings {
+        let mut cur = Some(tip);
+        while let Some(l) = cur {
+            if !seen.insert(l) || !reader.has_kind(rdy_store::kinds::LANDING, &l)? {
+                break;
+            }
+            let landing = reader.landing(&l)?;
+            out.extend(landing.changes);
+            cur = landing.prev;
+        }
+    }
+    for head in ops {
+        let mut cur = Some(head);
+        while let Some(h) = cur {
+            if !seen.insert(h) {
+                break;
+            }
+            let op = match reader.view_op(&h) {
+                Ok(op) => op,
+                Err(StoreError::NotFound(_)) => break,
+                Err(e) => return Err(e.into()),
+            };
+            match op.op {
+                ViewOpKind::Fork { changes, .. }
+                | ViewOpKind::Include { changes }
+                | ViewOpKind::Exclude { changes } => out.extend(changes),
+                ViewOpKind::Commit { change } => {
+                    out.insert(change);
+                }
+                ViewOpKind::Rebase {
+                    dropped, remaining, ..
+                } => {
+                    out.extend(dropped);
+                    out.extend(remaining);
+                }
+                ViewOpKind::Create { .. }
+                | ViewOpKind::Undo { .. }
+                | ViewOpKind::Close { .. }
+                | ViewOpKind::Own { .. } => {}
+            }
+            cur = op.prev;
+        }
+    }
+    Ok(out)
+}
+
+/// The changes that the `replayed_from` links of `reach`'s changes reach, outside `reach`. A
+/// change whose contents are gone or removed links nowhere.
+fn ancestry_of(
+    reader: &rdy_store::StoreReader,
+    reach: &HashSet<Hash>,
+) -> Result<HashSet<Hash>, RdyError> {
+    let from = |c: &Hash| -> Result<Option<Hash>, RdyError> {
+        match reader.change(c) {
+            Ok(change) => Ok(change.links.replayed_from),
+            Err(StoreError::NotFound(_) | StoreError::Redacted { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    };
+    let mut out = HashSet::new();
+    for c in reach {
+        let mut cur = from(c)?;
+        while let Some(s) = cur {
+            if reach.contains(&s) || !out.insert(s) {
+                break;
+            }
+            cur = from(&s)?;
+        }
+    }
+    Ok(out)
 }
 
 /// incl1: what an include of `added` into `view` (reading on `base`, including `included`)
@@ -613,16 +801,22 @@ pub(crate) fn missing_deps_rooted(
 /// refuses the include with `E_DEPS_MISSING`, one issue per parent. A dep that landed after a
 /// pinned base is brought along: an include is an explicit act, so it may bring landed work into
 /// a pinned view, which an undo never does on its own (`E_UNDO_LANDING` sends the agent here;
-/// final review I3, kept as built pending the founder's ruling).
+/// final review I3, kept as built pending the founder's ruling). Each change the closure adds
+/// passes `sources` before its contents are read (D-99CWC): finding it grants nothing.
 fn include_closure(
     st: &ReadState,
     view: &str,
     base: Option<Hash>,
     included: &BTreeSet<Hash>,
     added: &[Hash],
+    sources: &mut Eligibility<'_>,
 ) -> Result<Vec<Hash>, RdyError> {
     let reader = st.reader();
-    let mut deps = missing_deps(st, base, included, added)?;
+    let mut admit = |c: &Hash| sources.check(reader, c);
+    let mut deps: Vec<Hash> = missing_deps_admitted(st, base, included, added, &mut admit)?
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect();
     let mut changes: Vec<(Hash, Change)> = added
         .iter()
         .chain(&deps)
@@ -679,6 +873,7 @@ fn include_closure(
             match open.get(p) {
                 Some(k) if !have.contains(k) && reader.landing_of(k)?.is_none() => {
                     if !new.contains(k) {
+                        admit(k)?;
                         new.push(*k);
                     }
                 }
@@ -713,7 +908,10 @@ fn include_closure(
             e.issues = issues;
             return Err(e);
         }
-        let more = missing_deps(st, base, &have, &new)?;
+        let more: Vec<Hash> = missing_deps_admitted(st, base, &have, &new, &mut admit)?
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
         for h in new.iter().chain(&more) {
             changes.push((*h, reader.change(h)?));
         }
@@ -825,8 +1023,9 @@ impl Rdy {
     /// incl1: includes `changes` (from any view) in `view`, with what they need that the view
     /// neither includes nor has in its base: their deps, and the changes that create the parents
     /// their blocks are created or moved under (`include_closure`). Changes already included are
-    /// skipped; a landed change is refused. An include into a view with no ref creates it, owned
-    /// by the session.
+    /// skipped; a landed change is refused. A change that only later evidence carries (a fork's
+    /// later removal or dispute record) is `E_NOT_FOUND`, named or reached (D-99CWC); nothing is
+    /// written then. An include into a view with no ref creates it, owned by the session.
     pub fn view_include(
         &mut self,
         s: &Session,
@@ -862,6 +1061,12 @@ impl Rdy {
                 ));
             }
         }
+        // the sources this state's history reaches (D-99CWC): a change that only later evidence
+        // carries is no source, by name or through the closure
+        let mut sources = Eligibility::lazy(&st);
+        for c in &requested {
+            sources.check(reader, c)?;
+        }
         // 3. what to add: the requested changes not included, then their missing deps (BFS)
         let included: BTreeSet<Hash> = st.included(view).iter().copied().collect();
         let base = st.effective_base(view);
@@ -873,7 +1078,7 @@ impl Rdy {
         if added.is_empty() {
             return op_result(&st, view, &[], &[], &[], &[]);
         }
-        let added_deps = include_closure(&st, view, base, &included, &added)?;
+        let added_deps = include_closure(&st, view, base, &included, &added, &mut sources)?;
         refuse_parent_cycle(&st, view, base, &added, &added_deps)?;
         // 5. the writes: a new view is created first (its own batch and publish)
         let exists = st.has_view(view);

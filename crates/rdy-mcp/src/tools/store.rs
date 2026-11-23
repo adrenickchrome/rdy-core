@@ -2,7 +2,10 @@
 //! O6); chained dumps and stopped loads (D-2FMRR, D-QF2HQ). Any session may call them. Relative paths resolve against the project directory.
 //! ok11: `rdy_upgrade` (D-WWAK7, D-KQ4CA, D-1HDVA) on the connected project only.
 use super::*;
-use rdy_engine::clone::{CloneSource, SourceKind, clone, clone_url, source_kind, url_fork};
+use rdy_engine::clone::{
+    CloneSource, SourceKind, at_needs_fork, at_needs_project, clone_at, clone_url, source_kind,
+    url_fork,
+};
 use rdy_engine::config_levels::user_file_from_env;
 use rdy_engine::dump_error;
 use rdy_engine::dump_stop::{DumpStop, MAX_CHAIN_FILES};
@@ -48,6 +51,8 @@ pub struct CloneParams {
     pub fork: Option<bool>,
     /// An https hub repo URL to clone instead, with the hub's settings and a share remote named hub. Not with file or fork.
     pub url: Option<String>,
+    /// A version of this project, such as v1.2.0: the fork keeps only the history up to that tag. Needs fork true; not with file or url.
+    pub at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -121,14 +126,18 @@ pub fn rdy_clone(st: &mut McpState, p: CloneParams) -> Result<Value, RdyError> {
     let root = st.engine.root();
     let dir = under(&root, &p.dir);
     let fork = p.fork.unwrap_or(false);
+    if p.url.is_some() && p.file.is_some() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            CLONE_URL_FILE_MESSAGE,
+            CLONE_URL_FILE_FIX,
+        ));
+    }
+    // a fork at a tag (D-99CWC): the fork first, then the source form
+    if p.at.is_some() && !fork {
+        return Err(at_needs_fork());
+    }
     if let Some(url) = &p.url {
-        if p.file.is_some() {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                CLONE_URL_FILE_MESSAGE,
-                CLONE_URL_FILE_FIX,
-            ));
-        }
         if fork {
             return Err(url_fork());
         }
@@ -136,11 +145,13 @@ pub fn rdy_clone(st: &mut McpState, p: CloneParams) -> Result<Value, RdyError> {
         let summary = clone_url(&s, url, &dir, &user_file)?;
         return Ok(serde_json::to_value(summary).expect("a reply serializes"));
     }
+    let at = p.at.as_deref();
     let summary = match p.file {
-        None => clone(CloneSource::State(&st.engine.read()), &dir, fork)?,
+        None => clone_at(CloneSource::State(&st.engine.read()), &dir, fork, at)?,
+        Some(_) if at.is_some() => return Err(at_needs_project()),
         Some(file) => {
             let file = dump_file(&root, &file)?;
-            clone(CloneSource::File(&file), &dir, fork)?
+            clone_at(CloneSource::File(&file), &dir, fork, None)?
         }
     };
     Ok(serde_json::to_value(summary).expect("a reply serializes"))

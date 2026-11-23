@@ -335,6 +335,17 @@ pub const CLONE_URL_FORK_FIX: &str =
 pub const CLONE_URL_FILE_MESSAGE: &str = "file is not used by clone with url";
 /// The fix of `CLONE_URL_FILE_MESSAGE`.
 pub const CLONE_URL_FILE_FIX: &str = "remove file or url";
+/// The message of `E_BAD_INPUT` when a clone names a tag but is no fork (D-99CWC).
+pub const CLONE_AT_NEEDS_FORK_MESSAGE: &str = "a clone keeps the whole history; --at needs --fork";
+/// The fix of `CLONE_AT_NEEDS_FORK_MESSAGE`.
+pub const CLONE_AT_NEEDS_FORK_FIX: &str = "add --fork, or remove --at";
+/// The message of `E_BAD_INPUT` when a fork at a tag names a dump file (D-99CWC).
+pub const CLONE_AT_NEEDS_PROJECT_MESSAGE: &str = "--at needs a project";
+/// The fix of `CLONE_AT_NEEDS_PROJECT_MESSAGE`.
+pub const CLONE_AT_NEEDS_PROJECT_FIX: &str = "load the dump, then fork the loaded project";
+/// The fix of `E_ALREADY_EXISTS` when a fork at a tag meets a destination that is not empty.
+/// The message is `<dir> is not empty`.
+pub const FORK_DESTINATION_FIX: &str = "fork into a new directory, or an empty one";
 /// The message of `E_BAD_INPUT` when a member of a hub repo's settings, captured by rdy
 /// `<captured>`, does not fit this rdy (D-7PYYS). `<member>` is `pack` or a setting's name.
 pub const CLONE_SETTING_MESSAGE: &str =
@@ -646,6 +657,10 @@ pub struct RdyError {
     /// Warnings that ride on this refusal (W_DAEMON_BUILD on the first tool result).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Box<Vec<serde_json::Value>>>,
+    /// The HTTP status of a reply that was not the hub's, on the uncertain error of a write
+    /// step; the caller that rewraps the error names it again. Never serialized.
+    #[serde(skip)]
+    pub upstream_status: Option<u16>,
 }
 
 impl RdyError {
@@ -658,6 +673,7 @@ impl RdyError {
             corrected: None,
             briefing: None,
             warnings: None,
+            upstream_status: None,
         }
     }
 

@@ -293,6 +293,7 @@ fn scenario() -> Scenario {
         audience: None,
         artifact_bytes: 201_326_592,
         artifact_files: 32_000,
+        zstd: false,
     };
     state.profile = Some(ProfileIdentity {
         id: site.clone(),

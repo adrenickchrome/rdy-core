@@ -596,3 +596,46 @@ fn rpl34_adapter_surface_is_complete() {
     drop(snap);
     handle.close().unwrap();
 }
+
+/// hfp2 (D-99CWC): a hub forks a holder snapshot with the adapter's own types: the call, its
+/// handle, its identity and origin, and its error all come from `rdy_adapter`.
+#[test]
+fn hfp2_adapter_types_need_no_core_import() {
+    let fork: fn(&Snapshot, &str, &Path) -> Result<StoreHandle, RdyError> = Snapshot::fork_at;
+    let dir = project();
+    let handle: StoreHandle = open(dir.path()).unwrap();
+    let snap: Snapshot = handle.snapshot().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let to = target.path().join("fork");
+    let e: RdyError = fork(&snap, "v1.0.0", &to).err().unwrap();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("E_BAD_INPUT", "this store is a project")
+    );
+    assert!(!to.exists());
+    // a holder's fork answers through the same types
+    let hub = StoreHandle::create_holder(&target.path().join("hub"), RepoId::new()).unwrap();
+    let held: Snapshot = hub.snapshot().unwrap();
+    let e: RdyError = held.fork_at("v1.0.0", &to).err().unwrap();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("E_NOT_FOUND", "no version v1.0.0")
+    );
+    let identity: &Identity = held.identity();
+    let origin: &Option<Origin> = &identity.origin;
+    assert!(origin.is_none());
+    drop((snap, held));
+    handle.close().unwrap();
+    hub.close().unwrap();
+}
+
+/// hfp4 (D-B2AC3): the adapter's own `HiddenList` has the shared JSON form as a method.
+#[test]
+fn hfp4_adapter_hidden_list_has_the_json_form() {
+    let form: fn(&rdy_adapter::publication::HiddenList) -> serde_json::Value =
+        rdy_adapter::publication::HiddenList::to_json;
+    assert_eq!(
+        form(&rdy_adapter::publication::HiddenList::default()),
+        serde_json::json!({"docs": 0, "blocks": 0, "rows": [], "omitted_rows": 0})
+    );
+}

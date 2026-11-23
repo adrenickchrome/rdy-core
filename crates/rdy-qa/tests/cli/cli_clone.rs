@@ -5,8 +5,8 @@
 use rdy_engine::Rdy;
 use rdy_qa::daemon::{Served, human_command, short_tempdir};
 use rdy_qa::golden::{FIXTURE_DIR, approver, land};
-use serde_json::Value;
-use std::path::Path;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// The `next` line of every clone (O9).
@@ -359,4 +359,310 @@ fn ec12_a_url_source_names_the_sync_client() {
     );
     assert!(!to.exists(), "the target is untouched");
     assert!(s.daemon_pid().is_none(), "no daemon was asked");
+}
+
+/// hfp3: `golden_served`, then one more landing tagged `v2.0.0`; its repo id and the landing of
+/// `v1.0.0`, which is not canon's head.
+fn two_tag_served() -> (Served, String, String) {
+    let (s, id) = golden_served();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    rdy_qa::golden::small_site(&mut r);
+    r.tag(&approver(), "v2.0.0", None, None).unwrap();
+    let st = r.read();
+    let v1 = st
+        .versions()
+        .unwrap()
+        .into_iter()
+        .find(|v| v.name == "v1.0.0")
+        .expect("v1.0.0")
+        .landing;
+    assert_ne!(
+        st.canon_head().map(|h| h.to_string()),
+        Some(v1.clone()),
+        "v1.0.0 is behind canon"
+    );
+    drop(st);
+    r.close().unwrap();
+    (s, id, v1)
+}
+
+/// Every path under `dir` with its bytes; empty when `dir` does not exist.
+fn files_of(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+    let mut out = vec![];
+    if !dir.exists() {
+        return out;
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            let rel = p.strip_prefix(dir).unwrap().to_string_lossy().into_owned();
+            if p.is_dir() {
+                stack.push(p);
+                out.push((rel, None));
+            } else {
+                out.push((rel, Some(std::fs::read(&p).unwrap())));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The code, message and fix of a refused CLI run.
+fn cli_refusal(out: &Output) -> (String, String, String) {
+    let (ok, e) = parsed(out);
+    assert!(!ok, "{e}");
+    let s = |k: &str| e[k].as_str().unwrap_or_default().to_string();
+    (s("code"), s("message"), s("fix"))
+}
+
+/// The code, message and fix of a refused MCP call.
+fn mcp_refusal(r: rdy_qa::mcp::Reply) -> (String, String, String) {
+    let rdy_qa::mcp::Reply::ToolError(e) = r else {
+        panic!("expected a tool error, got {r:?}")
+    };
+    let s = |k: &str| e[k].as_str().unwrap_or_default().to_string();
+    (s("code"), s("message"), s("fix"))
+}
+
+#[test]
+fn hfp3_at_refusals_match_on_all_surfaces() {
+    let (s, _id, _v1) = two_tag_served();
+    let scratch = short_tempdir();
+    let env = s.env_pairs();
+    let src = s.dir.path().to_str().unwrap().to_string();
+    let file = scratch.path().join("p.rdydump");
+    let file_arg = file.to_str().unwrap().to_string();
+    stdout(&s.rdy(&["dump", "--out", &file_arg]));
+    s.stop();
+    assert!(s.daemon_pid().is_none());
+    let to = scratch.path().join("to");
+    let to_arg = to.to_str().unwrap().to_string();
+    let full = scratch.path().join("full");
+    std::fs::create_dir(&full).unwrap();
+    std::fs::write(full.join("keep.txt"), b"keep").unwrap();
+    let full_arg = full.to_str().unwrap().to_string();
+    const URL: &str = "https://127.0.0.1:9/acme/docs";
+
+    // each row: the CLI arguments after `clone`, the MCP arguments, the target, and the
+    // expected refusal (the message and fix of a bad tag name are the parser's)
+    struct Row {
+        cli: Vec<String>,
+        mcp: Value,
+        target: PathBuf,
+        want: (&'static str, Option<String>, Option<String>),
+    }
+    let own = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let rows = [
+        Row {
+            cli: own(&[&src, &to_arg, "--at", "v1.0.0"]),
+            mcp: json!({"dir": &to_arg, "at": "v1.0.0"}),
+            target: to.clone(),
+            want: (
+                "E_BAD_INPUT",
+                Some("a clone keeps the whole history; --at needs --fork".into()),
+                Some("add --fork, or remove --at".into()),
+            ),
+        },
+        Row {
+            cli: own(&[&file_arg, &to_arg, "--at", "v1.0.0"]),
+            mcp: json!({"dir": &to_arg, "file": &file_arg, "at": "v1.0.0"}),
+            target: to.clone(),
+            want: (
+                "E_BAD_INPUT",
+                Some("a clone keeps the whole history; --at needs --fork".into()),
+                Some("add --fork, or remove --at".into()),
+            ),
+        },
+        Row {
+            cli: own(&[&file_arg, &to_arg, "--fork", "--at", "v1.0.0"]),
+            mcp: json!({"dir": &to_arg, "file": &file_arg, "fork": true, "at": "v1.0.0"}),
+            target: to.clone(),
+            want: (
+                "E_BAD_INPUT",
+                Some("--at needs a project".into()),
+                Some("load the dump, then fork the loaded project".into()),
+            ),
+        },
+        Row {
+            cli: own(&[URL, &to_arg, "--fork", "--at", "v1.0.0"]),
+            mcp: json!({"dir": &to_arg, "url": URL, "fork": true, "at": "v1.0.0"}),
+            target: to.clone(),
+            want: (
+                "E_BAD_INPUT",
+                Some("a fork starts from a project or a dump, not from a hub URL".into()),
+                Some("clone the hub repo, then run rdy clone --fork <that project> <dir>".into()),
+            ),
+        },
+        Row {
+            cli: own(&[URL, &to_arg, "--at", "v1.0.0"]),
+            mcp: json!({"dir": &to_arg, "url": URL, "at": "v1.0.0"}),
+            target: to.clone(),
+            want: (
+                "E_BAD_INPUT",
+                Some("a clone keeps the whole history; --at needs --fork".into()),
+                Some("add --fork, or remove --at".into()),
+            ),
+        },
+        Row {
+            cli: own(&[&src, &to_arg, "--fork", "--at", "v9.9.9"]),
+            mcp: json!({"dir": &to_arg, "fork": true, "at": "v9.9.9"}),
+            target: to.clone(),
+            want: (
+                "E_NOT_FOUND",
+                Some("no version v9.9.9".into()),
+                Some("list versions with rdy tags".into()),
+            ),
+        },
+        Row {
+            cli: own(&[&src, &to_arg, "--fork", "--at", "latest"]),
+            mcp: json!({"dir": &to_arg, "fork": true, "at": "latest"}),
+            target: to.clone(),
+            want: ("E_BAD_TAG_NAME", None, None),
+        },
+        Row {
+            cli: own(&[&src, &full_arg, "--fork", "--at", "v1.0.0"]),
+            mcp: json!({"dir": &full_arg, "fork": true, "at": "v1.0.0"}),
+            target: full.clone(),
+            want: (
+                "E_ALREADY_EXISTS",
+                Some(format!("{} is not empty", full.display())),
+                Some("fork into a new directory, or an empty one".into()),
+            ),
+        },
+    ];
+
+    let mut seen: Vec<Vec<(String, String, String)>> = vec![vec![]; rows.len()];
+    let check = |i: usize, surface: &str, got: (String, String, String)| {
+        let r = &rows[i];
+        assert_eq!(got.0, r.want.0, "row {i} {surface}: {got:?}");
+        if let Some(m) = &r.want.1 {
+            assert_eq!(&got.1, m, "row {i} {surface}");
+        }
+        if let Some(f) = &r.want.2 {
+            assert_eq!(&got.2, f, "row {i} {surface}");
+        }
+        got
+    };
+    // --no-daemon first: the source opens in this process while no daemon holds it
+    for (i, r) in rows.iter().enumerate() {
+        let before = files_of(&r.target);
+        let mut args = own(&["--no-daemon", "--json", "clone"]);
+        args.extend(r.cli.iter().cloned());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = human_command(scratch.path(), &env, &args).output().unwrap();
+        seen[i].push(check(i, "--no-daemon", cli_refusal(&out)));
+        assert_eq!(
+            files_of(&r.target),
+            before,
+            "row {i}: the target is untouched"
+        );
+    }
+    assert!(s.daemon_pid().is_none(), "--no-daemon starts no daemon");
+    // through the daemon
+    for (i, r) in rows.iter().enumerate() {
+        let before = files_of(&r.target);
+        let mut args = own(&["--json", "clone"]);
+        args.extend(r.cli.iter().cloned());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = human_command(scratch.path(), &env, &args).output().unwrap();
+        seen[i].push(check(i, "daemon", cli_refusal(&out)));
+        assert_eq!(
+            files_of(&r.target),
+            before,
+            "row {i}: the target is untouched"
+        );
+    }
+    // the agent's tool
+    let mut c = rdy_qa::mcp::McpClient::start_proxy(&s);
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:a", "run": "a", "role": "writer"}),
+    )
+    .ok();
+    for (i, r) in rows.iter().enumerate() {
+        let before = files_of(&r.target);
+        seen[i].push(check(
+            i,
+            "mcp",
+            mcp_refusal(c.call("rdy_clone", r.mcp.clone())),
+        ));
+        assert_eq!(
+            files_of(&r.target),
+            before,
+            "row {i}: the target is untouched"
+        );
+    }
+    drop(c);
+    for (i, got) in seen.iter().enumerate() {
+        assert_eq!(got.len(), 3, "row {i}");
+        assert!(
+            got.iter().all(|g| g == &got[0]),
+            "row {i}: the three surfaces give one refusal: {got:?}"
+        );
+    }
+    assert!(!to.exists(), "no row made the target");
+    s.stop();
+}
+
+#[test]
+fn hfp3_rdy_clone_fork_at_prints_forked_from() {
+    let (s, id, v1) = two_tag_served();
+    let scratch = short_tempdir();
+    let env = s.env_pairs();
+    let src = s.dir.path().to_str().unwrap();
+
+    // --no-daemon, then through the daemon: the text names the tag
+    for (name, lead) in [("a", vec!["--no-daemon"]), ("b", vec![])] {
+        let to = scratch.path().join(name);
+        let to_arg = to.to_str().unwrap();
+        let mut args = lead.clone();
+        args.extend(["clone", "--fork", src, to_arg, "--at", "v1.0.0"]);
+        let out = human_command(scratch.path(), &env, &args).output().unwrap();
+        let text = stdout(&out);
+        let new_id = repo_of(&s, &to);
+        assert_ne!(new_id, id, "a fork takes a new id: {text}");
+        check_text(
+            &text,
+            to_arg,
+            &new_id,
+            &format!("forked from {id} at version v1.0.0"),
+        );
+        assert!(to.join(".rdy.yaml").is_file(), "{text}");
+        assert!(!to.join(".rdy/local.yaml").exists(), "{text}");
+    }
+    assert!(
+        s.daemon_pid().is_some(),
+        "the second fork went through the daemon"
+    );
+
+    // --json: forked_from names the tag and its landing, never the newest tag
+    let c = scratch.path().join("c");
+    let out = human_command(
+        scratch.path(),
+        &env,
+        &[
+            "--json",
+            "clone",
+            src,
+            c.to_str().unwrap(),
+            "--fork",
+            "--at",
+            "v1.0.0",
+        ],
+    )
+    .output()
+    .unwrap();
+    let (ok, v) = parsed(&out);
+    assert!(ok, "{v}");
+    assert_eq!(v["fork"], true, "{v}");
+    assert_ne!(v["repo_id"], id.as_str(), "{v}");
+    assert_eq!(v["forked_from"]["repo_id"], id.as_str(), "{v}");
+    assert_eq!(v["forked_from"]["tag"], "v1.0.0", "{v}");
+    assert_eq!(v["forked_from"]["landing"], v1.as_str(), "{v}");
+    assert_eq!(v["tags"], 1, "only v1.0.0 comes along: {v}");
+    assert!(v.get("origin").is_none(), "{v}");
+    assert_eq!(v["fsck"]["unlogged_moves"], 0, "{v}");
+    s.stop();
 }

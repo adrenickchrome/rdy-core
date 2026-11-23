@@ -672,9 +672,9 @@ impl From<StreamError> for IndexError {
 }
 
 /// Checks every file and indexes the union: its records by key, and every file's
-/// prerequisites. Returns the first header.
+/// prerequisites. The first header must name repo `expected`. Returns the first header.
 fn index_files(
-    rx: &Receiver,
+    expected: RepoId,
     files: &[File],
     union: &mut BTreeMap<ObjectKey, Entry>,
     prerequisites: &mut BTreeSet<ObjectKey>,
@@ -693,7 +693,7 @@ fn index_files(
         let report = check_batch(handle)?;
         match &first {
             None => {
-                if report.header.repo_id != rx.repo {
+                if report.header.repo_id != expected {
                     return Err(IndexError::Repo(report.header.repo_id));
                 }
                 first = Some(report.header.clone());
@@ -1255,7 +1255,25 @@ pub(crate) fn prepare_history<E>(
     files: &[File],
     target: &HistoryTarget,
 ) -> Result<Plan, TakeError<E>> {
-    prepare_intake(rx, files, Intake::History(target))
+    prepare_intake(rx, files, rx.repo, Intake::History(target))
+}
+
+/// Prepares a fresh fork's take of its source's history (D-99CWC): the steps of
+/// [`prepare_history`], with one difference. The stream's repo must be `source`, the repo the
+/// fork came from, and never the fork's own (`rx.repo`). Only `Store::take_fork_history` calls
+/// it, on a holder that holds nothing beyond its creating batch.
+pub(crate) fn prepare_fork_history<E>(
+    rx: &Receiver,
+    files: &[File],
+    target: &HistoryTarget,
+    source: RepoId,
+) -> Result<Plan, TakeError<E>> {
+    if source == rx.repo {
+        return Err(TakeError::Store(StoreError::Refused(format!(
+            "a fork of repo {source} needs a new repo id"
+        ))));
+    }
+    prepare_intake(rx, files, source, Intake::History(target))
 }
 
 /// Prepares a take (module docs, steps 1 to 9): every check before anything is written, the
@@ -1266,7 +1284,7 @@ pub(crate) fn prepare<'a, E>(
     target: &'a UploadTarget,
     check: impl FnOnce(&mut dyn ObjectSource, &UploadFacts) -> Result<TagChoice, E> + 'a,
 ) -> Result<Plan, TakeError<E>> {
-    prepare_intake(rx, files, Intake::Upload(target, Box::new(check)))
+    prepare_intake(rx, files, rx.repo, Intake::Upload(target, Box::new(check)))
 }
 
 /// Prepares a project's fetch: the take's steps 1, 2 and 4 to 7 over the project, then the
@@ -1286,25 +1304,27 @@ pub(crate) fn prepare_fetch<'a, E>(
     target: &'a FetchTarget,
     check: impl FnOnce(&mut dyn ObjectSource, &FetchFacts) -> Result<(), E> + 'a,
 ) -> Result<Plan, TakeError<E>> {
-    prepare_intake(rx, files, Intake::Fetch(target, Box::new(check)))
+    prepare_intake(rx, files, rx.repo, Intake::Fetch(target, Box::new(check)))
 }
 
-/// [`prepare`] and [`prepare_fetch`].
+/// [`prepare`], [`prepare_fetch`], [`prepare_history`] and [`prepare_fork_history`]. The
+/// stream's repo must be `expected`: the receiver's own, except on a fresh fork's path.
 fn prepare_intake<E>(
     rx: &Receiver,
     files: &[File],
+    expected: RepoId,
     intake: Intake<'_, E>,
 ) -> Result<Plan, TakeError<E>> {
     let fetch = matches!(intake, Intake::Fetch(..));
     // 1. every file alone, and the union's index
     let mut union: BTreeMap<ObjectKey, Entry> = BTreeMap::new();
     let mut prerequisites: BTreeSet<ObjectKey> = BTreeSet::new();
-    let header = match index_files(rx, files, &mut union, &mut prerequisites) {
+    let header = match index_files(expected, files, &mut union, &mut prerequisites) {
         Ok(h) => h,
         Err(IndexError::Repo(source)) => {
             return Err(TakeError::RepoMismatch {
                 source,
-                target: rx.repo,
+                target: expected,
             });
         }
         Err(IndexError::Stream(e)) => return Err(e.into()),

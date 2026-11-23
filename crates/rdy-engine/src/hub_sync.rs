@@ -575,6 +575,7 @@ impl<'a> SyncService<'a> {
             ca_file: t.ca_file.clone(),
             claim: grant.claim,
             bearer: grant.access_token,
+            zstd: false,
         })
     }
 
@@ -1306,7 +1307,12 @@ impl<'a> SyncService<'a> {
             at_ms: self.clock.now_ms(),
         };
         let wire = SyncObjects(self.wire);
-        let mut context = || self.context(t, read, Some(base_url));
+        // the put bodies go as zstd when the state reply says the hub takes it (D-SEGWK)
+        let zstd = state.zstd;
+        let mut context = || {
+            self.context(t, read, Some(base_url))
+                .map(|cx| UploadContext { zstd, ..cx })
+        };
         let missing = missing_with(&keys, &push, &wire, &mut context)?;
         let limits = BatchLimits {
             bytes: state.batch_bytes,

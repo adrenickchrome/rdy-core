@@ -6,7 +6,8 @@
 //! of this store carried (`ReadState::check_carried_pins`, `E_FOREIGN_VERSION`). Undo of the one
 //! `Include` removes the whole replay.
 use super::{
-    Action, ConflictInfo, check_view_op, conflict_infos, no_view, owner_of, parse_change, strings,
+    Action, ConflictInfo, Eligibility, check_view_op, conflict_infos, no_change, no_view, owner_of,
+    parse_change, strings,
 };
 use crate::error::*;
 use crate::read_state::ReadState;
@@ -300,7 +301,10 @@ impl Rdy {
             }
         }
         let by = s.provenance();
-        let (prepared, replayed_list) = replay_changes(&st, view, &head, &requested, &by)?;
+        // the sources this state's own history reaches (D-99CWC)
+        let mut sources = Eligibility::lazy(&st);
+        let (prepared, replayed_list) =
+            replay_changes(&st, view, &head, &requested, &by, &mut sources)?;
         // 7. the one write, then publish and report
         drop(st);
         let (include, ids) = self.store.view_replay_prepared(view, &prepared, &by)?;
@@ -338,12 +342,17 @@ impl Rdy {
 /// the parent loop). Returns the new changes in replay order, and each source with its new
 /// change in that order. Writes nothing. A pull's stopped replay calls it for its `pull-<n>`
 /// view (D-QCE8M), on a state whose canon is the pull's new tip.
+///
+/// `sources` says which changes may be sources (D-99CWC). It is checked for each source before
+/// its contents are read, and a change it refuses is `E_NOT_FOUND`. It comes from the sources'
+/// state, which a pull captures before its canon moves; `st` is the target's.
 pub(crate) fn replay_changes(
     st: &ReadState,
     view: &str,
     head: &str,
     requested: &[Hash],
     by: &Provenance,
+    sources_ok: &mut Eligibility<'_>,
 ) -> Result<Prepared, RdyError> {
     {
         if requested.len() > MAX_REPLAY_CHANGES {
@@ -362,12 +371,10 @@ pub(crate) fn replay_changes(
         let mut stored = 0u64;
         for c in requested {
             if !reader.has_kind(kinds::CHANGE, c)? {
-                return Err(RdyError::new(
-                    E_NOT_FOUND,
-                    format!("no change {}", c.short()),
-                    "check the id with rdy view show <view>",
-                ));
+                return Err(no_change(c));
             }
+            // a change that only later evidence carries is no source (D-99CWC)
+            sources_ok.check(reader, c)?;
             stored = stored
                 .checked_add(reader.stored_len(kinds::CHANGE, c)?)
                 .filter(|b| *b <= MAX_REPLAY_BYTES as u64)

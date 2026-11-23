@@ -170,6 +170,14 @@ impl StoreHandle {
         crate::publication_take::take_publication(&self.local, batches, target, verdict)
     }
 
+    /// The handle over `rdy`, a store this crate opened or made (a fork's new holder): it owns
+    /// the store's lock from now on.
+    pub(crate) fn from_rdy(rdy: Rdy) -> Self {
+        StoreHandle {
+            local: Local::new(rdy),
+        }
+    }
+
     /// The engine handle, so a sibling module (and its tests) can write through it.
     pub(crate) fn local(&self) -> &Local {
         &self.local

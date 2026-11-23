@@ -2639,6 +2639,51 @@ fn pql_pushed_landings_mix_stored_and_pushed() {
     h.close().unwrap();
 }
 
+/// A held chain: the hub seeds `l1`, then holds `l2` under `held/`. A check of the stored head
+/// `l2` reads the held landing's facts as the stored read gives them once the chain moves in.
+#[test]
+fn hl1_stored_head_check_reads_its_held_chain_landings() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let c = checked();
+    let r = Rdy::open(c.dir.path()).unwrap();
+    let repo = repo_of(&r);
+    r.close().unwrap();
+    let at_l1 = c.dir.path().join("l1.rdysync");
+    export_canon(c.dir.path(), c.l1, None, &at_l1);
+    let next = c.dir.path().join("next.rdysync");
+    export_canon(c.dir.path(), c.l2, Some(c.l1), &next);
+    let hub = tempfile::tempdir().unwrap();
+    let h = StoreHandle::create_holder(hub.path(), repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let q1 = check(&s0, &[&at_l1]).unwrap();
+    assert_eq!(
+        h.move_canon(&q1, CanonMove::Seed, None).unwrap(),
+        moved(c.l1)
+    );
+    let s1 = h.snapshot().unwrap();
+    let q2 = check(&s1, &[&next]).unwrap();
+    assert_eq!(
+        h.move_canon(&q2, CanonMove::Hold, Some(c.l1)).unwrap(),
+        moved(c.l2)
+    );
+    let s2 = h.snapshot().unwrap();
+    let stored = s2.check_stored_head(c.l2).unwrap();
+    let got = s2.pushed_landings(&stored, &[c.l2, c.l1]).unwrap();
+    assert_eq!(
+        got.iter().map(|f| f.hash).collect::<Vec<_>>(),
+        vec![c.l2, c.l1]
+    );
+    assert_eq!(
+        h.move_canon(&stored, CanonMove::Extend, Some(c.l1))
+            .unwrap(),
+        moved(c.l2)
+    );
+    let s3 = h.snapshot().unwrap();
+    assert_eq!(s3.landings(&[c.l2, c.l1]).unwrap(), got);
+    drop((s0, s1, s2, s3, q1, q2, stored));
+    h.close().unwrap();
+}
+
 /// The (name, landing) of each row of a tag read.
 fn tag_rows(rows: &[(Hash, rdy_adapter::Tag)]) -> Vec<(String, Hash)> {
     rows.iter()

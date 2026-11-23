@@ -6,8 +6,8 @@ use crate::hub_tls;
 
 use hub_tls::{Ca, LOOPBACK, Recorded, Reply, Server};
 use rdy_engine::hub_http::{
-    HttpHubTransport, JsonLimits, MAX_UPLOAD_BODY_BYTES, MAX_UPLOAD_REPLY_BYTES, UploadHttpRequest,
-    UploadMethod, check_json, decode_bounded_json, route,
+    BodyEncoding, HttpHubTransport, JsonLimits, MAX_UPLOAD_BODY_BYTES, MAX_UPLOAD_REPLY_BYTES,
+    UploadHttpRequest, UploadMethod, check_json, decode_bounded_json, route,
 };
 use rdy_engine::hub_types::*;
 use rdy_engine::{
@@ -88,6 +88,7 @@ fn post<'a>(destination: &'a str, body: &'a mut dyn Read, len: u64) -> UploadHtt
         body: Some(body),
         body_len: len,
         reply_limit: REPLY_CAP,
+        encoding: BodyEncoding::Identity,
     }
 }
 
@@ -99,6 +100,7 @@ fn get(destination: &str) -> UploadHttpRequest<'_> {
         body: None,
         body_len: 0,
         reply_limit: REPLY_CAP,
+        encoding: BodyEncoding::Identity,
     }
 }
 
@@ -682,6 +684,7 @@ fn hpb3_upload_streams_exact_length_without_redirects() {
             body: None,
             body_len: 0,
             reply_limit: REPLY_CAP,
+            encoding: BodyEncoding::Identity,
         })
     });
     assert_eq!(r.expect("no body").0, 200);
@@ -775,6 +778,7 @@ fn hpb3_upload_streams_exact_length_without_redirects() {
         body: None,
         body_len: 5,
         reply_limit: REPLY_CAP,
+        encoding: BodyEncoding::Identity,
     };
     assert_eq!(local(unsent(&a, || up(no_body))).code, E_IO);
     // The media type is one header value.

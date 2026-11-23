@@ -398,3 +398,117 @@ fn ec12_rdy_clone_into_a_store_is_refused() {
     let o = c.call("rdy_overview", json!({})).ok();
     assert!(o["project"].is_object(), "the project still serves: {o}");
 }
+
+#[test]
+fn hfp3_rdy_clone_at_forks_the_project_at_the_tag() {
+    let (s, id) = golden_served();
+    // one more landing, tagged v2.0.0: the fork must take v1.0.0, not the newest tag
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    rdy_qa::golden::small_site(&mut r);
+    r.tag(&approver(), "v2.0.0", None, None).unwrap();
+    let v1 = r
+        .read()
+        .versions()
+        .unwrap()
+        .into_iter()
+        .find(|v| v.name == "v1.0.0")
+        .expect("v1.0.0")
+        .landing;
+    r.close().unwrap();
+
+    let mut c = agent(&s);
+    let v = c
+        .call(
+            "rdy_clone",
+            json!({"dir": "fork", "fork": true, "at": "v1.0.0"}),
+        )
+        .ok();
+    check_reply(&v, &id, true);
+    assert_eq!(v["forked_from"]["landing"], v1.as_str(), "{v}");
+    let to = s.dir.path().join("fork");
+    assert!(to.join(".rdy/store").is_dir(), "{v}");
+    assert!(
+        !to.join(".rdy/local.yaml").exists(),
+        "a fork never carries the local file"
+    );
+    drop(c);
+    s.stop();
+    let f = Rdy::open(&to).unwrap();
+    let st = f.read();
+    assert_eq!(
+        st.repo_id().unwrap().to_string(),
+        v["repo_id"].as_str().unwrap()
+    );
+    assert_eq!(st.canon_head().map(|h| h.to_string()), Some(v1));
+    let names: Vec<String> = st.versions().unwrap().into_iter().map(|v| v.name).collect();
+    assert_eq!(names, ["v1.0.0"], "only the tag's chain comes along");
+    drop(st);
+    f.close().unwrap();
+}
+
+#[test]
+fn hfp3_unknown_keys_name_at() {
+    // the tool's params: a near key names at, and the list holds it
+    let e = parse_params::<CloneParams>(
+        "rdy_clone",
+        json!({"dir": "x", "fork": true, "att": "v1.0.0"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .expect_err("a refusal");
+    let mcp = (e.code.to_string(), e.message.clone(), e.fix.clone());
+    assert_eq!(
+        mcp,
+        (
+            "E_BAD_INPUT".to_string(),
+            "rdy_clone: unknown parameter \"att\"".to_string(),
+            "did you mean \"at\"? the parameters here are at, dir, file, fork, url".to_string()
+        )
+    );
+    for args in [
+        json!({"dir": "x", "fork": true, "at": "v1.0.0"}),
+        json!({"dir": "x", "at": 5}),
+    ] {
+        let p = parse_params::<CloneParams>("rdy_clone", args.as_object().unwrap().clone());
+        if args["at"].is_string() {
+            assert_eq!(p.unwrap().at.as_deref(), Some("v1.0.0"));
+        } else {
+            assert_eq!(p.expect_err("a wrong type").code, "E_BAD_INPUT", "{args}");
+        }
+    }
+
+    // over the wire, the same refusal, and nothing is written
+    let s = Served::new();
+    let mut c = agent(&s);
+    let got = refused(c.call(
+        "rdy_clone",
+        json!({"dir": "copy", "fork": true, "att": "v1.0.0"}),
+    ));
+    assert_eq!(got, mcp);
+    assert!(!s.dir.path().join("copy").exists());
+    drop(c);
+    s.stop();
+
+    // the daemon's clone op: its fields, at among them
+    let h = rdy_qa::daemon::Hosted::new();
+    let copy = h.dir.path().join("copy");
+    let got = rdy_qa::daemon::Hosted::rt().block_on(async {
+        let mut c = h.client(Some("agent:a"), Some("a")).await;
+        c.ctl(
+            "clone",
+            json!({"dir": copy.to_str().unwrap(), "fork": true, "att": "v1.0.0"}),
+        )
+        .await
+        .expect_err("a refusal")
+    });
+    assert_eq!(
+        (got.code.as_str(), got.message.as_str(), got.fix.as_str()),
+        (
+            "E_BAD_INPUT",
+            "clone: unknown field \"att\"",
+            "did you mean \"at\"? the fields are dir, fork, url, at"
+        )
+    );
+    assert!(!copy.exists());
+}

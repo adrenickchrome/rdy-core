@@ -20,6 +20,9 @@
 //! 5. The loader thread is always joined. The clone returns the writer's error when the writer
 //!    failed and the loader failed reading the stream; in every other case the loader's (O25).
 //!
+//! A fork at a tag ([`clone_at`] with `at`, D-99CWC) takes neither path: it needs `fork` and a
+//! project, and `crate::fork` makes it from the source's canon history at that tag.
+//!
 //! A clone from a hub URL ([`clone_url`], D-D5J18, D-7PYYS, D-47HVF) has its own steps, in
 //! this order:
 //! 1. The target is absent or an empty directory with no store. The user config holds no share
@@ -45,11 +48,13 @@ use crate::config_levels::PROJECT_FILE;
 use crate::dump::project_files;
 use crate::engine::Local;
 use crate::error::{
-    CLONE_NO_CANON_FIX, CLONE_NO_CANON_MESSAGE, CLONE_SETTING_MESSAGE, CLONE_SETTING_NEWER_FIX,
-    CLONE_SETTING_OLDER_FIX, CLONE_SETTING_UNNAMED_FIX, CLONE_SETTING_UNNAMED_MESSAGE,
-    CLONE_URL_FORK_FIX, CLONE_URL_FORK_MESSAGE, E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_INTERNAL,
-    E_IO, RdyError, UPSTREAM_PACK_MISMATCH_FIX, UPSTREAM_PACK_MISMATCH_MESSAGE,
-    W_UPSTREAM_PACK_MISMATCH, upstream_protocol,
+    CLONE_AT_NEEDS_FORK_FIX, CLONE_AT_NEEDS_FORK_MESSAGE, CLONE_AT_NEEDS_PROJECT_FIX,
+    CLONE_AT_NEEDS_PROJECT_MESSAGE, CLONE_NO_CANON_FIX, CLONE_NO_CANON_MESSAGE,
+    CLONE_SETTING_MESSAGE, CLONE_SETTING_NEWER_FIX, CLONE_SETTING_OLDER_FIX,
+    CLONE_SETTING_UNNAMED_FIX, CLONE_SETTING_UNNAMED_MESSAGE, CLONE_URL_FORK_FIX,
+    CLONE_URL_FORK_MESSAGE, E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_INTERNAL, E_IO, RdyError,
+    UPSTREAM_PACK_MISMATCH_FIX, UPSTREAM_PACK_MISMATCH_MESSAGE, W_UPSTREAM_PACK_MISMATCH,
+    upstream_protocol,
 };
 use crate::fsck::FsckReport;
 use crate::hub_config::{HubConfig, RemoteEntry, RemoteMode};
@@ -158,11 +163,27 @@ pub fn source_kind(path: &Path) -> Result<SourceKind, RdyError> {
 }
 
 /// Clones `source` into `dir`, a directory with no store. A refusal or failure leaves the target
-/// as it was.
+/// as it was. It is [`clone_at`] with no tag.
 pub fn clone(source: CloneSource, dir: &Path, fork: bool) -> Result<CloneSummary, RdyError> {
-    let (load, origin, repo_id) = match source {
-        CloneSource::File(file) => from_file(file, dir, fork)?,
-        CloneSource::State(st) => from_state(st, dir, fork)?,
+    clone_at(source, dir, fork, None)
+}
+
+/// Clones `source` into `dir` as [`clone`] does. With `at`, the clone is a fork of the project
+/// `source` at its tag `at` (`crate::fork`, D-99CWC): it needs `fork` (checked first), then a
+/// project, not a dump. Its `forked_from` names the selected tag and its landing. A refusal or
+/// failure leaves the target as it was.
+pub fn clone_at(
+    source: CloneSource,
+    dir: &Path,
+    fork: bool,
+    at: Option<&str>,
+) -> Result<CloneSummary, RdyError> {
+    let (load, origin, repo_id) = match (at, source) {
+        (Some(_), _) if !fork => return Err(at_needs_fork()),
+        (Some(_), CloneSource::File(_)) => return Err(at_needs_project()),
+        (Some(tag), CloneSource::State(st)) => crate::fork::fork_project_at(st, tag, dir)?,
+        (None, CloneSource::File(file)) => from_file(file, dir, fork)?,
+        (None, CloneSource::State(st)) => from_state(st, dir, fork)?,
     };
     let reply = OriginReply::from(&origin);
     let (origin, forked_from) = if fork {
@@ -182,8 +203,26 @@ pub fn clone(source: CloneSource, dir: &Path, fork: bool) -> Result<CloneSummary
     })
 }
 
+/// The refusal of `at` with no fork (D-99CWC): a clone keeps the whole history.
+pub fn at_needs_fork() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        CLONE_AT_NEEDS_FORK_MESSAGE,
+        CLONE_AT_NEEDS_FORK_FIX,
+    )
+}
+
+/// The refusal of `at` with a dump source (D-99CWC): a fork at a tag starts from a project.
+pub fn at_needs_project() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        CLONE_AT_NEEDS_PROJECT_MESSAGE,
+        CLONE_AT_NEEDS_PROJECT_FIX,
+    )
+}
+
 /// The refusal of a holder as a clone source: a clone is a project operation (D-BPYN8).
-fn holder_source() -> RdyError {
+pub(crate) fn holder_source() -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
         "a holder dump cannot be cloned as a project",
@@ -425,7 +464,7 @@ pub fn clone_url_checked(
     before_checks: Option<BeforeChecks>,
 ) -> Result<UrlCloneSummary, RdyError> {
     let url = RemoteUrl::parse(url)?;
-    check_new_dir(dir)?;
+    check_new_dir(dir, "clone a hub URL into a new directory, or an empty one")?;
     let settings = HubConfig::load(None, Some(user_file))?;
     let api = HttpHubTransport::new(settings.fence(url.origin())?)?;
     let wire = HttpSyncWire::new(HttpHubTransport::new(settings.fence(url.origin())?)?);
@@ -463,9 +502,10 @@ fn no_render() -> RdyError {
     )
 }
 
-/// The target of a URL clone: absent, or an empty directory with no store, outside any `.rdy`,
-/// with no daemon.
-fn check_new_dir(dir: &Path) -> Result<(), RdyError> {
+/// The target of a URL clone or a hub fork: absent, or an empty directory with no store,
+/// outside any `.rdy`, with no daemon. A target that holds anything else is `E_ALREADY_EXISTS`
+/// with `fix`.
+pub(crate) fn check_new_dir(dir: &Path, fix: &str) -> Result<(), RdyError> {
     crate::load::check_target(dir, &[])?;
     match std::fs::read_dir(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -479,7 +519,7 @@ fn check_new_dir(dir: &Path) -> Result<(), RdyError> {
             Some(_) => Err(RdyError::new(
                 E_ALREADY_EXISTS,
                 format!("{} is not empty", dir.display()),
-                "clone a hub URL into a new directory, or an empty one",
+                fix,
             )),
         },
     }
@@ -766,15 +806,7 @@ fn clone_from(
     };
     let bundle = read_bundle(&service.clone_settings(t, &base_url)?, &t.url)?;
     // the first write: a temporary directory beside the target, on its file system
-    let target = std::path::absolute(dir).map_err(|e| io_at(dir, &e))?;
-    let parent = target
-        .parent()
-        .ok_or_else(|| io_at(dir, &std::io::Error::other("it has no parent")))?;
-    rdy_store::fsutil::create_dir_durable(parent).map_err(|e| io_at(parent, &e))?;
-    let tmp = tempfile::Builder::new()
-        .prefix(".rdy-clone-")
-        .tempdir_in(parent)
-        .map_err(|e| io_at(parent, &e))?;
+    let (target, tmp) = staging_beside(dir, ".rdy-clone-")?;
     let project = tmp.path().to_path_buf();
     let origin = Origin {
         fork: false,
@@ -817,7 +849,26 @@ fn clone_from(
     })
 }
 
-fn io_at(path: &Path, e: &std::io::Error) -> RdyError {
+/// The absolute target `dir` and a new temporary directory beside it, on its file system, whose
+/// name starts with `prefix`. The target's parent is made when it is missing. Dropping the
+/// temporary directory removes it.
+pub(crate) fn staging_beside(
+    dir: &Path,
+    prefix: &str,
+) -> Result<(PathBuf, tempfile::TempDir), RdyError> {
+    let target = std::path::absolute(dir).map_err(|e| io_at(dir, &e))?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| io_at(dir, &std::io::Error::other("it has no parent")))?;
+    rdy_store::fsutil::create_dir_durable(parent).map_err(|e| io_at(parent, &e))?;
+    let tmp = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(parent)
+        .map_err(|e| io_at(parent, &e))?;
+    Ok((target, tmp))
+}
+
+pub(crate) fn io_at(path: &Path, e: &std::io::Error) -> RdyError {
     RdyError::new(
         E_IO,
         format!("{}: {e}", path.display()),
@@ -950,7 +1001,7 @@ fn check_project(
 /// empty directory. A system that renames no directory onto an empty one (Windows) refuses the
 /// first rename: the empty target then goes, the rename runs again, and a failure makes the
 /// empty target again. On a failure the temporary directory goes and the target stays.
-fn install(tmp: tempfile::TempDir, target: &Path) -> Result<(), RdyError> {
+pub(crate) fn install(tmp: tempfile::TempDir, target: &Path) -> Result<(), RdyError> {
     if let Err(first) = std::fs::rename(tmp.path(), target) {
         if !target.is_dir() {
             return Err(io_at(target, &first));

@@ -2,12 +2,13 @@
 //! `rdy_clone` without `file` (D-9QV85, D-D2NPN; O6: any session). A dump file clones in the
 //! caller's process (`rdy clone <file>`), so the op takes none. With `url` it clones that hub
 //! repo instead, with the session's claim and this process's user config (D-D5J18, D-47HVF): a
-//! URL clone never forks.
+//! URL clone never forks. With `at` and `fork` it forks the project at that tag (D-99CWC):
+//! `at` needs `fork`, checked first, then the source form.
 //!
 //! Platform (D-1RXEA): none here; the engine's clone uses `std::io::pipe` and a thread.
 use super::*;
 use rdy_engine::RdyError;
-use rdy_engine::clone::{CloneSource, clone as clone_into, clone_url, url_fork};
+use rdy_engine::clone::{CloneSource, at_needs_fork, clone_at, clone_url, url_fork};
 use rdy_engine::config_levels::user_file_from_env;
 use rdy_engine::hub_credentials::require_user_file;
 use serde::Deserialize;
@@ -19,11 +20,16 @@ pub(super) struct CloneArgs {
     dir: String,
     fork: Option<bool>,
     url: Option<String>,
+    at: Option<String>,
 }
 
 pub(super) fn clone(cx: &OpContext, a: CloneArgs) -> Result<Value, RdyError> {
+    let fork = a.fork.unwrap_or(false);
+    if a.at.is_some() && !fork {
+        return Err(at_needs_fork());
+    }
     if let Some(url) = &a.url {
-        if a.fork == Some(true) {
+        if fork {
             return Err(url_fork());
         }
         let user_file = require_user_file(user_file_from_env())?;
@@ -31,10 +37,11 @@ pub(super) fn clone(cx: &OpContext, a: CloneArgs) -> Result<Value, RdyError> {
         return Ok(to_json(&summary));
     }
     let st = cx.engine.read();
-    let summary = clone_into(
+    let summary = clone_at(
         CloneSource::State(&st),
         &resolve_path(cx.cwd, &a.dir),
-        a.fork.unwrap_or(false),
+        fork,
+        a.at.as_deref(),
     )?;
     Ok(to_json(&summary))
 }

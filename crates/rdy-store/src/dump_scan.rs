@@ -2410,7 +2410,8 @@ impl<'p> Scan<'p> {
     /// The payload of the `REF_UPDATE` record `fh` when its name is one the scan needs (the
     /// mode, the repo id, the store format), read whole and checked against its hash; None for
     /// any other ref, whose rest is skipped. A `meta/sync/` ref after a request or an apply of
-    /// its batch marks a fetch's batch (`dump::is_sync_ref_update`).
+    /// its batch marks a fetch's batch (`dump::is_sync_ref_update`). So does a fork origin there
+    /// (`dump::is_fork_origin_update`), a project fork's take: it is read whole to tell.
     fn ref_payload(
         &mut self,
         r: &mut BufReader<Input>,
@@ -2433,8 +2434,13 @@ impl<'p> Scan<'p> {
         {
             self.batch_sync = true;
         }
-        let wanted = dump::ref_name(&p)
-            .is_some_and(|name| SCANNED_REFS.iter().any(|n| n.as_bytes() == name));
+        // a fork origin after a request or an apply of its batch, within the sync value bound
+        let origin = self.batch_removal
+            && fh.len <= (crate::sync_state::MAX_VALUE_BYTES + 4_096) as u64
+            && dump::ref_name(&p) == Some(crate::meta::REF_ORIGIN.as_bytes());
+        let wanted = origin
+            || dump::ref_name(&p)
+                .is_some_and(|name| SCANNED_REFS.iter().any(|n| n.as_bytes() == name));
         if !wanted {
             let n = i64::try_from(fh.len - first as u64).map_err(|_| alloc(i, fh.at))?;
             r.seek_relative(n)
@@ -2452,6 +2458,9 @@ impl<'p> Scan<'p> {
         }
         if Hash::of(&p) != fh.hash {
             return Err(self.fail(i, damaged(fh.at, dump::HASH_MISMATCH)));
+        }
+        if origin && dump::is_fork_origin_update(&p) {
+            self.batch_sync = true;
         }
         Ok(Some(p))
     }

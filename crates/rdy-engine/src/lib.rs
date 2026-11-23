@@ -47,6 +47,7 @@ pub mod foreign_locks;
 mod foreign_refs;
 pub mod foreign_removal;
 mod foreign_signals;
+pub mod fork;
 pub mod formats;
 mod fsck;
 mod gate;

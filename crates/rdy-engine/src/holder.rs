@@ -16,6 +16,7 @@ use crate::{E_BAD_INPUT, E_LIMIT, PackFingerprint, Rdy, RdyError};
 use rdy_model::{Hash, RepoId};
 use rdy_store::check_holder::holder_check_limit;
 use rdy_store::holder::StoreMode;
+use rdy_store::meta::Origin;
 use rdy_store::start_lock::StartGuard;
 use rdy_store::{OpenPolicy, Store, StoreError, layout};
 use std::path::Path;
@@ -98,12 +99,24 @@ impl Rdy {
     /// directory there that holds anything is refused and left as it was. Nothing else is
     /// written: no config, pack directory or settings.
     pub fn create_holder(root: &Path, repo_id: RepoId) -> Result<Rdy, RdyError> {
+        Rdy::create_holder_with_origins(root, repo_id, &[])
+    }
+
+    /// Creates a holder at `root` as [`Rdy::create_holder`] does, with `origins` in its first
+    /// batch, in the order given (`Store::create_holder_with_origins`, D-HX6BX). A fork gives
+    /// its source's counted origins oldest first, then its own. An empty `origins` writes none.
+    pub fn create_holder_with_origins(
+        root: &Path,
+        repo_id: RepoId,
+        origins: &[Origin],
+    ) -> Result<Rdy, RdyError> {
         crate::config_levels::refuse_follower(root)?;
         let dot = root.join(".rdy");
         rdy_store::fsutil::create_dir_durable(&dot).map_err(io)?;
         // the project's start lock across the creation, which the store's own lock follows
         let _entry = enter(root)?;
-        let store = Store::create_holder(&dot.join(layout::STORE_DIR), repo_id)?;
+        let store =
+            Store::create_holder_with_origins(&dot.join(layout::STORE_DIR), repo_id, origins)?;
         Rdy::from_store(root, store, holder_context()?)
     }
 

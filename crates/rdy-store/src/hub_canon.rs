@@ -1005,7 +1005,7 @@ impl StoreReader {
     }
 
     /// The landings of canon's chain, newest first, read from the holder.
-    fn canon_landings(&self, tip: &Hash) -> Result<HashSet<Hash>, StoreError> {
+    pub(crate) fn canon_landings(&self, tip: &Hash) -> Result<HashSet<Hash>, StoreError> {
         let (chain, _) = walk_landings(tip, &mut |h| self.typed_or_none(kinds::LANDING, h))?;
         Ok(chain.into_iter().collect())
     }

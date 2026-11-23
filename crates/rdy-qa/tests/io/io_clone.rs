@@ -3,7 +3,10 @@
 //! log byte for byte, then that batch; it keeps the repo id (a fork takes a new one) and records
 //! where it came from. A refused or failed clone leaves the target as it was.
 use rdy_engine::Rdy;
-use rdy_engine::clone::{CloneSource, CloneSummary, SourceKind, clone, source_kind};
+use rdy_engine::clone::{
+    CloneSource, CloneSummary, SourceKind, at_needs_fork, at_needs_project, clone, clone_at,
+    source_kind,
+};
 use rdy_qa::every_kind;
 use rdy_qa::reindex_check::{compare, derived, reindex_reproduces};
 use rdy_store::kinds::{self, RefUpdate};
@@ -778,4 +781,86 @@ fn ec5_a_clone_into_a_symlinked_source_dot_rdy_is_refused_and_both_are_untouched
     let st = Rdy::open(src.path()).unwrap();
     clone_of(&st, &ok, true);
     st.close().unwrap();
+}
+
+#[test]
+fn hfp3_without_at_keeps_clone_behavior() {
+    // clone_at with no tag is clone: the same log bytes, origin and summary, from the project and
+    // from its dump
+    let (_src, a, scratch) = source();
+    let file = scratch.path().join("p.rdydump");
+    a.read().dump(&file).unwrap();
+    let st = a.read();
+    for (name, from_file) in [("state", false), ("file", true)] {
+        let old = scratch.path().join(format!("old-{name}"));
+        let new = scratch.path().join(format!("new-{name}"));
+        let src = |f: bool| {
+            if f {
+                CloneSource::File(&file)
+            } else {
+                CloneSource::State(&st)
+            }
+        };
+        let s_old = clone(src(from_file), &old, false).unwrap();
+        let s_new = clone_at(src(from_file), &new, false, None).unwrap();
+        assert_eq!(log_bytes(&new), log_bytes(&old), "{name}");
+        let (mut j_old, mut j_new) = (
+            serde_json::to_value(&s_old).unwrap(),
+            serde_json::to_value(&s_new).unwrap(),
+        );
+        for j in [&mut j_old, &mut j_new] {
+            j.as_object_mut().unwrap().remove("project");
+        }
+        assert_eq!(j_new, j_old, "{name}");
+
+        // a fork with no tag keeps every landing, view and tag of the source
+        let fork = scratch.path().join(format!("fork-{name}"));
+        let s = clone_at(src(from_file), &fork, true, None).unwrap();
+        assert!(s.fork && s.origin.is_none(), "{name}");
+        let f = s.forked_from.clone().expect("forked_from");
+        assert_eq!(f.repo_id, repo_id_of(&a).to_string(), "{name}");
+        let want = expected_origin(&a, true);
+        assert_eq!(f.tag, want.tag, "{name}");
+        assert_eq!(f.landing, want.landing.map(|h| h.to_string()), "{name}");
+        let b = Rdy::open(&fork).unwrap();
+        let (mut fa, mut fb) = (every_kind::facts(&a), every_kind::facts(&b));
+        assert_eq!(fb["landings"], fa["landings"], "{name}");
+        for f in [&mut fa, &mut fb] {
+            let refs = f["refs"].as_object_mut().unwrap();
+            refs.remove(REF_ORIGIN);
+            refs.remove(REF_REPO_ID);
+        }
+        assert_eq!(fb["refs"], fa["refs"], "{name}: every view and tag ref");
+        assert_eq!(
+            log_bytes(&fork)[..log_bytes(_src.path()).len()],
+            log_bytes(_src.path())[..],
+            "{name}: the source log is a prefix of the fork's"
+        );
+        b.close().unwrap();
+    }
+    drop(st);
+
+    // the at refusals come first, and leave the target as it was
+    let to = scratch.path().join("to");
+    for (source, fork, want) in [
+        (CloneSource::File(&file), false, at_needs_fork()),
+        (CloneSource::File(&file), true, at_needs_project()),
+    ] {
+        let e = clone_at(source, &to, fork, Some("v1.0.0")).unwrap_err();
+        assert_eq!(
+            (e.code, e.message, e.fix),
+            (want.code, want.message, want.fix)
+        );
+        assert!(!to.exists());
+    }
+    let st = a.read();
+    let e = clone_at(CloneSource::State(&st), &to, false, Some("v1.0.0")).unwrap_err();
+    let want = at_needs_fork();
+    assert_eq!(
+        (e.code, e.message, e.fix),
+        (want.code, want.message, want.fix)
+    );
+    assert!(!to.exists());
+    drop(st);
+    a.close().unwrap();
 }

@@ -10,7 +10,6 @@
 
 use super::baseline::{Baseline, compare};
 use super::diff::disclosure_diff;
-use super::hidden::HiddenList;
 use super::references::{CheckStatus, ReferenceReport};
 use super::release;
 use super::review_json::{PublicationReview, ReviewJson, review_json};
@@ -169,21 +168,6 @@ pub(super) fn doc_row(x: &super::DocEntry) -> Value {
     })
 }
 
-pub(super) fn hidden_json(h: &HiddenList) -> Value {
-    json!({
-        "docs": h.docs,
-        "blocks": h.blocks,
-        "rows": h.rows.iter().map(|r| json!({
-            "doc": r.doc.to_string(),
-            "title": r.title,
-            "redacted": r.redacted,
-            "hidden_blocks": r.hidden_blocks,
-            "doc_hidden": r.doc_hidden,
-        })).collect::<Vec<_>>(),
-        "omitted_rows": h.omitted_rows,
-    })
-}
-
 fn report_json(
     r: &Resolved,
     scope: &Side,
@@ -232,7 +216,7 @@ fn report_json(
         },
         "references": review.references,
         "release": release.map(|(_, v)| v),
-        "hidden_planned": hidden_json(&r.hidden_planned.full()),
+        "hidden_planned": r.hidden_planned.full().to_json(),
         "disclosure": review.disclosure,
         "included": review.included,
         "warnings": warnings,

@@ -20,6 +20,7 @@ pub mod compare;
 mod follower;
 pub mod foreign_facts;
 pub mod foreign_removal;
+mod fork;
 pub mod history;
 pub mod landing_check;
 pub mod link_take;

@@ -25,6 +25,8 @@ pub use rdy_engine::publication::{
     CheckStatus, DisclosureDiff, HiddenList, HiddenRow, ProfileFacts, ReferenceReport,
     SelectionEntry, profile_facts,
 };
+// `HiddenList::to_json` is the one JSON form of a hidden list, shared with the publication tool.
+// A hub prints `check.first_hidden_planned.as_ref().map(HiddenList::to_json)`. The review adds no key.
 
 /// One publication profile as a tag holds it. `selector` is the value to pass back to
 /// [`Snapshot::disclosure`]: the full profile id, or `implicit:org`. Every fact but `name`,
@@ -96,7 +98,8 @@ pub struct LabelledAttachment {
 /// discloses beyond the previous publication. `comparison` is None when there is no previous
 /// publication; that is not an empty diff. Then `first_attachments` lists every attachment of
 /// the candidate (the complete docs are `profile.docs`) and `first_hidden_planned` lists the docs
-/// with planned blocks the profile hides; with a previous publication both are None and the
+/// with planned blocks the profile hides (print it with [`HiddenList::to_json`]; the review gets no
+/// key for it); with a previous publication both are None and the
 /// comparison holds `newly_hidden_planned` instead. `review` is the review's one JSON form
 /// (D-RDH1C): exactly `references`, `disclosure` and `included`, with every outer row kept and
 /// the inner lists cut as the report cuts them, at most [`ADAPTER_REVIEW_BYTES`] bytes.
