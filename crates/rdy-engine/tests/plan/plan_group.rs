@@ -425,7 +425,7 @@ fn rg9_group_fields_and_together() {
             e,
             E_PLAN_ITEM,
             "the group matches no open item of the change plan for view:w",
-            "read the plan with rdy_plan / rdy plan and pass a group it holds",
+            "read the plan again with rdy_plan / rdy plan (a write can close items, and counts.open 0 means nothing is left to answer), read every page, and pass a group it holds",
         )
     };
     // each field alone holds items; together with a field that disagrees, they match none
@@ -534,7 +534,7 @@ fn rg9_a_group_that_matches_nothing_is_refused() {
         .unwrap_err(),
         E_PLAN_ITEM,
         "the group matches no open item of the change plan for view:w",
-        "read the plan with rdy_plan / rdy plan and pass a group it holds",
+        "read the plan again with rdy_plan / rdy plan (a write can close items, and counts.open 0 means nothing is left to answer), read every page, and pass a group it holds",
     );
     assert_eq!(log_state(&r), before);
     // no field, and a follow_up that is none of the three
@@ -598,7 +598,10 @@ fn rg9_a_group_with_an_act_some_items_refuse_is_refused_whole() {
             "confirm does not answer 1 items of the group: {}",
             pi(&w.d1, &w.q, PlanKind::Rejustify)
         ),
-        "narrow the group, or answer those items one by one",
+        &format!(
+            "narrow the group, or answer those items one by one ({})",
+            rdy_engine::plan::api::ACTS_BY_KIND
+        ),
     );
     // a group of update items: all of them refuse it
     expect_err(
@@ -618,7 +621,10 @@ fn rg9_a_group_with_an_act_some_items_refuse_is_refused_whole() {
             "confirm does not answer 1 items of the group: {}",
             pi(&w.a, &w.p, PlanKind::Update)
         ),
-        "narrow the group, or answer those items one by one",
+        &format!(
+            "narrow the group, or answer those items one by one ({})",
+            rdy_engine::plan::api::ACTS_BY_KIND
+        ),
     );
     assert_eq!(log_state(&r), before);
     assert_eq!(plan_ref(&r, "w"), None);
@@ -875,7 +881,7 @@ fn rg9_follow_up_confirm_matches_rejustify_items_too() {
         .unwrap_err(),
         E_PLAN_ITEM,
         "the group matches no open item of the change plan for view:w",
-        "read the plan with rdy_plan / rdy plan and pass a group it holds",
+        "read the plan again with rdy_plan / rdy plan (a write can close items, and counts.open 0 means nothing is left to answer), read every page, and pass a group it holds",
     );
 }
 

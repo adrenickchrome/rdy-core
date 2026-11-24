@@ -336,7 +336,10 @@ fn rg5_a_tension_item_takes_confirm_or_dismiss_with_a_reason() {
     let e = answer(&mut fx.r, "a", &tn, PlanAct::Defer, Some("later")).unwrap_err();
     assert_eq!(e.code, E_PLAN_ITEM, "{e}");
     assert_eq!(e.message, "defer does not answer a tension item");
-    assert_eq!(e.fix, "answer it with confirm or dismiss, with a reason");
+    assert_eq!(
+        e.fix,
+        "tension items take: confirm or dismiss, with a reason"
+    );
     // done does not answer it either
     let e = answer(&mut fx.r, "a", &tn, PlanAct::Done, None).unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
@@ -411,7 +414,10 @@ fn rg5_dismiss_answers_only_a_tension_item() {
     let e = answer(&mut fx.r, "a", &item, PlanAct::Dismiss, Some("no")).unwrap_err();
     assert_eq!(e.code, E_PLAN_ITEM, "{e}");
     assert_eq!(e.message, "dismiss answers a tension item only");
-    assert_eq!(e.fix, "answer it with confirm, defer or done");
+    assert_eq!(
+        e.fix,
+        "update items take: defer. An update item also closes when you edit its block's content; a repin does not close it"
+    );
     // the refusal wrote nothing: the item is still open
     assert_eq!(
         rows_of_kind(&whole(&fx.r, "a"), "update")[0]["state"],

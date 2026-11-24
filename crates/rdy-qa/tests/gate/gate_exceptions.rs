@@ -72,7 +72,10 @@ fn exception_open(e: &RdyError, pref: &str, ex: &[Item]) {
     let refs: Vec<&str> = ex.iter().map(|i| i.r#ref.as_str()).collect();
     assert_eq!(
         e.fix,
-        format!("answer each exception card first: {}", refs.join(", "))
+        format!(
+            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+            refs.join(", ")
+        )
     );
     let cards: Vec<Value> = ex.iter().map(card_json).collect();
     assert_eq!(e.corrected, Some(json!({"exceptions": cards})));
@@ -119,7 +122,10 @@ fn di17_rdy_approve_refuses_an_open_exception_too() {
     );
     assert_eq!(
         e["fix"],
-        format!("answer each exception card first: {}", ex.r#ref),
+        format!(
+            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+            ex.r#ref
+        ),
         "{e}"
     );
     assert_eq!(

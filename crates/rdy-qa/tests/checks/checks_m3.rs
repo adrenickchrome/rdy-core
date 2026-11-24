@@ -1193,7 +1193,11 @@ fn mg9_neighbours_and_group_answers_use_the_complete_displayed_set() {
         (
             "E_PLAN_ITEM",
             format!("confirm does not answer 1 items of the group: {update_item}").as_str(),
-            "narrow the group, or answer those items one by one"
+            format!(
+                "narrow the group, or answer those items one by one ({})",
+                rdy_engine::plan::api::ACTS_BY_KIND
+            )
+            .as_str()
         )
     );
     assert_eq!(neighbor_items(&r, "edit"), want, "nothing was answered");

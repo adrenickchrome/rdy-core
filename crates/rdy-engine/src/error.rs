@@ -752,7 +752,7 @@ impl From<StoreError> for RdyError {
             StoreError::Frozen(id) => RdyError::new(
                 E_FROZEN,
                 format!("{id} is an accepted or rejected decision and cannot change"),
-                format!("write a new decision that supersedes or revokes {id}"),
+                crate::reaffirm::frozen_ways(&id),
             ),
             StoreError::UnknownBlock(id) => RdyError::new(
                 E_UNKNOWN_BLOCK,
@@ -783,7 +783,7 @@ impl From<StoreError> for RdyError {
                 E_VIEW_CLOSED,
                 format!("view {v:?} is closed"),
                 format!(
-                    "reopen it with rdy undo --view {v} <close op> (rdy view show {v} lists the ops), or fork it"
+                    "reopen it with rdy undo --view {v} <close op> (rdy view show {v} lists the ops; on MCP: rdy_view {{op: \"undo\", view: \"{v}\", target: <close op>}}), or fork it (rdy_view {{op: \"fork\", from: \"{v}\", name}})"
                 ),
             ),
             StoreError::ProposalMoved { stable, latest } => RdyError::new(

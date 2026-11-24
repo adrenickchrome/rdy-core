@@ -216,7 +216,9 @@ fn deferral_open(e: &RdyError, pref: &str, n: usize, card: &Item) {
     assert_eq!(e.message, format!("{n} deferrals of {pref} have no answer"));
     assert_eq!(
         e.fix,
-        format!("answer the deferral card first: defer:{pref}")
+        format!(
+            "answer the card below with the person's words, then relay the approval again. Answer the deferral card first: defer:{pref}"
+        )
     );
     assert_eq!(e.corrected, Some(json!({"deferral": card_json(card)})));
 }
@@ -604,7 +606,9 @@ fn cp12_every_approval_path_waits_for_deferral_answer() {
         );
         assert_eq!(
             e["fix"],
-            format!("answer the deferral card first: defer:{pref}"),
+            format!(
+                "answer the card below with the person's words, then relay the approval again. Answer the deferral card first: defer:{pref}"
+            ),
             "{e}"
         );
         assert_eq!(
@@ -939,7 +943,10 @@ fn cp12_one_way_reaffirm_has_its_own_exception() {
     assert_eq!(e.code, E_EXCEPTION_OPEN, "{e}");
     assert_eq!(
         e.fix,
-        format!("answer each exception card first: {}", ex.r#ref)
+        format!(
+            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+            ex.r#ref
+        )
     );
     // a rejection
     let v = answer_local(&mut r, &ex.r#ref, "reject").unwrap();
@@ -1472,7 +1479,10 @@ fn cp12_repeated_reaffirm_reason_still_needs_confirmation() {
     assert_eq!(e.code, E_EXCEPTION_OPEN, "{e}");
     assert_eq!(
         e.fix,
-        format!("answer each exception card first: {}", ex2[0].r#ref)
+        format!(
+            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+            ex2[0].r#ref
+        )
     );
     confirm_exceptions(&mut r, &approver(), &p2.r#ref);
     r.land_with(&approver(), &p2.r#ref, LandOptions::default())

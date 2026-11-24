@@ -37,7 +37,7 @@ pub fn rdy_accept(st: &mut McpState, p: AcceptParams) -> Result<Value, RdyError>
                 RdyError::new(
                     E_BAD_INPUT,
                     format!("suggestion {i}: {e}"),
-                    "pass the suggestion objects unchanged from a response's suggestions",
+                    "pass the suggestion objects unchanged from a response's suggestions, as the list suggestions; a bare suggestion id is not one",
                 )
             })
         })

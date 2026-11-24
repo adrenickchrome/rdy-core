@@ -250,7 +250,9 @@ fn cf1_e_frozen_names_the_resolution_first() {
         e.message.contains("cannot be resolved by an edit"),
         "the message is kept: {e}"
     );
-    let first = format!("take the landed side (rdy view resolve b {d} --landed)");
+    let first = format!(
+        "take the landed side (rdy view resolve b {d} --landed; rdy_view {{op: \"resolve\", view: \"b\", block: \"{d}\", landed: true}})"
+    );
     assert!(e.fix.starts_with(&first), "{e}");
     assert!(
         e.fix.contains("rdy view exclude") && e.fix.contains("supersedes or revokes"),

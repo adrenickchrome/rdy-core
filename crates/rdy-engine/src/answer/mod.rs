@@ -895,9 +895,12 @@ pub(crate) fn changed(code: &'static str, r: &str) -> RdyError {
     RdyError::new(
         code,
         format!("{r} changed since it was shown"),
-        "show the person the fresh card and ask again",
+        FRESH_CARD_HINT,
     )
 }
+
+/// The fix of an answer to a card that changed since the person saw it.
+pub(crate) const FRESH_CARD_HINT: &str = "when corrected holds the fresh card and its facts and Exceptions match the card the person saw, relay the same words once with its card_hash; otherwise show the person the fresh card and ask again. Read rdy_pending again before you answer the next card";
 
 /// The labels the card shows, in order.
 pub(crate) fn labels(i: &Item) -> Vec<String> {

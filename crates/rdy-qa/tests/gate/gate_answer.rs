@@ -706,7 +706,10 @@ fn di7_an_approval_with_an_open_exception_is_refused() {
         );
         assert_eq!(
             e.fix,
-            format!("answer each exception card first: {}", refs.join(", "))
+            format!(
+                "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+                refs.join(", ")
+            )
         );
         let cards: Vec<Value> = ex.iter().map(card_json).collect();
         assert_eq!(e.corrected, Some(json!({"exceptions": cards})));
