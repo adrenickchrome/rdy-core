@@ -305,6 +305,8 @@ pub struct Hub {
     pub page: Mutex<usize>,
     pub pulls: Mutex<Vec<KnownPull>>,
     pub gets: Mutex<Vec<GetRequest>>,
+    /// Each get's reply, in order: the bytes the hub produced and the bytes the client read.
+    pub get_replies: Mutex<Vec<(u64, u64)>>,
     /// A get reply served once in place of the store's batch.
     pub get_bytes: Mutex<Option<Vec<u8>>>,
     /// The dump files the dump step serves, by id (D-7CDEQ); an id with none is refused as
@@ -357,6 +359,7 @@ impl Hub {
             page: Mutex::new(usize::MAX),
             pulls: Mutex::default(),
             gets: Mutex::default(),
+            get_replies: Mutex::default(),
             get_bytes: Mutex::default(),
             dumps: Mutex::default(),
             dump_ids: Mutex::default(),
@@ -711,10 +714,18 @@ impl SyncWire for Hub {
         for piece in bytes.chunks(rdy_engine::hub_http::UPLOAD_BUFFER_BYTES) {
             n += piece.len() as u64;
             if n > limit {
+                self.get_replies
+                    .lock()
+                    .unwrap()
+                    .push((bytes.len() as u64, n));
                 return Err(rdy_engine::upstream_protocol());
             }
             sink.write_all(piece).unwrap();
         }
+        self.get_replies
+            .lock()
+            .unwrap()
+            .push((bytes.len() as u64, n));
         Ok(n)
     }
 
