@@ -149,7 +149,8 @@ fn hpt2_port_preserves_ops_message_and_justification() {
         assert_eq!(new.links.replayed_from, None);
         assert_eq!(new.links.intent, None);
         assert_eq!(new.links.alternative, None);
-        assert_eq!(new.links.briefing, Some(p.briefing));
+        assert!(p.briefing.is_some(), "a hub port makes its briefing");
+        assert_eq!(new.links.briefing, p.briefing);
         assert!(!new.deps.contains(hash), "a source is never a dep");
         assert_eq!((mapped.source, mapped.change), (origin, new.id()));
     }
@@ -642,15 +643,11 @@ fn hpt2_port_uses_target_briefing_without_exemption() {
         .read()
         .brief_ids(&Scope::At(tip), &BTreeSet::from([bid(&c)]), None)
         .unwrap();
-    assert_eq!(p.briefing, normal.record.token);
-    assert_ne!(Some(p.briefing), source_token, "never the source's token");
+    assert_eq!(p.briefing, Some(normal.record.token));
+    assert_ne!(p.briefing, source_token, "never the source's token");
+    assert!(p.changes.iter().all(|x| x.links.briefing == p.briefing));
     assert!(
-        p.changes
-            .iter()
-            .all(|x| x.links.briefing == Some(p.briefing))
-    );
-    assert!(
-        t.briefs().get(&p.briefing.to_string()).is_some(),
+        t.briefs().get(&p.briefing.unwrap().to_string()).is_some(),
         "registered"
     );
 
@@ -703,7 +700,7 @@ fn hpt2_port_uses_target_briefing_without_exemption() {
     .unwrap_err();
     assert_eq!(e.code, E_BRIEF_STALE);
     // the made token, cited, passes
-    let token = p.briefing.to_string();
+    let token = p.briefing.unwrap().to_string();
     let (got, rec) = port::port_brief(
         &st,
         &scope,

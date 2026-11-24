@@ -694,7 +694,8 @@ pub(crate) fn view(env: &Env, cmd: ViewCmd) -> Result<(Value, String), ErrorRepl
 /// The first briefing covers the target's first top-level block: a port of drafts needs only a
 /// current briefing of the target. A port of stable content refuses with the blocks a briefing
 /// must cover; the session briefs those and ports once more. When the view cannot be read, or
-/// holds no block, the port goes without a briefing and refuses with its own rule.
+/// holds no block, the port goes without a briefing. Core then lets it through only if it
+/// touches no target block, as in a new empty project.
 fn port_briefed(env: &Env, view: &str, args: Value) -> Result<Value, ErrorReply> {
     let mut conn = Conn::open(env)?;
     let out = port_with_own_briefing(&mut conn, view, args);

@@ -19,10 +19,11 @@
 //! against its own deliveries. A port never brings a delivery.
 //!
 //! A ported change copies its source's ops, justification and message. It records its source in
-//! `links.ported_from` and the target's briefing in `links.briefing`. Its `replayed_from` stays
-//! empty, and it has no intent or alternative. A held base stays. A create or update whose base
-//! the target lacks becomes a create, so the ordinary merge decides it. A delete whose base the
-//! target lacks is dropped when the target lacks the block, and refused when it holds it.
+//! `links.ported_from` and the target's briefing in `links.briefing` (none for a port that
+//! touches no target block and cites none). Its `replayed_from` stays empty, and it has no
+//! intent or alternative. A held base stays. A create or update whose base the target lacks
+//! becomes a create, so the ordinary merge decides it. A delete whose base the target lacks is
+//! dropped when the target lacks the block, and refused when it holds it.
 use crate::error::*;
 use crate::materialize::Materialized;
 use crate::port_wire::{
@@ -551,8 +552,9 @@ pub struct PreparedPort {
     pub ported: Vec<PortedChange>,
     /// The blocks the merged view records a conflict on, sorted.
     pub conflicts: Vec<BlockId>,
-    /// The target briefing every new change records.
-    pub briefing: Hash,
+    /// The target briefing every new change records: none for a port that touches no target
+    /// block and cites none.
+    pub briefing: Option<Hash>,
     /// The record of a briefing core made, registered already.
     pub record: Option<Arc<crate::brief::BriefRecord>>,
     /// The blob chunks and manifests the target lacks, each once: chunks first, as
@@ -865,7 +867,7 @@ pub(crate) fn prepare_changes(
                 client_nonce: Some(format!("port:{anchor}:{n}")),
                 imported_by: None,
                 replayed_from: None,
-                briefing: Some(briefing),
+                briefing,
                 ported_from: Some(source.from),
             },
             read_identity: None,
@@ -1050,7 +1052,8 @@ fn port_covers(m: &Materialized, ops: &[&Op]) -> BTreeSet<BlockId> {
 /// ([`port_covers`], with every stable subject) through `brief::brief_record_in`, at the target,
 /// and registers it in `reg`. With [`PortBrief::Cite`], the cited token must be known and not
 /// stale, for drafts too. Either way `brief::check` then checks stable coverage on the target.
-/// No source token is ever used.
+/// A port that cites no token goes on with no briefing when it covers no target block (a new
+/// empty target): `(None, None)`. Otherwise it needs one. No source token is ever used.
 pub fn port_brief(
     st: &ReadState,
     scope: &Scope,
@@ -1059,7 +1062,7 @@ pub fn port_brief(
     base_block: &dyn Fn(&Hash) -> Result<Block, RdyError>,
     brief: PortBrief<'_>,
     reg: &BriefRegistry,
-) -> Result<(Hash, Option<Arc<crate::brief::BriefRecord>>), RdyError> {
+) -> Result<(Option<Hash>, Option<Arc<crate::brief::BriefRecord>>), RdyError> {
     let inputs = op_inputs(ops, base_block)?;
     let pack = st.pack();
     let (token, record) = match brief {
@@ -1071,7 +1074,15 @@ pub fn port_brief(
             reg.insert(Arc::clone(&rec));
             (rec.token, Some(rec))
         }
-        PortBrief::Cite(None) => return Err(needs_briefing()),
+        PortBrief::Cite(None) => {
+            // a port that touches no target block needs no briefing, as a write's rule reads it
+            let mut covers = port_covers(m, ops);
+            covers.extend(crate::brief::stable_subjects(pack, m, &inputs));
+            if covers.is_empty() {
+                return Ok((None, None));
+            }
+            return Err(needs_briefing());
+        }
         PortBrief::Cite(Some(t)) => {
             let short: String = t.chars().take(8).collect();
             let unknown = || {
@@ -1115,5 +1126,5 @@ pub fn port_brief(
         &crate::reaffirm::Selection::default(),
         Some(&hex),
     )?;
-    Ok((token, record))
+    Ok((Some(token), record))
 }

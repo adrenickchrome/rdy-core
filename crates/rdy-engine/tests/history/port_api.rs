@@ -1075,6 +1075,91 @@ fn hpt4_without_source_keeps_replay_contract() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// an empty target: a port needs a briefing only for the target blocks it touches
+
+/// The source line of [`world`] with one more landing, a new claim under `notes`, closed with
+/// its dump: `(root, project, dump, seed, later, notes)`.
+fn bootstrap_source() -> (tempfile::TempDir, PathBuf, PathBuf, Hash, Hash, String) {
+    let World {
+        root,
+        mut s,
+        notes,
+        seed,
+        ..
+    } = world();
+    write(
+        &mut s,
+        "more",
+        json!([{"op": "create", "type": "claim", "parent": notes, "body": "A later note."}]),
+    );
+    let later = land(&mut s, "more");
+    let (project, dump) = close_with_dump(s, root.path());
+    (root, project, dump, seed, later, notes)
+}
+
+#[test]
+fn hpt4_empty_target_port_needs_no_briefing() {
+    let (root, project, dump, seed, _, notes) = bootstrap_source();
+    for (kind, from) in [("project", &project), ("dump", &dump)] {
+        let mut t = Rdy::init(&root.path().join(format!("empty-{kind}")), "rdy-standard").unwrap();
+        open_view(&mut t, MINE);
+        let briefs = t.briefs().len();
+        // the target holds no block the port touches: no briefing and no token
+        let res =
+            port(&mut t, from, &[seed], MINE, None).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        assert_eq!(res.replayed.len(), 1, "{kind}");
+        let new = stored(&t, &h(&res.replayed[0].change));
+        assert_eq!(new.links.briefing, None, "{kind}: records no briefing");
+        assert!(new.links.ported_from.is_some(), "{kind}");
+        assert_eq!(t.briefs().len(), briefs, "{kind}: registers no briefing");
+        assert!(
+            t.read()
+                .materialized(&mine(MINE))
+                .unwrap()
+                .get(&bid(&notes))
+                .is_some(),
+            "{kind}"
+        );
+        // it lands: no stable change lacks a briefing
+        land(&mut t, MINE);
+        t.close().unwrap();
+    }
+}
+
+#[test]
+fn hpt4_port_that_anchors_to_a_target_block_needs_briefing() {
+    let (root, project, dump, seed, later, notes) = bootstrap_source();
+    for (kind, from) in [("project", &project), ("dump", &dump)] {
+        let mut t = Rdy::init(&root.path().join(format!("boot-{kind}")), "rdy-standard").unwrap();
+        open_view(&mut t, "first");
+        port(&mut t, from, &[seed], "first", None).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        land(&mut t, "first");
+        // the target now holds notes, and the later claim hangs under it
+        open_view(&mut t, MINE);
+        let before = state(&t, MINE);
+        let briefs = t.briefs().len();
+        let e = port(&mut t, from, &[later], MINE, None).unwrap_err();
+        assert_eq!(
+            refusal(&e),
+            (
+                E_BRIEF_REQUIRED,
+                "a port needs a target briefing",
+                "brief the target blocks and retry with the token"
+            ),
+            "{kind}"
+        );
+        assert_eq!(state(&t, MINE), before, "{kind}: nothing written");
+        assert_eq!(t.briefs().len(), briefs, "{kind}");
+        // a briefing of the anchor lets the same port through
+        let res = port_briefed(&mut t, from, &[later], MINE, &[&notes])
+            .unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        let new = stored(&t, &h(&res.replayed[0].change));
+        assert!(new.links.briefing.is_some(), "{kind}");
+        t.close().unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // ruled ops and pins (D-1QT23, D-08M5W)
 
 const AGENTS: &str = "pf-AGNT1";

@@ -1088,3 +1088,111 @@ fn hpr4_local_limits_stay_separate() {
     drop(c);
     assert_eq!(show(s, "mine"), before, "nothing written");
 }
+
+// ---------------------------------------------------------------------------------------------
+// an empty target
+
+/// A port into a new empty project: it touches no target block, so it needs no briefing. MCP
+/// with no `brief`, and the person's session through the daemon and in the direct process, each
+/// port from a project and from a dump. No change records a briefing.
+#[test]
+fn hpt4_empty_target_ports_need_no_briefing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("s");
+    let mut src = Rdy::init(&project, "rdy-standard").unwrap();
+    src.write_briefed(
+        &writer(),
+        WriteRequest {
+            view: "seed".into(),
+            ops: parse_test_ops(json!([
+                {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+                {"op": "create", "type": "claim", "parent": "$n", "body": "A draft note."},
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview", "lifecycle": "stable"}},
+                {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Refunds"}},
+                {"op": "create", "type": "claim", "parent": "$s", "body": "Refunds take five days."}
+            ]))
+            .unwrap(),
+            justification: j_typo(),
+            message: String::new(),
+        },
+        None,
+    )
+    .unwrap();
+    let seed = land(&mut src, "seed").unwrap();
+    let source = changes_of(&src, &seed);
+    let dump = tmp.path().join("s.rdydump");
+    src.read().dump(&dump).unwrap();
+    src.close().unwrap();
+    const AGENT: [&str; 2] = ["mcp-project", "mcp-dump"];
+    const PERSON: [&str; 4] = [
+        "daemon-project",
+        "daemon-dump",
+        "direct-project",
+        "direct-dump",
+    ];
+    let s = Served::new();
+    let mut t = Rdy::open(s.dir.path()).unwrap();
+    assert!(t.read().materialized(&Scope::Canon).unwrap().is_empty());
+    for v in AGENT {
+        t.view_create(&as_agent(A, RUN), v, None, false).unwrap();
+    }
+    for v in PERSON {
+        t.view_create(&writer(), v, None, false).unwrap();
+    }
+    t.close().unwrap();
+    let sel = vec![seed.clone()];
+    let ported = |view: &str, reply: &Value| {
+        let sources: Vec<&str> = reply["replayed"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{view}: {reply}"))
+            .iter()
+            .map(|r| r["source"].as_str().unwrap())
+            .collect();
+        assert_eq!(sources, source, "{view}: {reply}");
+    };
+    // MCP, with no brief
+    let mut c = mcp(&s);
+    for (view, field, from) in [
+        ("mcp-project", "from", &project),
+        ("mcp-dump", "from_file", &dump),
+    ] {
+        let mut req = json!({"op": "replay", "view": view, "changes": sel});
+        req[field] = json!(path(from));
+        match c.call("rdy_view", req) {
+            Reply::ToolError(e) => panic!("{view}: {e}"),
+            r => ported(view, &r.ok()),
+        }
+    }
+    drop(c);
+    // the person's session: nothing to brief, so it ports with no token, through the daemon
+    for (view, from) in [("daemon-project", &project), ("daemon-dump", &dump)] {
+        let (ok, reply) = s.json(&[
+            "--json",
+            "view",
+            "replay",
+            view,
+            "--from",
+            &path(from),
+            &seed,
+        ]);
+        assert!(ok, "{view}: {reply}");
+        ported(view, &reply);
+    }
+    // and in the direct process
+    for (view, from) in [("direct-project", &project), ("direct-dump", &dump)] {
+        let reply =
+            direct(&s, None, from, view, None, &sel).unwrap_or_else(|e| panic!("{view}: {e}"));
+        ported(view, &reply);
+    }
+    s.stop();
+    let t = Rdy::open(s.dir.path()).unwrap();
+    for v in AGENT.iter().chain(&PERSON) {
+        for id in t.read().included(v).to_vec() {
+            let ch = t.store().reader().change(&id).unwrap();
+            assert!(ch.links.ported_from.is_some(), "{v}");
+            assert_eq!(ch.links.briefing, None, "{v}: records no briefing");
+        }
+        assert_eq!(t.read().included(v).len(), 1, "{v}");
+    }
+    t.close().unwrap();
+}
