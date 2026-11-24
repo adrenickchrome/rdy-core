@@ -5,6 +5,7 @@ mod release_contract;
 mod release_dark_figure_formats;
 mod release_disclosure_contract;
 mod release_hub_forks_contract;
+mod release_hub_ports_contract;
 mod release_install;
 mod release_install_unix;
 mod release_keys;

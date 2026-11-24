@@ -433,6 +433,10 @@ fn tree_digest(dir: &Path) -> (usize, String) {
     }
     let mut files = vec![];
     walk(dir, "", &mut files);
+    // the first-use fixtures of `ported_change` (hub ports) came after this plan's release
+    files.retain(|(path, _)| {
+        !path.starts_with("v4-f1-e1-ported-change") && !path.starts_with("ported-change-1")
+    });
     files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let lines: String = files
         .iter()
@@ -504,11 +508,23 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
         "the store fixtures"
     );
 
-    // the store registry and the formats: no feature, store format or dump format is new
+    // the store registry and the formats: no feature, store format or dump format is new, but
+    // the one a later plan registered (hub ports, `ported_change`): the registry less it is what
+    // this fixture lists, and it is the only addition
+    let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
+        .iter()
+        .copied()
+        .filter(|n| *n != "ported_change")
+        .collect();
     assert_eq!(
         now["store"]["registered_names"],
-        serde_json::json!(rdy_store::format::REGISTERED_FEATURES),
-        "the store registers what the contract lists"
+        serde_json::json!(live),
+        "the store registers what the contract lists, and ported_change"
+    );
+    assert_eq!(
+        live.len() + 1,
+        rdy_store::format::REGISTERED_FEATURES.len(),
+        "ported_change is the only addition"
     );
     assert_eq!(
         now["dump_load"]["dump_format"],
@@ -523,5 +539,5 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
         (19, 1, 4),
         "the store and dump formats"
     );
-    assert_eq!(rdy_store::format::REGISTERED_FEATURES.len(), 12);
+    assert_eq!(live.len(), 12);
 }

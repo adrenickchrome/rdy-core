@@ -153,7 +153,7 @@ fn ordinal<T: Serialize>(v: &T) -> u64 {
 /// The shape of a JSON value: objects as their sorted members, an array as the merge of the
 /// shapes of all its elements (a member that only some elements hold ends in `?`), scalars as
 /// their type. No id, time or text of the run is in it.
-fn shape(v: &Value) -> Value {
+pub(super) fn shape(v: &Value) -> Value {
     match v {
         Value::Object(m) => {
             // a member named by an id or a hash is one entry, whatever its id
@@ -763,6 +763,17 @@ fn store_row() -> Value {
         activation.len() >= 5,
         "the activation rules of the carried kinds have a source"
     );
+    // the port encodings (hub ports): a frame of one turns on `ported_change`, and the foreign
+    // copy too when it holds a foreign part
+    for (kind, version) in codec::PORT_ENCODINGS {
+        let names: Vec<String> =
+            required_features(*kind | codec::VERSIONED, &version.to_le_bytes())
+                .into_iter()
+                .map(|f| f.name)
+                .collect();
+        assert!(!names.is_empty(), "a port encoding turns features on");
+        activation.insert(format!("kind {kind} encoding {version}"), json!(names));
+    }
     let kind_ids: BTreeMap<String, u8> = [
         ("BLOCK", kinds::BLOCK),
         ("CHANGE", kinds::CHANGE),
@@ -992,6 +1003,7 @@ fn store_row() -> Value {
             "hub_canon": "a holder's first move: a batch that writes canon, a view/, a held/ or a replaced/ ref",
             "object_encoding": "any frame of encoding 1 or more",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
+            "ported_change": "the first stored CHANGE of encoding 3 or 4, or REDACTION_RESIDUE of encoding 2",
             "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
             "sync_state": "a project's first meta/sync/ ref: a batch that writes one",
             "view_replay": "a CHANGE whose links.replayed_from is set",
@@ -1003,6 +1015,8 @@ fn store_row() -> Value {
             "optional": codec::OPTIONAL.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
             "latest": latest,
             "first": first,
+            // hub ports: the encodings a value chooses, never a kind's latest
+            "ported": ported_encodings(&kind_ids),
         },
         "kind_ids": kind_ids,
         "current_frame_kinds": dump::current_frame_kinds(),
@@ -1020,7 +1034,49 @@ fn store_row() -> Value {
         "holder_fixture": digests(&fixtures.join("store/hub-canon-1"), |_| true),
         // a project's sync state refs and their bounds (D-3RSCW, Sync client A Task 2)
         "sync_state": sync_state_facts(),
+        // hub ports (D-RHYNQ, D-PKC71, D-1QT23, D-08M5W, D-3DG3R, D-3JN9N)
+        "port_residue": super::release_hub_ports_contract::store_facts().residue.clone(),
+        "port_bundle": super::release_hub_ports_contract::hub_probe().bundle.clone(),
+        "port_provenance": port_provenance(),
+        "port_bases": super::release_hub_ports_contract::hub_probe().bases.clone(),
+        "port_removals": super::release_hub_ports_contract::hub_probe().removals.clone(),
     })
+}
+
+/// The encodings of [`codec::PORT_ENCODINGS`] by the name of their kind, ascending.
+fn ported_encodings(kind_ids: &BTreeMap<String, u8>) -> Value {
+    let mut out: BTreeMap<String, Vec<u16>> = BTreeMap::new();
+    for (kind, version) in codec::PORT_ENCODINGS {
+        let name = kind_ids
+            .iter()
+            .find(|(_, k)| *k == kind)
+            .map(|(n, _)| n.clone())
+            .expect("a named kind");
+        out.entry(name).or_default().push(*version);
+    }
+    json!(out)
+}
+
+/// `store.port_provenance`: the stored vectors of a port, and what a hub carry and a replay of a
+/// port record besides its source.
+fn port_provenance() -> Value {
+    let mut m = super::release_hub_ports_contract::store_facts()
+        .provenance
+        .as_object()
+        .expect("vectors")
+        .clone();
+    for (k, v) in super::release_hub_ports_contract::hub_probe()
+        .provenance
+        .as_object()
+        .expect("runtime facts")
+    {
+        m.insert(k.clone(), v.clone());
+    }
+    m.insert(
+        "replay_copies_origin".into(),
+        json!(super::release_hub_ports_contract::local_probe().replay_copies_origin),
+    );
+    Value::Object(m)
 }
 
 /// The sync state refs of one remote `<remote>` and view `<name>` (D-3RSCW), their value and
@@ -1156,6 +1212,10 @@ fn dump_load_row() -> Value {
         "empty_target": empty_target,
         // hfp5 (D-99CWC, D-HX6BX): a project forked at a tag, through a reindex and a load
         "fork_at": super::release_hub_forks_contract::fork_probe().facts.clone(),
+        // hub ports: a carried view through a reindex, a dump and its load, and a sync; the
+        // landing facts of a landed port, from a project and from its dump
+        "hub_ports": super::release_hub_ports_contract::hub_probe().facts.clone(),
+        "port_landing_facts": super::release_hub_ports_contract::local_probe().landing_facts.clone(),
     })
 }
 
@@ -2731,6 +2791,39 @@ fn cli_clone_probes(seen: &mut Seen, env: &[(String, String)]) {
     s.stop();
 }
 
+/// hpt5 (D-G4PZX): `rdy view replay --from PROJECT` of a landing of a source project, as the
+/// person, with no daemon and no `--brief`: the session briefs the target itself. The reply is
+/// a replay's, with the one new change that stands for the source change; `view show` then
+/// names the source of the new change.
+fn cli_port_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let w = super::release_hub_ports_contract::port_world();
+    let (code, _, err) = rdy_in(&w.target, env, &["--json", "view", "new", "mine"]);
+    assert_eq!(code, 0, "{err}");
+    let from = w.project.to_string_lossy().into_owned();
+    let landing = w.landing.to_string();
+    let v = cli_probe(
+        seen,
+        &w.target,
+        env,
+        "view replay port",
+        &["view", "replay", "mine", "--from", &from, &landing],
+    );
+    assert_eq!(v["changes"], 1, "{v}");
+    assert_eq!(v["replayed"][0]["source"], w.change.to_string(), "{v}");
+    let shown = cli_probe(
+        seen,
+        &w.target,
+        env,
+        "view show port",
+        &["view", "show", "mine"],
+    );
+    assert_eq!(
+        shown["changes"][0]["ported_from"]["change"],
+        w.change.to_string(),
+        "{shown}"
+    );
+}
+
 fn cli_hook_probes(seen: &mut Seen) {
     let h = HookWorld::new();
     let root = h.root.clone();
@@ -3096,6 +3189,7 @@ fn cli_runtime() -> Value {
     cli_markdown_probes(&mut seen, &env);
     cli_export_probes(&mut seen, &env);
     cli_clone_probes(&mut seen, &env);
+    cli_port_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -4802,6 +4896,45 @@ fn mcp_clone_probes(seen: &mut Seen) {
     );
 }
 
+/// hpt5 (D-G4PZX): `rdy_view {op: replay, from_file}` of a landing of a dump, as an agent that
+/// cites a briefing of the target; `rdy_view {op: show}` of the view then names the source.
+fn mcp_port_probes(seen: &mut Seen) {
+    let w = super::release_hub_ports_contract::port_world();
+    let mut c = isolated_mcp(&w.target);
+    let opened = c.call(
+        "rdy_session",
+        json!({"actor": "agent:port", "run": "port", "role": "writer"}),
+    );
+    assert!(opened.is_ok(), "the session opens");
+    let made = c.call("rdy_view", json!({"op": "create", "name": "mine"}));
+    assert!(made.is_ok(), "a view of the agent's own");
+    let b = c.call("rdy_brief", json!({"ids": [w.section], "scope": "mine"}));
+    let token = b.ok()["base"]["token"].clone();
+    assert!(token.is_string(), "the briefing holds a token");
+    let v = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_view",
+        "rdy_view replay port",
+        json!({"op": "replay", "view": "mine", "from_file": w.dump.to_string_lossy(),
+            "brief": token, "changes": [w.landing.to_string()]}),
+    ));
+    assert_eq!(v["changes"], 1, "{v}");
+    assert_eq!(v["replayed"][0]["source"], w.change.to_string(), "{v}");
+    let shown = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_view",
+        "rdy_view show port",
+        json!({"op": "show", "name": "mine"}),
+    ));
+    assert_eq!(
+        shown["changes"][0]["ported_from"]["change"],
+        w.change.to_string(),
+        "{shown}"
+    );
+}
+
 /// The `rdy_links` reads over a project that holds a live link, a revoked one and a repo no link
 /// names (see [`links_project`]): each reply of the list, the show and the refs has its rows.
 fn mcp_links_probes(seen: &mut Seen) {
@@ -4964,6 +5097,7 @@ fn mcp_row() -> Value {
     mcp_hook_probes(&mut seen);
     mcp_export_probes(&mut seen);
     mcp_clone_probes(&mut seen);
+    mcp_port_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());
@@ -5195,6 +5329,10 @@ fn errors_row() -> Value {
         "envelope": envelope,
         // hfp5 (D-99CWC): the refusals of a fork at a tag, each with the code, message and fix
         "fork_at": super::release_hub_forks_contract::fork_probe().errors.clone(),
+        // hub ports: the stages of a make and of a take in the order they run, with the result
+        // of a pair of faults at two stages; and each refusal by cause
+        "port_check_order": super::release_hub_ports_contract::check_order(),
+        "port_refusals": super::release_hub_ports_contract::refusals(),
         "follower_refusal": follower_refusal(),
         "daemon_build_warning": rdy_mcp::server::DaemonBuildWarning {
             version: "1.2.3".into(),
@@ -7490,6 +7628,9 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// drv6: the old publication probes' docs hold no section and no decision, and their profiles
 /// cite no decision outside the selection, so the review's outline, decision titles, decision
 /// rows and dropped decisions are empty there; the review rows probe fills each of them.
+/// hpt5: a port of one change into a view with no other work adds no dependency, removes and
+/// cascades nothing (a replay never does), runs no check and resolves no tension, and its view
+/// holds no conflict; the neighbor rows' `values` are empty as above.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -7616,6 +7757,15 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/undo/stdout/on_change/resolved",
     "cli/undo/stdout/on_change/tensions",
     "cli/upgrade/stdout/steps",
+    "cli/view replay port/stdout/added_deps",
+    "cli/view replay port/stdout/cascaded",
+    "cli/view replay port/stdout/conflicts",
+    "cli/view replay port/stdout/consequences[]/because/values",
+    "cli/view replay port/stdout/on_change/checks",
+    "cli/view replay port/stdout/on_change/resolved",
+    "cli/view replay port/stdout/on_change/tensions",
+    "cli/view replay port/stdout/removed",
+    "cli/view show port/stdout/conflicts",
     "cli/view show/stdout/conflicts",
     "mcp/rdy_alternatives list/ok/sets",
     "mcp/rdy_answer elicit mixed/refused/issues",
@@ -7760,6 +7910,15 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_view compare/ok/conflicted",
     "mcp/rdy_view compare/ok/deleted",
     "mcp/rdy_view compare/ok/moved",
+    "mcp/rdy_view replay port/ok/added_deps",
+    "mcp/rdy_view replay port/ok/cascaded",
+    "mcp/rdy_view replay port/ok/conflicts",
+    "mcp/rdy_view replay port/ok/consequences[]/because/values",
+    "mcp/rdy_view replay port/ok/on_change/checks",
+    "mcp/rdy_view replay port/ok/on_change/resolved",
+    "mcp/rdy_view replay port/ok/on_change/tensions",
+    "mcp/rdy_view replay port/ok/removed",
+    "mcp/rdy_view show port/ok/conflicts",
     "mcp/rdy_view show/ok/conflicts",
     "mcp/rdy_view undo/refused/issues",
     "mcp/rdy_write/ok/consequences[]/because/values?",

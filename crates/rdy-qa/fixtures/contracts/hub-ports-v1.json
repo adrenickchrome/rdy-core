@@ -3769,6 +3769,51 @@
             "view": "string"
           }
         },
+        "view replay port": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "added": [
+              "string"
+            ],
+            "added_deps": [],
+            "cascaded": [],
+            "changes": "number",
+            "conflicts": [],
+            "consequences": [
+              {
+                "because": {
+                  "changed": "string",
+                  "edge": "string",
+                  "edges": [
+                    "string"
+                  ],
+                  "values": []
+                },
+                "block": "string",
+                "fix": "string",
+                "follow_up": "string",
+                "id": "string",
+                "kind": "string"
+              }
+            ],
+            "head": "string",
+            "on_change": {
+              "checks": [],
+              "resolved": [],
+              "tensions": []
+            },
+            "removed": [],
+            "replayed": [
+              {
+                "change": "string",
+                "source": "string"
+              }
+            ],
+            "view": "string"
+          }
+        },
         "view show": {
           "exits": [
             0
@@ -3784,6 +3829,56 @@
                 ],
                 "id": "string",
                 "message": "string",
+                "replayed_from": "null",
+                "run": "string"
+              }
+            ],
+            "conflicts": [],
+            "effective_base": "string",
+            "head": {
+              "base": "string",
+              "changes": "number",
+              "closed": "bool",
+              "head": "string",
+              "owner": {
+                "actor": "string",
+                "run": "string"
+              },
+              "pinned": "bool",
+              "view": "string"
+            },
+            "ops": [
+              {
+                "actor": "string",
+                "at_ms": "number",
+                "id": "string",
+                "kind": "string",
+                "run": "string",
+                "undone": "bool"
+              }
+            ]
+          }
+        },
+        "view show port": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "blocks": "number",
+            "changes": [
+              {
+                "actor": "string",
+                "at_ms": "number",
+                "blocks": [
+                  "string"
+                ],
+                "client_nonce": "string",
+                "id": "string",
+                "message": "string",
+                "ported_from": {
+                  "change": "string",
+                  "repo_id": "string"
+                },
                 "replayed_from": "null",
                 "run": "string"
               }
@@ -7491,6 +7586,24 @@
                   ]
                 },
                 {
+                  "action": "set",
+                  "id": "from",
+                  "long": "from",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT_OR_DUMP"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "brief",
+                  "long": "brief",
+                  "num_args": "1",
+                  "value_names": [
+                    "TOKEN"
+                  ]
+                },
+                {
                   "action": "append",
                   "id": "changes",
                   "index": 2,
@@ -7548,7 +7661,9 @@
               "groups": [
                 {
                   "args": [
+                    "brief",
                     "changes",
+                    "from",
                     "view"
                   ],
                   "id": "Replay",
@@ -19640,6 +19755,8 @@
       "v4-f1-e1-holder.rdydump": "72881 4e6001ad4f964b71009736244700b9b7f906b3b3531037c7e72268a6e0889842",
       "v4-f1-e1-hub-canon.expect.json": "11654 2d81d696b42558566a9d8619cb79caa57cdb36a2e7d33078e77cd13d92b9967c",
       "v4-f1-e1-hub-canon.rdydump": "14310 69c214a9813fb5e1b1f0ac13da4a440df158e28f67b0d4c6312fc93d34e6e9ec",
+      "v4-f1-e1-ported-change.expect.json": "14356 c292102672ba4c9ed2417b26dcef23a0677863da15e170e26352163d3f22cc54",
+      "v4-f1-e1-ported-change.rdydump": "16152 4dc15e868554e8d8b6dc486cacbdcd8865493576f9f25bc433b1e543a3513b7e",
       "v4-f1-e1-snapshot-delta.expect.json": "13645 917e36512b6a05848dbf36cb12066da12c632c0e43bfca21fd9a394885ed0a36",
       "v4-f1-e1-snapshot-delta.rdydump": "13655 f92ef939bd0054285f7ac442390afc64b2ea753a0944301c8785d8d615fe3ceb",
       "v4-f1-e1.expect.json": "457228 26dd1b3eac47340d062b8293d29012f433de440c40d646b535c03b4f20795082",
@@ -19657,7 +19774,34 @@
       "removal_applied": true,
       "replay_refused": true
     },
+    "hub_ports": {
+      "bases_resolve": true,
+      "blobs_present": true,
+      "canon_unchanged": true,
+      "conflict_survives": true,
+      "load_equal": true,
+      "new_view": true,
+      "no_source_records": true,
+      "one_batch": true,
+      "reindex_equal": true,
+      "sync_equal": true
+    },
     "magic": "RDYDUMP\n",
+    "port_landing_facts": {
+      "empty_op_change_kept": true,
+      "landing_order": true,
+      "ported_changes": [
+        {
+          "change": "string",
+          "ported_from": {
+            "change": "string",
+            "repo_id": "string"
+          }
+        }
+      ],
+      "project_and_dump_equal": true,
+      "sources_match": true
+    },
     "project_file_probes": [
       [
         ".rdy.yaml",
@@ -20760,6 +20904,228 @@
         "message": "--at needs a project"
       }
     },
+    "port_check_order": {
+      "first_fault_wins": {
+        "make": [
+          {
+            "first": "holder",
+            "then": "empty",
+            "wins": {
+              "code": "E_BAD_INPUT",
+              "fix": "open the line's hub store",
+              "message": "a hub port needs a holder"
+            }
+          },
+          {
+            "first": "entry_count",
+            "then": "landing_canon",
+            "wins": {
+              "code": "E_BAD_INPUT",
+              "fix": "carry fewer landings at a time",
+              "message": "the port bundle is too large"
+            }
+          },
+          {
+            "first": "landing_canon",
+            "then": "blob_erased",
+            "wins": {
+              "code": "E_BAD_INPUT",
+              "fix": "carry a landing from this line's hub canon",
+              "message": "landing <hash> is not on this store's hub canon"
+            }
+          }
+        ],
+        "take": [
+          {
+            "first": "lineage",
+            "then": "author",
+            "wins": {
+              "code": "E_BAD_INPUT",
+              "fix": "carry from a line of the same family",
+              "message": "the port bundle comes from outside this line's family"
+            }
+          },
+          {
+            "first": "same_store",
+            "then": "author",
+            "wins": {
+              "code": "E_BAD_INPUT",
+              "fix": "replay the change inside this store",
+              "message": "the port bundle comes from this store"
+            }
+          },
+          {
+            "first": "author",
+            "then": "view_name",
+            "wins": {
+              "code": "E_BAD_INPUT",
+              "fix": "pass the person who asked for the carry",
+              "message": "a hub carry needs a person's actor"
+            }
+          },
+          {
+            "first": "view_name",
+            "then": "canon_tip",
+            "wins": {
+              "code": "E_RESERVED_VIEW",
+              "fix": "write to a view and land it with rdy_propose",
+              "message": "canon cannot be written directly"
+            }
+          },
+          {
+            "first": "view_name",
+            "then": "holder",
+            "wins": {
+              "code": "E_RESERVED_VIEW",
+              "fix": "write to a view and land it with rdy_propose",
+              "message": "canon cannot be written directly"
+            }
+          },
+          {
+            "first": "target_removals",
+            "then": "missing_base_delete",
+            "wins": {
+              "code": "E_REDACTED_STATE",
+              "fix": "carry the change after the line's removal is replaced",
+              "message": "the port bundle holds a version or blob removed in this line"
+            }
+          },
+          {
+            "first": "view_head_compare",
+            "then": "target_removals",
+            "wins": {
+              "result": "behind"
+            }
+          }
+        ]
+      },
+      "make": [
+        "holder",
+        "read_epoch",
+        "empty_input",
+        "entry_count",
+        "parse",
+        "landing_canon",
+        "change_count",
+        "blob_erased",
+        "byte_count",
+        "read_epoch_again"
+      ],
+      "take": [
+        "length",
+        "form_and_hash",
+        "lineage",
+        "same_store",
+        "author",
+        "view_name",
+        "holder",
+        "canon_tip",
+        "view_head_compare",
+        "target_removals",
+        "foreign_pin",
+        "missing_base_delete",
+        "briefing",
+        "parent",
+        "parent_loop"
+      ]
+    },
+    "port_refusals": {
+      "brief_required": {
+        "code": "E_BRIEF_REQUIRED",
+        "fix": "brief the target blocks and retry with the token",
+        "message": "a port needs a target briefing"
+      },
+      "brief_unknown": {
+        "code": "E_BRIEF_STALE",
+        "fix": "brief these blocks (rdy_brief) and retry with the token",
+        "message": "the cited briefing 00000000 is unknown: the daemon restarted, or the briefing was evicted"
+      },
+      "brief_without_source": {
+        "code": "E_BAD_INPUT",
+        "fix": "remove brief, or name a port source",
+        "message": "replay without a source does not take brief"
+      },
+      "delete_base": {
+        "code": "E_BAD_INPUT",
+        "fix": "carry the landing that wrote it first",
+        "message": "the target line lacks the base of a ported delete"
+      },
+      "empty": {
+        "code": "E_BAD_INPUT",
+        "fix": "name a landing from this line's hub canon",
+        "message": "name at least one landing to carry"
+      },
+      "needs_holder": {
+        "code": "E_BAD_INPUT",
+        "fix": "open the line's hub store",
+        "message": "a hub port needs a holder"
+      },
+      "no_hub_canon": {
+        "code": "E_BAD_INPUT",
+        "fix": "seed the line before carrying a landing",
+        "message": "the target line has no hub canon"
+      },
+      "not_a_person": {
+        "code": "E_BAD_INPUT",
+        "fix": "pass the person who asked for the carry",
+        "message": "a hub carry needs a person's actor"
+      },
+      "not_landed": {
+        "code": "E_BAD_INPUT",
+        "fix": "land it there first, or replay it inside that project",
+        "message": "change <hash> has not landed in <project>"
+      },
+      "not_on_canon": {
+        "code": "E_BAD_INPUT",
+        "fix": "carry a landing from this line's hub canon",
+        "message": "landing <hash> is not on this store's hub canon"
+      },
+      "outside_family": {
+        "code": "E_BAD_INPUT",
+        "fix": "carry from a line of the same family",
+        "message": "the port bundle comes from outside this line's family"
+      },
+      "same_store": {
+        "code": "E_BAD_INPUT",
+        "fix": "replay the change inside this store",
+        "message": "the port bundle comes from this store"
+      },
+      "source_blob_removed": {
+        "code": "E_REDACTED_STATE",
+        "fix": "port the change after its figure is replaced",
+        "message": "a source blob of the ported change was removed"
+      },
+      "source_field_elsewhere": {
+        "code": "E_BAD_INPUT",
+        "fix": "use the source field only with replay",
+        "message": "include does not take from_file"
+      },
+      "source_write": {
+        "code": "E_STORE_READ_ONLY",
+        "fix": "open the target project for writes instead",
+        "message": "this store was opened as a read-only port source"
+      },
+      "target_removed": {
+        "code": "E_REDACTED_STATE",
+        "fix": "carry the change after the line's removal is replaced",
+        "message": "the port bundle holds a version or blob removed in this line"
+      },
+      "too_large": {
+        "code": "E_BAD_INPUT",
+        "fix": "carry fewer landings at a time",
+        "message": "the port bundle is too large"
+      },
+      "two_sources": {
+        "code": "E_BAD_INPUT",
+        "fix": "pass from or from_file, not both",
+        "message": "replay takes only one source"
+      },
+      "unverified": {
+        "code": "E_BAD_INPUT",
+        "fix": "make the bundle again in the source line",
+        "message": "the port bundle does not verify"
+      }
+    },
     "redaction_warning": {
       "copies": "This removes bytes from this store. It cannot erase exports, renders, dumps, clones, published files, working copies, backups, or filesystem snapshots.",
       "inventory": "Dumps, clones, exports, renders, and published versions may hold copies. Their locations are unknown to rdy.",
@@ -20809,6 +21175,7 @@
       "BASELINE_VERIFY_MESSAGE": "\"The publication baseline does not verify.\"",
       "BLOCKED_FIX": "\"Include the target docs or remove these references. Run the publication check again.\"",
       "BRIEFING_FIX": "\"exclude the change from the view, then brief the block and write it again\"",
+      "BRIEF_AGAIN_FIX": "\"brief these blocks (rdy_brief) and retry with the token\"",
       "CAPACITY_FIX": "\"keep the project; this holder takes no more history until its limit is raised\"",
       "CARD_CHANGE_FIX": "\"Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again.\"",
       "CARRIED_WARNING_BUDGET_FIX": "\"Increase max_tokens, or run rdy fsck for the complete warning list.\"",
@@ -20909,6 +21276,46 @@
       "PLAN_ITEM_FIX": "\"read the plan with rdy_plan / rdy plan and pass an item id it lists\"",
       "PLAN_OPEN_FIX": "\"close or defer each item: rdy_plan / rdy plan\"",
       "POLICY_HUMAN_FIX": "\"show the card to the person and relay their answer: rdy_pending, then rdy_answer\"",
+      "PORT_AUTHOR_FIX": "\"pass the person who asked for the carry\"",
+      "PORT_AUTHOR_MESSAGE": "\"a hub carry needs a person's actor\"",
+      "PORT_BRIEF_FIX": "\"brief the target blocks and retry with the token\"",
+      "PORT_BRIEF_MESSAGE": "\"a port needs a target briefing\"",
+      "PORT_BRIEF_NO_SOURCE_FIX": "\"remove brief, or name a port source\"",
+      "PORT_BRIEF_NO_SOURCE_MESSAGE": "\"replay without a source does not take brief\"",
+      "PORT_CYCLE_FIX": "\"move one block out of the other in the target, then carry again\"",
+      "PORT_CYCLE_MESSAGE": "\"the port would make <a> and <b> each other's ancestors\"",
+      "PORT_DELETE_BASE_FIX": "\"carry the landing that wrote it first\"",
+      "PORT_DELETE_BASE_MESSAGE": "\"the target line lacks the base of a ported delete\"",
+      "PORT_EMPTY_FIX": "\"name a landing from this line's hub canon\"",
+      "PORT_EMPTY_MESSAGE": "\"name at least one landing to carry\"",
+      "PORT_FAMILY_FIX": "\"carry from a line of the same family\"",
+      "PORT_FAMILY_MESSAGE": "\"the port bundle comes from outside this line's family\"",
+      "PORT_HOLDER_FIX": "\"open the line's hub store\"",
+      "PORT_HOLDER_MESSAGE": "\"a hub port needs a holder\"",
+      "PORT_NOT_CANON_FIX": "\"carry a landing from this line's hub canon\"",
+      "PORT_NOT_CANON_MESSAGE": "\"landing <hash> is not on this store's hub canon\"",
+      "PORT_NOT_LANDED_FIX": "\"land it there first, or replay it inside that project\"",
+      "PORT_NOT_LANDED_MESSAGE": "\"change <hash> has not landed in <project>\"",
+      "PORT_NO_CANON_FIX": "\"seed the line before carrying a landing\"",
+      "PORT_NO_CANON_MESSAGE": "\"the target line has no hub canon\"",
+      "PORT_PARENT_FIX": "\"carry the change that creates the parent first, or resolve its conflict\"",
+      "PORT_PARENT_MESSAGE": "\"the port needs parent <id> present and clean in the target\"",
+      "PORT_SAME_STORE_FIX": "\"replay the change inside this store\"",
+      "PORT_SAME_STORE_MESSAGE": "\"the port bundle comes from this store\"",
+      "PORT_SOURCE_BLOB_FIX": "\"port the change after its figure is replaced\"",
+      "PORT_SOURCE_BLOB_MESSAGE": "\"a source blob of the ported change was removed\"",
+      "PORT_SOURCE_FIELD_FIX": "\"use the source field only with replay\"",
+      "PORT_SOURCE_FIELD_MESSAGE": "\"<op> does not take <field>\"",
+      "PORT_SOURCE_WRITE_FIX": "\"open the target project for writes instead\"",
+      "PORT_SOURCE_WRITE_MESSAGE": "\"this store was opened as a read-only port source\"",
+      "PORT_TARGET_REMOVED_FIX": "\"carry the change after the line's removal is replaced\"",
+      "PORT_TARGET_REMOVED_MESSAGE": "\"the port bundle holds a version or blob removed in this line\"",
+      "PORT_TOO_LARGE_FIX": "\"carry fewer landings at a time\"",
+      "PORT_TOO_LARGE_MESSAGE": "\"the port bundle is too large\"",
+      "PORT_TWO_SOURCES_FIX": "\"pass from or from_file, not both\"",
+      "PORT_TWO_SOURCES_MESSAGE": "\"replay takes only one source\"",
+      "PORT_UNVERIFIED_FIX": "\"make the bundle again in the source line\"",
+      "PORT_UNVERIFIED_MESSAGE": "\"the port bundle does not verify\"",
       "PROFILE_PARENT_FIX": "\"set parent to a doc id\"",
       "PROJECT_FIX": "\"Propose the redaction of the listed targets again, and have a person approve it.\"",
       "REACH_CONFIRM_FIX": "\"a block it relies on changed: check that it still holds, and supersede it if not; no repin is needed\"",
@@ -26049,6 +26456,48 @@
           ]
         }
       },
+      "rdy_view replay port": {
+        "ok": {
+          "added": [
+            "string"
+          ],
+          "added_deps": [],
+          "cascaded": [],
+          "changes": "number",
+          "conflicts": [],
+          "consequences": [
+            {
+              "because": {
+                "changed": "string",
+                "edge": "string",
+                "edges": [
+                  "string"
+                ],
+                "values": []
+              },
+              "block": "string",
+              "fix": "string",
+              "follow_up": "string",
+              "id": "string",
+              "kind": "string"
+            }
+          ],
+          "head": "string",
+          "on_change": {
+            "checks": [],
+            "resolved": [],
+            "tensions": []
+          },
+          "removed": [],
+          "replayed": [
+            {
+              "change": "string",
+              "source": "string"
+            }
+          ],
+          "view": "string"
+        }
+      },
       "rdy_view show": {
         "ok": {
           "blocks": "number",
@@ -26061,6 +26510,53 @@
               ],
               "id": "string",
               "message": "string",
+              "replayed_from": "null",
+              "run": "string"
+            }
+          ],
+          "conflicts": [],
+          "effective_base": "string",
+          "head": {
+            "base": "string",
+            "changes": "number",
+            "closed": "bool",
+            "head": "string",
+            "owner": {
+              "actor": "string",
+              "run": "string"
+            },
+            "pinned": "bool",
+            "view": "string"
+          },
+          "ops": [
+            {
+              "actor": "string",
+              "at_ms": "number",
+              "id": "string",
+              "kind": "string",
+              "run": "string",
+              "undone": "bool"
+            }
+          ]
+        }
+      },
+      "rdy_view show port": {
+        "ok": {
+          "blocks": "number",
+          "changes": [
+            {
+              "actor": "string",
+              "at_ms": "number",
+              "blocks": [
+                "string"
+              ],
+              "client_nonce": "string",
+              "id": "string",
+              "message": "string",
+              "ported_from": {
+                "change": "string",
+                "repo_id": "string"
+              },
               "replayed_from": "null",
               "run": "string"
             }
@@ -30342,6 +30838,13 @@
                 "null"
               ]
             },
+            "brief": {
+              "description": "replay with from_file: the briefing token of the target blocks (rdy_brief); every ported change records it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "cascade": {
               "description": "exclude and undo: also exclude the changes that depend on these (default false).",
               "type": [
@@ -30368,6 +30871,13 @@
             },
             "from": {
               "description": "fork: the view to fork.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "from_file": {
+              "description": "replay: port landed changes from a dump of another project, a file on this server (rdy_dump makes it there). changes then names landings or changes on that project's canon.",
               "type": [
                 "string",
                 "null"
@@ -32523,12 +33033,25 @@
       "kind 2 encoding 1": [
         "object_encoding"
       ],
+      "kind 2 encoding 3": [
+        "object_encoding",
+        "ported_change"
+      ],
+      "kind 2 encoding 4": [
+        "object_encoding",
+        "ported_change",
+        "foreign_copy"
+      ],
       "kind 20 encoding 1": [
         "object_encoding",
         "foreign_copy"
       ],
       "kind 21 encoding 1": [
         "object_encoding"
+      ],
+      "kind 21 encoding 2": [
+        "object_encoding",
+        "ported_change"
       ],
       "kind 25 encoding 1": [
         "object_encoding",
@@ -32703,6 +33226,15 @@
           2
         ]
       ],
+      "ported": {
+        "CHANGE": [
+          3,
+          4
+        ],
+        "REDACTION_RESIDUE": [
+          2
+        ]
+      },
       "registered": [
         [
           2,
@@ -32753,6 +33285,7 @@
       "hub_canon": "a holder's first move: a batch that writes canon, a view/, a held/ or a replaced/ ref",
       "object_encoding": "any frame of encoding 1 or more",
       "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
+      "ported_change": "the first stored CHANGE of encoding 3 or 4, or REDACTION_RESIDUE of encoding 2",
       "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
       "sync_state": "a project's first meta/sync/ ref: a batch that writes one",
       "view_replay": "a CHANGE whose links.replayed_from is set"
@@ -32802,6 +33335,11 @@
         "class": "incompatible",
         "name": "plan_tension",
         "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "ported_change",
+        "required_rdy": "0.58.0"
       },
       {
         "class": "incompatible",
@@ -33105,6 +33643,58 @@
         }
       }
     },
+    "port_bases": {
+      "conflict_record": false,
+      "held": "keep",
+      "missing_delete_absent": "drop_op_keep_change",
+      "missing_delete_held": "refuse",
+      "missing_result": "create"
+    },
+    "port_bundle": {
+      "bytes": "whole_value",
+      "duplicates": "make_collapses_take_refuses",
+      "format": "rdy-port-bundle-1",
+      "hub_replay_limits": false,
+      "max_bytes": 67108864,
+      "max_changes": 1000,
+      "max_entries": 1000,
+      "order": "canon_oldest_first",
+      "vector_hash": "b474e74ce8e5728e2bbab32d9ec0050c5f709f29122b0299c0d7babf04aef68b"
+    },
+    "port_provenance": {
+      "alternative": null,
+      "briefing": "target",
+      "foreign_encoding": 4,
+      "foreign_id": "39740916ad1ef4a4b0004b3dffb00e8b267db4de7811b42c90f3cf6944b352d4",
+      "intent": null,
+      "object_edge": false,
+      "pin_closure": false,
+      "plain_encoding": 3,
+      "plain_id": "22a30044ed10ca10373ef64ea6d4b884ac2a32648c4fcdadc6c7e5ddcdd13fb2",
+      "replay_copies_origin": true,
+      "replayed_from": true,
+      "source_after_link_six": true,
+      "unported_foreign_id": "36aa5554f9e9657b7c0039c63f12476822b61409a649af6b1cbf8a9d66ba5b74",
+      "unported_plain_id": "a8e74f56cc0146e928d0d4a85aff8c7f9404cfda58909a8e976e98a77742bb22"
+    },
+    "port_removals": {
+      "epoch": false,
+      "expiry": false,
+      "hub_remakes": "every_attempt",
+      "removal_set": false,
+      "target_checks": "every_bundled_version_and_blob"
+    },
+    "port_residue": {
+      "body": "v1_then_ported_from",
+      "encoding": 2,
+      "old_json_omits": true,
+      "residue_only_activation": true,
+      "source_encodings": [
+        3,
+        4
+      ],
+      "unported_encoding": 1
+    },
     "ref_families": [
       "meta/store_features",
       "meta/repo_id",
@@ -33134,6 +33724,7 @@
       "hub_canon",
       "object_encoding",
       "plan_tension",
+      "ported_change",
       "snapshot_delta",
       "sync_state",
       "view_replay"
