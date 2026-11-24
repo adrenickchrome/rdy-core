@@ -73,6 +73,42 @@ struct CoordKeys {
     alt_sets: BTreeSet<Hash>,
 }
 
+impl CoordKeys {
+    /// Whether `h` names an intent: one this store's `intent/` refs name, or a held intent
+    /// version that starts a chain. A pull or a URL clone takes a change's object edges as
+    /// fetched records, the intent's first version among them, and moves no `intent/` ref
+    /// (D-KE83X, D-D5J18; a hub's refs are closed, D-DZDB7). There the held object is the intent.
+    fn intent(&self, s: &StoreReader, h: &Hash) -> Result<bool, StoreError> {
+        if self.intents.contains(h) {
+            return Ok(true);
+        }
+        held_first::<Intent>(s, kinds::INTENT, h, |i| (i.stable, i.prev))
+    }
+
+    /// [`CoordKeys::intent`] for an alternative set and the `alt/` refs.
+    fn alt_set(&self, s: &StoreReader, h: &Hash) -> Result<bool, StoreError> {
+        if self.alt_sets.contains(h) {
+            return Ok(true);
+        }
+        held_first::<AltSet>(s, kinds::ALT_SET, h, |a| (a.stable, a.prev))
+    }
+}
+
+/// Whether the store holds an object of `kind` at `h` that starts its chain (no stable id and
+/// no prev): the stable id of an intent or an alternative set that no ref of this store names.
+fn held_first<T: DeserializeOwned + 'static>(
+    s: &StoreReader,
+    kind: u8,
+    h: &Hash,
+    chain: impl Fn(&T) -> (Option<Hash>, Option<Hash>),
+) -> Result<bool, StoreError> {
+    if !s.has_kind(kind, h)? {
+        return Ok(false);
+    }
+    let v: T = s.get_typed(kind, h)?;
+    Ok(chain(&v) == (None, None))
+}
+
 fn bad(m: String) -> StoreError {
     StoreError::Decode(m)
 }
@@ -144,11 +180,11 @@ impl StoreReader {
             self.check_chains::<AltSet>(kinds::ALT_SET, ALT_REF, "alternative set", |s| {
                 (s.stable, s.prev)
             })?;
-        self.check_alt_sets(&alt_sets, &sets, &landings)?;
         let keys = CoordKeys {
             intents: intents.iter().map(|(k, _)| *k).collect(),
             alt_sets: alt_sets.iter().map(|(k, _)| *k).collect(),
         };
+        self.check_alt_sets(&alt_sets, &sets, &landings, &keys)?;
         self.check_dag(&landings, &sets, &keys)?;
         let reviews =
             self.check_dismissals()? + self.check_mention_reviews()? + self.check_verdicts()?;
@@ -655,12 +691,16 @@ impl StoreReader {
 
     /// The latest version of each set names member views that exist, and a chosen set names a
     /// landing of canon that records the choice; every landing of canon that records a choice
-    /// names a set whose latest version is chosen by that landing.
+    /// names a set whose latest version is chosen by that landing. A landing that chooses from a
+    /// set no `alt/` ref names needs only the set's held first version: a pull or a URL clone
+    /// takes the landing's object edges and no ref, and the set's later versions and member views
+    /// stay with the store that wrote them (D-KE83X, D-D5J18).
     fn check_alt_sets(
         &self,
         sets: &[(Hash, AltSet)],
         views: &[(String, ViewHead, Arc<Vec<Hash>>)],
         landings: &[(Hash, LandingRecord)],
+        keys: &CoordKeys,
     ) -> Result<(), StoreError> {
         let names: HashSet<&str> = views.iter().map(|(n, _, _)| n.as_str()).collect();
         let canon: HashMap<&Hash, &LandingRecord> = landings.iter().map(|(h, r)| (h, r)).collect();
@@ -697,6 +737,7 @@ impl StoreReader {
         for (l, rec) in landings {
             let Some(c) = &rec.chosen else { continue };
             match latest.get(&c.set).map(|s| &s.status) {
+                None if keys.alt_set(self, &c.set)? => {}
                 None => {
                     return Err(bad(format!(
                         "landing {l}: chooses from alternative set {}, which does not exist",
@@ -801,12 +842,12 @@ impl StoreReader {
                 }
             }
             if let Some(h) = &ch.links.intent
-                && !keys.intents.contains(h)
+                && !keys.intent(self, h)?
             {
                 return Err(bad(format!("change {c}: intent {h} does not exist")));
             }
             if let Some(a) = &ch.links.alternative
-                && !keys.alt_sets.contains(&a.set)
+                && !keys.alt_set(self, &a.set)?
             {
                 return Err(bad(format!(
                     "change {c}: alternative set {} does not exist",
