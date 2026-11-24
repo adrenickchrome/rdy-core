@@ -1,6 +1,6 @@
 **Your intent, ready for anyone who needs it.** rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents. Before an agent writes, rdy shows it what governs the change and what depends on it. After the write, rdy shows what the change affected. Nothing joins the accepted design until a person approves it.
 
-In this release, you can fork a project at one of its tags. `rdy clone <project> <dir> --fork --at <tag>` makes a new project with the history up to that tag only. A publish, push or restore sends smaller bodies to a hub that takes zstd, and a publish that stops resumes where it stopped. On the site, the diff of an edited table is a table. rdy 0.57.0 opens a 0.56.0 project as it is. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
+In this release, you can port landed changes from another project on your machine, or from a dump of one, into a view: `rdy view replay <view> --from <project-or-dump> <change-or-landing>...`. Each new change records where it came from. A land now refuses a foreign pin that the project holds no delivery for. The C code in the Linux archive is now built for any x86-64 CPU. A clone or full-history pull from a hub now passes its check and downloads each object once. rdy 0.58.0 opens a 0.57.0 project as it is. A project that ports a change needs rdy 0.58.0 from then on. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
 
 ## What you get
 
@@ -13,7 +13,7 @@ In this release, you can fork a project at one of its tags. `rdy clone <project>
 - **It catches drift.** When a decision changes, rdy marks every page that rests on it. It also flags a page that states a different number for a recorded value.
 - **Linked projects.** Cite the decisions and instructions that another project delivers through rdyhub. Your project keeps the version it cites until a person adopts a newer one.
 - **Bring your Markdown.** Import a folder of Markdown files as docs. A preview shows what maps, and what does not, before anything is written.
-- **Share through a hub.** Push canon and views to a hub repo, pull them back, and clone a project from its hub URL. Fork a project at one of its tags.
+- **Share through a hub.** Push canon and views to a hub repo, pull them back, and clone a project from its hub URL. Fork a project at one of its tags, and port landed changes from another project into a view.
 - **Checks that you write.** A pack rule can test each block with a WebAssembly module, in a sandbox with fixed limits.
 - **A live docs site.** `rdy site` gives you a local site that refreshes as changes land.
 - **A README from your docs.** Export one doc as one Markdown file, with its images in a folder beside it.
@@ -40,26 +40,26 @@ To install from the archive instead:
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.57.0/rdy-0.57.0-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.57.0-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.57.0-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.58.0/rdy-0.58.0-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.58.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.58.0-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.57.0/rdy-0.57.0-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.57.0-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.57.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.58.0/rdy-0.58.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.58.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.58.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
 **Windows (x86_64), in PowerShell:**
 
 ```powershell
-Invoke-WebRequest -OutFile rdy-0.57.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.57.0/rdy-0.57.0-x86_64-pc-windows-msvc.tar.gz
-tar.exe -xzf rdy-0.57.0-x86_64-pc-windows-msvc.tar.gz
+Invoke-WebRequest -OutFile rdy-0.58.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.58.0/rdy-0.58.0-x86_64-pc-windows-msvc.tar.gz
+tar.exe -xzf rdy-0.58.0-x86_64-pc-windows-msvc.tar.gz
 New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Move-Item -Force rdy-0.57.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
+Move-Item -Force rdy-0.58.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
 ```
 
 On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile. On Windows, add `$HOME\.local\bin` to your PATH. Then check:
@@ -68,13 +68,13 @@ On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HO
 rdy --version
 ```
 
-It prints `rdy 0.57.0`.
+It prints `rdy 0.58.0`.
 
 On macOS, if you downloaded the archive in a browser instead of with curl, macOS may block the binary. Run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
 
 ## Release key
 
-This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0, 0.48.0, 0.49.0, 0.50.0, 0.51.0, 0.52.0, 0.53.0, 0.54.0, 0.55.0 and 0.56.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.57.0:
+This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0, 0.48.0, 0.49.0, 0.50.0, 0.51.0, 0.52.0, 0.53.0, 0.54.0, 0.55.0, 0.56.0 and 0.57.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.58.0:
 
 ```text
 rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8
@@ -82,7 +82,7 @@ rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUy
 
 Fingerprint: `SHA256:Tj8hfra0U07asaeSZkt1b5e1HGJ+w8vMzLrn+G6/+/M`.
 
-Compare this line and fingerprint with the ones in the README at v0.57.0. Use the key only when both match.
+Compare this line and fingerprint with the ones in the README at v0.58.0. Use the key only when both match.
 
 ## Try it: your first project
 
@@ -156,36 +156,46 @@ Compare this line and fingerprint with the ones in the README at v0.57.0. Use th
 
    The site keeps running after `rdy site` exits. To stop it, close your agent's session first: quit the agent, or end the `rdy mcp` process that your client started. `rdy mcp` ends when its standard input closes. Then run `rdy serve --stop` in the project folder. An `rdy mcp` that is still open logs `E_DAEMON_GONE`. `rdy serve --stop` prints `stopped`, or `no daemon running` when none was running. Your meta project has its own daemon, which starts at the agent's first `rdy_instructions` call. Stop it with `rdy serve --stop --project <path>`. Use the path that `rdy setup` printed when it created the project. By default, the path is `.rdy/meta` in your home folder, such as `~/.rdy/meta`.
 
-## What changed since 0.56.0
+## What changed since 0.57.0
 
 ### New features
 
-- **Fork at a tag.** `rdy clone <project> <dir> --fork --at <tag>` makes a fork whose canon ends at the tag's landing. The fork holds the source's history up to that landing, each tag on that chain, and every removal of carried content, still applied, also after a dump and load. It holds no view and no open proposal. Your first write makes the default view, as after `rdy init`. It gets a new repo id, and `forked_from` names the source's repo id, the tag and its landing. The source must be a project directory. A fork without `--at` works as before.
-- **Records after the tag.** A removal or a dispute correction made after the tag comes with the fork only as evidence. No read reaches it, no view holds it, and it lands nothing. `rdy view include` and a view replay in the fork refuse a change that only such a record carries, with `E_NOT_FOUND`.
-- **`rdy_clone`** takes `at`, the same tag, which needs `fork: true`. A call with `file` refuses it.
-- **New refusals.** `--at` without `--fork` gives `E_BAD_INPUT`, `a clone keeps the whole history; --at needs --fork`. `--at` with a dump file gives `E_BAD_INPUT`, `--at needs a project`: load the dump, then fork the loaded project. A tag that the source does not hold gives `E_NOT_FOUND`. A destination that is not empty gives `E_ALREADY_EXISTS`, `<dir> is not empty`: fork into a new directory, or an empty one.
-- **Smaller uploads.** When the hub's state reply says that it takes zstd, `rdy publish`, `rdy push` and a restore send each `files/put` and `objects/put` body as one zstd frame, at level 3 with a window of at most 8 MiB. A body that zstd does not make smaller goes as it is. Every other step stays uncompressed, and the limits still count the bytes before compression.
-- **A stopped publish resumes.** A publish that stops before its publish write keeps its push id in `.rdy/publish-resume.json`, outside the log, with mode 0600 on macOS and Linux. The next publish of the same tag to the same remote and hub repo, at the same redaction epoch, resumes under that push id, so it sends only what the hub lacks. A hub refusal at the known or put step clears the record, and the next publish starts with a new push id. A publish of another tag, or to another remote, hub repo or epoch, also takes a new push id. Any reply to the publish write clears the record, also `E_UPSTREAM_UNCERTAIN`, except a busy, over-budget or read-only refusal.
-- **Table diffs.** On the site's diff summary pages, and in review mode with Show diff, the diff of an edited table is now a table, in place of one paragraph of the cells' words. Columns pair by header text, and rows by a first cell that is unique in both tables. Each cell has its own word diff. A new or removed table shows whole, as a table.
+- **Port changes from another project.** `rdy view replay <view> --from <project-or-dump> [--brief <token>] <change-or-landing>...` writes one new change into your open view for each change you name, or for each change of a landing you name. The source is another project on this machine, or a dump of one, and rdy opens it read-only. The changes must have landed there. The port is one act, and one undo removes it. Without `--from`, `rdy view replay` works as before.
+- **What a port copies.** Each new change keeps the ops, the message and the justification of its source change, and the blobs they need. It drops `intent` and `alternative`. Local pins and block links come as data, with no pin closure. An update whose base your project lacks becomes a create of its result, so it conflicts with a block that the project holds or deleted. A delete that your project already satisfies is dropped, and so is a delete whose base your project lacks, of a block that your project lacks too. A conflict stays in the view, as in any view. The limits of replay apply: 1,000 changes, 10,000 ops and 16,777,216 encoded bytes.
+- **Where a change came from.** Each ported change records its source in `ported_from`: the source project's repo id and the hash of the source change. `rdy view show` prints `ported from <repo_id> <change>` for it, with no `[wc]`. JSON view reads give `ported_from` on each ported change, and landing facts give `ported_changes`, in landing order.
+- **A port needs a briefing.** A port that touches a block of your project needs a briefing of the target blocks, also in a draft view. When you leave out `--brief`, your CLI session briefs the target itself. An agent session passes the token from `rdy brief`, or the port gives `E_BRIEF_REQUIRED` and writes nothing. A port that touches no block of your project needs no token.
+- **`rdy_view`** replay takes `from_file`, a dump of the source project on the server's machine, and `brief`, the target briefing token. `rdy_dump` makes the dump. `from` stays the input of a fork.
+- **New refusals.**
+    - A change that has not landed in the source gives `E_BAD_INPUT`, "change <hash> has not landed in <project>": land it there first, or replay it inside that project.
+    - `from` and `from_file` together give `E_BAD_INPUT`, "replay takes only one source". `brief` with no source gives `E_BAD_INPUT`, "replay without a source does not take brief".
+    - A delete whose base your project lacks, of a block that your project holds, gives `E_BAD_INPUT`, "the target line lacks the base of a ported delete". So does a port that would make two blocks each other's ancestors.
+    - A port whose block needs a parent that your project lacks, or holds in conflict, gives `E_DEPS_MISSING`, "the port needs parent <id> present and clean in the target": carry the change that creates the parent first, or resolve its conflict.
+    - A source blob that was removed gives `E_REDACTED_STATE`, "a source blob of the ported change was removed".
+    - A foreign pin that your project holds no delivery for gives `E_FOREIGN_VERSION`.
+- **A new store feature.** The first ported change in a project turns on the store feature `ported_change`. From then on, an rdy before 0.58.0 refuses the project with `E_STORE_FORMAT`, "store feature ported_change needs rdy 0.58.0". A removal of the ported change keeps the feature on. A dump of the project records it, and an older rdy refuses to load that dump by the same rule.
 - **For hub integrators (rdy-adapter):**
-    - `Snapshot::fork_at(tag, dir)` makes a new hub store from a hub store, in an empty directory, by the same rule. It gets a new repo id, its hub canon starts at the tag's landing, and only the tags on that landing's chain get refs. It refuses a project's snapshot, and a removal since the snapshot gives `E_REDACTED_STATE`.
-    - A hub store counts only the fork origins that its creating batch wrote, for the lineage check and for signatures.
-    - A canon move that carries a removal renews the read caches on the same handle.
+    - `Snapshot::port_bundle(landings)` on a hub holder gives a `PortBundle`, form `rdy-port-bundle-1`, of 1 to 1,000 landings of the source hub canon, with at most 1,000 changes and 64 MiB. It holds no epoch, removal set or expiry: the hub makes it again for each attempt and keeps none.
+    - `StoreHandle::port_into_view(bundle, view, author)` writes a new pushed view on hub canon's tip, with one new change for each source change, under the run `hub-carry` and the person's actor. Canon, tags and held refs do not move, and the carry makes no landing and no request. A person pulls the view, lands it and pushes it, and that push opens the landing request. If the view exists, the call returns `PortOutcome::Behind { head }` and writes nothing.
+    - A carry copies foreign links and pins as written and checks no delivery for them. The delivery check runs when a person lands the view.
+    - A carry's refusals are `E_BAD_INPUT`, `E_DEPS_MISSING`, `E_REDACTED_STATE` and `E_BRIEF_REQUIRED`. It checks in a fixed order, and the first fault wins: length, family, same store, author, target hub canon, view head, target removals, ops, briefing.
+    - `Snapshot::compare_size(from, to, limit)` counts the rows of a compare up to `limit`, builds no entry, and refuses what `compare` refuses.
 
 ### Changes
 
-- **The upstream status of an uncertain write.** When a write gets a reply that is not the hub's, such as a proxy's 502 page, `E_UPSTREAM_UNCERTAIN` now names the status. In a push or a restore, its message ends with `upstream answered <status>`. In a publish, the message stays as it was, and a second issue reads `upstream answered <status>`. rdy never quotes the reply's body. The code and the fix do not change.
-- **Each file is checked once.** A publish read and hashed each artifact file twice before it sent any file. It now checks each file once. A file is still hashed while it goes, so bytes that change after the check are held back.
-- **You do nothing to move.** rdy 0.57.0 opens a store made by rdy 0.56.0 as it is, with no upgrade step and no dump and load. Store format 19, dump format 4 and the store features stay.
+- **The schema texts for ports.** The `rdy_schema` edit-loop text says that a port needs a briefing of the target blocks, also on drafts. The view schema lists `from_file` and `brief` for replay.
+- **Breaking for older rdy: rdy 0.58.0 adds the store feature `ported_change` (class incompatible, minimum rdy 0.58.0); store format 19 and dump format 4 stay.** A store starts to use `ported_change` only when its project first uses it, and only a store or dump that uses it needs rdy 0.58.0: rdy 0.57.0 refuses one with `E_STORE_FORMAT` and names rdy 0.58.0. rdy 0.58.0 opens a store made by rdy 0.57.0 as it is, and loads every earlier dump.
+- **You do nothing to move.** rdy 0.58.0 opens a store made by rdy 0.57.0 as it is, with no upgrade step and no dump and load. Store format 19, dump format 4 and the sync stream formats stay. A project that ports a change cannot go back to rdy 0.57.0.
 
 ### Fixes
 
-- **Lands of a held chain (rdy-adapter).** `Snapshot::pushed_landings` on a stored-head check now reads the held chain's landings. Before, every land of a held request chain failed with `E_NOT_FOUND` `no landing <hash> in the captured history`.
+- **A land checks every pin.** Before, a land of a pulled view could land a pin to a foreign version that the project held no delivery for. A land now checks the pins of every change that it writes, and refuses such a pin with `E_FOREIGN_VERSION`. The land works once the delivery is in the project.
+- **Linux on older CPUs.** The rdy 0.56.0 and 0.57.0 Linux archives needed an x86-64-v3 CPU, with AVX2, BMI2 and MOVBE (about 2013 and later). On an older CPU, rdy died with SIGILL at its first TLS contact with a hub, for example in `rdy auth sign-in`. The C code of ring and zstd in the Linux x86_64 archive is now built for baseline x86-64. ring and zstd still choose fast code by the CPU at run time.
+- **A clone of a hub project passes its check.** Before, `rdy clone <hub url>` of a project with intents, alternative sets or plan chains from other views failed its fsck with `E_IO`, "intent ... does not exist". A later fsck or upgrade after a full-history pull failed the same way. The store check now accepts these fetched records. A clone of a 453 MB project, with its check, takes about 49 seconds.
+- **A pull downloads each object once.** Before, a full-history pull or a clone by URL asked for every object in one get, dropped a reply that was past the hub's batch limit, and asked again for half. So a large history came down two or three times. A fetch now sizes each get from the bytes of each kind that earlier replies held.
 
 ### Project and build
 
-- **Dependencies.** The crate `zstd` 0.14.3 is new to the build, pinned exactly, with no default features. It brings `zstd-safe` 8.2.0 and `zstd-sys` 2.1.2, which builds the zstd 1.5.7 C library into rdy. The release notices list them.
-- **rdy-engine.** `HiddenList::to_json` gives the one JSON form of the hidden planned list. The publication check and the review's `newly_hidden_planned` use it.
+- **Build flags.** `.cargo/config.toml` sets `CFLAGS_x86_64_unknown_linux_gnu` and `CXXFLAGS_x86_64_unknown_linux_gnu` to `-march=x86-64 -mtune=generic`. The same variable set in your environment wins. No dependency changes.
 
 ## Feedback
 
@@ -245,6 +255,11 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
 - Forks at a tag:
   - When the last sync of the folder fails after a fork is in place, the fork returns `E_IO` but leaves a complete project there. A retry then gives `E_ALREADY_EXISTS`. Check the project with `rdy fsck`, or remove the folder and fork again.
   - In a fork, a search in the scope of a proposal, by its full hash, can read a correction made after the tag.
+  - On Windows, a file or folder that another program makes at a clone or fork destination, while rdy moves the new project into place, can be replaced.
+- Ports:
+  - `rdy_view` replay takes a project directory as `from_file` or `from`, although it is meant to take only a dump.
+  - A port that cites an unknown or stale briefing token gives `E_BRIEF_STALE` with no new briefing. Run `rdy brief` again, then retry with the new token.
+  - A project can hold canon landings, taken from a hub, with foreign pins that it holds no delivery for, while its own land of the same content is refused.
 - Hub reads in rdy-adapter:
   - A pushed view whose included change was redacted does not render at an op. The holder and the render process refuse it. A read of the same scope works.
   - `rebase_test` and `replay_test` read deletions as of `onto`. A block that was deleted before `onto`, and that the chain re-creates, deletes and re-creates again, can show a false `deleted_since`. A real pull of the same chain is clean.
@@ -297,8 +312,8 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
 
 rdy is licensed MIT OR Apache-2.0. The binaries also contain two libraries under the [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/): `imbl` 7.0.2 and `imbl-sized-chunks` 0.2.0. This release attaches the exact source code of each, as its crates.io crate file. Each SHA-256 matches rdy's `Cargo.lock` at this release:
 
-- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.57.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
-- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.57.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
+- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.58.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
+- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.58.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
 
 Each archive's `THIRD-PARTY-NOTICES.txt` gives the license of every library in the binary.
 
@@ -357,11 +372,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.57.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.57.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.57.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.57.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.57.0/bin/rdy' &&
-'/path/to/rdy-0.57.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.58.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.58.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.58.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.58.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.58.0/bin/rdy' &&
+'/path/to/rdy-0.58.0/bin/rdy' '--version'
 ```
 
 On Linux amd64:
@@ -371,11 +386,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.57.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.57.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.57.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.57.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.57.0/bin/rdy' &&
-'/path/to/rdy-0.57.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.58.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.58.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.58.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.58.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.58.0/bin/rdy' &&
+'/path/to/rdy-0.58.0/bin/rdy' '--version'
 ```
 
 On Windows amd64, in PowerShell:
@@ -388,16 +403,16 @@ $s = [IO.File]::Open('C:\path\to\download\release-allowed-signers', [IO.FileMode
 & 'cmd.exe' '/d' '/c' 'ssh-keygen.exe -Y verify -f release-allowed-signers -I rdy-release -n rdy-release-v1 -s SHA256SUMS.sig < SHA256SUMS'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 $n = 0; foreach ($line in [IO.File]::ReadAllLines('C:\path\to\download\SHA256SUMS')) { $want = $line.Substring(0, 64); $name = $line.Substring(66); $file = [IO.Path]::Combine('C:\path\to\download', $name); if (Test-Path -LiteralPath $file) { $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower(); if ($got -cne $want) { throw ($name + ': FAILED') }; [Console]::Out.Write($name + ': OK' + [char]10); $n++ } }; if ($n -eq 0) { throw 'no archive was checked' }
-foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.57.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
-& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.57.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
+foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.58.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
+& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.58.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
-[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.57.0\bin')
-[IO.File]::Copy('C:\path\to\unpack\rdy-0.57.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.57.0\bin\rdy.exe')
-& 'C:\path\to\rdy-0.57.0\bin\rdy.exe' '--version'
+[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.58.0\bin')
+[IO.File]::Copy('C:\path\to\unpack\rdy-0.58.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.58.0\bin\rdy.exe')
+& 'C:\path\to\rdy-0.58.0\bin\rdy.exe' '--version'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 }
 # Add the version's bin directory to PATH in this session:
-# $env:Path = 'C:\path\to\rdy-0.57.0\bin;' + $env:Path
+# $env:Path = 'C:\path\to\rdy-0.58.0\bin;' + $env:Path
 # rdy needs SSH_AUTH_SOCK, even when ssh works without it. Set it to the agent pipe:
 # $env:SSH_AUTH_SOCK = '\\.\pipe\openssh-ssh-agent'
 ```
@@ -411,16 +426,16 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.57.0-aarch64-apple-darwin.tar.gz' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.57.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.57.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.57.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.57.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.57.0/bin/rdy' &&
-'/path/to/rdy-0.57.0/bin/rdy' '--version'
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.58.0-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.58.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.58.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.58.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.58.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.58.0/bin/rdy' &&
+'/path/to/rdy-0.58.0/bin/rdy' '--version'
 ```
 
 Add the version's bin directory to PATH in this shell.
-Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.57.0`:
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.58.0`:
 
 ```sh
 export PATH="<version-prefix>/bin:$PATH"
