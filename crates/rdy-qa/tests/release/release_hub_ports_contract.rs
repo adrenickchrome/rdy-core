@@ -2,7 +2,7 @@
 //! fixture of hub ports, plan C2.
 //!
 //! `hub-ports-v1.json` is this plan's fixture. It started as a byte copy of the frozen
-//! `hub-forks-v1.json`, and every selector names it. One capture wrote its delta: the feature
+//! `hub-forks-v1.json`, and every selector named it until its successor `rdy-0590-v1.json`. One capture wrote its delta: the feature
 //! `ported_change` and its first-use rules, the port flags of `rdy view replay` and `rdy_view`,
 //! the new refusal templates, the populated probes of a local and a dump port, and the semantic
 //! probes of a hub port. The tests here pin that delta leaf by leaf, keep every earlier fixture
@@ -55,6 +55,9 @@ const CURRENT: &str = "hub-ports-v1.json";
 /// The sha256 of [`CURRENT`] after its capture, its final bytes. A later contract change is a
 /// successor.
 const CURRENT_SHA: &str = "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab";
+
+/// The successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen since.
+const SELECTED: &str = "rdy-0590-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -243,18 +246,18 @@ fn delta(was: &Value, now: &Value) -> Vec<String> {
     found
 }
 
-/// hpt5: every selector names this plan's fixture, and none names a fixture the selectors named
-/// before it.
+/// hpt5: every selector names the successor of this plan's fixture, and none names this plan's
+/// fixture or a fixture the selectors named before it.
 #[test]
 fn hpt5_selectors_name_the_current_fixture_only() {
     for file in SELECTORS {
         let text =
             std::fs::read_to_string(root().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert!(
-            text.contains(&format!("fixtures/contracts/{CURRENT}\"")),
-            "{file} selects {CURRENT}"
+            text.contains(&format!("fixtures/contracts/{SELECTED}\"")),
+            "{file} selects {SELECTED}"
         );
-        for earlier in [PREDECESSOR, "m5b-v1.json", "sync-client-b-v1.json"] {
+        for earlier in [CURRENT, PREDECESSOR, "m5b-v1.json", "sync-client-b-v1.json"] {
             assert!(
                 !text.contains(&format!("contracts/{earlier}\"")),
                 "{file} no longer selects {earlier}"
@@ -264,8 +267,8 @@ fn hpt5_selectors_name_the_current_fixture_only() {
 }
 
 /// hpt5: the successor keeps every earlier fixture as it was. Each frozen file keeps its bytes,
-/// the folder holds those and this plan's fixture and no other, this plan's fixture differs from
-/// its predecessor, and it keeps its captured bytes.
+/// the folder holds those, this plan's fixture and its successor and no other, this plan's fixture
+/// differs from its predecessor, and it keeps its captured bytes.
 #[test]
 fn hpt5_predecessors_keep_their_bytes() {
     for (name, want) in FROZEN {
@@ -276,11 +279,15 @@ fn hpt5_predecessors_keep_their_bytes() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    let mut want: Vec<&str> = FROZEN.iter().map(|(n, _)| *n).chain([CURRENT]).collect();
+    let mut want: Vec<&str> = FROZEN
+        .iter()
+        .map(|(n, _)| *n)
+        .chain([CURRENT, SELECTED])
+        .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds every frozen fixture and {CURRENT}"
+        "the folder holds every frozen fixture, {CURRENT} and {SELECTED}"
     );
     let now = sha(&bytes(CURRENT));
     assert_ne!(now, PREDECESSOR_SHA, "{CURRENT} is a successor, not a copy");

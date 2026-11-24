@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/hub-ports-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/rdy-0590-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -100,12 +100,12 @@ fn workspace_root() -> PathBuf {
 /// The current contract fixture: the earlier fixtures (`release-1.json`, `repo-links-v1.json`,
 /// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json`,
 /// `disclosure-review-v1.json`, `sd1-v1.json`, `sync-client-v1.json`, `sync-client-b-v1.json`,
-/// `m5b-v1.json` and `hub-forks-v1.json`, all frozen) with the additions since. A capture writes
-/// this file, never a baseline. It starts as a byte copy of its predecessor `hub-forks-v1.json`,
-/// whose bytes `release_hub_forks_contract.rs` and `release_disclosure_contract.rs` pin. A later
-/// contract change is a successor fixture.
+/// `m5b-v1.json`, `hub-forks-v1.json` and `hub-ports-v1.json`, all frozen) with the additions
+/// since. A capture writes this file, never a baseline. It starts as a byte copy of its
+/// predecessor `hub-ports-v1.json`, whose bytes `release_hub_ports_contract.rs` and
+/// `release_0590_contract.rs` pin. A later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/hub-ports-v1.json")
+    qa_root().join("fixtures/contracts/rdy-0590-v1.json")
 }
 
 fn capture_mode() -> bool {
