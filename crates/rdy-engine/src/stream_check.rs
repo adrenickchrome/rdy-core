@@ -55,11 +55,25 @@ pub fn check_batch<R: Read>(
     input: R,
     expected_repo: Option<RepoId>,
 ) -> Result<BatchReport, RdyError> {
+    check_batch_tally(input, expected_repo, |_, _, _| {})
+}
+
+/// [`check_batch`], telling `tally` each record's kind, frame start and frame payload bytes in
+/// stream order (a fetch sizes its next get from them, TASK-3869).
+pub fn check_batch_tally<R: Read>(
+    input: R,
+    expected_repo: Option<RepoId>,
+    mut tally: impl FnMut(u8, u64, u64),
+) -> Result<BatchReport, RdyError> {
     let header = |h: &StreamHeader| match expected_repo {
         Some(target) if h.repo_id != target => Err(Stop::Core(repo_mismatch(&h.repo_id, &target))),
         _ => Ok(()),
     };
-    sync_stream::check_batch_with(input, header, check_record).map_err(|e| match e {
+    let record = |n: u64, at: u64, r: &StreamRecord| {
+        tally(r.key().kind, at, r.frame_len());
+        check_record(n, at, r)
+    };
+    sync_stream::check_batch_with(input, header, record).map_err(|e| match e {
         Stop::Stream(e) => to_rdy(e),
         Stop::Core(e) => e,
     })
