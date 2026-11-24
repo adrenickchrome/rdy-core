@@ -882,7 +882,7 @@ fn cp14_guidance_matches_the_engine_in_a_live_project() {
     };
     assert_eq!(
         d("rdy_plan"),
-        "Read a change plan, or record answers in the session's view. Read a proposal, landing or decision with its selector. Page with next. Confirm and defer need a reason."
+        "Read a change plan, or record answers in the session's view. Read a proposal, landing or decision with its selector. Page with next. answers is [{item, act, reason?}] or [{group: {kind?, follow_up?, doc?, edge?}, act, reason?}]; act is confirm, defer, done or dismiss. Update, rejustify and reaffirm items take defer; confirm items take confirm or defer; update_implementation items take done or defer; tension items take confirm or dismiss. Confirm, defer and dismiss need a reason. An update item also closes when you edit its block, and a reaffirm item with an rdy_write reaffirm op. One answer that matches no open item refuses the whole call. A write can close items: read the plan again after a write, check counts.open, and read every page before you build groups. rdy_propose plan_answers take item, not group."
     );
     assert!(
         d("rdy_propose").contains("plan_answers records answers in the same batch as the proposal. The reply includes the change plan. Open non-code items warn; deferred non-code items need the person's answer before landing."),

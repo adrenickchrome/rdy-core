@@ -709,7 +709,7 @@ pub(crate) fn withdrawn_error(pref: &ProposalRef, view: &str) -> RdyError {
         E_VIEW_CLOSED,
         format!("{pref} was withdrawn when view {view:?} closed"),
         format!(
-            "reopen the view with rdy undo --view {view} <close op> (rdy view show {view} lists the ops), then propose again"
+            "reopen the view with rdy undo --view {view} <close op> (rdy view show {view} lists the ops; on MCP: rdy_view {{op: \"undo\", view: \"{view}\", target: <close op>}}), then propose again"
         ),
     )
 }
@@ -1385,7 +1385,10 @@ fn exceptions_open(pref: &ProposalRef, open: &[Item]) -> RdyError {
     RdyError::new(
         E_EXCEPTION_OPEN,
         format!("{} exceptions of {pref} have no answer", open.len()),
-        format!("answer each exception card first: {}", refs.join(", ")),
+        format!(
+            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+            refs.join(", ")
+        ),
     )
     .with_corrected(serde_json::json!({ "exceptions": cards }))
 }
@@ -1396,7 +1399,10 @@ fn deferrals_open(pref: &ProposalRef, card: &Item, n: usize) -> RdyError {
     RdyError::new(
         E_DEFERRAL_OPEN,
         format!("{n} deferrals of {pref} have no answer"),
-        format!("answer the deferral card first: {}", card.r#ref),
+        format!(
+            "answer the card below with the person's words, then relay the approval again. Answer the deferral card first: {}",
+            card.r#ref
+        ),
     )
     .with_corrected(serde_json::json!({ "deferral": card_of(card) }))
 }
@@ -3541,7 +3547,7 @@ impl Rdy {
                 return Err(RdyError::new(
                     E_PROPOSAL_MOVED,
                     format!("{pref} changed since it was shown"),
-                    "show the person the fresh card and ask again",
+                    crate::answer::FRESH_CARD_HINT,
                 )
                 .with_corrected(card_of(&card)));
             }
@@ -4118,7 +4124,7 @@ impl Rdy {
             return Err(RdyError::new(
                 E_ITEM_MOVED,
                 format!("{card} changed since it was shown"),
-                "show the person the fresh card and ask again",
+                crate::answer::FRESH_CARD_HINT,
             ));
         }
         let pid = pref.version;

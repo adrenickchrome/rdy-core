@@ -683,7 +683,7 @@ impl Resolver<'_> {
             return self.placeholders.get(s).cloned().ok_or_else(|| {
                 bad(
                     format!("placeholder ${name} is used before it is created"),
-                    "create the block earlier in the same batch, or use a real id",
+                    PLACEHOLDER_HINT,
                 )
             });
         }
@@ -1190,7 +1190,7 @@ fn current_for_edit<'b>(
     if touched.contains(id) && rekeyed_from.is_none() {
         return Err(bad(
             format!("{id} is changed more than once in this write"),
-            "combine the edits into one op",
+            ONCE_PER_WRITE_HINT,
         ));
     }
     if let Some(c) = conflicts.list.iter().find(|c| c.block == *id) {
@@ -1362,16 +1362,20 @@ fn frozen_in_conflict_hinted(
     let others = match excludable.as_slice() {
         [] => supersede,
         [one] => {
-            format!("exclude the change {one} from the view (rdy view exclude), or {supersede}")
+            format!(
+                "exclude the change {one} from the view (rdy view exclude; rdy_view {{op: \"exclude\", changes: [\"{one}\"]}}), or {supersede}"
+            )
         }
         many => format!(
-            "exclude the changes {} from the view (rdy view exclude), or {supersede}",
+            "exclude the changes {} from the view (rdy view exclude; rdy_view {{op: \"exclude\", changes}}), or {supersede}",
             many.join(", ")
         ),
     };
     let fix = match landed_side(c, store)? {
         Some(_) => {
-            format!("take the landed side (rdy view resolve {view} {id} --landed), or {others}")
+            format!(
+                "take the landed side (rdy view resolve {view} {id} --landed; rdy_view {{op: \"resolve\", view: \"{view}\", block: \"{id}\", landed: true}}), or {others}"
+            )
         }
         None => others,
     };
@@ -1510,6 +1514,12 @@ fn check_tracking_edit(
     }
 }
 
+/// The fix of a `$name` used before an op of the same write creates it.
+const PLACEHOLDER_HINT: &str = "create the block earlier in the same write, or use a real id: a $name resolves only when an earlier op of this write creates it, in ops, links and body text alike, and it lives in this write only. For blocks that cite each other, create both, then add the back-reference in a second write";
+
+/// The fix of a write that changes one block twice.
+const ONCE_PER_WRITE_HINT: &str = "a block changes once per write: put its body, fields and links in one create or update op, and all its repin targets in one repin op; make any other change to it, a repin included, in a later write";
+
 /// `E_FROZEN` for a frozen `cur`; the fix names the reaffirm op when `reaffirmable(id)`.
 fn check_not_frozen(
     id: &BlockId,
@@ -1520,10 +1530,7 @@ fn check_not_frozen(
         return Err(RdyError::new(
             E_FROZEN,
             format!("{id} is an accepted or rejected decision and cannot change"),
-            crate::reaffirm::frozen_fix(
-                format!("write a new decision that supersedes or revokes {id}"),
-                reaffirmable(id),
-            ),
+            crate::reaffirm::frozen_fix(crate::reaffirm::frozen_ways(id), reaffirmable(id)),
         ));
     }
     Ok(())
@@ -2055,7 +2062,7 @@ fn build_ops(
                 if touched.contains(&new_id) {
                     return Err(bad(
                         format!("{new_id} is changed more than once in this write"),
-                        "combine the edits into one op",
+                        ONCE_PER_WRITE_HINT,
                     ));
                 }
                 if ov.get(&new_id).is_some() {
@@ -2392,7 +2399,7 @@ fn build_ops(
                     return Err(RdyError::new(
                         E_HAS_CHILDREN,
                         format!("{id} still has children"),
-                        "delete or move its children first",
+                        "delete or move its children first: delete ops for them earlier in the same write do it",
                     ));
                 }
                 // the key the view held (a conflicted block's base), not the side's
@@ -2783,7 +2790,7 @@ fn build_ops(
             if let Some(name) = tok.strip_prefix('$') {
                 return Err(bad(
                     format!("placeholder ${name} is used before it is created"),
-                    "create the block earlier in the same batch, or use a real id",
+                    PLACEHOLDER_HINT,
                 ));
             }
             if let Some(target) = foreign.link_target(&tok) {
@@ -3879,14 +3886,24 @@ pub(crate) fn check_view_access(
                 "view {view:?} is owned by {}",
                 crate::identity::actor_run_text(&o.actor, o.run.as_deref())
             ),
-            if propose && view != s.default_view() {
-                format!(
-                    "propose your own view ({}), or include its changes into your own view and \
-                     propose that",
-                    s.default_view()
-                )
-            } else {
-                own_view_fix(view, s)
+            {
+                let fix = if propose && view != s.default_view() {
+                    format!(
+                        "propose your own view ({}), or include its changes into your own view and \
+                         propose that",
+                        s.default_view()
+                    )
+                } else {
+                    own_view_fix(view, s)
+                };
+                // the same actor under another run: a view belongs to actor and run together
+                match (&o.run, o.actor == s.actor) {
+                    (Some(run), true) => format!(
+                        "{fix}. Your session is {}: to act on this view as its owner, start the session with run {run} (rdy_session run, or RDY_RUN)",
+                        crate::identity::actor_run_text(&s.actor, s.run.as_deref())
+                    ),
+                    _ => fix,
+                }
             },
         )),
     }

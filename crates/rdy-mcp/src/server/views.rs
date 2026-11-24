@@ -8,7 +8,7 @@ use rmcp::{model::CallToolResult, tool, tool_router};
 #[tool_router(router = views_router, vis = "pub(crate)")]
 impl RdyServer {
     #[tool(
-        description = "Create, fork, include, exclude, replay, compare, list, show, close or undo views. Include, exclude, replay, close and undo need ownership of the target view. Include, exclude, replay and undo return the op's consequences, with conflict entries to resolve. Replay with from_file ports landed changes from a dump of another project, with brief as the target briefing."
+        description = "Create, fork, include, exclude, replay, compare, list, show, close, own, resolve or undo views. op is required: create {name, base?, pin?}; fork {from, name}; include {changes, view?}; exclude {changes, cascade?, view?}; undo {view?, target?, cascade?}; close {name, reason?}; resolve {block, landed: true, view?}; list {all?, stale?}; show {view?}; compare {a?, b?}; rdy_schema \"views\" gives own and replay. To drop one change, exclude it or undo its op. A closed view comes back with an undo of its close op, or a fork. Include, exclude, replay, close and undo need ownership of the target view: the actor and run that made it. Include, exclude, replay and undo return the op's consequences, with conflict entries to resolve. Replay with from_file ports landed changes from a dump of another project, with brief as the target briefing."
     )]
     async fn rdy_view(&self, Parameters(p): Parameters<view_tools::ViewParams>) -> CallToolResult {
         self.run("rdy_view", p, view_tools::rdy_view).await

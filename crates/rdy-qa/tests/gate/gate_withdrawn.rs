@@ -49,7 +49,7 @@ fn is_withdrawn(e: &RdyError, pref: &str, view: &str) {
     assert_eq!(
         e.fix,
         format!(
-            "reopen the view with rdy undo --view {view} <close op> (rdy view show {view} lists the ops), then propose again"
+            "reopen the view with rdy undo --view {view} <close op> (rdy view show {view} lists the ops; on MCP: rdy_view {{op: \"undo\", view: \"{view}\", target: <close op>}}), then propose again"
         ),
         "{e}"
     );
