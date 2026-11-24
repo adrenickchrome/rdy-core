@@ -147,6 +147,7 @@ fn cfmt1_fsck_counts_and_checks_coordination_objects() {
             imported_by: None,
             replayed_from: None,
             briefing: None,
+            ported_from: None,
         },
         read_identity: None,
     };

@@ -1,6 +1,6 @@
 //! cview1: `rdy view *` and `rdy undo`. The commands build one `ViewRequest` JSON for the ctl
 //! `view` op; the renderers turn the op's reply into text. `--json` prints the reply as it is.
-use crate::conn::{Env, call};
+use crate::conn::{Conn, Env, call, human_session};
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
 use serde_json::{Value, json};
@@ -26,6 +26,14 @@ pub enum ViewCmd {
     Replay {
         /// The open view you own.
         view: String,
+        /// Port landed changes from another project on this machine, or from a dump of one:
+        /// the changes then name landings or changes on that project's canon.
+        #[arg(long, value_name = "PROJECT_OR_DUMP")]
+        from: Option<std::path::PathBuf>,
+        /// With --from: the briefing token of the target blocks (rdy brief). An agent session
+        /// needs one; the person's session briefs the target itself when it is left out.
+        #[arg(long, value_name = "TOKEN")]
+        brief: Option<String>,
         /// The changes to replay, from any view.
         #[arg(required = true, num_args = 1..)]
         changes: Vec<String>,
@@ -127,8 +135,22 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
         ViewCmd::Include { view, changes } => {
             json!({"op": "include", "view": view, "changes": changes})
         }
-        ViewCmd::Replay { view, changes } => {
-            json!({"op": "replay", "view": view, "changes": changes})
+        ViewCmd::Replay {
+            view,
+            from,
+            brief,
+            changes,
+        } => {
+            let mut v = json!({"op": "replay", "view": view, "changes": changes});
+            // the source path as this process sees it: the daemon runs elsewhere
+            if let Some(from) = from {
+                v["from"] = json!(source_path(from));
+            }
+            // a brief with no source reaches the dispatcher, which refuses it
+            if let Some(brief) = brief {
+                v["brief"] = json!(brief);
+            }
+            v
         }
         ViewCmd::Exclude {
             view,
@@ -177,6 +199,14 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
                 "relayed_by": relayed_by})
         }
     }
+}
+
+/// `path` made absolute against this process's working directory, as text.
+fn source_path(path: &std::path::Path) -> String {
+    std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// The `ViewRequest` JSON for `rdy undo`; no `view` means the session's own.
@@ -416,8 +446,11 @@ fn show_text(v: &Value, all: bool) -> String {
             short(text(&c["id"])),
             text(&c["actor"]),
             if message.is_empty() { "-" } else { message },
-            // a replay's nonce is its own: only a working-copy commit is marked
-            if c["client_nonce"].is_string() && c["replayed_from"].is_null() {
+            // a replay's or a port's nonce is its own: only a working-copy commit is marked
+            if c["client_nonce"].is_string()
+                && c["replayed_from"].is_null()
+                && c["ported_from"].is_null()
+            {
                 " [wc]"
             } else {
                 ""
@@ -426,6 +459,13 @@ fn show_text(v: &Value, all: bool) -> String {
         ));
         if let Some(source) = c["replayed_from"].as_str() {
             out.push_str(&format!(" replayed from {}", short(source)));
+        }
+        if let Some(change) = c["ported_from"]["change"].as_str() {
+            out.push_str(&format!(
+                " ported from {} {}",
+                text(&c["ported_from"]["repo_id"]),
+                short(change)
+            ));
         }
     }
     out.push_str("\nconflicts:");
@@ -633,9 +673,74 @@ pub(crate) fn view(env: &Env, cmd: ViewCmd) -> Result<(Value, String), ErrorRepl
     {
         return Err(run_without_owner());
     }
-    let v = call(env, "view", args_of(&cmd))?;
+    let args = args_of(&cmd);
+    let v = match &cmd {
+        ViewCmd::Replay {
+            view,
+            from: Some(_),
+            brief: None,
+            ..
+        } if human_session(env)? => port_briefed(env, view, args)?,
+        _ => call(env, "view", args)?,
+    };
     let t = render_view(&cmd, &v);
     Ok((v, t))
+}
+
+/// A port by the person's session that cites no briefing (FW-E3, as a commit briefs itself):
+/// it briefs the target `view` on the port's own connection and cites that token. A briefing
+/// lives in the process that made it, so this works in a direct process too.
+///
+/// The first briefing covers the target's first top-level block: a port of drafts needs only a
+/// current briefing of the target. A port of stable content refuses with the blocks a briefing
+/// must cover; the session briefs those and ports once more. When the view cannot be read, or
+/// holds no block, the port goes without a briefing. Core then lets it through only if it
+/// touches no target block, as in a new empty project.
+fn port_briefed(env: &Env, view: &str, args: Value) -> Result<Value, ErrorReply> {
+    let mut conn = Conn::open(env)?;
+    let out = port_with_own_briefing(&mut conn, view, args);
+    conn.close();
+    out
+}
+
+fn port_with_own_briefing(
+    conn: &mut Conn,
+    view: &str,
+    mut args: Value,
+) -> Result<Value, ErrorReply> {
+    let top = conn
+        .op("ls", json!({"scope": format!("view:{view}"), "depth": 0}))
+        .ok()
+        .and_then(|t| t[0]["id"].as_str().map(str::to_string));
+    let Some(top) = top else {
+        return conn.op("view", args);
+    };
+    args["brief"] = json!(own_token(conn, view, &[top])?);
+    match conn.op("view", args.clone()) {
+        Err(e) if e.code == rdy_engine::E_BRIEF_REQUIRED => {
+            let ids: Vec<String> = e
+                .extra
+                .get("briefing")
+                .and_then(|b| b["ids"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect();
+            if ids.is_empty() {
+                return Err(e);
+            }
+            args["brief"] = json!(own_token(conn, view, &ids)?);
+            conn.op("view", args)
+        }
+        out => out,
+    }
+}
+
+/// The token of a fresh briefing of `ids` in the write target `view`, registered on `conn`.
+/// `None` when the briefing carries none: the port then refuses as one that cites none.
+fn own_token(conn: &mut Conn, view: &str, ids: &[String]) -> Result<Option<String>, ErrorReply> {
+    let b = conn.op("brief", json!({"ids": ids, "view": view}))?;
+    Ok(b["base"]["token"].as_str().map(str::to_string))
 }
 
 #[cfg(test)]
@@ -730,6 +835,72 @@ mod tests {
             "{replayed}"
         );
         assert!(line(&"12".repeat(6)).contains("from files [wc]"), "{t}");
+    }
+
+    /// hpt4: a ported change is labelled by its source project and change, never `[wc]`.
+    #[test]
+    fn hpt4_a_ported_change_is_labelled_by_its_source() {
+        let mut d = detail(1);
+        d["changes"] = json!([
+            {"id": "cd".repeat(32), "actor": "human:qa", "run": null, "at_ms": 1,
+             "message": "edit the note", "blocks": ["c-00001"], "client_nonce": "port:0",
+             "replayed_from": null,
+             "ported_from": {"repo_id": "0a".repeat(16), "change": "ef".repeat(32)}}
+        ]);
+        let t = show_text(&d, false);
+        let line = t
+            .lines()
+            .find(|l| l.starts_with(&format!("  {}", "cd".repeat(6))))
+            .unwrap();
+        assert!(!line.contains("[wc]"), "{line}");
+        assert!(
+            line.ends_with(&format!(
+                "edit the note [c-00001] ported from {} {}",
+                "0a".repeat(16),
+                "ef".repeat(6)
+            )),
+            "{line}"
+        );
+    }
+
+    /// hpt4: `rdy view replay --from` sends the source as an absolute path, and `--brief` as
+    /// the briefing; without them the request is a plain replay's.
+    #[test]
+    fn hpt4_replay_from_sends_an_absolute_source_and_the_brief() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(subcommand)]
+            cmd: ViewCmd,
+        }
+        let parse = |args: &[&str]| {
+            let mut all = vec!["view"];
+            all.extend_from_slice(args);
+            args_of(&W::try_parse_from(all).unwrap().cmd)
+        };
+        let c = "ab".repeat(32);
+        let v = parse(&[
+            "replay",
+            "mine",
+            "--from",
+            "s.rdydump",
+            "--brief",
+            "tok",
+            &c,
+        ]);
+        let want = std::env::current_dir().unwrap().join("s.rdydump");
+        assert_eq!(
+            v,
+            json!({"op": "replay", "view": "mine", "changes": [c],
+                "from": want.to_string_lossy(), "brief": "tok"})
+        );
+        assert!(std::path::Path::new(v["from"].as_str().unwrap()).is_absolute());
+        let v = parse(&["replay", "mine", &c]);
+        assert_eq!(v, json!({"op": "replay", "view": "mine", "changes": [c]}));
+        // a brief alone reaches the dispatcher, which refuses it
+        let v = parse(&["replay", "mine", "--brief", "tok", &c]);
+        assert_eq!(v["brief"], "tok");
+        assert!(v.get("from").is_none());
     }
 
     /// Final-review fix round 1: a close op prints its reason, and `view ls --all` prints why

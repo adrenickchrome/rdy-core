@@ -356,6 +356,7 @@ fn ok7_replay_copies_authored_fields_and_alternative() {
             }),
             replayed_from: None,
             briefing: Some(Hash::of(b"the briefing token")),
+            ported_from: None,
         },
         read_identity: None,
     };

@@ -757,13 +757,15 @@ impl Store {
         )
         .map_err(|e| refused(format!("the redaction request does not frame: {e}")))?;
         let request_id = Hash::of(&request_frame.1);
-        // a supplied residue is a new one: it is written, and checked, in the latest encoding
-        let encoding = crate::codec::latest(kinds::REDACTION_RESIDUE);
+        // a supplied residue is a new one: it is written, and checked, in the encoding its value
+        // chooses (`RedactionResidue::encoding`: 2 for a port's residue, else the latest)
         let mut supplied: HashMap<Hash, (&RedactionResidue, u16)> = HashMap::new();
         let mut residue_frames = vec![];
         for r in residues {
-            let bytes = encode_into(r, &mut buf).map_err(|_| too_big())?;
-            let frame = crate::codec::frame_latest(kinds::REDACTION_RESIDUE, bytes.to_vec());
+            let encoding = r.encoding();
+            let bytes = r.body_into(&mut buf).map_err(|_| too_big())?;
+            let frame = crate::codec::frame(kinds::REDACTION_RESIDUE, encoding, bytes.to_vec())
+                .map_err(|e| refused(format!("a redaction residue does not frame: {e}")))?;
             let h = Hash::of(&frame.1);
             if supplied.insert(h, (r, encoding)).is_none() {
                 residue_frames.push(frame);
@@ -910,10 +912,11 @@ pub(crate) fn marker_agrees(raw: u8, kind: u8, residue: Option<&RedactionResidue
 ///
 /// The residue's encoding decides the one derivation of a block residue's content hash
 /// (`crate::codec::REGISTERED`): encoding 1 holds the content-2 hash, encoding 0 the content-1
-/// hash an rdy before content-2 recorded ([`rdy_model::encoding::legacy_content_1_hash`]). The
-/// whole residue is compared, its content hash and source encoding included: the frame's raw
-/// kind and its version prefix must be the source encoding's ([`marker_agrees`]). Any other
-/// residue encoding has no residue.
+/// hash an rdy before content-2 recorded ([`rdy_model::encoding::legacy_content_1_hash`]).
+/// Encoding 2 holds only a port's residue, and a port's residue only encoding 2: its source
+/// (`ported_from`) is compared with the rest. The whole residue is compared, its content hash and
+/// source encoding included: the frame's raw kind and its version prefix must be the source
+/// encoding's ([`marker_agrees`]). Any other residue encoding has no residue.
 pub(crate) fn residue_matches(
     raw: u8,
     payload: &[u8],
@@ -923,9 +926,14 @@ pub(crate) fn residue_matches(
     // the content hash a block residue of this encoding holds
     let content: fn(&Block) -> Hash = match encoding {
         0 => rdy_model::encoding::legacy_content_1_hash,
-        1 => Block::content_hash,
+        1 | 2 => Block::content_hash,
         _ => return false,
     };
+    // a port's residue is encoding 2 alone (it has no encoding 0 or 1), and 2 is a port's alone
+    let ported = r.encoding() == rdy_model::encoding::RESIDUE_PORT_ENCODING;
+    if ported != (encoding == rdy_model::encoding::RESIDUE_PORT_ENCODING) {
+        return false;
+    }
     if !marker_agrees(raw, crate::codec::logical_kind(raw), Some(r)) {
         return false;
     }

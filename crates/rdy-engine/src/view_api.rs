@@ -1,6 +1,8 @@
 //! vapi1: the one view request dispatcher behind MCP's `rdy_view` and the ctl `view` op. Writes
 //! go through `write_typed` (they run on the engine's writer), include, exclude and undo through
-//! `view_op_and_report` (with their consequences); reads use one `engine.read()` snapshot.
+//! `view_op_and_report` (with their consequences); reads use one `engine.read()` snapshot. A
+//! replay with `from` or `from_file` is a local or dump port (D-G4PZX): its source is read and
+//! closed before the writer runs, and `brief` is its target briefing.
 use crate::answer::relay::RelayInput;
 use crate::consequence::{op_effect, replay_effect, undo_effect, view_op_and_report};
 use crate::engine::{Engine, write_typed};
@@ -25,7 +27,13 @@ pub struct OwnerInput {
 pub struct ViewRequest {
     pub op: String,
     pub name: Option<String>,
+    /// fork: the view to fork. replay: a local port's source (D-G4PZX), a project directory or
+    /// a dump file.
     pub from: Option<String>,
+    /// replay: a local port's source as a dump file (D-G4PZX).
+    pub from_file: Option<String>,
+    /// replay with a source: the target briefing token every ported change records.
+    pub brief: Option<String>,
     pub base: Option<String>,
     pub pin: Option<bool>,
     pub view: Option<String>,
@@ -60,10 +68,10 @@ pub struct ViewRequest {
 
 impl ViewRequest {
     /// The first field, in declaration order, that is set although replay does not take it.
+    /// The source fields (`from`, `from_file`, `brief`) are replay's own.
     fn replay_forbidden(&self) -> Option<&'static str> {
         let set = [
             ("name", self.name.is_some()),
-            ("from", self.from.is_some()),
             ("base", self.base.is_some()),
             ("pin", self.pin.is_some()),
             ("views", self.views.is_some()),
@@ -86,6 +94,30 @@ impl ViewRequest {
         set.into_iter().find(|(_, on)| *on).map(|(name, _)| name)
     }
 
+    /// The first source field, in declaration order, that is set on op `op`, which is not
+    /// replay. Fork's `from` is fork's own.
+    fn source_field_on(&self, op: &str) -> Option<&'static str> {
+        let set = [
+            ("from", self.from.is_some() && op != "fork"),
+            ("from_file", self.from_file.is_some()),
+            ("brief", self.brief.is_some()),
+        ];
+        set.into_iter().find(|(_, on)| *on).map(|(name, _)| name)
+    }
+
+    /// The port source a replay names: `from` or `from_file`, never both. `brief` needs one.
+    fn port_source(&self) -> Result<Option<&str>, RdyError> {
+        match (self.from.as_deref(), self.from_file.as_deref()) {
+            (Some(_), Some(_)) => Err(needs(PORT_TWO_SOURCES_MESSAGE, PORT_TWO_SOURCES_FIX)),
+            (Some(p), None) | (None, Some(p)) => Ok(Some(p)),
+            (None, None) if self.brief.is_some() => Err(needs(
+                PORT_BRIEF_NO_SOURCE_MESSAGE,
+                PORT_BRIEF_NO_SOURCE_FIX,
+            )),
+            (None, None) => Ok(None),
+        }
+    }
+
     fn relay(&self) -> RelayInput {
         RelayInput {
             relayed_by: self.relayed_by.clone(),
@@ -96,6 +128,22 @@ impl ViewRequest {
         }
     }
 }
+
+/// A replay that names both port sources (D-G4PZX).
+pub const PORT_TWO_SOURCES_MESSAGE: &str = "replay takes only one source";
+pub const PORT_TWO_SOURCES_FIX: &str = "pass from or from_file, not both";
+/// A replay with a briefing and no port source.
+pub const PORT_BRIEF_NO_SOURCE_MESSAGE: &str = "replay without a source does not take brief";
+pub const PORT_BRIEF_NO_SOURCE_FIX: &str = "remove brief, or name a port source";
+/// A port source field (`from` off fork, `from_file`, `brief`) on a view op other than replay.
+pub const PORT_SOURCE_FIELD_MESSAGE: &str = "<op> does not take <field>";
+pub const PORT_SOURCE_FIELD_FIX: &str = "use the source field only with replay";
+
+/// The view ops `run_view` knows.
+const VIEW_OPS: [&str; 12] = [
+    "create", "fork", "include", "exclude", "replay", "compare", "list", "show", "close", "own",
+    "resolve", "undo",
+];
 
 fn needs(message: &str, fix: &str) -> RdyError {
     RdyError::new(E_BAD_INPUT, message, fix)
@@ -128,6 +176,17 @@ pub fn run_view(
         return Err(needs(
             &format!("replay does not take {field}"),
             &format!("drop {field}, or use the view operation that takes it"),
+        ));
+    }
+    if VIEW_OPS.contains(&req.op.as_str())
+        && req.op != "replay"
+        && let Some(field) = req.source_field_on(&req.op)
+    {
+        return Err(needs(
+            &PORT_SOURCE_FIELD_MESSAGE
+                .replace("<op>", &req.op)
+                .replace("<field>", field),
+            PORT_SOURCE_FIELD_FIX,
         ));
     }
     let relays = req.relay() != RelayInput::default();
@@ -281,9 +340,21 @@ pub fn run_view(
             let changes = req.changes.clone().unwrap_or_default();
             let view = view();
             let v = view.clone();
-            view_op_and_report(engine, &v, req.max_tokens, replay_effect, move |r| {
-                r.view_replay(&s, &view, &changes)
-            })
+            match req.port_source()? {
+                None => view_op_and_report(engine, &v, req.max_tokens, replay_effect, move |r| {
+                    r.view_replay(&s, &view, &changes)
+                }),
+                // a local or dump port (D-G4PZX): the source is read and closed before the
+                // target's writer; a relative path names one under the project
+                Some(path) => {
+                    let path = engine.root().join(path);
+                    let source = crate::views::port::read_source(&path, &changes)?;
+                    let brief = req.brief.clone();
+                    view_op_and_report(engine, &v, req.max_tokens, replay_effect, move |r| {
+                        r.view_port(&s, &view, &source, brief.as_deref())
+                    })
+                }
+            }
         }
         "undo" => {
             let (view, target, cascade) =

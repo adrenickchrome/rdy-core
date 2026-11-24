@@ -1,8 +1,9 @@
 use crate::encoding::{
-    CHANGE_ENCODING, CHANGE_FOREIGN_ENCODING, EncodedIdentity, ForeignChangeV2, encoded_hash,
+    CHANGE_ENCODING, CHANGE_FOREIGN_ENCODING, CHANGE_PORT_ENCODING, CHANGE_PORT_FOREIGN_ENCODING,
+    ChangeLinksV1, EncodedIdentity, PortLinksV3, change_body, encoded_hash,
 };
-use crate::{ActorRun, Block, BlockId, Hash};
-use serde::{Deserialize, Serialize};
+use crate::{ActorRun, Block, BlockId, Hash, RepoId};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
@@ -84,10 +85,30 @@ pub struct AltChoice {
     pub member: String,
 }
 
-/// What a change is linked to. It is the last field of `Change`, so a change without links
-/// encodes as its other fields followed by six absent options (encoding 1; encoding 0 had the
-/// first four, `crate::encoding::LegacyChangeLinksV0`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a ported change came from: the source store's repo id and the source change's id. It is
+/// data, not an object reference: no edge, no dependency.
+///
+/// Postcard writes the 16 repo-id bytes, then the 32 hash bytes. JSON writes both as lowercase
+/// hex: `{"repo_id": "...", "change": "..."}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PortedFrom {
+    #[serde(with = "ported_hex::repo")]
+    pub repo_id: RepoId,
+    #[serde(with = "ported_hex::hash")]
+    pub change: Hash,
+}
+
+/// What a change is linked to. It is the last field of `Change`.
+///
+/// The six options up to `briefing` are encoding 1's frozen links
+/// ([`crate::encoding::ChangeLinksV1`]); encoding 0 had the first four
+/// ([`crate::encoding::LegacyChangeLinksV0`]). `ported_from` is the seventh field, and only
+/// change encodings 3 and 4 have it ([`crate::encoding::PortLinksV3`]).
+///
+/// Postcard reads the frozen six fields only, so no released body moves. It writes them too,
+/// and a port's links in the seventh-field layout of encodings 3 and 4, so a port's postcard
+/// form is its encoding-3 body. JSON writes all seven, and leaves out an absent `ported_from`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChangeLinks {
     pub intent: Option<Hash>,
     pub alternative: Option<AltChoice>,
@@ -100,6 +121,130 @@ pub struct ChangeLinks {
     /// The identity of the briefing the writer read (encoding 1): a token identity, not an
     /// object hash. None on every ordinary change; a replay copies its source's.
     pub briefing: Option<Hash>,
+    /// The source of a ported change (encodings 3 and 4): data, not an object reference. None on
+    /// every unported change; a replay copies its source's.
+    pub ported_from: Option<PortedFrom>,
+}
+
+/// `ChangeLinks` in JSON: all seven fields, `ported_from` left out when absent.
+#[derive(Serialize)]
+#[serde(rename = "ChangeLinks")]
+struct LinksJsonOut<'a> {
+    intent: &'a Option<Hash>,
+    alternative: &'a Option<AltChoice>,
+    client_nonce: &'a Option<String>,
+    imported_by: &'a Option<ActorRun>,
+    replayed_from: &'a Option<Hash>,
+    briefing: &'a Option<Hash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ported_from: Option<&'a PortedFrom>,
+}
+
+/// `ChangeLinks` read from JSON: an omitted option reads as None.
+#[derive(Deserialize)]
+#[serde(rename = "ChangeLinks")]
+struct LinksJsonIn {
+    intent: Option<Hash>,
+    alternative: Option<AltChoice>,
+    client_nonce: Option<String>,
+    imported_by: Option<ActorRun>,
+    replayed_from: Option<Hash>,
+    briefing: Option<Hash>,
+    #[serde(default)]
+    ported_from: Option<PortedFrom>,
+}
+
+impl Serialize for ChangeLinks {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            return LinksJsonOut {
+                intent: &self.intent,
+                alternative: &self.alternative,
+                client_nonce: &self.client_nonce,
+                imported_by: &self.imported_by,
+                replayed_from: &self.replayed_from,
+                briefing: &self.briefing,
+                ported_from: self.ported_from.as_ref(),
+            }
+            .serialize(s);
+        }
+        match ChangeLinksV1::from_current(self) {
+            Some(v1) => v1.serialize(s),
+            None => PortLinksV3::of(self).serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChangeLinks {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<ChangeLinks, D::Error> {
+        if d.is_human_readable() {
+            let l = LinksJsonIn::deserialize(d)?;
+            return Ok(ChangeLinks {
+                intent: l.intent,
+                alternative: l.alternative,
+                client_nonce: l.client_nonce,
+                imported_by: l.imported_by,
+                replayed_from: l.replayed_from,
+                briefing: l.briefing,
+                ported_from: l.ported_from,
+            });
+        }
+        Ok(ChangeLinksV1::deserialize(d)?.into_current())
+    }
+}
+
+/// A ported source as hex in a human-readable format, and as its own bytes otherwise.
+mod ported_hex {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    fn parse<T: std::str::FromStr, E: serde::de::Error>(text: &str, what: &str) -> Result<T, E> {
+        text.parse()
+            .map_err(|_| E::custom(format!("bad {what} {text:?}")))
+    }
+
+    /// A repo id.
+    pub mod repo {
+        use super::*;
+        use crate::RepoId;
+
+        pub fn serialize<S: Serializer>(r: &RepoId, s: S) -> Result<S::Ok, S::Error> {
+            if s.is_human_readable() {
+                s.serialize_str(&r.to_string())
+            } else {
+                r.serialize(s)
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<RepoId, D::Error> {
+            if d.is_human_readable() {
+                parse(&String::deserialize(d)?, "repo id")
+            } else {
+                RepoId::deserialize(d)
+            }
+        }
+    }
+
+    /// A hash.
+    pub mod hash {
+        use super::*;
+        use crate::Hash;
+
+        pub fn serialize<S: Serializer>(h: &Hash, s: S) -> Result<S::Ok, S::Error> {
+            if s.is_human_readable() {
+                s.serialize_str(&h.to_string())
+            } else {
+                h.serialize(s)
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Hash, D::Error> {
+            if d.is_human_readable() {
+                parse(&String::deserialize(d)?, "hash")
+            } else {
+                Hash::deserialize(d)
+            }
+        }
+    }
 }
 
 /// The transient identity of a change that was read, never serialized: a stored read keeps the
@@ -139,15 +284,10 @@ impl Change {
             Some(ChangeReadIdentity::Stored(i)) => i.hash,
             Some(ChangeReadIdentity::Redacted(id)) => id,
             None => {
-                let body = if self.embeds_foreign() {
-                    postcard::to_allocvec(&ForeignChangeV2::of(self))
-                } else {
-                    postcard::to_allocvec(self)
-                };
-                encoded_hash(
-                    self.encoding(),
-                    &body.expect("postcard encoding of an in-memory value cannot fail"),
-                )
+                let version = self.encoding();
+                let body = change_body(self, version)
+                    .expect("a change has a form in the encoding it chooses");
+                encoded_hash(version, &body)
             }
         }
     }
@@ -160,13 +300,27 @@ impl Change {
         })
     }
 
-    /// The encoding a new change is written in: [`CHANGE_FOREIGN_ENCODING`] when it embeds a
-    /// block with a foreign part, else the released [`CHANGE_ENCODING`].
+    /// Whether the change is a port: it records `links.ported_from`.
+    pub fn is_ported(&self) -> bool {
+        self.links.ported_from.is_some()
+    }
+
+    /// Whether the change copies another change's ops: a replay (`replayed_from`) or a port
+    /// (`ported_from`). Merge callers treat both alike.
+    pub fn is_replay_like(&self) -> bool {
+        self.links.replayed_from.is_some() || self.is_ported()
+    }
+
+    /// The encoding a new change is written in, chosen by its value. An unported change takes
+    /// the released [`CHANGE_ENCODING`], or [`CHANGE_FOREIGN_ENCODING`] when it embeds a block
+    /// with a foreign part. A port takes [`CHANGE_PORT_ENCODING`], or
+    /// [`CHANGE_PORT_FOREIGN_ENCODING`] when it embeds such a block.
     pub fn encoding(&self) -> u16 {
-        if self.embeds_foreign() {
-            CHANGE_FOREIGN_ENCODING
-        } else {
-            CHANGE_ENCODING
+        match (self.is_ported(), self.embeds_foreign()) {
+            (false, false) => CHANGE_ENCODING,
+            (false, true) => CHANGE_FOREIGN_ENCODING,
+            (true, false) => CHANGE_PORT_ENCODING,
+            (true, true) => CHANGE_PORT_FOREIGN_ENCODING,
         }
     }
 

@@ -1666,3 +1666,274 @@ fn rdx2_a_residue_identity_matches_its_frame_hash() {
         .unwrap_err();
     assert!(corrupt_at(&e, span.place), "{e:?}");
 }
+
+// Hub ports: the removal of a port keeps its source in an encoding-2 residue.
+
+/// The source a port names: no store here holds its change.
+fn port_source() -> PortedFrom {
+    PortedFrom {
+        repo_id: RepoId([9; 16]),
+        change: Hash::of(b"source change"),
+    }
+}
+
+/// The hash of residue `r`'s frame, in the encoding its value chooses.
+fn value_residue_id(r: &RedactionResidue) -> Hash {
+    Hash::of(&rdy_store::codec::item_new(kinds::REDACTION_RESIDUE, r).1)
+}
+
+/// The request that removes version `b` in view `work`, built from the store as it is now: the
+/// block frame and the frames of its producers, each span naming its residue by the frame the
+/// residue's value chooses.
+fn port_draft(s: &Store, b: &Block) -> Draft {
+    use rdy_model::redaction::{AssessmentSupport, BlockResidue, Redaction, RedactionManifest};
+    let reader = s.reader();
+    let v = b.version_hash();
+    let producers: BTreeSet<Hash> = reader.producers(&v).unwrap().into_iter().collect();
+    let mut spans = vec![];
+    let mut residues = vec![];
+    for f in redaction_fixture::frames(&reader, s.log_end()) {
+        let residue = match f.kind {
+            BLOCK if f.hash == v => RedactionResidue::Block(BlockResidue::of(b)),
+            CHANGE if producers.contains(&f.hash) => {
+                RedactionResidue::Change(ChangeResidue::of(&reader.change(&f.hash).unwrap()))
+            }
+            _ => continue,
+        };
+        spans.push(DropSpan {
+            place: place(f.loc),
+            kind: f.kind,
+            hash: f.hash,
+            len: f.len,
+            residue: Some(value_residue_id(&residue)),
+        });
+        residues.push(residue);
+    }
+    let spec = RequestSpec::new("work", vec![version(b)]);
+    let carrier = rdy_model::redaction::carrier(spec.view.clone(), vec![], spec.requester.clone());
+    let request = Redaction {
+        carrier: carrier.id(),
+        actor: spec.requester.clone(),
+        targets: spec.targets.clone(),
+        reason_class: spec.reason_class,
+        reason: spec.reason.clone(),
+        manifest: RedactionManifest {
+            versions: vec![(b.id.clone(), v)],
+            blobs: vec![],
+            shared_blobs: vec![],
+            spans,
+            inside: vec![],
+            outside: redaction_fixture::outside_rows(),
+            quarantine: vec![],
+            assessment: AssessmentSupport::NotImplemented,
+        },
+    };
+    Draft {
+        carrier,
+        request,
+        residues,
+    }
+}
+
+/// The encoding and value of the residue frame `h` of `s`.
+fn residue_at(s: &Store, h: &Hash) -> (u16, RedactionResidue) {
+    let (raw, p) = s.get_kind_raw(kinds::REDACTION_RESIDUE, h).unwrap();
+    let o = rdy_store::codec::split(raw, &p).unwrap();
+    (o.version, rdy_store::codec::decode_split(&o).unwrap())
+}
+
+/// The sealed batches of `s`.
+fn sealed_batches(s: &Store) -> Vec<rdy_store::dump::DumpBatch> {
+    let mut out = vec![];
+    s.reader()
+        .for_each_batch(s.log_end(), |b| {
+            out.push(b);
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+#[test]
+fn hpr1_removal_keeps_port_origin() {
+    use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
+    use rdy_store::dump::{DumpItem, DumpReader, DumpWriter, RemovalTally};
+    use rdy_store::dump_chain::{BatchMarker, DumpChainHeader, batch_end};
+    use rdy_store::format::{DumpStore, FEATURE_PORTED_CHANGE};
+    use rdy_store::{LandRequest, StoreReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut s = Store::create(&path).unwrap();
+    let a = block("b-00001", "claim", "ported canary secret");
+    let kept = block("b-00002", "claim", "ported kept text");
+    let mut port = change(
+        "work",
+        vec![
+            Op::Create { block: a.clone() },
+            Op::Create {
+                block: kept.clone(),
+            },
+        ],
+    );
+    port.links.ported_from = Some(port_source());
+    let ch = s.commit_to_view("work", port).unwrap();
+    let stored = s.change(&ch).unwrap();
+    assert_eq!(stored.links.ported_from, Some(port_source()));
+
+    // the report names each residue by its stored frame: the port's in encoding 2
+    let d = port_draft(&s, &a);
+    let port_residue = RedactionResidue::Change(ChangeResidue::of(&stored));
+    assert!(d.residues.contains(&port_residue));
+    let port_id = value_residue_id(&port_residue);
+    let block_residue = d
+        .residues
+        .iter()
+        .find(|r| matches!(r, RedactionResidue::Block(_)))
+        .unwrap();
+    let block_id = value_residue_id(block_residue);
+    let p = s
+        .prepare_redaction(&d.carrier, &d.request, &d.residues)
+        .unwrap();
+    let req = s.commit_redaction(p).unwrap();
+    assert_eq!(residue_at(&s, &port_id), (2, port_residue.clone()));
+    assert_eq!(residue_at(&s, &block_id).0, 1, "a block residue keeps 1");
+    let named: BTreeSet<Hash> = s
+        .redaction_request(&req)
+        .unwrap()
+        .manifest
+        .spans
+        .iter()
+        .filter_map(|sp| sp.residue)
+        .collect();
+    assert_eq!(named, BTreeSet::from([port_id, block_id]));
+
+    // the apply: the source is data, so a link to a change no store holds never blocks it
+    let prop = s.propose("work", "Remove content", writer()).unwrap();
+    let approver = Provenance {
+        actor: "human:alice".into(),
+        run: None,
+        role: Role::Approver,
+        at_ms: 50,
+    };
+    let landing = s
+        .land_atomic(LandRequest {
+            proposal: prop,
+            accept: None,
+            approver: approver.clone(),
+            alt: None,
+            relay: None,
+            evidence: None,
+            assessment: None,
+        })
+        .unwrap()
+        .landing;
+    let tag = s
+        .put_tag(&Tag {
+            name: "v1".into(),
+            landing,
+            message: None,
+            tagged_by: approver,
+        })
+        .unwrap();
+    assert_eq!(s.redaction_of(CHANGE, &ch).unwrap(), Some(req));
+    let check = |s: &Store, what: &str| {
+        let c = s.change(&ch).unwrap();
+        assert!(c.is_projection(), "{what}");
+        assert_eq!(c.links.ported_from, Some(port_source()), "{what}");
+        assert_eq!(c.id(), ch, "{what}");
+        assert_eq!(
+            s.get_block(&a.version_hash()).unwrap().body,
+            rdy_model::redaction::CONTENT_REMOVED,
+            "{what}"
+        );
+        assert_eq!(s.get_block(&kept.version_hash()).unwrap(), kept, "{what}");
+        assert_eq!(residue_at(s, &port_id), (2, port_residue.clone()), "{what}");
+        assert!(s.features().has(FEATURE_PORTED_CHANGE), "{what}");
+    };
+    check(&s, "apply");
+    drop(s);
+    // reopen and reindex
+    let mut s = Store::open(&path).unwrap();
+    check(&s, "reopen");
+    s.reindex().unwrap();
+    check(&s, "reindex");
+    s.verify().unwrap();
+    s.check_objects().unwrap();
+
+    // dump and load
+    let batches = sealed_batches(&s);
+    let repo = s.repo_id().unwrap().unwrap();
+    let last = batches.last().unwrap();
+    let header = rdy_store::dump::DumpHeader {
+        store: DumpStore::Features(s.features().clone()),
+        log_end: batch_end(last).unwrap(),
+        rdy: "test".into(),
+        chain: Some(DumpChainHeader::full(repo, BatchMarker::of(last))),
+    };
+    let mut tally = RemovalTally::default();
+    let mut w = DumpWriter::new(Vec::new(), &header).unwrap();
+    for b in &batches {
+        tally.observe(b).unwrap();
+        w.batch(b).unwrap();
+    }
+    let bytes = w.finish(tally.facts().unwrap()).unwrap().0;
+    let (mut reader, _, _) = DumpReader::open(&bytes[..]).unwrap();
+    let loaded = dir.path().join("loaded");
+    let mut i = rdy_store::ingest::Ingest::create(&loaded).unwrap();
+    let mut n = 0;
+    while let Some(item) = reader.next().unwrap() {
+        if let DumpItem::Batch(b) = item {
+            n += 1;
+            i.batch(n, &b).unwrap();
+        }
+    }
+    i.upgrade(&DumpStore::Features(s.features().clone()))
+        .unwrap();
+    i.finish().unwrap();
+    check(&Store::open(&loaded).unwrap(), "dump and load");
+
+    // sync: a holder takes the tag's history, the removed port and its residue with it
+    let r: StoreReader = s.reader();
+    let c = closure(&r, tag, &BTreeSet::new()).unwrap();
+    let header = rdy_store::sync_stream::StreamHeader::tag_history(
+        r.store_features().unwrap(),
+        repo,
+        tag,
+        c.prerequisites,
+    );
+    let mut source = StoreSource {
+        reader: &r,
+        end: END_OF_LOG,
+    };
+    let file = dir.path().join("upload.rdysync");
+    std::fs::write(
+        &file,
+        write_batch(&mut source, &header, &c.records, Vec::new())
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+    drop(r);
+    drop(s);
+    let mut holder = Store::create_holder(&dir.path().join("holder"), repo).unwrap();
+    holder
+        .take_batches(
+            &[std::fs::File::open(&file).unwrap()],
+            &rdy_store::take_batch::UploadTarget {
+                tag: "v1".into(),
+                landing,
+            },
+            |_, _| {
+                Ok::<_, rdy_store::stream_error::StreamError>(
+                    rdy_store::take_batch::TagChoice::Incoming,
+                )
+            },
+        )
+        .unwrap();
+    let c = holder.change(&ch).unwrap();
+    assert!(c.is_projection());
+    assert_eq!(c.links.ported_from, Some(port_source()));
+    assert_eq!(residue_at(&holder, &port_id), (2, port_residue));
+    assert!(holder.features().has(FEATURE_PORTED_CHANGE));
+}

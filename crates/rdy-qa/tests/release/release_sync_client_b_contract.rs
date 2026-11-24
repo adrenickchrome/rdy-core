@@ -23,14 +23,21 @@ const CURRENT: &str = "sync-client-b-v1.json";
 /// The sha256 of [`CURRENT`] as its successor copied it.
 const CURRENT_SHA: &str = "e65653b123aea1307a9e2ab9728f3b5d18e25b33b8f7ca8aa9fb2ff5a2dcb3e1";
 
-/// The successor of [`CURRENT`], frozen since its own successor [`SELECTED`].
-const NEXT: &str = "m5b-v1.json";
+/// The successors of [`CURRENT`], in order. Each is frozen since its own successor, and each
+/// has the sha256 that its successor copied.
+const NEXT: [(&str, &str); 2] = [
+    (
+        "m5b-v1.json",
+        "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d26256d2fb41",
+    ),
+    (
+        "hub-forks-v1.json",
+        "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252",
+    ),
+];
 
-/// The sha256 of [`NEXT`] as its successor copied it.
-const NEXT_SHA: &str = "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d26256d2fb41";
-
-/// The successor of [`NEXT`], which every selector names now.
-const SELECTED: &str = "hub-forks-v1.json";
+/// The successor of the last of [`NEXT`], which every selector names now.
+const SELECTED: &str = "hub-ports-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -323,7 +330,7 @@ fn changes() -> Vec<String> {
 
 /// scc8 (brief addition): the current fixture starts from the shipped predecessor:
 /// `sync-client-v1.json` keeps its bytes, every selector names the latest successor
-/// `hub-forks-v1.json` and none names the predecessor, and no member of the predecessor is
+/// `hub-ports-v1.json` and none names the predecessor, and no member of the predecessor is
 /// removed.
 #[test]
 fn scc8_successor_starts_from_the_shipped_predecessor() {
@@ -717,8 +724,8 @@ fn sync_fixture(name: &str) -> Vec<u8> {
 
 /// scc10: every earlier contract fixture, `sync-client-v1.json` included, and the wire fixtures
 /// and the released stream expect files keep their bytes; the contracts folder holds these, this
-/// plan's fixture (frozen at the bytes its successor copied), that successor (frozen too) and its
-/// successor alone, and this plan's wire digests name the wire files as they stand.
+/// plan's fixture (frozen at the bytes its successor copied), its later successors (frozen too)
+/// and the current fixture alone, and this plan's wire digests name the wire files as they stand.
 #[test]
 fn scc10_predecessor_fixtures_keep_their_bytes() {
     for (name, want) in EARLIER {
@@ -740,16 +747,19 @@ fn scc10_predecessor_fixtures_keep_their_bytes() {
         .collect();
     names.sort();
     assert_eq!(sha(&bytes(CURRENT)), CURRENT_SHA, "{CURRENT} is frozen");
-    assert_eq!(sha(&bytes(NEXT)), NEXT_SHA, "{NEXT} is frozen");
+    for (name, want) in NEXT {
+        assert_eq!(sha(&bytes(name)), want, "{name} is frozen");
+    }
     let mut want: Vec<&str> = EARLIER
         .iter()
+        .chain(NEXT.iter())
         .map(|(n, _)| *n)
-        .chain([CURRENT, NEXT, SELECTED])
+        .chain([CURRENT, SELECTED])
         .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds the earlier fixtures, {CURRENT}, {NEXT} and {SELECTED}"
+        "the folder holds the earlier fixtures, {CURRENT}, its frozen successors and {SELECTED}"
     );
     let now = read(CURRENT);
     for (name, bytes) in [

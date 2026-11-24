@@ -330,10 +330,14 @@ pub(crate) fn encoded_dropped_payload(
 }
 
 /// Whether a removed frame of logical kind `kind` may have encoding `encoding`: a change (the
-/// one removable kind with versioned encodings) of any encoding CHANGE registers, a block or a
-/// blob chunk of encoding 0. Its residue names the same source encoding, which the proof checks.
+/// one removable kind with versioned encodings) of its latest encoding or a port encoding (3 or
+/// 4, `crate::codec::PORT_ENCODINGS`), a block or a blob chunk of encoding 0. Its residue names
+/// the same source encoding, which the proof checks.
 pub(crate) fn dropped_encoding_allowed(kind: u8, encoding: u16) -> bool {
-    encoding == 0 || (kind == kinds::CHANGE && encoding <= crate::codec::latest(kinds::CHANGE))
+    encoding == 0
+        || (kind == kinds::CHANGE
+            && (encoding <= crate::codec::latest(kinds::CHANGE)
+                || crate::codec::is_port_encoding(kind, encoding)))
 }
 
 /// The encoding of a dropped frame of raw kind `raw`: 0 for an unmarked one; for a marked

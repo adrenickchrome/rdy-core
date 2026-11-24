@@ -28,12 +28,20 @@
 //! [`PAIR_FOREIGN_ENCODING`] (REVIEW and TENSION), [`ANSWER_FOREIGN_ENCODING`],
 //! [`ASSESSMENT_FOREIGN_ENCODING`] and [`REDACTION_FOREIGN_ENCODING`]. A FOREIGN entry starts at
 //! [`FOREIGN_ENCODING`].
+//!
+//! A port records its source in `ChangeLinks::ported_from`, the seventh link field (store
+//! feature `ported_change`). Encodings 1 and 2 keep their frozen six link fields
+//! ([`ChangeLinksV1`]). A port takes its own encodings, chosen by value: [`PortChangeV3`]
+//! ([`CHANGE_PORT_ENCODING`]) and, when it embeds a block with a foreign part,
+//! [`PortForeignChangeV4`] ([`CHANGE_PORT_FOREIGN_ENCODING`]). The residue of a removed port takes
+//! [`PortResidueV2`] ([`RESIDUE_PORT_ENCODING`]); every other residue keeps encoding 1.
 use crate::change::ChangeReadIdentity;
 use crate::foreign::ForeignParts;
 use crate::redaction::{BlockResidue, ChangeResidue, RedactionResidue, ResidualOp};
 use crate::{
     ActorRun, AltChoice, ApprovalEvidence, Assurance, Block, BlockId, Change, ChangeLinks,
-    FieldValue, Hash, Justification, LandingRecord, Link, Op, Provenance, RelayEvidence,
+    FieldValue, Hash, Justification, LandingRecord, Link, Op, PortedFrom, Provenance,
+    RelayEvidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -52,6 +60,14 @@ pub const BLOCK_FOREIGN_ENCODING: u16 = 1;
 /// The encoding of a CHANGE that embeds a block with a foreign part: [`ForeignChangeV2`].
 /// Encodings 0 and 1 embed the frozen [`LegacyBlockV0`] layout and have no form for such a block.
 pub const CHANGE_FOREIGN_ENCODING: u16 = 2;
+/// The encoding of a ported CHANGE that embeds no block with a foreign part: [`PortChangeV3`].
+pub const CHANGE_PORT_ENCODING: u16 = 3;
+/// The encoding of a ported CHANGE that embeds a block with a foreign part:
+/// [`PortForeignChangeV4`].
+pub const CHANGE_PORT_FOREIGN_ENCODING: u16 = 4;
+/// The encoding of the REDACTION_RESIDUE of a removed port: [`PortResidueV2`]. Block residues
+/// and the residues of unported changes keep [`RESIDUE_ENCODING`].
+pub const RESIDUE_PORT_ENCODING: u16 = 2;
 /// The first and only encoding of a FOREIGN entry (`crate::foreign::ForeignEntry`, kind 29): the
 /// kind has no encoding 0.
 pub const FOREIGN_ENCODING: u16 = 1;
@@ -237,8 +253,8 @@ impl ForeignBlockV1 {
     }
 }
 
-/// An op of a change in [`CHANGE_FOREIGN_ENCODING`]: [`Op`]'s variants in their order, each block
-/// in the [`ForeignBlockV1`] layout.
+/// An op of a change in [`CHANGE_FOREIGN_ENCODING`] or [`CHANGE_PORT_FOREIGN_ENCODING`]:
+/// [`Op`]'s variants in their order, each block in the [`ForeignBlockV1`] layout.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ForeignOpV2 {
     Create { block: ForeignBlockV1 },
@@ -246,8 +262,127 @@ pub enum ForeignOpV2 {
     Delete { base: Hash, id: BlockId },
 }
 
+impl ForeignOpV2 {
+    /// The layout of `op`.
+    pub fn of(op: &Op) -> ForeignOpV2 {
+        match op {
+            Op::Create { block } => ForeignOpV2::Create {
+                block: ForeignBlockV1::of(block),
+            },
+            Op::Update { base, block } => ForeignOpV2::Update {
+                base: *base,
+                block: ForeignBlockV1::of(block),
+            },
+            Op::Delete { base, id } => ForeignOpV2::Delete {
+                base: *base,
+                id: id.clone(),
+            },
+        }
+    }
+
+    /// The runtime op.
+    pub fn into_current(self) -> Op {
+        match self {
+            ForeignOpV2::Create { block } => Op::Create {
+                block: block.into_current(),
+            },
+            ForeignOpV2::Update { base, block } => Op::Update {
+                base,
+                block: block.into_current(),
+            },
+            ForeignOpV2::Delete { base, id } => Op::Delete { base, id },
+        }
+    }
+}
+
+/// A change's links in encodings 1 and 2, frozen: the six options up to `briefing`. It is the
+/// postcard form of [`ChangeLinks`]; a port's links have no form here.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ChangeLinks")]
+pub struct ChangeLinksV1 {
+    pub intent: Option<Hash>,
+    pub alternative: Option<AltChoice>,
+    pub client_nonce: Option<String>,
+    pub imported_by: Option<ActorRun>,
+    pub replayed_from: Option<Hash>,
+    pub briefing: Option<Hash>,
+}
+
+impl ChangeLinksV1 {
+    /// The current links: no port source.
+    pub fn into_current(self) -> ChangeLinks {
+        ChangeLinks {
+            intent: self.intent,
+            alternative: self.alternative,
+            client_nonce: self.client_nonce,
+            imported_by: self.imported_by,
+            replayed_from: self.replayed_from,
+            briefing: self.briefing,
+            ported_from: None,
+        }
+    }
+
+    /// The encoding-1 links of `l`, while it records no port source.
+    pub fn from_current(l: &ChangeLinks) -> Option<ChangeLinksV1> {
+        if l.ported_from.is_some() {
+            return None;
+        }
+        Some(ChangeLinksV1 {
+            intent: l.intent,
+            alternative: l.alternative.clone(),
+            client_nonce: l.client_nonce.clone(),
+            imported_by: l.imported_by.clone(),
+            replayed_from: l.replayed_from,
+            briefing: l.briefing,
+        })
+    }
+}
+
+/// A port's links in encodings 3 and 4: the six frozen options, then `ported_from` as the
+/// seventh field. A reader refuses a port body whose `ported_from` is absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ChangeLinks")]
+pub struct PortLinksV3 {
+    pub intent: Option<Hash>,
+    pub alternative: Option<AltChoice>,
+    pub client_nonce: Option<String>,
+    pub imported_by: Option<ActorRun>,
+    pub replayed_from: Option<Hash>,
+    pub briefing: Option<Hash>,
+    pub ported_from: Option<PortedFrom>,
+}
+
+impl PortLinksV3 {
+    /// The layout of `l`.
+    pub fn of(l: &ChangeLinks) -> PortLinksV3 {
+        PortLinksV3 {
+            intent: l.intent,
+            alternative: l.alternative.clone(),
+            client_nonce: l.client_nonce.clone(),
+            imported_by: l.imported_by.clone(),
+            replayed_from: l.replayed_from,
+            briefing: l.briefing,
+            ported_from: l.ported_from,
+        }
+    }
+
+    /// The current links.
+    pub fn into_current(self) -> ChangeLinks {
+        ChangeLinks {
+            intent: self.intent,
+            alternative: self.alternative,
+            client_nonce: self.client_nonce,
+            imported_by: self.imported_by,
+            replayed_from: self.replayed_from,
+            briefing: self.briefing,
+            ported_from: self.ported_from,
+        }
+    }
+}
+
 /// A change in [`CHANGE_FOREIGN_ENCODING`]: the fields of encoding 1 in their order, its ops
-/// embedding [`ForeignBlockV1`] blocks. Encoding 1's body stays unchanged.
+/// embedding [`ForeignBlockV1`] blocks. Its links are the frozen six fields: the postcard form of
+/// [`ChangeLinks`] is [`ChangeLinksV1`]. Encoding 1's body stays unchanged.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignChangeV2 {
     pub view: String,
@@ -264,23 +399,7 @@ impl ForeignChangeV2 {
     pub fn of(c: &Change) -> ForeignChangeV2 {
         ForeignChangeV2 {
             view: c.view.clone(),
-            ops: c
-                .ops
-                .iter()
-                .map(|op| match op {
-                    Op::Create { block } => ForeignOpV2::Create {
-                        block: ForeignBlockV1::of(block),
-                    },
-                    Op::Update { base, block } => ForeignOpV2::Update {
-                        base: *base,
-                        block: ForeignBlockV1::of(block),
-                    },
-                    Op::Delete { base, id } => ForeignOpV2::Delete {
-                        base: *base,
-                        id: id.clone(),
-                    },
-                })
-                .collect(),
+            ops: c.ops.iter().map(ForeignOpV2::of).collect(),
             deps: c.deps.clone(),
             provenance: c.provenance.clone(),
             justification: c.justification.clone(),
@@ -296,16 +415,7 @@ impl ForeignChangeV2 {
             ops: self
                 .ops
                 .into_iter()
-                .map(|op| match op {
-                    ForeignOpV2::Create { block } => Op::Create {
-                        block: block.into_current(),
-                    },
-                    ForeignOpV2::Update { base, block } => Op::Update {
-                        base,
-                        block: block.into_current(),
-                    },
-                    ForeignOpV2::Delete { base, id } => Op::Delete { base, id },
-                })
+                .map(ForeignOpV2::into_current)
                 .collect(),
             deps: self.deps,
             provenance: self.provenance,
@@ -315,6 +425,110 @@ impl ForeignChangeV2 {
             read_identity: Some(ChangeReadIdentity::Stored(identity)),
         }
     }
+}
+
+/// A port in [`CHANGE_PORT_ENCODING`]: the fields of encoding 1 in their order, its links
+/// [`PortLinksV3`]. Encoding 1's body stays unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortChangeV3 {
+    pub view: String,
+    pub ops: Vec<Op>,
+    pub deps: Vec<Hash>,
+    pub provenance: Provenance,
+    pub justification: Option<Justification>,
+    pub message: String,
+    pub links: PortLinksV3,
+}
+
+impl PortChangeV3 {
+    /// The encoding-3 body of `c`.
+    pub fn of(c: &Change) -> PortChangeV3 {
+        PortChangeV3 {
+            view: c.view.clone(),
+            ops: c.ops.clone(),
+            deps: c.deps.clone(),
+            provenance: c.provenance.clone(),
+            justification: c.justification.clone(),
+            message: c.message.clone(),
+            links: PortLinksV3::of(&c.links),
+        }
+    }
+
+    /// The current change, with the stored read identity `identity` of the frame it came from.
+    pub fn into_current(self, identity: EncodedIdentity) -> Change {
+        Change {
+            view: self.view,
+            ops: self.ops,
+            deps: self.deps,
+            provenance: self.provenance,
+            justification: self.justification,
+            message: self.message,
+            links: self.links.into_current(),
+            read_identity: Some(ChangeReadIdentity::Stored(identity)),
+        }
+    }
+}
+
+/// A port in [`CHANGE_PORT_FOREIGN_ENCODING`]: the fields of encoding 2 in their order, its ops
+/// embedding [`ForeignBlockV1`] blocks and its links [`PortLinksV3`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortForeignChangeV4 {
+    pub view: String,
+    pub ops: Vec<ForeignOpV2>,
+    pub deps: Vec<Hash>,
+    pub provenance: Provenance,
+    pub justification: Option<Justification>,
+    pub message: String,
+    pub links: PortLinksV3,
+}
+
+impl PortForeignChangeV4 {
+    /// The encoding-4 body of `c`.
+    pub fn of(c: &Change) -> PortForeignChangeV4 {
+        PortForeignChangeV4 {
+            view: c.view.clone(),
+            ops: c.ops.iter().map(ForeignOpV2::of).collect(),
+            deps: c.deps.clone(),
+            provenance: c.provenance.clone(),
+            justification: c.justification.clone(),
+            message: c.message.clone(),
+            links: PortLinksV3::of(&c.links),
+        }
+    }
+
+    /// The current change, with the stored read identity `identity` of the frame it came from.
+    pub fn into_current(self, identity: EncodedIdentity) -> Change {
+        Change {
+            view: self.view,
+            ops: self
+                .ops
+                .into_iter()
+                .map(ForeignOpV2::into_current)
+                .collect(),
+            deps: self.deps,
+            provenance: self.provenance,
+            justification: self.justification,
+            message: self.message,
+            links: self.links.into_current(),
+            read_identity: Some(ChangeReadIdentity::Stored(identity)),
+        }
+    }
+}
+
+/// The body of change `c` in encoding `version`. Encoding 0 is the frozen [`LegacyChangeV0`];
+/// encodings 1 to 4 each hold one shape, and `c` must choose that encoding by its value
+/// ([`Change::encoding`]). None when `c` has no form in `version`.
+pub fn change_body(c: &Change, version: u16) -> Option<Vec<u8>> {
+    let body = match version {
+        0 => postcard::to_allocvec(&LegacyChangeV0::from_current(c)?),
+        _ if c.encoding() != version => return None,
+        CHANGE_ENCODING => postcard::to_allocvec(c),
+        CHANGE_FOREIGN_ENCODING => postcard::to_allocvec(&ForeignChangeV2::of(c)),
+        CHANGE_PORT_ENCODING => postcard::to_allocvec(&PortChangeV3::of(c)),
+        CHANGE_PORT_FOREIGN_ENCODING => postcard::to_allocvec(&PortForeignChangeV4::of(c)),
+        _ => return None,
+    };
+    Some(body.expect("postcard encoding of an in-memory value cannot fail"))
 }
 
 /// A change's links in encoding 0: the four options it had then.
@@ -328,7 +542,7 @@ pub struct LegacyChangeLinksV0 {
 }
 
 impl LegacyChangeLinksV0 {
-    /// The current links: the encoding-1 options absent.
+    /// The current links: the later options absent.
     pub fn into_current(self) -> ChangeLinks {
         ChangeLinks {
             intent: self.intent,
@@ -337,12 +551,13 @@ impl LegacyChangeLinksV0 {
             imported_by: self.imported_by,
             replayed_from: None,
             briefing: None,
+            ported_from: None,
         }
     }
 
-    /// The encoding-0 links of `l`, while its encoding-1 options are absent.
+    /// The encoding-0 links of `l`, while its later options are absent.
     pub fn from_current(l: &ChangeLinks) -> Option<LegacyChangeLinksV0> {
-        if l.replayed_from.is_some() || l.briefing.is_some() {
+        if l.replayed_from.is_some() || l.briefing.is_some() || l.ported_from.is_some() {
             return None;
         }
         Some(LegacyChangeLinksV0 {
@@ -568,6 +783,44 @@ impl LegacyRedactionResidueV0 {
                 })
             }
         })
+    }
+}
+
+/// A REDACTION_RESIDUE in [`RESIDUE_PORT_ENCODING`]: the encoding-1 body of a change residue,
+/// its `source_encoding` included, then the removed port's `ported_from`. Only the residue of a
+/// port takes it; a reader refuses one that names no port source or holds a block residue.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortResidueV2 {
+    /// The encoding-1 body: its links hold no port source.
+    pub residue: RedactionResidue,
+    pub ported_from: Option<PortedFrom>,
+}
+
+impl PortResidueV2 {
+    /// The encoding-2 body of `r`, when `r` is the residue of a port.
+    pub fn of(r: &RedactionResidue) -> Option<PortResidueV2> {
+        let RedactionResidue::Change(c) = r else {
+            return None;
+        };
+        let ported_from = c.links.ported_from?;
+        let mut body = c.clone();
+        body.links.ported_from = None;
+        Some(PortResidueV2 {
+            residue: RedactionResidue::Change(body),
+            ported_from: Some(ported_from),
+        })
+    }
+
+    /// The current residue: a change residue's links regain `ported_from`. A block residue
+    /// ignores it, and its encoding then tells the reader to refuse it.
+    pub fn into_current(self) -> RedactionResidue {
+        match self.residue {
+            RedactionResidue::Change(mut c) => {
+                c.links.ported_from = self.ported_from;
+                RedactionResidue::Change(c)
+            }
+            block => block,
+        }
     }
 }
 

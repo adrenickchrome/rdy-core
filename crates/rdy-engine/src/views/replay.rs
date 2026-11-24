@@ -137,7 +137,7 @@ pub fn replay_order_for_tests(nodes: &[(Hash, Vec<Hash>)]) -> Result<Vec<Hash>, 
 
 /// A block as the preview reads it: clean at a version (None: absent), or conflicted.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Slot {
+pub(crate) enum Slot {
     Clean(Option<Hash>),
     Conflicted,
 }
@@ -145,14 +145,14 @@ enum Slot {
 /// The target as each replay leaves it, in replay order: the target's materialized versions and
 /// recorded conflicts, then each replayed op applied (an equal base), agreeing (an equal result)
 /// or conflicted (another base and another result, or a block already conflicted).
-struct Preview<'a> {
-    versions: &'a dyn Fn(&BlockId) -> Option<Hash>,
-    conflicted: HashSet<BlockId>,
-    slots: HashMap<BlockId, Slot>,
+pub(crate) struct Preview<'a> {
+    pub(crate) versions: &'a dyn Fn(&BlockId) -> Option<Hash>,
+    pub(crate) conflicted: HashSet<BlockId>,
+    pub(crate) slots: HashMap<BlockId, Slot>,
 }
 
 impl Preview<'_> {
-    fn get(&self, id: &BlockId) -> Slot {
+    pub(crate) fn get(&self, id: &BlockId) -> Slot {
         match self.slots.get(id) {
             Some(s) => *s,
             None if self.conflicted.contains(id) => Slot::Conflicted,
@@ -162,7 +162,7 @@ impl Preview<'_> {
 
     /// Whether `id` still holds the target's own version (no earlier replay of this call wrote
     /// it) and that version is clean.
-    fn targets_own(&self, id: &BlockId) -> bool {
+    pub(crate) fn targets_own(&self, id: &BlockId) -> bool {
         !self.slots.contains_key(id) && !self.conflicted.contains(id)
     }
 }
@@ -170,7 +170,7 @@ impl Preview<'_> {
 /// The changes `view` includes that wrote the target's version `v` of block `id`: of `v`'s
 /// producers, the ones `view` includes; for an absent block, the included changes that delete
 /// it. `src` never counts: a replay never depends on its own source.
-fn view_writers(
+pub(crate) fn view_writers(
     st: &ReadState,
     included: &HashSet<Hash>,
     src: &Hash,
@@ -213,6 +213,7 @@ fn replayed(
             imported_by: None,
             replayed_from: Some(src),
             briefing: source.links.briefing,
+            ported_from: source.links.ported_from,
         },
         read_identity: None,
     }

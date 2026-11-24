@@ -871,7 +871,7 @@ pub(crate) fn blocking_conflicts(
             id: *id,
             deps: &c.deps,
             ops: &c.ops,
-            is_replay: c.links.replayed_from.is_some(),
+            is_replay: c.is_replay_like(),
         })
         .collect();
     let deleters = st.merge_deleters(base, &state, &touched)?;
@@ -3493,6 +3493,10 @@ impl Rdy {
         // repo links (rpl23): a deviation written before its target's organization or team lock
         // was adopted never lands
         crate::foreign_locks::check_landing(&st, changes.iter().flat_map(|c| &c.ops))?;
+        // D-FK58A, D-DAPR8 (ruling task-3): each foreign pin the version writes names content a
+        // delivery of this project holds. A pulled view's changes (a hub carry's among them) came
+        // through no write of this project, so the land checks them before anything is written.
+        st.check_carried_pins(&Scope::View(p.view.clone()), &changes)?;
         // FW-HB1, RULING F1's limit: --strict and reviews.require_up_to_date refuse any landing
         // since the version was proposed
         Self::check_base_moved(&st, &pref, &p, &opts)?;

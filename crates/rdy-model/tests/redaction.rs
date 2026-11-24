@@ -158,6 +158,7 @@ fn change() -> Change {
             }),
             replayed_from: None,
             briefing: None,
+            ported_from: None,
         },
         read_identity: None,
     }

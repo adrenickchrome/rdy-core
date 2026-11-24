@@ -281,9 +281,8 @@ fn ok10_replay_takes_only_op_view_changes_and_max_tokens() {
     let p = project();
     let before = p.head("mine");
     // every other field, alone
-    let others: [(&str, Value); 20] = [
+    let others: [(&str, Value); 19] = [
         ("name", json!("n")),
-        ("from", json!("f")),
         ("base", json!("b")),
         ("pin", json!(false)),
         ("views", json!(["v"])),
@@ -321,7 +320,14 @@ fn ok10_replay_takes_only_op_view_changes_and_max_tokens() {
             json!({"op": "replay", "changes": [p.cx], "relayed_by": "agent:a", "cascade": true, "from": "x", "evidence": "w"}),
         )
         .unwrap_err();
-    assert_eq!(e.message, "replay does not take from", "{e}");
+    assert_eq!(e.message, "replay does not take cascade", "{e}");
+    let e = p
+        .run(
+            "mine",
+            json!({"op": "replay", "changes": [p.cx], "relayed_by": "agent:a", "cascade": true, "evidence": "w"}),
+        )
+        .unwrap_err();
+    assert_eq!(e.message, "replay does not take cascade", "{e}");
     let e = p
         .run(
             "mine",

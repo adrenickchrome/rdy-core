@@ -443,7 +443,7 @@ impl StoreReader {
                 id: c.id(),
                 deps: &c.deps,
                 ops: &c.ops,
-                is_replay: c.links.replayed_from.is_some(),
+                is_replay: c.is_replay_like(),
             })
             .collect();
         let deleters = match deletions {

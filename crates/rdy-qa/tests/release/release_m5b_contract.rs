@@ -23,14 +23,21 @@ const PREDECESSOR: &str = "sync-client-b-v1.json";
 /// change is a successor fixture, never an edit of that file.
 const PREDECESSOR_SHA: &str = "e65653b123aea1307a9e2ab9728f3b5d18e25b33b8f7ca8aa9fb2ff5a2dcb3e1";
 
-/// This plan's fixture, which every selector named until its successor [`SELECTED`].
+/// This plan's fixture, which every selector named until its successor, the first of [`LATER`].
 const CURRENT: &str = "m5b-v1.json";
 
 /// The sha256 of [`CURRENT`] since the example pack metadata capture (wck8), its final bytes.
 const CURRENT_SHA: &str = "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d26256d2fb41";
 
-/// The successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen since.
-const SELECTED: &str = "hub-forks-v1.json";
+/// The successors of [`CURRENT`] before [`SELECTED`], in order, each frozen since its own
+/// successor, with the sha256 that its successor copied.
+const LATER: [(&str, &str); 1] = [(
+    "hub-forks-v1.json",
+    "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252",
+)];
+
+/// The latest successor of [`CURRENT`], which every selector names now.
+const SELECTED: &str = "hub-ports-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -58,7 +65,7 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 /// wck1: the integrated predecessor keeps its bytes, this plan's fixture has its captured
-/// bytes, and every selector names its successor and no earlier fixture.
+/// bytes, and every selector names its latest successor and no earlier fixture.
 #[test]
 fn wck1_successor_starts_from_the_integrated_fixture() {
     let (old, new) = (bytes(PREDECESSOR), bytes(CURRENT));
@@ -71,7 +78,10 @@ fn wck1_successor_starts_from_the_integrated_fixture() {
             text.contains(&format!("fixtures/contracts/{SELECTED}\"")),
             "{file} selects {SELECTED}"
         );
-        for earlier in [PREDECESSOR, CURRENT] {
+        for earlier in [PREDECESSOR, CURRENT]
+            .into_iter()
+            .chain(LATER.map(|(n, _)| n))
+        {
             assert!(
                 !text.contains(&format!("contracts/{earlier}\"")),
                 "{file} no longer selects {earlier}"
@@ -423,6 +433,10 @@ fn tree_digest(dir: &Path) -> (usize, String) {
     }
     let mut files = vec![];
     walk(dir, "", &mut files);
+    // the first-use fixtures of `ported_change` (hub ports) came after this plan's release
+    files.retain(|(path, _)| {
+        !path.starts_with("v4-f1-e1-ported-change") && !path.starts_with("ported-change-1")
+    });
     files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let lines: String = files
         .iter()
@@ -432,7 +446,7 @@ fn tree_digest(dir: &Path) -> (usize, String) {
 }
 
 /// wck9: M5b changes no released format: every earlier contract fixture keeps its bytes and this
-/// plan's fixture has its final bytes, the folder holds those and its successor and no other; the
+/// plan's fixture has its final bytes, the folder holds those and its successors and no other; the
 /// built-in pack's file, the released dump fixtures and the native store fixtures keep their bytes; the store
 /// registers the same features at the same formats; and the built-in pack still has no rule.
 #[test]
@@ -445,6 +459,9 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
         CURRENT_SHA,
         "{CURRENT} has its final bytes"
     );
+    for (name, want) in LATER {
+        assert_eq!(sha(&bytes(name)), want, "{name} is frozen");
+    }
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/contracts");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
@@ -453,13 +470,14 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
     names.sort();
     let mut want: Vec<&str> = EARLIER
         .iter()
+        .chain(LATER.iter())
         .map(|(n, _)| *n)
         .chain([CURRENT, SELECTED])
         .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds the earlier fixtures, {CURRENT} and {SELECTED}"
+        "the folder holds the earlier fixtures, {CURRENT}, its successors and {SELECTED}"
     );
 
     // the built-in pack, its bytes and the pack the project resolves from them
@@ -490,11 +508,23 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
         "the store fixtures"
     );
 
-    // the store registry and the formats: no feature, store format or dump format is new
+    // the store registry and the formats: no feature, store format or dump format is new, but
+    // the one a later plan registered (hub ports, `ported_change`): the registry less it is what
+    // this fixture lists, and it is the only addition
+    let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
+        .iter()
+        .copied()
+        .filter(|n| *n != "ported_change")
+        .collect();
     assert_eq!(
         now["store"]["registered_names"],
-        serde_json::json!(rdy_store::format::REGISTERED_FEATURES),
-        "the store registers what the contract lists"
+        serde_json::json!(live),
+        "the store registers what the contract lists, and ported_change"
+    );
+    assert_eq!(
+        live.len() + 1,
+        rdy_store::format::REGISTERED_FEATURES.len(),
+        "ported_change is the only addition"
     );
     assert_eq!(
         now["dump_load"]["dump_format"],
@@ -509,5 +539,5 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
         (19, 1, 4),
         "the store and dump formats"
     );
-    assert_eq!(rdy_store::format::REGISTERED_FEATURES.len(), 12);
+    assert_eq!(live.len(), 12);
 }

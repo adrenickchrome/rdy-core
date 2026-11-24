@@ -12,21 +12,32 @@
 //! `page`. A cursor is a token of the two states and an offset, so it needs no session; a cursor
 //! of another request is `E_PAGE_STALE`. A holder's pushed view at an op reads its own state, so
 //! a pair with such a side compares the two sides' states, with each side's label and merge
-//! conflicts as the engine gives them for that side alone. No call writes.
+//! conflicts as the engine gives them for that side alone. [`Snapshot::compare_size`] counts the
+//! rows of a compare up to a limit without building them. No call writes.
 
 use crate::reads::Resolved;
 use crate::store::Snapshot;
 use rdy_engine::diff::diff_states;
 use rdy_engine::diff_request::{DIFF_DEFAULT_TOKENS, DiffSide};
 use rdy_engine::tool_reads::check_tokens;
-use rdy_engine::view_query::compare_states;
-use rdy_engine::{E_INTERNAL, Materialized, RdyError, ReadState};
+use rdy_engine::view_query::{compare_states, count_states};
+use rdy_engine::{E_INTERNAL, Materialized, RdyError, ReadState, Scope};
+use rdy_model::BlockId;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub use rdy_engine::diff::DiffCounts;
 pub use rdy_engine::{Compare, CompareEntry, Diff, DiffChange, DiffEntry};
+
+/// How many rows a compare lists, counted up to a limit ([`Snapshot::compare_size`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompareSize {
+    /// The rows counted: the compare's whole total, or the limit when more rows exist.
+    pub count: usize,
+    /// Whether at least one more row exists past the limit.
+    pub stopped: bool,
+}
 
 /// The label of the empty side in a compare (D-AJW0S).
 const EMPTY: &str = "empty";
@@ -109,6 +120,73 @@ impl Snapshot {
         };
         state.ensure_current_epoch()?;
         Ok(out)
+    }
+
+    /// How many rows [`Snapshot::compare`] lists from scope `from` (None: the empty state) to
+    /// scope `to`, counted up to `limit`. A row is one entry of `added`, `deleted`, `changed`,
+    /// `moved` or `conflicted`, so a block that moves and changes is two rows and a conflicted
+    /// block is one. `count` is the number of rows, at most `limit`. `stopped` is true when at
+    /// least one more row exists, so `count` is the whole total exactly when it is false. The
+    /// walk builds no entry and ends at the first row past `limit`. It refuses what `compare`
+    /// refuses, with the same code, message and fix.
+    pub fn compare_size(
+        &self,
+        from: Option<&str>,
+        to: &str,
+        limit: usize,
+    ) -> Result<CompareSize, RdyError> {
+        self.compare_size_between_for_tests(from, to, limit, || {})
+    }
+
+    /// Test hook: [`Snapshot::compare_size`] that runs `between` after the count and before the
+    /// closing epoch check, so a test can remove content at that point. No product path reaches
+    /// it.
+    #[doc(hidden)]
+    pub fn compare_size_between_for_tests(
+        &self,
+        from: Option<&str>,
+        to: &str,
+        limit: usize,
+        between: impl FnOnce(),
+    ) -> Result<CompareSize, RdyError> {
+        let (from, to) = self.sides(from, to)?;
+        let state = self.read_state();
+        // the states are read in the order `compare` reads them
+        let (newer, older) = match &from {
+            Some(f) if f.view.is_none() && to.view.is_none() => {
+                let newer = to.state(state).materialized(&to.scope)?;
+                (newer, f.state(state).materialized(&f.scope)?)
+            }
+            from => {
+                let older = match from {
+                    Some(f) => f.state(state).materialized(&f.scope)?,
+                    None => Arc::new(Materialized::default()),
+                };
+                (to.state(state).materialized(&to.scope)?, older)
+            }
+        };
+        let (mut count, mut stopped) = count_states(&newer, &older, limit);
+        if !stopped {
+            // each block that either side's merge conflicts on is one row, in all
+            let room = limit - count;
+            let mut blocks: BTreeSet<BlockId> = BTreeSet::new();
+            'sides: for side in std::iter::once(&to).chain(from.as_ref()) {
+                if matches!(side.scope, Scope::Canon | Scope::At(_)) {
+                    continue;
+                }
+                for c in side.state(state).conflicts(&side.scope)?.iter() {
+                    blocks.insert(c.block.clone());
+                    if blocks.len() > room {
+                        stopped = true;
+                        break 'sides;
+                    }
+                }
+            }
+            count += blocks.len().min(room);
+        }
+        between();
+        state.ensure_current_epoch()?;
+        Ok(CompareSize { count, stopped })
     }
 
     /// The block diff from scope `from` (None: the empty state) to scope `to` (the diff

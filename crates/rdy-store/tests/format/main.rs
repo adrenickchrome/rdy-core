@@ -19,6 +19,7 @@ mod index;
 mod kinds;
 mod meta;
 mod object_refs;
+mod ported_encoding;
 mod private_write;
 mod reader;
 mod reflects_encoding;

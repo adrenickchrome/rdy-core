@@ -13,6 +13,8 @@
 //! and pages the diff as `rdy_diff` does; `version_tests` tests whether a chain of landings merges
 //! onto a landing's state, and whether an approval carries from one request version to the next;
 //! `replay_test` tests where a pull replay of a chain would stop, with each landing's gate result.
+//! `port` makes a port bundle from a holder snapshot and carries it into a new pushed view of
+//! another line of the family.
 //! No product behaviour is promised stable across pins.
 
 pub mod capabilities;
@@ -26,6 +28,7 @@ pub mod landing_check;
 pub mod link_take;
 pub mod links;
 pub mod maintenance;
+pub mod port;
 pub mod publication;
 pub mod publication_take;
 pub mod reads;
@@ -39,7 +42,9 @@ pub mod take;
 mod value;
 pub mod version_tests;
 
-pub use compare::{Compare, CompareEntry, Diff, DiffChange, DiffCounts, DiffEntry, DiffQuery};
+pub use compare::{
+    Compare, CompareEntry, CompareSize, Diff, DiffChange, DiffCounts, DiffEntry, DiffQuery,
+};
 pub use follower::Follower;
 pub use foreign_removal::{ForeignRemovalTaken, RemovalTaken};
 pub use landing_check::LandingCheck;
@@ -49,6 +54,7 @@ pub use maintenance::{
     UpgradeReport, UpgradeStep,
 };
 pub use maintenance::{FeatureClass, StoreFeature, StoreFeatures};
+pub use port::{PortBundle, PortOutcome, PortedFrom, PortedView};
 pub use publication::{Baseline, BaselineBinding, PreviousChoice, ProfileFacts, profile_facts};
 pub use publication_take::{
     PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,

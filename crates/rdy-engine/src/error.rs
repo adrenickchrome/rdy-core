@@ -886,6 +886,11 @@ impl From<StoreError> for RdyError {
                 format!("store feature {feature} permits reads only"),
                 format!("open the project with rdy {required_rdy} or later to write"),
             ),
+            StoreError::PortSource => RdyError::new(
+                E_STORE_READ_ONLY,
+                crate::views::port::PORT_SOURCE_WRITE_MESSAGE,
+                crate::views::port::PORT_SOURCE_WRITE_FIX,
+            ),
             StoreError::ReadOnlyNoLock => RdyError::new(
                 E_STORE_READ_ONLY,
                 "the read-only store has no lock file",

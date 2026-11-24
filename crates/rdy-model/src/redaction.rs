@@ -185,6 +185,30 @@ pub enum RedactionResidue {
     Change(ChangeResidue),
 }
 
+impl RedactionResidue {
+    /// The encoding a new residue is written in, chosen by its value: the residue of a port
+    /// takes [`crate::encoding::RESIDUE_PORT_ENCODING`]; every other residue keeps
+    /// [`crate::encoding::RESIDUE_ENCODING`].
+    pub fn encoding(&self) -> u16 {
+        match self {
+            RedactionResidue::Change(c) if c.links.ported_from.is_some() => {
+                crate::encoding::RESIDUE_PORT_ENCODING
+            }
+            _ => crate::encoding::RESIDUE_ENCODING,
+        }
+    }
+
+    /// Encodes this residue's body, in the encoding it chooses ([`RedactionResidue::encoding`]),
+    /// into the caller's bounded `buf`. A body that does not fit is postcard's
+    /// `SerializeBufferFull`.
+    pub fn body_into<'b>(&self, buf: &'b mut [u8]) -> Result<&'b mut [u8], postcard::Error> {
+        match crate::encoding::PortResidueV2::of(self) {
+            Some(port) => encode_into(&port, buf),
+            None => encode_into(self, buf),
+        }
+    }
+}
+
 /// The closed structural facts of a removed block version: no title, key, field, body, link or
 /// pin.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,7 +268,7 @@ pub struct ChangeResidue {
     pub message: String,
     #[serde(with = "hex::links")]
     pub links: ChangeLinks,
-    /// The encoding of the removed CHANGE frame (0 or 1), not the residue's own encoding.
+    /// The encoding of the removed CHANGE frame (0 to 4), not the residue's own encoding.
     pub source_encoding: u16,
 }
 
@@ -664,10 +688,12 @@ mod hex {
     }
 
     /// A change's links: the intent and alternative-set hashes as hex in a human-readable
-    /// format; `ChangeLinks`'s own serializer, unchanged, otherwise (postcard).
+    /// format, and `ported_from` only when present. Postcard writes the frozen six fields of
+    /// residue encoding 1, and refuses a port's links: a port's residue is encoding 2
+    /// (`crate::encoding::PortResidueV2`), which writes its source after the whole body.
     pub mod links {
         use super::*;
-        use crate::{ActorRun, AltChoice, ChangeLinks};
+        use crate::{ActorRun, AltChoice, ChangeLinks, PortedFrom};
 
         /// `ChangeLinks`'s fields, in its order, with hex hashes.
         #[derive(Serialize)]
@@ -682,6 +708,9 @@ mod hex {
             replayed_from: Option<Hash>,
             #[serde(with = "super::opt")]
             briefing: Option<Hash>,
+            // absent on every residue but a port's, so old JSON keeps its text
+            #[serde(skip_serializing_if = "Option::is_none")]
+            ported_from: Option<&'a PortedFrom>,
         }
 
         #[derive(Serialize)]
@@ -706,6 +735,8 @@ mod hex {
             replayed_from: Option<Hash>,
             #[serde(default, with = "super::opt")]
             briefing: Option<Hash>,
+            #[serde(default)]
+            ported_from: Option<PortedFrom>,
         }
 
         #[derive(Deserialize)]
@@ -728,10 +759,16 @@ mod hex {
                     imported_by: &l.imported_by,
                     replayed_from: l.replayed_from,
                     briefing: l.briefing,
+                    ported_from: l.ported_from.as_ref(),
                 }
                 .serialize(s)
             } else {
-                l.serialize(s)
+                match crate::encoding::ChangeLinksV1::from_current(l) {
+                    Some(v1) => v1.serialize(s),
+                    None => Err(serde::ser::Error::custom(
+                        "a port's residue has no encoding-1 form",
+                    )),
+                }
             }
         }
 
@@ -748,6 +785,7 @@ mod hex {
                     imported_by: l.imported_by,
                     replayed_from: l.replayed_from,
                     briefing: l.briefing,
+                    ported_from: l.ported_from,
                 })
             } else {
                 ChangeLinks::deserialize(d)

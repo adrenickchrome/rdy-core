@@ -492,7 +492,10 @@ struct FirstUse {
 /// `store/hub-canon-1`, whose own tests are `scc1_` in the store area. `sync_state` (D-3RSCW,
 /// Sync client A Task 2), a project's first `meta/sync/` ref activates it: the format-4 sync
 /// pairs `sync4-canon-history` and `sync4-view-history`, whose fetch activates it in the
-/// receiver; their own tests are `scc2_` in the store area.
+/// receiver; their own tests are `scc2_` in the store area. `ported_change` (D-RHYNQ, D-PKC71,
+/// hub ports Task 5), the first port or the residue of one activates it: the dump pair
+/// `v4-f1-e1-ported-change` and the native store `store/ported-change-1`, whose own tests are
+/// `hpt5_` in the release area.
 const FIRST_USE: &[FirstUse] = &[
     FirstUse {
         name: "foreign_copy",
@@ -565,6 +568,22 @@ const FIRST_USE: &[FirstUse] = &[
         ],
         sync: &[],
         native: Some("fixtures/store/hub-canon-1/expect.json"),
+        baseline: false,
+    },
+    FirstUse {
+        name: "ported_change",
+        dump: &[
+            (
+                "v4-f1-e1-ported-change.rdydump",
+                "4dc15e868554e8d8b6dc486cacbdcd8865493576f9f25bc433b1e543a3513b7e",
+            ),
+            (
+                "v4-f1-e1-ported-change.expect.json",
+                "c292102672ba4c9ed2417b26dcef23a0677863da15e170e26352163d3f22cc54",
+            ),
+        ],
+        sync: &[],
+        native: Some("fixtures/store/ported-change-1/expect.json"),
         baseline: false,
     },
     FirstUse {
