@@ -601,7 +601,7 @@ fn cp8_answers_are_atomic_and_do_not_write_blocks() {
         e,
         E_BAD_INPUT,
         "done does not answer a confirm item",
-        "read the plan and use an act the item accepts",
+        "confirm items take: confirm or defer",
     );
     let st = r.read();
     assert_eq!(
@@ -992,7 +992,7 @@ fn cp8_plan_act_matrix_and_duplicate_aliases_are_exact() {
                     got.unwrap_err(),
                     E_BAD_INPUT,
                     &format!("{} does not answer a {} item", act.as_str(), kind.as_str()),
-                    "read the plan and use an act the item accepts",
+                    &rdy_engine::plan::api::act_fix(kind),
                 );
             }
         }
@@ -1824,7 +1824,7 @@ fn cp8_input_limits_have_exact_text() {
             .unwrap_err(),
         E_BAD_INPUT,
         "confirm does not answer a update item",
-        "read the plan and use an act the item accepts",
+        "update items take: defer. An update item also closes when you edit its block's content; a repin does not close it",
     );
     assert_eq!(plan_ref(&r, "w"), bound, "nothing refused was written");
     // the bounds hold exactly: 2000 characters (not bytes) are a reason

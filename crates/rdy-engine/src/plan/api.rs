@@ -396,6 +396,26 @@ fn bad(message: &str, fix: &str) -> RdyError {
     RdyError::new(E_BAD_INPUT, message, fix)
 }
 
+/// The acts each item kind takes, in one line, for the fix of a group answer.
+pub const ACTS_BY_KIND: &str = "update, rejustify and reaffirm items take defer; confirm items take confirm or defer; update_implementation items take done or defer; tension items take confirm or dismiss";
+
+/// The fix of an answer whose act its item's kind does not take: the acts the kind takes, and
+/// how an item of that kind closes without an answer.
+pub fn act_fix(kind: PlanKind) -> String {
+    let acts: Vec<&str> = allowed_acts(kind).iter().map(|a| a.as_str()).collect();
+    let how = match kind {
+        PlanKind::Update => {
+            ". An update item also closes when you edit its block's content; a repin does not close it"
+        }
+        PlanKind::Rejustify => {
+            ". A rejustify item also closes when the block no longer links to or references the cause"
+        }
+        PlanKind::Reaffirm => ". A reaffirm item also closes with an rdy_write reaffirm op",
+        _ => "",
+    };
+    format!("{} items take: {}{how}", kind.as_str(), acts.join(" or "))
+}
+
 /// The refusal of more than `MAX_PLAN_ANSWERS` answers, in one request or in one plan.
 fn answers_limit() -> RdyError {
     RdyError::new(
@@ -1150,14 +1170,14 @@ pub(crate) fn prepare_plan_answers(
             return Err(RdyError::new(
                 E_PLAN_ITEM,
                 "dismiss answers a tension item only",
-                "answer it with confirm, defer or done",
+                act_fix(c.kind),
             ));
         }
         if input.act == PlanAct::Defer && c.kind == PlanKind::Tension {
             return Err(RdyError::new(
                 E_PLAN_ITEM,
                 "defer does not answer a tension item",
-                "answer it with confirm or dismiss, with a reason",
+                format!("{}, with a reason", act_fix(c.kind)),
             ));
         }
         if !allowed_acts(c.kind).contains(&input.act) {
@@ -1167,7 +1187,7 @@ pub(crate) fn prepare_plan_answers(
                     input.act.as_str(),
                     c.kind.as_str()
                 ),
-                "read the plan and use an act the item accepts",
+                &act_fix(c.kind),
             ));
         }
         let reason = match input.act {
@@ -1362,7 +1382,9 @@ impl Rdy {
                                     .collect::<Vec<_>>()
                                     .join(", ")
                             ),
-                            "narrow the group, or answer those items one by one",
+                            format!(
+                                "narrow the group, or answer those items one by one ({ACTS_BY_KIND})"
+                            ),
                         ));
                     }
                     if s.repin {
