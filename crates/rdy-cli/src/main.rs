@@ -230,7 +230,9 @@ enum Cmd {
     Reindex,
     Fsck(project_cmd::FsckArgs),
     // the about is given in full: a doc comment would lose its closing period
-    #[command(about = "Free disk space used by removed payloads. The chat path is rdy_compact.")]
+    #[command(
+        about = "Free disk space used by removed payloads and repeated byte runs. The chat path is rdy_compact."
+    )]
     Compact(compact_cmd::CompactArgs),
     // the about is given in full: a doc comment would lose its closing period
     #[command(about = "Inspect or upgrade this project's store.")]

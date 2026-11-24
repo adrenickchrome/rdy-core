@@ -717,3 +717,44 @@ fn ok12_format_facts_are_shared_with_core() {
     assert_eq!(adapter, core);
     assert_eq!(adapter.steps, ["add_test"]);
 }
+
+/// A project and a holder written as the rdy before span maps did (no `dedup_spans`) open for
+/// the adapter as they are: the span step is optional, so no backup, no span map and no batch.
+#[test]
+fn r5902_old_stores_open_for_readers_unmapped() {
+    let base = tempfile::tempdir().unwrap();
+    let p = base.path().join("p");
+    let h = base.path().join("h");
+    {
+        let _legacy = rdy_store::format::legacy_writer_for_tests();
+        project(&p);
+        StoreHandle::create_holder(&h, RepoId([7; 16]))
+            .unwrap()
+            .close()
+            .unwrap();
+    }
+    for root in [&p, &h] {
+        assert!(
+            !features_of(root).has(rdy_store::format::FEATURE_DEDUP_SPANS),
+            "{}",
+            root.display()
+        );
+    }
+    let before = (segments(&p), segments(&h));
+    StoreHandle::open(&p).unwrap().close().unwrap();
+    StoreHandle::open_holder(&h).unwrap().close().unwrap();
+    for root in [&p, &h] {
+        assert!(
+            !store_dir(root)
+                .join(rdy_store::dedup::SPANMAP_FILE)
+                .exists()
+        );
+        assert!(backups(root).is_empty());
+        assert_eq!(upgrade_batches(root), 0);
+    }
+    assert_eq!(
+        (segments(&p), segments(&h)),
+        before,
+        "no byte of either log changes"
+    );
+}

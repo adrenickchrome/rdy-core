@@ -13,6 +13,7 @@ mod redaction_fixture;
 mod compact;
 mod coord;
 mod crash;
+mod dedup_spans;
 mod follower_guard;
 mod follower_ingest;
 mod import_seal;

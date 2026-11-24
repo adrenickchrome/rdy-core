@@ -1207,7 +1207,10 @@ fn sdl7_streamed_legacy_fixture_upgrades_to_the_recipe_deltas() {
     }
     let report = rdy_engine::maintenance::run(&root, false).unwrap();
     assert!(report.changed && report.checked);
-    assert_eq!(report.steps, ["snapshot_delta".to_string()]);
+    assert_eq!(
+        report.steps,
+        ["snapshot_delta".to_string(), "dedup-spans-1".to_string()]
+    );
     assert!(report.batch.is_some() && report.backup.is_some());
     let r = Rdy::open(&root).unwrap();
     let s = r.store();

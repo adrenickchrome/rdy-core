@@ -909,6 +909,16 @@ impl From<StoreError> for RdyError {
                 "the follower mark check exceeds 100000000 frames",
                 "report this as a bug in rdy",
             ),
+            StoreError::DedupCorrupt => RdyError::new(
+                E_IO,
+                "the store span map is damaged",
+                "restore the store and its span map from the same backup",
+            ),
+            StoreError::DedupLimit => RdyError::new(
+                E_LIMIT,
+                "the store span map exceeds its limits",
+                "report this as a bug in rdy",
+            ),
             StoreError::UpgradeRequired => RdyError::new(
                 E_STORE_FORMAT,
                 "the store needs an upgrade before it can open",

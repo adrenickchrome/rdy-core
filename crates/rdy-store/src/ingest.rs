@@ -747,10 +747,16 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
         let from = match from {
             DumpStore::Features(m) => {
                 self.keep_manifest(m)?;
-                let Some(features) = self.conversion(m)? else {
+                let Some((features, converts)) = self.conversion(m)? else {
                     return Ok(false);
                 };
-                let deltas = self.tail_deltas()?;
+                // a manifest that needs only dedup_spans writes its one manifest tail, with no
+                // snapshot object; the load maps nothing
+                let deltas = if converts {
+                    self.tail_deltas()?
+                } else {
+                    vec![]
+                };
                 self.append_tail(
                     deltas,
                     vec![(format::REF_STORE_FEATURES, features.to_json())],
@@ -770,8 +776,10 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
         let mut features = format::legacy_baseline_features().merged(&self.used);
         // and the snapshot deltas in the same one tail batch, when this rdy converts them
         let mut deltas = vec![];
-        if let Some(converted) = self.conversion(&features)? {
-            deltas = self.tail_deltas()?;
+        if let Some((converted, converts)) = self.conversion(&features)? {
+            if converts {
+                deltas = self.tail_deltas()?;
+            }
             features = converted;
         }
         let mut refs = vec![(format::REF_STORE_FEATURES, features.to_json())];
@@ -789,15 +797,18 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
     /// The manifest the snapshot-delta step makes from `from`, when this ingest converts and the
     /// step applies (`crate::upgrade::delta_conversion`); the merged manifest keeps the bounds
     /// this rdy writes.
-    fn conversion(&self, from: &StoreFeatures) -> Result<Option<StoreFeatures>, StoreError> {
+    fn conversion(
+        &self,
+        from: &StoreFeatures,
+    ) -> Result<Option<(StoreFeatures, bool)>, StoreError> {
         if self.history.is_none() {
             return Ok(None);
         }
-        let Some(to) = crate::upgrade::delta_conversion(from)? else {
+        let Some((to, deltas)) = crate::upgrade::delta_conversion(from)? else {
             return Ok(None);
         };
         format::check_writable(&to)?;
-        Ok(Some(to))
+        Ok(Some((to, deltas)))
     }
 
     /// The deltas of the ingested history ([`crate::snapshot_upgrade::LoadHistory::deltas`]).

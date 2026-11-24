@@ -997,6 +997,7 @@ fn store_row() -> Value {
             "assessment": "an ASSESSMENT, or a LANDING whose assessment is set",
             "check_request": "a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or Fail, or an ANSWER with act AcceptVerdict",
             "content_hash_v2": "baseline: every store this rdy writes",
+            "dedup_spans": "baseline: every store this rdy creates; an older store at its upgrade, load or take",
             "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
             "figure_dark": "a figure BLOCK whose dark_blob is set, alone or in a CHANGE's create or update",
             "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
@@ -10577,7 +10578,12 @@ fn sdl7_contract_changes_only_delta_surfaces() {
     sorted.sort();
     assert_eq!(
         sorted,
-        ["content_hash_v2", "object_encoding", "snapshot_delta"]
+        [
+            "content_hash_v2",
+            "dedup_spans",
+            "object_encoding",
+            "snapshot_delta"
+        ]
     );
     let t = tempfile::tempdir().unwrap();
     let fresh = t.path().join("fresh");

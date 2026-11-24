@@ -929,7 +929,8 @@ pub(crate) fn read_record(
     if k != kind || h != *hash {
         return Ok(None);
     }
-    let payload = read_payload(f, loc.offset + HEADER, len)?;
+    let mut payload = read_payload(f, loc.offset + HEADER, len)?;
+    crate::dedup::overlay_raw(readers, loc, &mut payload)?;
     Ok((Hash::of(&payload) == *hash).then_some(payload))
 }
 
@@ -1091,7 +1092,9 @@ impl FrameLog for LogAccess<'_> {
     }
 
     fn payload(&mut self, loc: Location, len: u32) -> Result<Vec<u8>, StoreError> {
-        read_payload(self.file(loc)?, loc.offset + HEADER, len)
+        let mut p = read_payload(self.file(loc)?, loc.offset + HEADER, len)?;
+        crate::dedup::overlay_raw(self.readers, loc, &mut p)?;
+        Ok(p)
     }
 
     fn payload_is_zero(&mut self, loc: Location, len: u32) -> Result<bool, StoreError> {
@@ -1424,7 +1427,8 @@ pub(crate) struct Seen<'a> {
 /// Where a frame's payload is: in a segment file, in a batch not yet written, or behind a reader
 /// of another source (a dump chain's frame, or its dropped frame's zeros).
 enum Source<'a> {
-    File(&'a File),
+    /// A segment file of the log `readers`, whose span map a read of it overlays.
+    File(&'a File, &'a [File]),
     Memory(&'a [u8]),
     Read(&'a dyn Fn() -> Result<Vec<u8>, StoreError>),
 }
@@ -1463,7 +1467,11 @@ impl Seen<'_> {
     /// The frame's payload, read through a fallibly allocated buffer.
     fn payload(&self) -> Result<Vec<u8>, StoreError> {
         match self.source {
-            Source::File(f) => read_payload(f, self.loc.offset + HEADER, self.len),
+            Source::File(f, readers) => {
+                let mut p = read_payload(f, self.loc.offset + HEADER, self.len)?;
+                crate::dedup::overlay_raw(readers, self.loc, &mut p)?;
+                Ok(p)
+            }
             Source::Memory(p) => Ok(p.to_vec()),
             Source::Read(read) => read(),
         }
@@ -1518,7 +1526,7 @@ pub(crate) fn for_each_seen(
                 kind,
                 hash,
                 len,
-                source: Source::File(file),
+                source: Source::File(file, readers),
             })?;
             offset = end;
         }

@@ -373,6 +373,7 @@
                 "removed_bytes": "number"
               }
             ],
+            "deduplicated_bytes": "number",
             "log_bytes": "number",
             "notes": [],
             "on_disk_bytes": "number",
@@ -559,6 +560,7 @@
                 "removed_bytes": "number"
               }
             ],
+            "deduplicated_bytes": "number",
             "frames": "number",
             "intents": "number",
             "landed_changes": "number",
@@ -3429,6 +3431,7 @@
               "similar_kinds": []
             },
             "daemon": "null",
+            "deduplicated_bytes": "number",
             "landings": "number",
             "log_bytes": "number",
             "open_report": {
@@ -22320,6 +22323,7 @@
               "removed_bytes": "number"
             }
           ],
+          "deduplicated_bytes": "number",
           "log_bytes": "number",
           "notes": [],
           "on_disk_bytes": "number",
@@ -33088,6 +33092,11 @@
         },
         {
           "class": "incompatible",
+          "name": "dedup_spans",
+          "required_rdy": "0.59.0"
+        },
+        {
+          "class": "incompatible",
           "name": "object_encoding",
           "required_rdy": "0.26.0"
         },
@@ -33099,7 +33108,7 @@
       ],
       "manifest_version": 1
     },
-    "creation_baseline_text": "rdy store features 1\n{\"manifest_version\":1,\"features\":[{\"name\":\"content_hash_v2\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},{\"name\":\"object_encoding\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},{\"name\":\"snapshot_delta\",\"class\":\"incompatible\",\"required_rdy\":\"0.52.0\"}]}\n",
+    "creation_baseline_text": "rdy store features 1\n{\"manifest_version\":1,\"features\":[{\"name\":\"content_hash_v2\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},{\"name\":\"dedup_spans\",\"class\":\"incompatible\",\"required_rdy\":\"0.59.0\"},{\"name\":\"object_encoding\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},{\"name\":\"snapshot_delta\",\"class\":\"incompatible\",\"required_rdy\":\"0.52.0\"}]}\n",
     "current_frame_kinds": [
       1,
       2,
@@ -33279,6 +33288,7 @@
       "assessment": "an ASSESSMENT, or a LANDING whose assessment is set",
       "check_request": "a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or Fail, or an ANSWER with act AcceptVerdict",
       "content_hash_v2": "baseline: every store this rdy writes",
+      "dedup_spans": "baseline: every store this rdy creates; an older store at its upgrade, load or take",
       "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
       "figure_dark": "a figure BLOCK whose dark_blob is set, alone or in a CHANGE's create or update",
       "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
@@ -33305,6 +33315,11 @@
         "class": "incompatible",
         "name": "content_hash_v2",
         "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "dedup_spans",
+        "required_rdy": "0.59.0"
       },
       {
         "class": "incompatible",
@@ -33718,6 +33733,7 @@
       "assessment",
       "check_request",
       "content_hash_v2",
+      "dedup_spans",
       "dispute",
       "figure_dark",
       "foreign_copy",

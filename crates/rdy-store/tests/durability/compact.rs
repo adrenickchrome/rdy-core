@@ -314,8 +314,8 @@ fn mh4_byte_counts_include_every_kind_and_physical_copy() {
     let whole = serde_json::to_value(&report).unwrap();
     assert_eq!(
         whole.as_object().unwrap().keys().len(),
-        3,
-        "a byte report has log_bytes, removed_bytes and by_kind"
+        4,
+        "a byte report has log_bytes, removed_bytes, deduplicated_bytes and by_kind"
     );
     assert!(whole.get("notes").is_none());
 }

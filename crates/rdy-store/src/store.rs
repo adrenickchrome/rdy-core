@@ -23,7 +23,7 @@ use std::fs::{File, OpenOptions};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// The file a store creates when it opens and removes on a clean close. Finding it at open means the
@@ -220,6 +220,9 @@ pub struct Store {
     /// Held batches are on (plan M2e2, D-Z0EMP): a `write` appends and indexes its frames but
     /// writes no marker and makes no sync, and `seal` ends the batch. Off after open.
     held: bool,
+    /// While set, a sealed write runs no threshold span-mapping pass: a project seed and the
+    /// receiving operations that write through the ordinary path map nothing (D-1ER84).
+    no_map_pass: bool,
     /// The held batch not yet sealed, if any.
     open: Option<OpenBatch>,
     /// Set by a failed seal: the index holds entries of frames the log no longer holds, so no
@@ -1997,7 +2000,22 @@ impl Store {
         // the boundary, because it lags the log.
         // two passes: the redaction bootstrap validates every apply from the log's own frames,
         // then the marker rule's scan hashes every payload but the authorized holes
-        let (log, quarantined) = SegmentLog::open_authorized(&segments, SEGMENT_MAX, acked)?;
+        // the span map is read first (D-1ER84): the marker rule's scan hashes mapped payloads
+        // through it. A follower reads it as a reader: it never writes or cuts the map.
+        let map_mode = if matches!(access, Access::ReadWrite) {
+            crate::dedup::MapOpen::Writable
+        } else {
+            crate::dedup::MapOpen::ReadOnly
+        };
+        let spans = Arc::new(RwLock::new(crate::dedup::SpanMap::load(dir, map_mode)?));
+        let (log, mut quarantined) =
+            SegmentLog::open_authorized(&segments, SEGMENT_MAX, acked, Arc::clone(&spans))?;
+        let map_torn = {
+            let map = spans.read().unwrap_or_else(|e| e.into_inner());
+            map.check_sealed(log.end())?;
+            quarantined.extend(map.quarantined().map(Path::to_path_buf));
+            map.torn()
+        };
         // the mode comes from the log's first batch, before any other ref is judged
         let creation = read_creation(&log)?;
         if let Some(n) = holder
@@ -2007,7 +2025,7 @@ impl Store {
         }
         let report = OpenReport {
             quarantined,
-            unclean_shutdown: unclean,
+            unclean_shutdown: unclean || map_torn,
             redb_repaired,
             index_rebuilt,
             ..OpenReport::default()
@@ -2016,7 +2034,7 @@ impl Store {
             index: Arc::new(index),
             shared: Arc::new(ReaderShared {
                 dir: dir.to_path_buf(),
-                segments: SegmentReader::open(&segments),
+                segments: SegmentReader::open_with(&segments, Arc::clone(&spans)),
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
@@ -2053,6 +2071,7 @@ impl Store {
             last_batch: vec![],
             last_batch_end: ORIGIN,
             held: false,
+            no_map_pass: false,
             open: None,
             stale_index: false,
             creation,
@@ -2202,7 +2221,17 @@ impl Store {
         // the writable open's floor, read from a private copy of the source index: damage
         // before it is acknowledged data, refused as the writable open refuses it
         let floor = read_only_floor(dir, unclean, private.path())?;
-        let (log, tail) = SegmentLog::open_read_only(&segments, SEGMENT_MAX, dir, floor)?;
+        let spans = Arc::new(RwLock::new(crate::dedup::SpanMap::load(
+            dir,
+            crate::dedup::MapOpen::ReadOnly,
+        )?));
+        let (log, tail) =
+            SegmentLog::open_read_only(&segments, SEGMENT_MAX, dir, floor, Arc::clone(&spans))?;
+        let tail = {
+            let map = spans.read().unwrap_or_else(|e| e.into_inner());
+            map.check_sealed(log.end())?;
+            tail || map.torn()
+        };
         let creation = read_creation(&log)?;
         let index = Index::open(&private.path().join("index.redb"))?;
         replay_into(&log, &index, ORIGIN, None, RefRules::new(creation))?;
@@ -2210,7 +2239,7 @@ impl Store {
             index: Arc::new(index),
             shared: Arc::new(ReaderShared {
                 dir: dir.to_path_buf(),
-                segments: SegmentReader::open(&segments),
+                segments: SegmentReader::open_with(&segments, Arc::clone(&spans)),
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
@@ -2255,6 +2284,7 @@ impl Store {
             last_batch: vec![],
             last_batch_end: ORIGIN,
             held: false,
+            no_map_pass: false,
             open: None,
             stale_index: false,
             creation,
@@ -2506,6 +2536,15 @@ impl Store {
                     mode: holder.map_or(StoreMode::Project, |h| h.mode),
                     end: self.log.end(),
                 };
+                // a store that maps spans has its empty span map from creation (D-1ER84)
+                if features.has(format::FEATURE_DEDUP_SPANS) {
+                    match crate::dedup::SpanMap::create(&self.dir) {
+                        Ok(()) => {}
+                        Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
                 self.features = features;
                 // a new store is durable from its first open
                 self.checkpoint()?;
@@ -2708,6 +2747,14 @@ impl Store {
     }
 
     /// The log itself, for the byte report of `crate::compact`.
+    /// Runs `f` with threshold span-mapping passes off on this handle (a receiving operation).
+    pub(crate) fn without_map_pass<T>(&mut self, f: impl FnOnce(&mut Store) -> T) -> T {
+        let was = std::mem::replace(&mut self.no_map_pass, true);
+        let out = f(self);
+        self.no_map_pass = was;
+        out
+    }
+
     pub(crate) fn segment_log(&self) -> &SegmentLog {
         &self.log
     }
@@ -2775,6 +2822,11 @@ impl Store {
                     self.features = f;
                 }
                 self.held_features = None;
+                // D-1ER84: a sealed ordinary write past the unmapped-byte threshold maps once
+                // its batch is durable; the pass never changes this seal's reply
+                if !self.no_map_pass {
+                    self.threshold_pass();
+                }
                 Ok(())
             }
             Err(e) => {
@@ -3337,12 +3389,17 @@ impl Store {
         }
         if result.is_ok() {
             self.writes += 1;
+            // D-1ER84: an ordinary sealed write past the unmapped-byte threshold maps once its
+            // batch is durable; the pass never changes this write's reply
             if let Some(f) = activated {
                 if self.held && self.open.is_some() {
                     self.held_features = Some(f);
                 } else {
                     self.features = f;
                 }
+            }
+            if how == RefWrite::Public && !self.held && !self.no_map_pass {
+                self.threshold_pass();
             }
         }
         if result.is_err() && how == RefWrite::Upgrade && self.synced_unindexed {
@@ -5252,7 +5309,7 @@ impl Store {
         }
         match self.finish(true) {
             Ok(_) => Ok(()),
-            Err(e @ StoreError::RedactionCorrupt { .. }) => Err(e),
+            Err(e @ (StoreError::RedactionCorrupt { .. } | StoreError::DedupCorrupt)) => Err(e),
             Err(_) => Err(StoreError::RedactionPending),
         }
     }
@@ -5278,7 +5335,7 @@ impl Store {
         }
         match self.finish(false) {
             Ok(c) => Ok(c),
-            Err(e @ StoreError::RedactionCorrupt { .. }) => Err(e),
+            Err(e @ (StoreError::RedactionCorrupt { .. } | StoreError::DedupCorrupt)) => Err(e),
             Err(_) => Err(self.pending_failure()),
         }
     }
@@ -5293,6 +5350,21 @@ impl Store {
     /// `finish`, and whether it erased anything (and so rebuilt the index).
     fn finish_erasing(&mut self, at_open: bool) -> Result<(RedactionCounts, bool), StoreError> {
         let auth = Arc::clone(self.log.authorization());
+        // D-1ER84: every mapped copy of a removed source is a target the same authority removes
+        // (a block's mapped change embeds that exact version); anything else is map damage,
+        // refused before a byte is erased, so no mapped copy can bring the text back
+        {
+            let map = self.log.spans().read().unwrap_or_else(|e| e.into_inner());
+            for loc in auth.holes.keys() {
+                if map
+                    .dependents_of(loc)
+                    .iter()
+                    .any(|t| !auth.holes.contains_key(t))
+                {
+                    return Err(StoreError::DedupCorrupt);
+                }
+            }
+        }
         let mut counts = auth.counts();
         let mut affected: BTreeSet<u32> = BTreeSet::new();
         for (loc, hole) in &auth.holes {

@@ -72,6 +72,9 @@ pub enum StepAction {
     /// One SNAPSHOT_DELTA for each held landing that has none (`crate::snapshot_upgrade`). A
     /// load and a take into a holder that holds the feature run the same action.
     SnapshotDelta,
+    /// No object: once the batch is sealed and checked, the span-mapping pass runs through the
+    /// receipt's source end before `FORMAT` is published (`crate::dedup`).
+    DedupSpans,
 }
 
 /// One registered upgrade step: it applies to a manifest that holds every feature of `from`
@@ -264,6 +267,26 @@ pub fn snapshot_delta_step() -> UpgradeStep {
     }
 }
 
+/// The id of the span-mapping step.
+pub const DEDUP_SPANS_STEP: &str = "dedup-spans-1";
+
+/// The span-mapping step: from a manifest with `snapshot_delta` (so it runs after
+/// [`snapshot_delta_step`]), it merges `dedup_spans` in and keeps every other feature. Its batch
+/// holds the manifest and receipt alone; the mapping pass through the receipt's source end runs
+/// after the batch is checked and before `FORMAT` is published. Readers do not require it.
+pub fn dedup_spans_step() -> UpgradeStep {
+    UpgradeStep {
+        id: DEDUP_SPANS_STEP.into(),
+        from: StoreFeatures::of(vec![format::registered(format::FEATURE_SNAPSHOT_DELTA)]),
+        to: StoreFeatures::of(vec![
+            format::registered(format::FEATURE_SNAPSHOT_DELTA),
+            format::registered(format::FEATURE_DEDUP_SPANS),
+        ]),
+        action: StepAction::DedupSpans,
+        required: false,
+    }
+}
+
 /// What [`inspect`] found: the authoritative manifest (`from`), the manifest the planned steps
 /// make (`to`), the step ids in execution order, the bytes a backup copies, and the last upgrade
 /// receipt. `pending_check` is true when that receipt explains a sealed manifest whose `FORMAT`
@@ -299,9 +322,28 @@ pub struct UpgradeReport {
 }
 
 /// This rdy's upgrade steps, in execution order: the snapshot-delta step
-/// ([`snapshot_delta_step`]).
+/// ([`snapshot_delta_step`]), then the span-mapping step ([`dedup_spans_step`]).
 fn registered_steps() -> Vec<UpgradeStep> {
-    vec![snapshot_delta_step()]
+    vec![snapshot_delta_step(), dedup_spans_step()]
+}
+
+/// Whether a test's own registry is active on this thread and has no span-mapping step: a new
+/// store then starts without `dedup_spans`, as the rdy before it did.
+pub(crate) fn registry_lacks_dedup_spans() -> bool {
+    OVERRIDE.with(|o| {
+        o.borrow()
+            .as_ref()
+            .is_some_and(|r| !r.iter().any(|s| s.action == StepAction::DedupSpans))
+    })
+}
+
+/// Whether the steps `ids` of `registry` include the span-mapping step.
+fn maps_spans(registry: &[UpgradeStep], ids: &[String]) -> bool {
+    ids.iter().any(|id| {
+        registry
+            .iter()
+            .any(|s| &s.id == id && s.action == StepAction::DedupSpans)
+    })
 }
 
 thread_local! {
@@ -365,15 +407,24 @@ pub(crate) fn current_without_walk(dir: &Path, writer: bool) -> bool {
 }
 
 /// The manifest a load or a take that runs the object-producing steps makes from `from`, when
-/// one of this rdy's steps with [`StepAction::SnapshotDelta`] applies to it: the load's one tail
-/// batch then holds that action's objects with the manifest. None when no such step applies.
-pub(crate) fn delta_conversion(from: &StoreFeatures) -> Result<Option<StoreFeatures>, StoreError> {
+/// one of this rdy's steps with [`StepAction::SnapshotDelta`] or [`StepAction::DedupSpans`]
+/// applies to it: the load's one tail batch then holds that action's objects with the manifest.
+/// The flag says whether the snapshot-delta step is among them (only it adds objects); the
+/// span step maps nothing at a load. None when no such step applies.
+pub(crate) fn delta_conversion(
+    from: &StoreFeatures,
+) -> Result<Option<(StoreFeatures, bool)>, StoreError> {
     let steps: Vec<UpgradeStep> = registry()
         .into_iter()
-        .filter(|s| s.action == StepAction::SnapshotDelta)
+        .filter(|s| matches!(s.action, StepAction::SnapshotDelta | StepAction::DedupSpans))
         .collect();
     let p = plan_steps(from, &steps)?;
-    Ok((!p.ids.is_empty()).then_some(p.to))
+    let deltas = p.ids.iter().any(|id| {
+        steps
+            .iter()
+            .any(|s| &s.id == id && s.action == StepAction::SnapshotDelta)
+    });
+    Ok((!p.ids.is_empty()).then_some((p.to, deltas)))
 }
 
 /// Whether this rdy registers a step with [`StepAction::SnapshotDelta`] on this thread.
@@ -507,6 +558,11 @@ pub fn publish_checked(store: &mut Store) -> Result<(), StoreError> {
     else {
         return Err(moved(None));
     };
+    // a span-mapping step that a crash interrupted resumes from the map's progress; FORMAT is
+    // published last
+    if receipt.steps.iter().any(|s| s == DEDUP_SPANS_STEP) {
+        store.upgrade_map_pass(receipt.source_end)?;
+    }
     format::write_format_file(&dir, &log)?;
     // D-CRXNA: the upgrade is verified and nothing is pending now; its backup stays until the
     // person deletes it, and every earlier one goes
@@ -820,7 +876,7 @@ fn plan_steps(from: &StoreFeatures, registry: &[UpgradeStep]) -> Result<Planned,
     }
     let mut ids = BTreeSet::new();
     for s in registry {
-        if !format::valid_feature_name(&s.id) || !ids.insert(s.id.as_str()) {
+        if !format::valid_step_id(&s.id) || !ids.insert(s.id.as_str()) {
             return Err(bad_registry(format!("step {:?} is not a valid id", s.id)));
         }
         for m in [&s.from, &s.to] {
@@ -988,6 +1044,12 @@ fn apply_with(
         return Err(failed(UpgradeFailure::CheckFailed, Some(&backup)));
     }
     hit(Phase::Checked)?;
+    // the span-mapping step maps the history through the source end only now: the backup is
+    // complete and the batch sealed and checked; a crash leaves the pending receipt, and the
+    // completion resumes from the map's progress before it publishes FORMAT
+    if maps_spans(registry, &now.steps) {
+        store.upgrade_map_pass(receipt.source_end)?;
+    }
     store.close()?;
     Ok(UpgradeReport {
         dry_run: false,
