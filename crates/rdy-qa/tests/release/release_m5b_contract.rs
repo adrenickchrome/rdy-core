@@ -31,13 +31,19 @@ const CURRENT_SHA: &str = "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d
 
 /// The successors of [`CURRENT`] before [`SELECTED`], in order, each frozen since its own
 /// successor, with the sha256 that its successor copied.
-const LATER: [(&str, &str); 1] = [(
-    "hub-forks-v1.json",
-    "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252",
-)];
+const LATER: [(&str, &str); 2] = [
+    (
+        "hub-forks-v1.json",
+        "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252",
+    ),
+    (
+        "hub-ports-v1.json",
+        "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab",
+    ),
+];
 
 /// The latest successor of [`CURRENT`], which every selector names now.
-const SELECTED: &str = "hub-ports-v1.json";
+const SELECTED: &str = "rdy-0590-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
