@@ -1922,8 +1922,9 @@ fn scc8_get_checks_purpose_root_and_sd1_delta_closure() {
 }
 
 /// D-H0BZN "Get" (final review F2): a fetch batch keeps within both of the hub's limits. The
-/// client cannot know a record's bytes before it fetches it, so a get whose reply passes
-/// `batch_bytes` is split in two and each half fetched in turn, down to one key; a history that
+/// client cannot know a record's bytes before it fetches it, so it sizes each get from the
+/// replies before it (TASK-3869), and a get whose reply still passes `batch_bytes` is split in
+/// two and each half fetched in turn, down to one key; a history that
 /// needs several byte-limited batches is fetched whole, canon and view alike (a URL clone fetches
 /// through the same step). Each half is checked as every batch is; one key past the limit is
 /// still refused (`scc8_get_checks_purpose_root_and_sd1_delta_closure`).
@@ -1983,6 +1984,9 @@ fn scc8_fetch_splits_batches_past_batch_bytes() {
     .unwrap();
     assert!(whole.len() > 8_192, "{}", whole.len());
 
+    // the sizer keeps these small records within the limit, so the first get of two or more
+    // keys is padded past it: the halving fallback must split that group
+    *fake.pad_get.lock().unwrap() = true;
     sync_env::Sync::new(&e, &fake)
         .pull(PullRequest {
             views: vec!["drafts".into()],
@@ -1990,13 +1994,35 @@ fn scc8_fetch_splits_batches_past_batch_bytes() {
         })
         .unwrap();
     let gets = fake.gets.lock().unwrap().clone();
+    let replies = fake.get_replies.lock().unwrap().clone();
+    assert_eq!(gets.len(), replies.len());
+    // the padded group's front half comes next, then its back half
+    let over = replies
+        .iter()
+        .position(|(made, _)| *made > 8_192)
+        .expect("a reply past batch_bytes");
+    let group = &gets[over].keys;
+    assert!(group.len() >= 2, "{group:?}");
+    let (front, back) = group.split_at(group.len() / 2);
+    assert_eq!(gets[over + 1].keys, front);
+    assert_eq!(gets[over + 2].keys, back);
+    assert_eq!(gets[over + 1].purpose, gets[over].purpose);
+    assert_eq!(gets[over + 2].purpose, gets[over].purpose);
+    assert!(replies[over + 1].0 <= 8_192 && replies[over + 2].0 <= 8_192);
     for (purpose, wanted) in [
         (StreamPurpose::CanonHistory, &canon_want),
         (StreamPurpose::ViewHistory, &view_want),
     ] {
         let mine: Vec<&GetRequest> = gets.iter().filter(|g| g.purpose == purpose).collect();
-        // the first get asks for every key within batch_records; the halves follow
-        assert_eq!(mine[0].keys, *wanted, "{purpose:?}");
+        // the gets whose replies kept within the limit ask for every wanted key once, in the
+        // hub's order (each group sized from the replies before it, TASK-3869)
+        let kept: Vec<ObjectKey> = gets
+            .iter()
+            .zip(&replies)
+            .filter(|(g, (made, _))| g.purpose == purpose && *made <= 8_192)
+            .flat_map(|(g, _)| g.keys.clone())
+            .collect();
+        assert_eq!(kept, *wanted, "{purpose:?}");
         let asked: BTreeSet<ObjectKey> = mine.iter().flat_map(|g| g.keys.clone()).collect();
         let wanted_set: BTreeSet<ObjectKey> = wanted.iter().copied().collect();
         assert_eq!(asked, wanted_set, "{purpose:?}");
@@ -2029,6 +2055,72 @@ fn scc8_fetch_splits_batches_past_batch_bytes() {
         .unwrap()
         .unwrap();
     assert_eq!(v.fetched, Some(drafts));
+}
+
+/// TASK-3869: a fetch whose history is several times `batch_bytes` sizes each get from the
+/// bytes per key its earlier replies measured, so no get passes the limit and no reply is read
+/// and dropped. Every get's reply is within `batch_bytes`, the client reads each one once, and the
+/// gets stay near the fewest the limit allows.
+#[test]
+fn fg1_fetch_sizes_gets_within_batch_bytes() {
+    const CAP: u64 = 32_768;
+    let e = fake_env(2);
+    let (_dir, hub_store) = sync_env::copy_project(&e);
+    let mut later = e.landings[1];
+    for i in 0..120 {
+        later = sync_env::land_in(&hub_store, &format!("fg1-later-{i}"));
+    }
+    let hub_read = hub_store.read();
+    let fake = sync_env::Hub::new();
+    fake.serve(hub_store.read());
+    {
+        let mut st = fake.state.lock().unwrap();
+        st.canon = Some(later);
+        st.batch_bytes = CAP;
+        st.batch_records = 100_000;
+    }
+    let mut whole = Vec::new();
+    rdy_engine::stream_export::write_history(
+        &hub_read,
+        StreamPurpose::CanonHistory,
+        later,
+        None,
+        &BTreeSet::new(),
+        &mut whole,
+    )
+    .unwrap();
+    let whole = whole.len() as u64;
+    assert!(whole > 4 * CAP, "{whole}");
+
+    sync_env::Sync::new(&e, &fake)
+        .pull(PullRequest::default())
+        .unwrap();
+    let replies = fake.get_replies.lock().unwrap().clone();
+    let gets = replies.len() as u64;
+    let refused = replies.iter().filter(|(made, _)| *made > CAP).count();
+    let made: u64 = replies.iter().map(|(m, _)| m).sum();
+    let read: u64 = replies.iter().map(|(_, r)| r).sum();
+    println!(
+        "FG1 gets={gets} refused={refused} produced={made} read={read} history={whole} cap={CAP}"
+    );
+    assert_eq!(refused, 0, "{replies:?}");
+    assert_eq!(made, read, "{replies:?}");
+    // no more gets than replies of a third of the limit would need, and two more
+    assert!(
+        gets <= whole.div_ceil(CAP / 3) + 2,
+        "{gets} gets: {replies:?}"
+    );
+    assert_eq!(
+        sync_env::canon_of(&e, "shared").unwrap().fetched,
+        Some(later)
+    );
+    assert!(
+        e.engine
+            .read()
+            .reader()
+            .has_kind(kinds::LANDING, &later)
+            .unwrap()
+    );
 }
 
 /// D-H0BZN "State": hub canon's tip reads from a landing's object key (Share on) and from a hex

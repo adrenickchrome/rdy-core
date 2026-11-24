@@ -1754,12 +1754,24 @@ impl<'a> SyncService<'a> {
         let per = usize::try_from(state.batch_records)
             .unwrap_or(MAX_KNOWN_KEYS)
             .clamp(1, MAX_KNOWN_KEYS);
-        // the groups to get, last first: each within batch_records; a group whose reply passes
-        // batch_bytes is split in two, its halves got in turn (a record's bytes are unknown
-        // before it is fetched), down to one key, which is refused
-        let mut groups: Vec<&[ObjectKey]> = want.chunks(per).rev().collect();
+        // the groups to get (TASK-3869): the known step gives no record's bytes, so each new
+        // group is sized from the bytes per kind that the replies so far held (`GroupSizer`),
+        // within batch_records. A group whose reply still passes batch_bytes is split in two and
+        // its halves got in turn (`split`, last first), down to one key, which is refused.
+        let mut sizer = GroupSizer::new(state.batch_bytes, per);
+        let mut split: Vec<&[ObjectKey]> = Vec::new();
+        let mut rest: &[ObjectKey] = &want;
         let mut files = Vec::new();
-        while let Some(keys) = groups.pop() {
+        loop {
+            let keys = match split.pop() {
+                Some(k) => k,
+                None if rest.is_empty() => break,
+                None => {
+                    let (k, r) = rest.split_at(sizer.next(rest));
+                    rest = r;
+                    k
+                }
+            };
             let mut file = tempfile::tempfile().map_err(|_| scratch_error())?;
             let cx = self.context(t, &read, Some(base_url))?;
             let request = GetRequest {
@@ -1778,20 +1790,26 @@ impl<'a> SyncService<'a> {
             let limit = state.batch_bytes.saturating_add(UPLOAD_BUFFER_BYTES as u64);
             let got = self.wire.get(&cx, &request, &mut sink, limit);
             let over = sink.over;
+            let written = sink.bytes;
             drop(cx);
             if over {
                 if keys.len() == 1 {
                     return Err(upstream_protocol());
                 }
                 let (front, back) = keys.split_at(keys.len() / 2);
-                groups.push(back);
-                groups.push(front);
+                split.push(back);
+                split.push(front);
                 continue;
             }
             got?;
             file.seek(SeekFrom::Start(0)).map_err(|_| scratch_error())?;
-            let report =
-                crate::stream_check::check_batch(BufReader::new(&mut file), Some(repo_id))?;
+            let mut records = Vec::new();
+            let report = crate::stream_check::check_batch_tally(
+                BufReader::new(&mut file),
+                Some(repo_id),
+                |kind, at, len| records.push((kind, at, len)),
+            )?;
+            sizer.taken(written, &records);
             if report.header.purpose != purpose || report.header.root() != root_key {
                 return Err(upstream_protocol());
             }
@@ -1810,6 +1828,95 @@ impl<'a> SyncService<'a> {
             crate::sync_fetch::fetch(rdy, &files, &target)
         })
         .map(Some)
+    }
+}
+
+/// The bytes that a fetch assumes for a key of a kind that no reply has shown yet: a fixed,
+/// conservative guess by judgement (TASK-3869), near the largest records a history holds (a
+/// sealed plan can pass 800 KB), so a first get, or the first get that reaches a new kind,
+/// stays small and learns the kind. At 100 MiB batches a first group asks for 80 keys.
+const FIRST_KEY_BYTES: u64 = 1_048_576;
+
+/// The share of `batch_bytes` that a sized group aims at, in fifths: the room left covers
+/// records larger than their kind's mean so far.
+const FETCH_FILL_FIFTHS: u64 = 4;
+
+/// The most a sized group's estimate may be, as a multiple of the largest reply so far.
+const FETCH_GROWTH: u64 = 4;
+
+/// The size of each new fetch group. The known step gives each key's kind but not its bytes,
+/// and a history's export order runs through its kinds in turn, whose records differ in size
+/// by orders of magnitude, so the sizer keeps, for each kind, the records and payload bytes that the
+/// replies so far held. It also keeps the most framing bytes of one record (the gap from a
+/// record's payload end to the next record's start) and of one reply (its bytes past its
+/// records). A group takes keys in order while its estimate stays within `FETCH_FILL_FIFTHS` of
+/// `batch_bytes`, and within `FETCH_GROWTH` times the largest reply so far (a mean from a small
+/// sample runs low when later records of a kind grow): at least one key, at most `per`.
+struct GroupSizer {
+    target: u64,
+    per: usize,
+    kinds: std::collections::BTreeMap<u8, (u64, u64)>,
+    framing: u64,
+    batch: u64,
+    largest: u64,
+}
+
+impl GroupSizer {
+    fn new(batch_bytes: u64, per: usize) -> GroupSizer {
+        GroupSizer {
+            target: batch_bytes / 5 * FETCH_FILL_FIFTHS,
+            per,
+            kinds: std::collections::BTreeMap::new(),
+            framing: 0,
+            batch: 0,
+            largest: 0,
+        }
+    }
+
+    /// The estimated reply bytes of one key of `kind`.
+    fn key_bytes(&self, kind: u8) -> u64 {
+        match self.kinds.get(&kind) {
+            Some(&(n, bytes)) if n > 0 => bytes.div_ceil(n).saturating_add(self.framing),
+            _ => FIRST_KEY_BYTES,
+        }
+    }
+
+    /// How many of `rest`'s first keys the next group takes.
+    fn next(&self, rest: &[ObjectKey]) -> usize {
+        let target = match self.largest {
+            0 => self.target,
+            l => self.target.min(l.saturating_mul(FETCH_GROWTH)),
+        };
+        let mut sum = self.batch;
+        let mut n = 0;
+        for k in rest.iter().take(self.per) {
+            sum = sum.saturating_add(self.key_bytes(k.kind));
+            if n > 0 && sum > target {
+                break;
+            }
+            n += 1;
+        }
+        n.max(1).min(rest.len())
+    }
+
+    /// A reply within the limit: `bytes` in all, holding `records`, each `(kind, frame start,
+    /// payload bytes)` in stream order.
+    fn taken(&mut self, bytes: u64, records: &[(u8, u64, u64)]) {
+        for pair in records.windows(2) {
+            let gap = pair[1]
+                .1
+                .saturating_sub(pair[0].1.saturating_add(pair[0].2));
+            self.framing = self.framing.max(gap);
+        }
+        let mut framed = 0u64;
+        for &(kind, _, len) in records {
+            let e = self.kinds.entry(kind).or_insert((0, 0));
+            e.0 = e.0.saturating_add(1);
+            e.1 = e.1.saturating_add(len);
+            framed = framed.saturating_add(len).saturating_add(self.framing);
+        }
+        self.batch = self.batch.max(bytes.saturating_sub(framed));
+        self.largest = self.largest.max(bytes);
     }
 }
 
