@@ -1485,3 +1485,207 @@ fn scc10_cli_stdio_and_http_mcp_share_results() {
     }
     seed_hub.finish();
 }
+
+/// TASK-3868 (D-D5J18, D-KE83X): a canon history whose changes link to an intent and to an
+/// alternative set clones by URL and pulls, and each copy passes fsck. A fetch carries the
+/// intent and set objects (the changes' object edges) but no `intent/` or `alt/` ref: a hub's
+/// refs are closed, and a URL clone writes only its settings, remote and sync state. The source
+/// store, which holds both refs, still checks both chains. A store upgrade's full check after
+/// the pull passes too.
+#[test]
+fn clone_and_pull_of_a_history_with_an_intent_and_an_alternative_set_pass_fsck() {
+    let hub = Hub::start();
+    let a = Machine::new("a", &hub);
+    a.init();
+    // machine B is a second project of the same repo, made before any landing
+    a.stop();
+    let b = copy_of("b", &a, &hub);
+    a.land_doc("base", "The base is landed.");
+    let (intent_change, alt_change) = a.with(|r| {
+        // a change linked to an intent, landed
+        let created = doc(r, "w-intent", "Intent", "Written under an intent.");
+        let prose = created["$p"].as_str().unwrap().to_string();
+        let it = r
+            .intent_post(
+                &session(Role::Writer),
+                Some("w-intent"),
+                None,
+                std::slice::from_ref(&prose),
+                "edit the prose",
+                None,
+            )
+            .expect("post an intent");
+        let w = r
+            .write_with_intent(
+                &session(Role::Writer),
+                WriteRequest {
+                    view: "w-intent".into(),
+                    ops: serde_json::from_value(
+                        json!([{"op": "update", "id": prose, "body": "Edited under an intent."}]),
+                    )
+                    .unwrap(),
+                    justification: None,
+                    message: "with an intent".into(),
+                },
+                None,
+                Some(&it.id),
+                None,
+            )
+            .expect("a write with an intent");
+        land(r, "w-intent");
+        // a change in a member view of an alternative set, landed: the landing chooses it
+        for v in ["alt-a", "alt-b"] {
+            r.view_create(&session(Role::Writer), v, None, false)
+                .expect("a member view");
+        }
+        let set = r
+            .alt_create(
+                &session(Role::Writer),
+                "Which page?",
+                None,
+                &[
+                    rdy_engine::alt::AltMemberInput {
+                        label: "a".into(),
+                        view: "alt-a".into(),
+                    },
+                    rdy_engine::alt::AltMemberInput {
+                        label: "b".into(),
+                        view: "alt-b".into(),
+                    },
+                ],
+            )
+            .expect("an alternative set");
+        let member = doc(r, "alt-a", "Choice A", "Member a.");
+        // the choosing version records the decision of its considered options (O17)
+        r.decide(
+            &session(Role::Writer),
+            "alt-a",
+            rdy_engine::DecisionInput {
+                parent: member["$s"].as_str().unwrap().to_string(),
+                statement: "Choose a".into(),
+                ..Default::default()
+            },
+        )
+        .expect("the choice's decision");
+        doc(r, "alt-b", "Choice B", "Member b.");
+        let alt_change = r
+            .read()
+            .included("alt-a")
+            .first()
+            .copied()
+            .expect("alt-a holds its change");
+        let pick = rdy_engine::alt::AltPick {
+            set: set.id.clone(),
+            chosen: "a".into(),
+        };
+        let p = r
+            .propose_with(
+                &session(Role::Writer),
+                "alt-a",
+                "alt-a",
+                None,
+                Some("test summary"),
+                Some(&pick),
+            )
+            .expect("propose the chosen member");
+        // the person confirms the decision that stands beside the batch
+        let q = r
+            .read()
+            .pending(&rdy_engine::pending::PendingQuery {
+                person: "human:founder".into(),
+                session_ref: None,
+                max_tokens: rdy_engine::pending::CARD_MAX_TOKENS,
+            })
+            .expect("the queue");
+        let items: Vec<String> = q
+            .items
+            .iter()
+            .filter(|i| i.batch.as_deref() == Some(p.r#ref.as_str()))
+            .map(|i| i.r#ref.clone())
+            .collect();
+        assert_eq!(items.len(), 1, "one exception: the decision");
+        r.answer(
+            &session(Role::Approver),
+            "human:founder",
+            rdy_engine::answer::AnswerRequest {
+                r#ref: items[0].clone(),
+                option: "confirm".into(),
+                card_hash: None,
+                note: None,
+                relay: rdy_engine::answer::relay::RelayInput::default(),
+                brief: None,
+            },
+        )
+        .expect("confirm the decision");
+        r.land(&session(Role::Approver), &p.id)
+            .expect("land the chosen member");
+        (w.change, alt_change)
+    });
+    // the source store holds both refs and checks both chains
+    let source = a.with(|r| r.fsck().expect("A's fsck"));
+    assert_eq!(
+        (source.intents, source.alt_sets),
+        (1, 1),
+        "A checks the intent's and the set's chains"
+    );
+    a.with(|r| {
+        let c: Hash = intent_change.parse().unwrap();
+        let ch = r.store().reader().change(&c).expect("the intent change");
+        assert!(ch.links.intent.is_some(), "{ch:?}");
+        let ch = r
+            .store()
+            .reader()
+            .change(&alt_change)
+            .expect("the member change");
+        assert!(ch.links.alternative.is_some(), "{ch:?}");
+    });
+    let landings = history(&a);
+    a.remote(&hub.url());
+    b.remote(&hub.url());
+    let v = a.cli_ok(&["push"]);
+    assert_eq!(v["canon"]["status"], "taken", "{v}");
+    hub.fsck();
+
+    // C clones the hub repo by URL: the clone's own fsck passes, and so does a later one
+    let c = Machine::new("c", &hub);
+    let target = c.path().join("clone");
+    let mut cmd = c.command(
+        c.path(),
+        &["--json", "clone", &hub.url(), target.to_str().unwrap()],
+    );
+    cmd.stdin(Stdio::null());
+    let (ok, v) = run_json(cmd);
+    assert!(ok, "clone: {v}");
+    assert_eq!(history_at(&target), landings);
+    let h = StoreHandle::open(&target).expect("open C");
+    h.fsck().expect("C's fsck");
+    h.close().unwrap();
+
+    // B pulls hub canon: its fsck passes, and so does an upgrade's full check
+    let v = b.cli_ok(&["pull"]);
+    assert_eq!(v["canon"]["status"], "pulled", "{v}");
+    assert_eq!(history(&b), landings);
+    let h = StoreHandle::open(b.path()).expect("open B");
+    h.fsck().expect("B's fsck after the pull");
+    h.close().unwrap();
+    let _known = rdy_store::format::inject_test_feature(
+        rdy_store::format::FeatureClass::Incompatible,
+        rdy_store::kinds::INTENT,
+    );
+    let step = rdy_adapter::maintenance::UpgradeStep {
+        id: "add_test".into(),
+        from: rdy_store::format::StoreFeatures::of(vec![]),
+        to: rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
+            name: rdy_store::format::TEST_FEATURE.into(),
+            class: rdy_store::format::FeatureClass::Incompatible,
+            required_rdy: "99.0.0".into(),
+        }]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
+    };
+    let report =
+        rdy_adapter::maintenance::upgrade_with_registry_for_tests(b.path(), false, &[step])
+            .expect("B's upgrade and its full check");
+    assert!(report.changed && report.checked, "{report:?}");
+    hub.finish();
+}
