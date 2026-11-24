@@ -188,6 +188,34 @@ pub fn on_map_event(probe: Option<MapProbe>) {
     MAP_PROBE.with(|p| *p.borrow_mut() = probe);
 }
 
+thread_local! {
+    static ROW_CAP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static FAIL_ALLOCATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test hook: on this thread, the map's row capacity is `rows` (at most [`MAX_ROWS`]) in
+/// place of [`MAX_ROWS`], so a test reaches a full map without a million rows. None removes it.
+/// No environment, CLI or MCP path reaches it.
+#[doc(hidden)]
+pub fn cap_rows_for_tests(rows: Option<u64>) {
+    ROW_CAP.with(|c| c.set(rows));
+}
+
+/// Test hook: on this thread, while `on`, the allocation of a pass's journal rows fails as an
+/// allocation failure does ([`StoreError::DedupLimit`]). No environment, CLI or MCP path
+/// reaches it.
+#[doc(hidden)]
+pub fn fail_allocation_for_tests(on: bool) {
+    FAIL_ALLOCATION.with(|f| f.set(on));
+}
+
+/// The map's row capacity on this thread.
+pub(crate) fn max_rows() -> u64 {
+    ROW_CAP
+        .with(|c| c.get())
+        .map_or(MAX_ROWS, |n| n.min(MAX_ROWS))
+}
+
 pub(crate) fn event(e: MapEvent) -> io::Result<()> {
     MAP_PROBE.with(|p| match p.borrow_mut().as_mut() {
         Some(f) => f(&e),
@@ -304,8 +332,10 @@ pub(crate) fn encode_row(
 enum RowRead {
     /// A row whose digest chains from the previous one: the record, its digest and its bytes.
     Valid(SpanMapRecordV1, [u8; 32], u64),
-    /// A complete row that does not check: its stored digest and its bytes.
-    Invalid([u8; 32], u64),
+    /// A complete row that does not check: its stored digest, the digest its own bytes give
+    /// after the previous one, and its bytes. A later row chains from one of the two: the
+    /// stored one when the body is damaged, the computed one when the digest is.
+    Invalid([u8; 32], [u8; 32], u64),
     /// A complete row whose length is over the row bound.
     Oversized,
     /// Fewer bytes than a row needs.
@@ -330,30 +360,39 @@ fn read_row(buf: &[u8], at: usize, prev: &[u8; 32]) -> RowRead {
     let body = &row[4..4 + n];
     let stored: [u8; 32] = row[4 + n..].try_into().expect("32 bytes");
     let total = (4 + n + 32) as u64;
-    if row_digest(prev, body) != stored {
-        return RowRead::Invalid(stored, total);
+    let computed = row_digest(prev, body);
+    if computed != stored {
+        return RowRead::Invalid(stored, computed, total);
     }
     match postcard::from_bytes::<SpanMapRecordV1>(body) {
         Ok(r) if postcard::to_allocvec(&r).ok().as_deref() == Some(body) => {
             RowRead::Valid(r, stored, total)
         }
-        _ => RowRead::Invalid(stored, total),
+        _ => RowRead::Invalid(stored, computed, total),
     }
 }
 
-/// True if any complete row that chains from the stored digest of its predecessor starts in
-/// `buf[at..]`, following the length prefixes of the rows from `at`: an invalid row followed by
-/// a valid one is damage, not a torn tail.
-fn valid_row_follows(buf: &[u8], mut at: usize, mut prev: [u8; 32]) -> bool {
+/// True if any complete row that chains from its predecessor starts in `buf[at..]`, following
+/// the length prefixes of the rows from `at`: an invalid row followed by a valid one is damage,
+/// not a torn tail. `prevs` are the two digests the invalid row before `at` may stand for (its
+/// stored one, and the one its bytes give); each later invalid row gives its own two.
+fn valid_row_follows(buf: &[u8], mut at: usize, mut prevs: [[u8; 32]; 2]) -> bool {
     while at < buf.len() {
-        match read_row(buf, at, &prev) {
-            RowRead::Valid(..) => return true,
-            RowRead::Invalid(stored, n) => {
-                prev = stored;
-                at += n as usize;
+        let mut next = None;
+        for prev in &prevs {
+            match read_row(buf, at, prev) {
+                RowRead::Valid(..) => return true,
+                RowRead::Invalid(stored, computed, n) => {
+                    next.get_or_insert((stored, computed, n));
+                }
+                RowRead::Short | RowRead::Oversized => return false,
             }
-            RowRead::Short | RowRead::Oversized => return false,
         }
+        let Some((stored, computed, n)) = next else {
+            return false;
+        };
+        prevs = [stored, computed];
+        at += n as usize;
     }
     false
 }
@@ -440,7 +479,7 @@ impl SpanMap {
         while at < buf.len() {
             match read_row(&buf, at, &prev) {
                 RowRead::Valid(record, digest, n) => {
-                    if map.rows >= MAX_ROWS {
+                    if map.rows >= max_rows() {
                         return Err(corrupt());
                     }
                     map.admit(record)?;
@@ -448,8 +487,8 @@ impl SpanMap {
                     prev = digest;
                     at += n as usize;
                 }
-                RowRead::Invalid(stored, n) => {
-                    if valid_row_follows(&buf, at + n as usize, stored) {
+                RowRead::Invalid(stored, computed, n) => {
+                    if valid_row_follows(&buf, at + n as usize, [stored, computed]) {
                         return Err(corrupt());
                     }
                     break;
@@ -720,7 +759,7 @@ impl SpanMap {
 
     /// Whether `rows` more rows of at most the largest size fit in the journal.
     pub(crate) fn has_room(&self, rows: u64, bytes: u64) -> bool {
-        self.rows.saturating_add(rows) <= MAX_ROWS
+        self.rows.saturating_add(rows) <= max_rows()
             && self.len.max(FILE_HEADER).saturating_add(bytes) <= MAX_JOURNAL_BYTES
     }
 
@@ -777,6 +816,9 @@ impl SpanMap {
         if records.is_empty() {
             return Ok(Staged::default());
         }
+        if FAIL_ALLOCATION.with(|f| f.get()) {
+            return Err(StoreError::DedupLimit);
+        }
         let mut bytes = Vec::new();
         let mut digest = self.digest;
         for r in &records {
@@ -787,7 +829,7 @@ impl SpanMap {
             bytes.extend_from_slice(&row);
             digest = d;
         }
-        if self.rows + records.len() as u64 > MAX_ROWS
+        if self.rows + records.len() as u64 > max_rows()
             || self.len.max(FILE_HEADER) + bytes.len() as u64 > MAX_JOURNAL_BYTES
         {
             return Err(StoreError::DedupLimit);

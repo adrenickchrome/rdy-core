@@ -9,6 +9,7 @@ mod io_check_fixture;
 mod io_clone;
 mod io_dark_figure;
 mod io_decision_basis;
+mod io_dedup_spans;
 mod io_dump;
 mod io_dump_chain_surfaces;
 mod io_dump_fixture;

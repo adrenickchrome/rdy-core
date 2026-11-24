@@ -1520,6 +1520,8 @@ impl SegmentLog {
                 "has a log with no store features",
             ));
         }
+        // the bootstrap reads mapped payloads through the loaded map, as the writable open does
+        crate::dedup::register(&readers, &spans);
         let auth = Arc::new(match crate::redaction_import::log_mode(&readers)? {
             crate::holder::StoreMode::Holder => {
                 crate::redaction_import::bootstrap_holder(&readers)?

@@ -214,7 +214,18 @@ impl Store {
     /// off and puts them back as they were after, so no TRANSITION frame joins the batch and no
     /// batch stays open. A batch already open is refused (`StoreError::Refused`); so is a clone
     /// (no new repo id) of a store with no repo id. Returns the repo id after it.
+    ///
+    /// The batch is part of a receiving operation (D-1ER84): it runs no span-mapping pass, so
+    /// the received history is mapped by the next explicit compact.
     pub fn put_origin(
+        &mut self,
+        origin: &Origin,
+        new_repo_id: Option<RepoId>,
+    ) -> Result<RepoId, StoreError> {
+        self.without_map_pass(|s| s.write_origin(origin, new_repo_id))
+    }
+
+    fn write_origin(
         &mut self,
         origin: &Origin,
         new_repo_id: Option<RepoId>,
