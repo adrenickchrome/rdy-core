@@ -19,7 +19,6 @@ use rdy_engine::redaction::RedactInput;
 use rdy_engine::{Rdy, RdyError, Scope, Session, pin_clock};
 use rdy_model::encoding::{
     CHANGE_PORT_ENCODING, CHANGE_PORT_FOREIGN_ENCODING, RESIDUE_ENCODING, RESIDUE_PORT_ENCODING,
-    change_body,
 };
 use rdy_model::foreign::{ForeignId, ForeignLink, ForeignParts, ForeignPin};
 use rdy_model::redaction::{ChangeResidue, RedactionResidue};
@@ -27,7 +26,7 @@ use rdy_model::{
     Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op, PortedFrom, Provenance,
     RepoId, Role,
 };
-use rdy_qa::fixtures::{approver, as_agent, land, write, writer};
+use rdy_qa::fixtures::{approver, land, write, writer};
 use rdy_store::codec;
 use rdy_store::format::{self, FEATURE_FOREIGN_COPY, FEATURE_PORTED_CHANGE};
 use rdy_store::hub_canon::{CanonMove, Moved};
@@ -226,11 +225,6 @@ fn keys_of(v: &Value) -> Vec<String> {
     k
 }
 
-/// This plan's fixture in its keyed form.
-fn current() -> Value {
-    keyed(&read(CURRENT))
-}
-
 /// The command `name` of the CLI tree in `fixture`, as the fixture holds it (no keyed form).
 fn command<'a>(fixture: &'a Value, name: &str) -> &'a Value {
     fixture["cli"]["tree"]["subcommands"]
@@ -343,10 +337,8 @@ struct Local {
     landings: [Hash; 3],
     /// The source changes of `s3` and `s4`.
     ports: [Hash; 2],
-    /// The section `a`, the prose `intro` and the secret prose of the seed.
+    /// The section `a` of the seed.
     a: String,
-    intro: String,
-    secret: String,
 }
 
 impl Local {
@@ -370,7 +362,7 @@ fn local() -> Local {
             {"op": "create", "type": "prose", "id": "$x", "parent": "$a", "body": SECRET}
         ]),
     );
-    let (a, intro, secret) = (made(&seed, "$a"), made(&seed, "$p"), made(&seed, "$x"));
+    let (a, intro) = (made(&seed, "$a"), made(&seed, "$p"));
     let t_dir = dir.path().join("t");
     clone(CloneSource::State(&s.read()), &t_dir, true).expect("a fork");
     let t2_dir = dir.path().join("t2");
@@ -420,8 +412,6 @@ fn local() -> Local {
         landings: [s2, s3, s4],
         ports,
         a,
-        intro,
-        secret,
     }
 }
 
@@ -456,7 +446,6 @@ fn port_local(
 /// What a landed port of two changes shows: the landing of the target, its ported facts, and
 /// the changes' own provenance.
 struct Landed {
-    landing: Hash,
     /// Whether a replay inside the target of one ported change keeps its source and records
     /// the ported change as its own.
     replay_copies_origin: bool,
@@ -526,7 +515,6 @@ fn landed_port(t: &mut Rdy, l: &Local, from: &Path) -> Landed {
         })
         .collect();
     Landed {
-        landing,
         replay_copies_origin,
         facts: json!({"ported_changes": rows}),
         in_order,
@@ -639,13 +627,12 @@ struct Hub {
     c: Rdy,
     m: Rdy,
     l: Rdy,
-    /// The landing of the seed, of the main updates `p2` to `p4`, of the removal of the secret
-    /// `p5`, of the line's edit `q2` and of its figure `q3`.
+    /// The landing of the seed, of the main updates `p2` to `p4`, of the line's edit `q2` and of its
+    /// figure `q3`.
     p1: Hash,
     p2: Hash,
     p3: Hash,
     p4: Hash,
-    p5: Hash,
     q2: Hash,
     q3: Hash,
     /// The line's deletion of `intro`: its base is the line's own edit, a version main never saw.
@@ -762,7 +749,7 @@ fn hub_world() -> Hub {
         ]),
     );
     let (p4, _) = landed(&mut p, "w3", json!([{"op": "delete", "id": spare}]));
-    let p5 = redact(&mut p, "w4", secret);
+    redact(&mut p, "w4", secret);
     let hub = Hub {
         dir,
         p,
@@ -773,7 +760,6 @@ fn hub_world() -> Hub {
         p2,
         p3,
         p4,
-        p5,
         q2: p1,
         q3: p1,
         q4: p1,
@@ -3076,6 +3062,14 @@ fn version_of(text: &str) -> (u32, u32, u32) {
     )
 }
 
+/// The refusal of opening the project at `root`; the open itself must fail.
+fn open_refused(root: &Path, what: &str) -> RdyError {
+    match Rdy::open(root) {
+        Ok(_) => panic!("{what}"),
+        Err(e) => e,
+    }
+}
+
 /// The minimum rdy a store's manifest asks for: the highest `required_rdy` of its features.
 fn minimum_rdy(r: &Rdy) -> (u32, u32, u32) {
     r.store()
@@ -3223,17 +3217,13 @@ fn hpt5_formats_stay_fixed_and_first_use_is_required() {
     let fix = "open the project with rdy 0.58.0 or later";
     {
         let _old = format::older_reader_for_tests(&[FEATURE_PORTED_CHANGE]);
-        let e = Rdy::open(&l.t)
-            .err()
-            .expect("an older rdy refuses the first port");
+        let e = open_refused(&l.t, "an older rdy refuses the first port");
         assert_eq!(
             (e.code, e.message.as_str(), e.fix.as_str()),
             ("E_STORE_FORMAT", need.as_str(), fix)
         );
         let (_base, root) = rdy_qa::foreign_fixture::project_copy(&fixture_dir());
-        let e = Rdy::open(&root)
-            .err()
-            .expect("an older rdy refuses the frozen store");
+        let e = open_refused(&root, "an older rdy refuses the frozen store");
         assert_eq!(
             (e.code, e.message.as_str(), e.fix.as_str()),
             ("E_STORE_FORMAT", need.as_str(), fix)
@@ -3241,8 +3231,7 @@ fn hpt5_formats_stay_fixed_and_first_use_is_required() {
         let scratch = tempfile::tempdir().expect("a directory");
         let to = scratch.path().join("loaded");
         let e = rdy_engine::load::load(&fixtures.join("dump").join(DUMP), &to)
-            .err()
-            .expect("an older rdy refuses the frozen dump");
+            .expect_err("an older rdy refuses the frozen dump");
         assert_eq!(
             (e.code, e.message.as_str(), e.fix.as_str()),
             ("E_STORE_FORMAT", need.as_str(), fix)
@@ -3357,9 +3346,7 @@ fn hpr5_residue_only_first_use_keeps_formats() {
     // an older rdy refuses the residue alone
     let _old = format::older_reader_for_tests(&[FEATURE_PORTED_CHANGE]);
     let scratch = l.at("t3-refused");
-    let e = rdy_engine::load::load(&dump, &scratch)
-        .err()
-        .expect("an older rdy refuses the dump");
+    let e = rdy_engine::load::load(&dump, &scratch).expect_err("an older rdy refuses the dump");
     assert_eq!(e.code, "E_STORE_FORMAT");
     // the formats: a residue changes none of them, and the frame kinds a dump holds are fixed
     assert_eq!(
