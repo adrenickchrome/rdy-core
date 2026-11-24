@@ -18,6 +18,8 @@ use crate::suggest::MentionedBy;
 use crate::suspect_reply::SuspectReply;
 use crate::tensions::info::{InfoCache, SideInfo, TensionInfo, row_bytes, rows_bytes};
 use crate::tensions::{Tension, TensionSeverity};
+use crate::vector_neighbors::{AdviceCut, eligible_source, vector_neighbors_in};
+use crate::vectors::{VectorBudget, WeightScope, round3};
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{
@@ -525,7 +527,7 @@ impl BriefRegistry {
 
 /// The paged sections of a briefing, in cursor order: a cursor holds one offset per section, how
 /// many of its entries earlier pages showed.
-pub const PAGE_SECTIONS: [&str; 12] = [
+pub const PAGE_SECTIONS: [&str; 13] = [
     "governs",
     "dependents",
     "lineage",
@@ -537,6 +539,7 @@ pub const PAGE_SECTIONS: [&str; 12] = [
     "inflight.intents",
     "inflight.tensions",
     "neighbors",
+    "vector_neighbors",
     "base.blocks",
 ];
 
@@ -569,6 +572,28 @@ pub struct NeighborDocCount {
     pub doc: String,
     pub count: usize,
 }
+
+/// D-Y1WEY: one vector neighbor row of a briefing. `block` shares words or links with the covered
+/// block `for`, and no section or entity rule ties the two. The row is advice: no token,
+/// consequence, suspect or plan item holds it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VectorNeighbor {
+    pub r#for: String,
+    pub block: String,
+    /// The score, rounded to three decimals. Rows sort on the exact score.
+    pub score: f64,
+    /// Up to five shared words, by weight product, then word.
+    pub words: Vec<String>,
+    /// Up to five shared link targets, by weight product, then id.
+    pub links: Vec<String>,
+    /// The containing doc of `block`.
+    pub doc: String,
+    pub summary: String,
+}
+
+/// The JSON bytes the `vector_neighbors` member adds to a briefing beyond its rows: the comma
+/// before it, its key and the brackets.
+const VECTOR_KEY_BYTES: usize = r#","vector_neighbors":[]"#.len();
 
 /// nb9 (t-F3KR2): the briefing a write that creates blocks returns: its token covers the
 /// created blocks, and `covers` counts them.
@@ -874,6 +899,17 @@ pub struct Briefing {
     pub neighbors: Vec<crate::neighbors::Neighbor>,
     /// nb7: the neighbor rows of the whole briefing per doc.
     pub neighbors_by_doc: Vec<NeighborDocCount>,
+    /// D-Y1WEY, D-5BM47: the vector neighbors of the covered content blocks when there are at
+    /// most 20 of them: up to two rows for each, each neighbor once under the covered block where
+    /// it scores highest, the rows of every source sorted together. Left out when empty, at a past
+    /// landing and in a proposal version.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vector_neighbors: Vec<VectorNeighbor>,
+    /// D-0ZPAP, D-5BM47: how many covered content blocks got no vector rows computed: every one
+    /// of a briefing that covers more than 20, and those a work guard stopped. A source with no
+    /// seed word or target, and rows past a source's two, count nowhere. Left out when zero.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub vector_neighbors_skipped: usize,
     /// rf9: the findings the covered decisions depend on directly, by (for, finding), at most
     /// `FINDINGS_CAP` in all. Not paged or cut: every page repeats them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -938,6 +974,9 @@ pub struct Briefing {
     /// not once per measure of the briefing.
     #[serde(skip)]
     neighbor_sizes: Vec<usize>,
+    /// The JSON size of each vector neighbor row, row for row, measured once.
+    #[serde(skip)]
+    vector_sizes: Vec<usize>,
     /// Whether the built rows' sides are settled: read (`read_sides`), or dropped for good by
     /// the detail cut (`cut_tensions`).
     #[serde(skip)]
@@ -973,16 +1012,27 @@ impl Briefing {
     }
 
     /// The JSON size in bytes of the briefing without its tension rows: the rest of it, and each
-    /// neighbor row (measured once while it does not change) with the comma between rows.
+    /// neighbor and vector neighbor row (measured once while it does not change) with the comma
+    /// between rows. The vector rows' member is left out of the JSON when empty, so its key
+    /// counts only while it has a row.
     fn frame_bytes(&mut self) -> usize {
         let rows = std::mem::take(&mut self.inflight.tensions);
         let neighbors = std::mem::take(&mut self.neighbors);
+        let vectors = std::mem::take(&mut self.vector_neighbors);
         let frame = serde_json::to_string(self)
             .expect("a briefing serializes: strings, numbers and string-keyed maps only")
             .len();
         self.inflight.tensions = rows;
         self.neighbors = neighbors;
-        frame + rows_bytes(self.neighbor_sizes.iter().sum(), self.neighbor_sizes.len())
+        self.vector_neighbors = vectors;
+        let vector_bytes = if self.vector_sizes.is_empty() {
+            0
+        } else {
+            VECTOR_KEY_BYTES + rows_bytes(self.vector_sizes.iter().sum(), self.vector_sizes.len())
+        };
+        frame
+            + rows_bytes(self.neighbor_sizes.iter().sum(), self.neighbor_sizes.len())
+            + vector_bytes
     }
 
     /// The JSON size in bytes of the built rows as array elements, each row measured once.
@@ -1052,6 +1102,7 @@ impl Briefing {
             self.inflight.intents.len(),
             self.rows.len(),
             self.neighbors.len(),
+            self.vector_neighbors.len(),
             self.base.blocks.len(),
         ]
     }
@@ -1075,7 +1126,9 @@ impl Briefing {
         drop(&mut self.row_sizes, skip[9]);
         drop(&mut self.neighbors, skip[10]);
         drop(&mut self.neighbor_sizes, skip[10]);
-        drop(&mut self.base.blocks, skip[11]);
+        drop(&mut self.vector_neighbors, skip[11]);
+        drop(&mut self.vector_sizes, skip[11]);
+        drop(&mut self.base.blocks, skip[12]);
         self.sync_warnings();
     }
 
@@ -1325,6 +1378,10 @@ impl Briefing {
                 self.neighbors.truncate(keep);
                 self.neighbor_sizes.truncate(keep);
             }
+            11 => {
+                self.vector_neighbors.truncate(keep);
+                self.vector_sizes.truncate(keep);
+            }
             _ => {
                 self.base.blocks.truncate(keep);
                 self.sync_warnings();
@@ -1409,7 +1466,7 @@ pub(crate) fn refuse_inflight(scope: &Scope) -> Result<(), RdyError> {
 /// carries as many.
 pub(crate) const DIGEST_HEX: usize = 16;
 
-/// A cursor `<token>:<o1>,…,<o12>:<digest>:<scope>` split at its first colon: the token (64
+/// A cursor `<token>:<o1>,…,<o13>:<digest>:<scope>` split at its first colon: the token (64
 /// lowercase hex) and the rest. The rest is read by `parse_tail` once the token is known.
 fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     let (token, rest) = cursor.split_once(':').ok_or_else(bad_cursor)?;
@@ -1740,6 +1797,9 @@ impl ReadState {
         // per doc over the whole list
         let neighbors = crate::neighbors::neighbors_in(&m, &g, pack, ids)?;
         let neighbors_by_doc = neighbor_counts(&m, &neighbors);
+        // D-Y1WEY: vector advice after them, never at a past landing or in a proposal version
+        let (vector_neighbors, vector_neighbors_skipped) =
+            self.brief_vectors(scope, &m, &g, ids, &summary_of)?;
         let mut governed: BTreeMap<BlockId, (Vec<String>, Vec<Through>)> = BTreeMap::new();
         for r in &record.governance.routes {
             let row = governed.entry(r.decision.clone()).or_default();
@@ -2068,6 +2128,8 @@ impl ReadState {
         // comes, goes, moves doc, changes route or summary stales a cursor (the token, which
         // records no neighbor, stays)
         let neighbor_sizes = digest_neighbors(&mut digested, &neighbors, &neighbors_by_doc);
+        // D-Y1WEY: the vector rows' order vouches for a page; their scores and reasons do not
+        let vector_sizes = digest_vectors(&mut digested, &vector_neighbors);
         let digest = Hash::of(&digested);
         Ok(Briefing {
             covers: ids.len(),
@@ -2086,6 +2148,8 @@ impl ReadState {
             related_decisions_omitted,
             neighbors,
             neighbors_by_doc,
+            vector_neighbors,
+            vector_neighbors_skipped,
             findings,
             findings_omitted,
             finding_counts,
@@ -2111,9 +2175,122 @@ impl ReadState {
             rows,
             row_sizes: vec![],
             neighbor_sizes,
+            vector_sizes,
             sides_read: false,
         })
     }
+
+    /// D-Y1WEY, D-0ZPAP, D-5BM47: the vector neighbor rows of `ids` in `scope` (`m` and `g`), with
+    /// each row's summary from `summary_of`, and the count of sources whose rows were not
+    /// computed. The sources are all the covered content blocks, in reading order. At most 20 are
+    /// scored against the scope's weights; more score none, count as skipped and build no
+    /// weights. A past landing and a proposal version have no rows and build no weights.
+    fn brief_vectors(
+        &self,
+        scope: &Scope,
+        m: &Materialized,
+        g: &Graph,
+        ids: &BTreeSet<BlockId>,
+        summary_of: &dyn Fn(&BlockId) -> String,
+    ) -> Result<(Vec<VectorNeighbor>, usize), RdyError> {
+        if self.coverage_left_out(scope) {
+            return Ok((vec![], 0));
+        }
+        let pack = self.pack();
+        let sources = in_reading_order(
+            m,
+            ids.iter()
+                .filter(|id| m.get(id).is_some_and(|b| eligible_source(m, pack, b))),
+        );
+        if sources.is_empty() {
+            return Ok((vec![], 0));
+        }
+        if !AdviceCut::BRIEFING.scores(sources.len()) {
+            return Ok((vec![], sources.len()));
+        }
+        let w = self.vector_weights(WeightScope::Read(scope))?;
+        let advice = vector_neighbors_in(
+            m,
+            g,
+            pack,
+            &w,
+            &sources,
+            AdviceCut::BRIEFING,
+            &mut VectorBudget::briefing(),
+        );
+        let rows = advice
+            .rows
+            .into_iter()
+            .map(|r| VectorNeighbor {
+                r#for: r.source.to_string(),
+                summary: summary_of(&r.block),
+                block: r.block.to_string(),
+                score: round3(r.score),
+                words: r.words,
+                links: r.links.iter().map(ToString::to_string).collect(),
+                doc: r.doc.to_string(),
+            })
+            .collect();
+        Ok((rows, advice.skipped))
+    }
+}
+
+/// A block's reading-order key: whether its ancestors fail to reach the top level, the chain of
+/// (order key, id) from the top level down, and its id.
+type ReadingKey<'m> = (bool, Vec<(&'m str, &'m BlockId)>, &'m BlockId);
+
+/// `ids` in the depth-first reading order of `m`: a block before its children, siblings by order
+/// key, then id. A block whose ancestors do not reach the top level follows, in id order.
+fn in_reading_order<'a>(
+    m: &'a Materialized,
+    ids: impl Iterator<Item = &'a BlockId>,
+) -> Vec<BlockId> {
+    let mut keyed: Vec<ReadingKey<'a>> = ids
+        .map(|id| {
+            let mut chain = vec![];
+            let mut cur = m.get(id);
+            let mut reached = false;
+            // a damaged store may loop: never walk more steps than there are blocks
+            for _ in 0..=m.len() {
+                let Some(b) = cur else { break };
+                chain.push((b.order.as_str(), &b.id));
+                match &b.parent {
+                    None => {
+                        reached = true;
+                        break;
+                    }
+                    Some(p) => cur = m.get(p),
+                }
+            }
+            if !reached {
+                chain.clear();
+            }
+            chain.reverse();
+            (!reached, chain, id)
+        })
+        .collect();
+    keyed.sort();
+    keyed.into_iter().map(|(_, _, id)| id.clone()).collect()
+}
+
+/// D-Y1WEY: adds the ordered `(for, block)` pairs of `rows` to `out`, after the tag
+/// `vector_neighbors`, as a JSON array; nothing when there are no rows. A row that comes, goes or
+/// moves stales a cursor; a score or reason that drifts does not. The JSON size of each row, row
+/// for row.
+fn digest_vectors(out: &mut Vec<u8>, rows: &[VectorNeighbor]) -> Vec<usize> {
+    const JSON: &str = "vector neighbor rows serialize: strings and numbers only";
+    if rows.is_empty() {
+        return vec![];
+    }
+    let pairs: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|r| (r.r#for.as_str(), r.block.as_str()))
+        .collect();
+    out.extend_from_slice(b"vector_neighbors");
+    serde_json::to_writer(&mut *out, &pairs).expect(JSON);
+    rows.iter()
+        .map(|r| serde_json::to_string(r).expect(JSON).len())
+        .collect()
 }
 
 /// nb7: adds `rows` and `counts` to `out` as the JSON array `[rows, counts]`, nothing when there
@@ -2350,7 +2527,7 @@ struct Subject<'a> {
 }
 
 /// A block's own `lifecycle`, if it has one (a null value counts as none).
-fn own_lifecycle(b: &Block) -> Option<&FieldValue> {
+pub(crate) fn own_lifecycle(b: &Block) -> Option<&FieldValue> {
     b.fields
         .get("lifecycle")
         .filter(|v| **v != FieldValue::Null)

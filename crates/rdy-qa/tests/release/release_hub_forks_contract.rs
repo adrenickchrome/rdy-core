@@ -1,8 +1,9 @@
 //! hfp5 (D-TXFHR; D-99CWC, D-HX6BX, D-B2AC3, D-RDH1C): the contract fixture of hub forks, Part 1.
 //!
 //! `hub-forks-v1.json` is this plan's fixture. It started as a byte copy of the frozen
-//! `m5b-v1.json`, and every selector named it until its successor `hub-ports-v1.json`, which
-//! the selectors name now. It is frozen since. One capture wrote its delta: the fork flag of
+//! `m5b-v1.json`, and every selector named it until its successor `hub-ports-v1.json`. It is
+//! frozen since, and so is `hub-ports-v1.json` since its successor `m5a-v1.json`, which the
+//! selectors name now. One capture wrote its delta: the fork flag of
 //! `rdy clone`, its populated probes, the hidden-list form, and the semantic probes of a fork
 //! and its lineage. The tests here pin that delta leaf by leaf, keep every earlier fixture and
 //! every released format and vector as it was, and show that a fork keeps its identities
@@ -44,8 +45,16 @@ const CURRENT: &str = "hub-forks-v1.json";
 /// successor.
 const CURRENT_SHA: &str = "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252";
 
-/// The successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen since.
-const SELECTED: &str = "hub-ports-v1.json";
+/// The successors of [`CURRENT`] before [`SELECTED`], in order, each frozen since its own
+/// successor, with the sha256 that its successor copied.
+const LATER: [(&str, &str); 1] = [(
+    "hub-ports-v1.json",
+    "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab",
+)];
+
+/// The latest successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen
+/// since its first successor.
+const SELECTED: &str = "m5a-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -200,8 +209,9 @@ fn at<'a>(v: &'a Value, path: &str) -> &'a Value {
     cur
 }
 
-/// hfp5: every selector names the successor of this plan's fixture, and none names this plan's
-/// fixture, `m5b-v1.json` or `sync-client-b-v1.json`, the fixtures the selectors named before it.
+/// hfp5: every selector names the latest successor of this plan's fixture, and none names this
+/// plan's fixture, its earlier successors, `m5b-v1.json` or `sync-client-b-v1.json`, the fixtures
+/// the selectors named before it.
 #[test]
 fn hfp5_selectors_name_the_current_fixture_only() {
     for file in SELECTORS {
@@ -211,7 +221,10 @@ fn hfp5_selectors_name_the_current_fixture_only() {
             text.contains(&format!("fixtures/contracts/{SELECTED}\"")),
             "{file} selects {SELECTED}"
         );
-        for earlier in [PREDECESSOR, "sync-client-b-v1.json", CURRENT] {
+        for earlier in [PREDECESSOR, "sync-client-b-v1.json", CURRENT]
+            .into_iter()
+            .chain(LATER.map(|(n, _)| n))
+        {
             assert!(
                 !text.contains(&format!("contracts/{earlier}\"")),
                 "{file} no longer selects {earlier}"
@@ -221,8 +234,9 @@ fn hfp5_selectors_name_the_current_fixture_only() {
 }
 
 /// hfp5: the successor keeps every earlier fixture as it was. Each frozen file keeps its bytes,
-/// the folder holds those, this plan's fixture and its successor and no other, and this plan's
-/// fixture differs from its predecessor and keeps its bytes.
+/// the folder holds those, this plan's fixture and its successors and no other, each earlier
+/// successor keeps its bytes, and this plan's fixture differs from its predecessor and keeps its
+/// bytes.
 #[test]
 fn hfp5_successor_preserves_every_frozen_fixture() {
     for (name, want) in FROZEN {
@@ -233,15 +247,19 @@ fn hfp5_successor_preserves_every_frozen_fixture() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
+    for (name, want) in LATER {
+        assert_eq!(sha(&bytes(name)), want, "{name} is frozen");
+    }
     let mut want: Vec<&str> = FROZEN
         .iter()
+        .chain(LATER.iter())
         .map(|(n, _)| *n)
         .chain([CURRENT, SELECTED])
         .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds every frozen fixture, {CURRENT} and {SELECTED}"
+        "the folder holds every frozen fixture, {CURRENT}, its successors and {SELECTED}"
     );
     let now = sha(&bytes(CURRENT));
     assert_ne!(now, PREDECESSOR_SHA, "{CURRENT} is a successor, not a copy");

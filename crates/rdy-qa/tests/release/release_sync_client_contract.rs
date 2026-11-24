@@ -32,11 +32,12 @@ const PREDECESSOR_SHA: &str = "012ff9ed50f654618517e629e3dcfa6c8e28935bf311c880d
 const CURRENT: &str = "sync-client-v1.json";
 
 /// The successors of [`CURRENT`], in order; the last is the fixture the selectors name now.
-const LATER: [&str; 4] = [
+const LATER: [&str; 5] = [
     "sync-client-b-v1.json",
     "m5b-v1.json",
     "hub-forks-v1.json",
     "hub-ports-v1.json",
+    "m5a-v1.json",
 ];
 
 /// The source file of each current-fixture selector, from the workspace root.
@@ -518,7 +519,7 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         // ruling R-F2: a later successor (`sync-client-b-v1.json`, `m5b-v1.json`,
-        // `hub-forks-v1.json`, then `hub-ports-v1.json`) is the selected file
+        // `hub-forks-v1.json`, `hub-ports-v1.json`, then `m5a-v1.json`) is the selected file
         let selects = |name: &str| text.contains(&format!("fixtures/contracts/{name}\""));
         assert!(
             selects(CURRENT) || LATER.iter().any(|n| selects(n)),

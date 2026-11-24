@@ -1503,11 +1503,18 @@ pub fn pointing_edge(e: &Edge) -> bool {
 /// `deprecated`, or it is a decision wholly superseded or revoked (a partial supersede does not
 /// count). The one rule the deprecated reference detector and coverage read (D-S46DE).
 pub(crate) fn is_deprecated(m: &Materialized, g: &Graph, b: &BlockId) -> bool {
-    effective_lifecycle(m, Some(b)).as_deref() == Some("deprecated")
-        || matches!(
-            g.status(b),
-            Some(DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })
-        )
+    effective_lifecycle(m, Some(b)).as_deref() == Some(DEPRECATED) || ended(g, b)
+}
+
+/// The lifecycle value that deprecates a block and what it holds.
+pub(crate) const DEPRECATED: &str = "deprecated";
+
+/// Whether decision `b` is superseded or revoked: the graph's half of [`is_deprecated`].
+pub(crate) fn ended(g: &Graph, b: &BlockId) -> bool {
+    matches!(
+        g.status(b),
+        Some(DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })
+    )
 }
 
 #[cfg(test)]
