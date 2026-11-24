@@ -266,8 +266,13 @@ pub fn write_seed_mark(
         return Err(StoreError::Locked(dir.to_path_buf()));
     }
     refuse_follower(dir)?;
-    let (log, _) =
-        SegmentLog::open_read_only(&dir.join("segments"), crate::store::SEGMENT_MAX, dir, None)?;
+    let (log, _) = SegmentLog::open_read_only(
+        &dir.join("segments"),
+        crate::store::SEGMENT_MAX,
+        dir,
+        None,
+        std::sync::Arc::default(),
+    )?;
     check_against_log(&log, mark)?;
     write_mark(dir, mark)
 }

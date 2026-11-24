@@ -8,6 +8,8 @@ pub mod closure;
 pub mod codec;
 pub mod compact;
 pub mod coord;
+pub mod dedup;
+pub mod dedup_candidates;
 pub mod diagram_cache;
 mod dispute;
 pub mod dump;

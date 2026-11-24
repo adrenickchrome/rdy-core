@@ -782,7 +782,7 @@ fn sg7_the_golden_set_names_every_m2_tool() {
 }
 
 /// mh7: the compact goldens. A dry run and a real run on a file system that cannot punch both
-/// succeed, with the six report fields and, in every by_kind row, the four child keys with the
+/// succeed, with the seven report fields and, in every by_kind row, the four child keys with the
 /// kind's name. The unsupported reply says so in its one note and punched nothing.
 #[test]
 fn mh7_compact_goldens_keep_failures_successful() {
@@ -802,6 +802,7 @@ fn mh7_compact_goldens_keep_failures_successful() {
             keys,
             [
                 "by_kind",
+                "deduplicated_bytes",
                 "log_bytes",
                 "notes",
                 "on_disk_bytes",

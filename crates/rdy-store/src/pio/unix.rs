@@ -604,6 +604,11 @@ fn punch_outcome(e: io::Error) -> io::Result<Punch> {
     }
 }
 
+/// The mapping alignment on Unix: one 4,096-byte block.
+pub(super) fn platform_alignment(_file: &File) -> io::Result<Option<u64>> {
+    Ok(Some(4096))
+}
+
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub(super) fn platform_punch(file: &File, offset: u64, len: u64) -> io::Result<Punch> {

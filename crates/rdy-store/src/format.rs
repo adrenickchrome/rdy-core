@@ -81,6 +81,9 @@ pub const SYNC_STATE_REQUIRED_RDY: &str = "0.53.0";
 /// The first rdy that knows [`FEATURE_PORTED_CHANGE`]: the release that first stores a port.
 /// It never moves.
 pub const PORTED_CHANGE_REQUIRED_RDY: &str = "0.58.0";
+/// The first rdy that knows [`FEATURE_DEDUP_SPANS`] (D-1ER84): the release that first maps a
+/// repeated byte run.
+pub const DEDUP_SPANS_REQUIRED_RDY: &str = "0.59.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -119,14 +122,21 @@ pub const FEATURE_HUB_CANON: &str = "hub_canon";
 /// A project's sync state (D-3RSCW): the first batch that writes a `meta/sync/` ref activates
 /// it, in that batch (`crate::sync_state`). No object turns it on, and no upgrade step writes it.
 pub const FEATURE_SYNC_STATE: &str = "sync_state";
+/// Deduplicated spans (D-1ER84): the store's span map (`crate::dedup`) may give the disk space
+/// of an exact repeated byte run back, so a raw segment read can hold a hole that only the map
+/// fills. A new store and a new holder list it from their first batch ([`baseline_features`]);
+/// in an older store, the optional upgrade step `dedup-spans-1` activates it
+/// (`crate::upgrade::dedup_spans_step`). No object turns it on.
+pub const FEATURE_DEDUP_SPANS: &str = "dedup_spans";
 
 /// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM; D-DZDB7;
 /// D-3RSCW; hub ports, D-RHYNQ), sorted by name. Each is `incompatible` and needs its own
 /// minimum ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 13] = [
+pub const REGISTERED_FEATURES: [&str; 14] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
+    FEATURE_DEDUP_SPANS,
     FEATURE_DISPUTE,
     FEATURE_FIGURE_DARK,
     FEATURE_FOREIGN_COPY,
@@ -152,6 +162,7 @@ pub fn required_rdy(name: &str) -> &'static str {
         FEATURE_HUB_CANON => HUB_CANON_REQUIRED_RDY,
         FEATURE_SYNC_STATE => SYNC_STATE_REQUIRED_RDY,
         FEATURE_PORTED_CHANGE => PORTED_CHANGE_REQUIRED_RDY,
+        FEATURE_DEDUP_SPANS => DEDUP_SPANS_REQUIRED_RDY,
         _ => FEATURE_REQUIRED_RDY,
     }
 }
@@ -287,6 +298,24 @@ pub fn valid_feature_name(name: &str) -> bool {
         && b[1..]
             .iter()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+/// Whether `id` is a valid upgrade step id: a feature name, or a versioned id — lowercase
+/// words joined by `-` that ends in `-` and a decimal version (`dedup-spans-1`). At most 64
+/// bytes.
+pub fn valid_step_id(id: &str) -> bool {
+    if valid_feature_name(id) {
+        return true;
+    }
+    if id.len() > 64 {
+        return false;
+    }
+    let Some((words, version)) = id.rsplit_once('-') else {
+        return false;
+    };
+    !version.is_empty()
+        && version.bytes().all(|c| c.is_ascii_digit())
+        && words.split('-').all(valid_feature_name)
 }
 
 /// The most bytes of a feature name.
@@ -967,14 +996,16 @@ fn known_class(name: &str) -> Option<FeatureClass> {
     })
 }
 
-/// The features a new store and a new holder start with, in their first batch (D-8T7PA):
-/// content-2 identity, versioned encodings and snapshot deltas, which every store this rdy
-/// creates uses. A legacy load starts with [`legacy_baseline_features`] instead.
+/// The features a new store and a new holder start with, in their first batch (D-8T7PA,
+/// D-1ER84): content-2 identity, deduplicated spans, versioned encodings and snapshot deltas,
+/// which every store this rdy creates uses. A legacy load starts with
+/// [`legacy_baseline_features`] instead.
 pub fn baseline_features() -> StoreFeatures {
     StoreFeatures {
         manifest_version: 1,
         features: vec![
             registered(FEATURE_CONTENT_HASH_V2),
+            registered(FEATURE_DEDUP_SPANS),
             registered(FEATURE_OBJECT_ENCODING),
             registered(FEATURE_SNAPSHOT_DELTA),
         ],
@@ -1001,6 +1032,12 @@ pub fn legacy_baseline_features() -> StoreFeatures {
 pub(crate) fn creation_baseline() -> StoreFeatures {
     if legacy_writer() {
         legacy_baseline_features()
+    } else if crate::upgrade::registry_lacks_dedup_spans() {
+        // a test's own registry without the span step writes as the rdy before it did, so a
+        // frozen writer recipe keeps its bytes
+        let mut f = baseline_features();
+        f.features.retain(|f| f.name != FEATURE_DEDUP_SPANS);
+        f
     } else {
         baseline_features()
     }
@@ -1332,7 +1369,7 @@ impl UpgradeReceipt {
         }
         let mut seen = std::collections::BTreeSet::new();
         for s in &self.steps {
-            if !valid_feature_name(s) || !seen.insert(s.as_str()) {
+            if !valid_step_id(s) || !seen.insert(s.as_str()) {
                 return Err(format!("upgrade receipt step {} is not valid", clip(s)));
             }
         }

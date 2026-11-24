@@ -102,6 +102,14 @@ pub enum StoreError {
     /// `crate::redaction::limit::ALL`.
     #[error("The redaction exceeds {limit}.")]
     RedactionLimit { limit: &'static str },
+    /// The store's span map (`crate::dedup`) is damaged: a bad header, a damaged interior row,
+    /// a forward source, an overlap, a row past the sealed log, or a removal that does not
+    /// cover every mapped copy (E_IO).
+    #[error("the store span map is damaged")]
+    DedupCorrupt,
+    /// A span map row over 256 bytes, or a failed allocation of span map work (E_LIMIT).
+    #[error("the store span map exceeds its limits")]
+    DedupLimit,
     /// A read projection (a stub or a residual change) offered to a writer (E_BAD_INPUT).
     #[error("A read projection cannot be written.")]
     ProjectedWrite,

@@ -1,9 +1,10 @@
-//! The quarantine files an open leaves behind: torn segment tails and damaged indexes. The names
+//! The quarantine files an open leaves behind: torn segment tails, torn span-map tails and
+//! damaged indexes. The names
 //! are listed, never opened; only the human's `rdy fsck --clean-quarantine` removes them.
 use std::path::Path;
 
-/// The quarantine files an open left behind: torn segment tails (`segments/<name>`) and
-/// damaged indexes, sorted. A missing directory contributes nothing. Links and directories that
+/// The quarantine files an open left behind: torn segment tails (`segments/<name>`), torn
+/// span-map tails (`SPANMAP.torn-*`) and damaged indexes, sorted. A missing directory contributes nothing. Links and directories that
 /// carry a quarantine name are listed too; only the cleanup filters them before it deletes.
 pub fn names(root: &Path) -> Vec<String> {
     let store = root.join(".rdy/store");
@@ -20,11 +21,9 @@ pub fn names(root: &Path) -> Vec<String> {
         .filter(|n| n.contains(".torn-"))
         .map(|n| format!("segments/{n}"))
         .collect();
-    out.extend(
-        names(&store)
-            .into_iter()
-            .filter(|n| n.starts_with("index.redb.damaged-")),
-    );
+    out.extend(names(&store).into_iter().filter(|n| {
+        n.starts_with("index.redb.damaged-") || rdy_store::dedup::is_quarantine_name(n)
+    }));
     out.sort();
     out
 }

@@ -25,7 +25,7 @@
       "removed_bytes": 0
     },
     {
-      "bytes": 13070,
+      "bytes": 13350,
       "kind": 8,
       "name": "ref_update",
       "removed_bytes": 0
@@ -115,7 +115,8 @@
       "removed_bytes": 0
     }
   ],
-  "log_bytes": 56305,
+  "deduplicated_bytes": 0,
+  "log_bytes": 56585,
   "notes": [
     "hole punching is not supported for 2 removed spans; they keep their disk space, and their content stays removed"
   ],

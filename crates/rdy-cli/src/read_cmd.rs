@@ -343,6 +343,12 @@ fn status_text(v: &Value) -> String {
         &v["redaction_warnings"],
     ));
     out.push_str(&open_warnings(v));
+    // the byte report's notes (a stopped or full span map), one line each
+    for n in v["notes"].as_array().into_iter().flatten() {
+        if let Some(n) = n.as_str() {
+            out.push_str(&format!("\n{n}"));
+        }
+    }
     out
 }
 

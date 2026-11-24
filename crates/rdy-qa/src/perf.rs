@@ -7357,7 +7357,10 @@ fn sd1_upgrade_large(
             report.changed && report.reindexed && report.checked,
             "{report:?}"
         );
-        assert_eq!(report.steps, ["snapshot_delta".to_string()]);
+        assert_eq!(
+            report.steps,
+            ["snapshot_delta".to_string(), "dedup-spans-1".to_string()]
+        );
         assert!(report.backup.is_some() && report.batch.is_some());
         // every hash, after the measured upgrade
         let r = Rdy::open(&work).expect("open the upgraded copy");

@@ -1139,12 +1139,19 @@ pub fn take_delta_head(tail: &mut Vec<(u8, Vec<u8>)>, store: &rdy_store::Store) 
     n as u64
 }
 
-/// The features the snapshot-delta conversion merges into a source manifest (D-918YB, SD1 Task
-/// 6): `snapshot_delta`, and `object_encoding`, since a delta is an encoding-1 record.
+/// The features the load conversion merges into a source manifest (D-918YB, SD1 Task 6):
+/// `snapshot_delta`, `object_encoding`, since a delta is an encoding-1 record, and
+/// `dedup_spans` in the same tail.
 pub fn conversion_features() -> Vec<rdy_store::format::StoreFeature> {
-    use rdy_store::format::{FEATURE_OBJECT_ENCODING, FEATURE_SNAPSHOT_DELTA, registered_features};
+    use rdy_store::format::{
+        FEATURE_DEDUP_SPANS, FEATURE_OBJECT_ENCODING, FEATURE_SNAPSHOT_DELTA, registered_features,
+    };
     registered_features()
         .into_iter()
-        .filter(|f| f.name == FEATURE_OBJECT_ENCODING || f.name == FEATURE_SNAPSHOT_DELTA)
+        .filter(|f| {
+            f.name == FEATURE_OBJECT_ENCODING
+                || f.name == FEATURE_SNAPSHOT_DELTA
+                || f.name == FEATURE_DEDUP_SPANS
+        })
         .collect()
 }

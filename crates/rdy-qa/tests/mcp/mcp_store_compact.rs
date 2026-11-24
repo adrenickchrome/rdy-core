@@ -19,9 +19,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const REPORT_KEYS: [&str; 6] = [
+const REPORT_KEYS: [&str; 7] = [
     "log_bytes",
     "removed_bytes",
+    "deduplicated_bytes",
     "punched_bytes",
     "on_disk_bytes",
     "by_kind",
@@ -111,7 +112,7 @@ fn sorted<const N: usize>(mut names: [&'static str; N]) -> [&'static str; N] {
     names
 }
 
-/// A report has the six keys, and rows of four keys with ascending numeric kinds.
+/// A report has the seven keys, and rows of four keys with ascending numeric kinds.
 fn assert_shape(v: &Value) {
     assert_eq!(keys(v), sorted(REPORT_KEYS), "{v}");
     let rows = v["by_kind"].as_array().unwrap();
@@ -352,7 +353,7 @@ fn mh7_a_compact_through_the_wire_refuses_before_a_claim_and_a_reader() {
     c.alive();
 }
 
-const DESCRIPTION: &str = "Free disk space used by removed payloads without changing the log. Set dry_run to true to report bytes without punching holes. Requires a writer session.";
+const DESCRIPTION: &str = "Free disk space used by removed payloads and repeated byte runs. Set dry_run to true to report bytes without changing the store. Requires a writer session.";
 
 #[test]
 fn mh7_the_tool_is_listed_with_its_description_and_one_property() {
