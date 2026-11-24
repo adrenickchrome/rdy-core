@@ -69,6 +69,10 @@ use ureq::unversioned::transport::{ConnectionDetails, Connector, DefaultConnecto
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest whole exchange.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest a write step (any upload request that is not a GET) waits: the hub's 1,800 s
+/// step limit plus 60 s. The hub's work on a write scales with the file count, not the bytes,
+/// so a write never waits less, however small or well compressed its body.
+const WRITE_STEP_TIMEOUT: Duration = Duration::from_secs(1_860);
 /// The longest upload body, in bytes.
 pub const MAX_UPLOAD_BODY_BYTES: u64 = 2_147_483_648;
 /// The highest reply cap an upload caller may choose, in bytes.
@@ -497,8 +501,12 @@ impl HttpHubTransport {
         // A slow link gets time in proportion to the bytes it must carry.
         let reply_bytes = u64::try_from(reply_limit).unwrap_or(u64::MAX);
         let carried = body_len.saturating_add(reply_bytes);
-        let timeout =
+        let mut timeout =
             REQUEST_TIMEOUT.saturating_add(Duration::from_secs(carried.div_ceil(UPLOAD_MIN_RATE)));
+        // A write step never waits less than the hub's own step limit.
+        if method != Method::GET {
+            timeout = timeout.max(WRITE_STEP_TIMEOUT);
+        }
         Ok(Prepared {
             method,
             url: destination.to_string(),
@@ -2048,5 +2056,77 @@ fn decode_api(
             Ok(HubReply::Revoke(k))
         }
         _ => Err(HubFailure::Protocol),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Session, SessionKind};
+    use rdy_model::Role;
+
+    const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
+    const OCTET: &str = "application/octet-stream";
+    const DEST: &str = "https://hub.example/sync/v1/objects/put?push=push_1";
+
+    /// The prepared deadline of one upload request of `method` with a body of `len` bytes.
+    fn deadline(method: UploadMethod, len: u64, reply_limit: usize) -> Duration {
+        let origin = Origin::parse("https://hub.example").unwrap();
+        let fence = OriginFence::new(origin.clone(), []).unwrap();
+        let transport = HttpHubTransport::new(fence).unwrap();
+        let claim = RequestClaim::from_session(&Session {
+            actor: "agent:claude".into(),
+            run: Some("r7".into()),
+            role: Role::Writer,
+            kind: SessionKind::Agent,
+        })
+        .unwrap();
+        let mut body = std::io::empty();
+        let post = matches!(method, UploadMethod::Post);
+        let request = UploadHttpRequest {
+            method,
+            destination: DEST,
+            content_type: OCTET,
+            body: if post && len > 0 {
+                Some(&mut body)
+            } else {
+                None
+            },
+            body_len: len,
+            reply_limit,
+            encoding: BodyEncoding::Identity,
+        };
+        transport
+            .prepare_upload(&origin, &claim, &Secret::new(ACCESS), request)
+            .unwrap()
+            .timeout
+    }
+
+    fn formula(len: u64, reply_limit: usize) -> Duration {
+        let carried = len.saturating_add(reply_limit as u64);
+        REQUEST_TIMEOUT.saturating_add(Duration::from_secs(carried.div_ceil(UPLOAD_MIN_RATE)))
+    }
+
+    #[test]
+    fn a_small_write_waits_the_hubs_step_limit() {
+        assert_eq!(WRITE_STEP_TIMEOUT, Duration::from_secs(1_860));
+        assert_eq!(
+            deadline(UploadMethod::Post, 1_024, 4_096),
+            Duration::from_secs(1_860)
+        );
+    }
+
+    #[test]
+    fn a_huge_write_keeps_the_byte_formula_when_it_is_larger() {
+        let len = MAX_UPLOAD_BODY_BYTES;
+        let expected = formula(len, 4_096);
+        assert!(expected > WRITE_STEP_TIMEOUT);
+        assert_eq!(deadline(UploadMethod::Post, len, 4_096), expected);
+    }
+
+    #[test]
+    fn a_get_keeps_the_byte_formula() {
+        assert_eq!(deadline(UploadMethod::Get, 0, 4_096), formula(0, 4_096));
+        assert!(formula(0, 4_096) < WRITE_STEP_TIMEOUT);
     }
 }
