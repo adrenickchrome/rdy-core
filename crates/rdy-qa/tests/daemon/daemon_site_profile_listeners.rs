@@ -191,6 +191,26 @@ fn first_usable_world<W>(
     Err(NO_WINDOW.to_string())
 }
 
+/// What a world's profile site did, for the record of a run (`--nocapture`): the bind
+/// requests of the daemon in order, the addresses the site reports, and which of the ports
+/// asked for this process listens on now (the actual sockets).
+fn show_world(label: &str, rec: &Recorder, info: &SiteInfo) {
+    let binds = rec.binds();
+    let open = platform::tcp_listen_ports();
+    let listening: Vec<u16> = binds
+        .iter()
+        .map(|a| a.port())
+        .chain(info.addrs.iter().map(|a| a.port()))
+        .filter(|p| open.contains(p))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    eprintln!(
+        "spv7 world {label}: binds {binds:?}; site addrs {:?}; listening {listening:?}",
+        info.addrs
+    );
+}
+
 /// [`world_with`], on a root whose profile window for `key` the machine can bind: the window of
 /// the key's candidates ([`profile_candidates`]) is probed on `127.0.0.1` and `[::1]` with the
 /// daemon already listening, before any recorder is installed. A case that asserts a derived
@@ -888,10 +908,9 @@ fn spv7_same_key_concurrent_starts_return_one_port() {
         vec!["guide".to_string(), "other".to_string()]
     );
     // a later start reuses the listener
-    assert_eq!(
-        url_of(&ensure_profile_site(Arc::clone(&sh), "guide").unwrap()),
-        urls[0]
-    );
+    let again = ensure_profile_site(Arc::clone(&sh), "guide").unwrap();
+    assert_eq!(url_of(&again), urls[0]);
+    show_world("concurrent", &rec, &again);
     assert!(page(guide, "manual/intro.html").contains("INTRO-ONLY-1"));
 }
 
@@ -1649,6 +1668,7 @@ fn spv7_lan_uses_the_profile_port_and_warning() {
                 caveat_line("Guide book"),
             ]
         );
+        show_world("lan address", &rec, &info);
         no_wildcard(&rec, &root_of(w.h.dir.path()), port);
         assert!(info.addrs.iter().all(|a| a.port() == port), "{info:?}");
     }
@@ -1679,6 +1699,7 @@ fn spv7_lan_uses_the_profile_port_and_warning() {
                 caveat_line("Guide book"),
             ]
         );
+        show_world("no lan address", &rec, &info);
         no_wildcard(&rec, &root_of(w.h.dir.path()), port_of(&url));
         assert!(info.addrs.iter().all(|a| a.ip().is_loopback()), "{info:?}");
     }
@@ -1724,6 +1745,7 @@ fn spv7_lan_uses_the_profile_port_and_warning() {
             "the configured address, on the profile port: {:?}",
             rec.binds()
         );
+        show_world("unbindable lan address", &rec, &info);
         no_wildcard(&rec, &root_of(w.h.dir.path()), port);
     }
 }
