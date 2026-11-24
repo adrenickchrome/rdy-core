@@ -1300,6 +1300,13 @@ impl StoreReader {
         let want = crate::index::Index::in_memory()?;
         let mut rows: Vec<IndexEntry> = vec![];
         let mut r = Resolver::new(self);
+        // the batches a fetch or a fork's take wrote (`redaction_io::marks_fetched`): their plans
+        // came from another store, so they keep the holder's rules and move no plan ref
+        let fetched = if holder {
+            BTreeSet::new()
+        } else {
+            self.fetched_batches(origin, upto)?
+        };
         self.for_each_record_from(origin, upto, |at, frame, next| {
             let (kind, hash, payload, residue) = match frame {
                 StoredFrame::Present {
@@ -1359,9 +1366,10 @@ impl StoreReader {
                     if let Some(reason) = invalid_record(&p) {
                         return Err(StoreError::Decode(damage(&hash, reason)));
                     }
+                    let from_fetch = fetched.contains(&batch_start);
                     let look = CheckLookup {
                         reader: self,
-                        holder,
+                        holder: holder || from_fetch,
                         batch_start,
                         batch: &batch,
                         latest: &latest,
@@ -1371,7 +1379,10 @@ impl StoreReader {
                     if let Some(reason) = invalid_context(&hash, &p, &look)? {
                         return Err(StoreError::Decode(damage(&hash, reason)));
                     }
-                    latest.insert(p.view.clone(), hash);
+                    // a fetched plan names no local view's chain: no `plan/` ref names it
+                    if !from_fetch {
+                        latest.insert(p.view.clone(), hash);
+                    }
                     match &p.seal {
                         Some(s) => {
                             sealed.entry(s.landing).or_insert(hash);
@@ -1425,6 +1436,46 @@ impl StoreReader {
         self.check_readiness_rows(&want, upto)?;
         self.check_dispute_rows(&want, upto)?;
         Ok(n)
+    }
+
+    /// The starts of the project batches in `from..upto` that a fetch or a fork's take wrote:
+    /// each holds a ref update that `redaction_io::marks_fetched` reads as fetched (D-KE83X: a
+    /// fetch's batch holds the fetched records and the sync state, and moves no other ref). A
+    /// batch starts at `from` or after a commit marker, as in [`StoreReader::check_plans`].
+    fn fetched_batches(
+        &self,
+        from: Location,
+        upto: Location,
+    ) -> Result<BTreeSet<Location>, StoreError> {
+        let mut out = BTreeSet::new();
+        let mut start: Option<Location> = None;
+        let mut marked = false;
+        self.for_each_record_from(from, upto, |at, frame, _| {
+            let (raw, payload) = match frame {
+                StoredFrame::Present { kind, payload, .. } => (kind, Some(payload)),
+                StoredFrame::Dropped { kind, .. } => (kind, None),
+            };
+            let kind = crate::codec::logical_kind(raw);
+            if kind == kinds::BATCH_COMMIT {
+                if let (true, Some(s)) = (marked, start) {
+                    out.insert(s);
+                }
+                start = None;
+                marked = false;
+                return Ok(());
+            }
+            start.get_or_insert(at);
+            // read as the header pass reads it (`redaction_io`)
+            if kind == kinds::REF_UPDATE
+                && let Some(b) = payload
+                && let Ok(u) = crate::store::decode::<kinds::RefUpdate>(b)
+                && crate::redaction_io::marks_fetched(&u)
+            {
+                marked = true;
+            }
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// The readiness rows (rg2) and the dispute rows (ap2) that the frame at `at` gives, as the

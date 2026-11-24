@@ -699,7 +699,7 @@ impl Collected {
             kinds::REF_UPDATE => {
                 if let Some(b) = payload.filter(|b| Hash::of(b) == hash)
                     && let Ok(u) = crate::store::decode::<kinds::RefUpdate>(b)
-                    && (crate::sync_state::is_sync_ref(&u.name) || is_fork_origin(&u))
+                    && marks_fetched(&u)
                 {
                     p.sync = true;
                 }
@@ -708,6 +708,14 @@ impl Collected {
         }
         Ok(())
     }
+}
+
+/// Whether the ref update `u` marks its project batch as fetched: a `meta/sync/` ref (a fetch's
+/// batch, D-3RSCW) or a fork origin (a project fork's take). The header pass reads a fetched
+/// batch's removals as another store's (D-FNRXT), and fsck checks its change plans by the
+/// holder's rules (`crate::plan`).
+pub(crate) fn marks_fetched(u: &kinds::RefUpdate) -> bool {
+    crate::sync_state::is_sync_ref(&u.name) || is_fork_origin(u)
 }
 
 /// Whether `u` writes a fork origin: `meta/origin` with a value that names a fork. A project

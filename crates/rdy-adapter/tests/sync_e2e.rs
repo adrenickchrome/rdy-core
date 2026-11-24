@@ -1621,6 +1621,82 @@ fn clone_and_pull_of_a_history_with_an_intent_and_an_alternative_set_pass_fsck()
             .expect("land the chosen member");
         (w.change, alt_change)
     });
+    // a landing with a sealed plan that has answer versions: an edit of a claim that another
+    // claim references opens a confirm item, answered twice, then proposed and landed
+    let sealed = a.with(|r| {
+        let w = r
+            .write(
+                &session(Role::Writer),
+                WriteRequest {
+                    view: "w-seed".into(),
+                    ops: serde_json::from_value(json!([
+                        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Rules", "doc_type": "page"}},
+                        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+                        {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds 30 days."},
+                        {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}}."}
+                    ]))
+                    .unwrap(),
+                    justification: None,
+                    message: "plan seed".into(),
+                },
+            )
+            .expect("the plan seed");
+        land(r, "w-seed");
+        let claim = w.created["$a"].clone();
+        r.write(
+            &session(Role::Writer),
+            WriteRequest {
+                view: "w-plan".into(),
+                ops: serde_json::from_value(
+                    json!([{"op": "update", "id": claim, "body": "A holds 40 days."}]),
+                )
+                .unwrap(),
+                justification: None,
+                message: "an edit with a plan item".into(),
+            },
+        )
+        .expect("the edit");
+        let items: Vec<String> = r
+            .read()
+            .view_plan("w-plan")
+            .expect("the view's plan")
+            .items
+            .iter()
+            .filter_map(|row| match row {
+                rdy_engine::plan::api::PlanRow::Live(i) => Some(i.id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!items.is_empty(), "the edit opens a plan item");
+        for reason in ["it still holds", "it still holds, checked again"] {
+            let answers: Vec<rdy_engine::plan::PlanAnswerInput> = items
+                .iter()
+                .map(|i| rdy_engine::plan::PlanAnswerInput {
+                    item: i.clone(),
+                    act: rdy_model::plan::PlanAct::Confirm,
+                    reason: Some(reason.into()),
+                })
+                .collect();
+            r.answer_plan(&session(Role::Writer), "w-plan", &answers)
+                .expect("answer the plan");
+        }
+        land(r, "w-plan");
+        let reader = r.store().reader();
+        let head = reader
+            .get_ref("plan/w-plan")
+            .unwrap()
+            .expect("the view's plan ref");
+        let head = Hash(head.try_into().expect("a plan hash"));
+        let mut versions = 0;
+        let mut cur = Some(head);
+        while let Some(h) = cur {
+            cur = reader.plan(&h).expect("a plan version").prev;
+            versions += 1;
+        }
+        assert!(reader.plan(&head).unwrap().seal.is_some(), "the latest version is sealed");
+        versions
+    });
+    assert!(sealed >= 3, "a sealed plan with answer versions: {sealed}");
     // the source store holds both refs and checks both chains
     let source = a.with(|r| r.fsck().expect("A's fsck"));
     assert_eq!(
