@@ -220,7 +220,7 @@ fn window_world(extra: usize, config: Option<&str>, lan: Option<LanOverride>, ke
         || world_with(extra, config, lan),
         |w| {
             let candidates = profile_candidates(&root_of(w.h.dir.path()), key);
-            window_binds_both(&candidates, |at| TcpListener::bind(at))
+            window_binds_both(&candidates, TcpListener::bind)
         },
     )
     .unwrap_or_else(|e| panic!("{e}"))
