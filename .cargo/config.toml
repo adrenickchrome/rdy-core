@@ -1,2 +1,11 @@
 [alias]
 qa = "run -p rdy-qa --release --bin qa-gate --"
+
+# Linux x86_64: build all C code (ring, zstd-sys) for the x86-64 baseline. Some build hosts' C
+# compilers default to x86-64-v3 (AVX2, BMI2, MOVBE), and the code they make dies with SIGILL on an
+# older CPU. ring's assembly picks AVX, AES-NI and ADX code at run time by CPU detection, and zstd
+# does for BMI2, so a new CPU keeps its fast paths. An explicit CFLAGS_x86_64_unknown_linux_gnu
+# in the environment wins over this one.
+[env]
+CFLAGS_x86_64_unknown_linux_gnu = "-march=x86-64 -mtune=generic"
+CXXFLAGS_x86_64_unknown_linux_gnu = "-march=x86-64 -mtune=generic"
