@@ -495,7 +495,10 @@ struct FirstUse {
 /// receiver; their own tests are `scc2_` in the store area. `ported_change` (D-RHYNQ, D-PKC71,
 /// hub ports Task 5), the first port or the residue of one activates it: the dump pair
 /// `v4-f1-e1-ported-change` and the native store `store/ported-change-1`, whose own tests are
-/// `hpt5_` in the release area.
+/// `hpt5_` in the release area. `dedup_spans` (D-1ER84), the second feature a new store writes
+/// from its first batch that a complete set does not hold: the dump pair `v4-f1-dedup-spans`
+/// and the native store `store/dedup-spans-1` with its span map, whose own tests are `r5902_` in
+/// the io area.
 const FIRST_USE: &[FirstUse] = &[
     FirstUse {
         name: "foreign_copy",
@@ -610,7 +613,38 @@ const FIRST_USE: &[FirstUse] = &[
         native: None,
         baseline: false,
     },
+    FirstUse {
+        name: "dedup_spans",
+        dump: &[
+            (
+                "v4-f1-dedup-spans.rdydump",
+                "25ca2264bb1dfaab5f795818d751e33ed5072a8c26b712b0a36739d99cfe19cf",
+            ),
+            (
+                "v4-f1-dedup-spans.expect.json",
+                "cf7643c1e2ad43fbbfcb03c28e25295b816c55842e8abad33b7ce2aaebb50440",
+            ),
+        ],
+        sync: &[],
+        native: Some("fixtures/store/dedup-spans-1/expect.json"),
+        baseline: true,
+    },
 ];
+
+/// The written formats `now` as the baseline first-use fixture at position `at` of
+/// [`FIRST_USE`] recorded them: `now` less each later baseline feature, which a new store
+/// started writing after that fixture was frozen. The registry is append-only, so each frozen
+/// expect file keeps the baseline of its own time.
+fn first_use_formats(now: &Value, at: usize) -> Value {
+    let mut v = now.clone();
+    let features = v["features"]["features"].as_array_mut().unwrap();
+    features.retain(|f| {
+        !FIRST_USE[at + 1..]
+            .iter()
+            .any(|u| u.baseline && f["name"] == json!(u.name))
+    });
+    v
+}
 
 /// The formats the complete sets pin for the written formats `now`: `now` less each
 /// [`FIRST_USE`] feature a new store writes from its first batch. Each of those is frozen in
@@ -643,7 +677,7 @@ fn first_use_members() -> Vec<&'static str> {
 fn all_features() -> StoreFeatures {
     let registered = registered_features();
     let mut covered: Vec<String> = vec![];
-    for f in FIRST_USE {
+    for (at, f) in FIRST_USE.iter().enumerate() {
         let reg = registered
             .iter()
             .find(|r| r.name == f.name)
@@ -668,7 +702,7 @@ fn all_features() -> StoreFeatures {
             assert_eq!(Hash::of(&bytes).to_string(), *digest, "{name}");
         }
         if f.baseline {
-            let now = chain_fixture::current_formats();
+            let now = first_use_formats(&chain_fixture::current_formats(), at);
             for (name, _) in f.dump.iter().filter(|(n, _)| n.ends_with(".expect.json")) {
                 assert_eq!(read_expect(name)["formats"], now, "{name}");
             }

@@ -2746,7 +2746,6 @@ impl Store {
         self.held
     }
 
-    /// The log itself, for the byte report of `crate::compact`.
     /// Runs `f` with threshold span-mapping passes off on this handle (a receiving operation).
     pub(crate) fn without_map_pass<T>(&mut self, f: impl FnOnce(&mut Store) -> T) -> T {
         let was = std::mem::replace(&mut self.no_map_pass, true);
@@ -2755,6 +2754,7 @@ impl Store {
         out
     }
 
+    /// The log itself, for the byte report of `crate::compact`.
     pub(crate) fn segment_log(&self) -> &SegmentLog {
         &self.log
     }
