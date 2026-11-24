@@ -201,7 +201,7 @@ fn acc1_overview_schema_and_instructions_carry_the_entity_surfaces() {
         "{guide}"
     );
     assert!(
-        guide.contains("accept the right ones with one `rdy_accept` call; they never block."),
+        guide.contains("accept the right ones with one `rdy_accept {suggestions: [...]}` call; they never block."),
         "{guide}"
     );
     assert!(

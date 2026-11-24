@@ -72,7 +72,7 @@ pub(crate) const MOVED: &[(&str, &str)] = &[
     ),
     (
         "write",
-        r##"Write responses carry suggestions (links to the entities your text names, new entities for literals that recur): accept the right ones with one `rdy_accept` call; they never block."##,
+        r##"Write responses carry suggestions (links to the entities your text names, new entities for literals that recur): accept the right ones with one `rdy_accept {suggestions: [...]}` call; they never block. Pass the suggestion objects unchanged, never bare ids."##,
     ),
     (
         "write",
@@ -80,7 +80,7 @@ pub(crate) const MOVED: &[(&str, &str)] = &[
     ),
     (
         "write",
-        r##"Link every entity a normative statement names, and elsewhere the entities a block is about; dismiss a passing mention of an everyday word with `rdy_resolve` (mention, dismiss)."##,
+        r##"Link every entity a normative statement names, and elsewhere the entities a block is about; dismiss a passing mention of an everyday word with `rdy_resolve {mention: {block, entity}, dismiss: {reason}}`."##,
     ),
     (
         "after-write",
