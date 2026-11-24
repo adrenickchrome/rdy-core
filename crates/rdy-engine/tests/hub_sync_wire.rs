@@ -1984,6 +1984,9 @@ fn scc8_fetch_splits_batches_past_batch_bytes() {
     .unwrap();
     assert!(whole.len() > 8_192, "{}", whole.len());
 
+    // the sizer keeps these small records within the limit, so the first get of two or more
+    // keys is padded past it: the halving fallback must split that group
+    *fake.pad_get.lock().unwrap() = true;
     sync_env::Sync::new(&e, &fake)
         .pull(PullRequest {
             views: vec!["drafts".into()],
@@ -1993,6 +1996,19 @@ fn scc8_fetch_splits_batches_past_batch_bytes() {
     let gets = fake.gets.lock().unwrap().clone();
     let replies = fake.get_replies.lock().unwrap().clone();
     assert_eq!(gets.len(), replies.len());
+    // the padded group's front half comes next, then its back half
+    let over = replies
+        .iter()
+        .position(|(made, _)| *made > 8_192)
+        .expect("a reply past batch_bytes");
+    let group = &gets[over].keys;
+    assert!(group.len() >= 2, "{group:?}");
+    let (front, back) = group.split_at(group.len() / 2);
+    assert_eq!(gets[over + 1].keys, front);
+    assert_eq!(gets[over + 2].keys, back);
+    assert_eq!(gets[over + 1].purpose, gets[over].purpose);
+    assert_eq!(gets[over + 2].purpose, gets[over].purpose);
+    assert!(replies[over + 1].0 <= 8_192 && replies[over + 2].0 <= 8_192);
     for (purpose, wanted) in [
         (StreamPurpose::CanonHistory, &canon_want),
         (StreamPurpose::ViewHistory, &view_want),
@@ -2089,7 +2105,7 @@ fn fg1_fetch_sizes_gets_within_batch_bytes() {
     );
     assert_eq!(refused, 0, "{replies:?}");
     assert_eq!(made, read, "{replies:?}");
-    // each get but the last fills at least a third of the limit
+    // no more gets than replies of a third of the limit would need, and two more
     assert!(
         gets <= whole.div_ceil(CAP / 3) + 2,
         "{gets} gets: {replies:?}"

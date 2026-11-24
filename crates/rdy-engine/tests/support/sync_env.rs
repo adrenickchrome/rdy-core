@@ -307,6 +307,9 @@ pub struct Hub {
     pub gets: Mutex<Vec<GetRequest>>,
     /// Each get's reply, in order: the bytes the hub produced and the bytes the client read.
     pub get_replies: Mutex<Vec<(u64, u64)>>,
+    /// When set, the next get of two or more keys has its reply padded one byte past the state's
+    /// `batch_bytes` (the client must split it), and the knob clears.
+    pub pad_get: Mutex<bool>,
     /// A get reply served once in place of the store's batch.
     pub get_bytes: Mutex<Option<Vec<u8>>>,
     /// The dump files the dump step serves, by id (D-7CDEQ); an id with none is refused as
@@ -360,6 +363,7 @@ impl Hub {
             pulls: Mutex::default(),
             gets: Mutex::default(),
             get_replies: Mutex::default(),
+            pad_get: Mutex::default(),
             get_bytes: Mutex::default(),
             dumps: Mutex::default(),
             dump_ids: Mutex::default(),
@@ -692,7 +696,7 @@ impl SyncWire for Hub {
     ) -> Result<u64, RdyError> {
         self.enter("get", cx, None, None)?;
         self.gets.lock().unwrap().push(request.clone());
-        let bytes = match self.get_bytes.lock().unwrap().take() {
+        let mut bytes = match self.get_bytes.lock().unwrap().take() {
             Some(b) => b,
             None => {
                 // the hub's export of exactly the keys asked for (the core read a hub serves)
@@ -708,6 +712,13 @@ impl SyncWire for Hub {
                 out
             }
         };
+        if request.keys.len() >= 2 && std::mem::take(&mut *self.pad_get.lock().unwrap()) {
+            let cap = self.state.lock().unwrap().batch_bytes;
+            let past = usize::try_from(cap).unwrap() + 1;
+            if bytes.len() < past {
+                bytes.resize(past, 0);
+            }
+        }
         // as the transport streams a reply: piece by piece, each written while the bytes so far
         // are within `limit`; the first piece past it fails the get
         let mut n = 0u64;
