@@ -1507,6 +1507,8 @@ fn hpt5_port_survives_reindex_dump_load_and_sync() {
         assert!(c["ported_from"]["repo_id"].is_string(), "{c}");
     }
     assert_eq!(&probe.pulled, first["changes"].as_array().expect("changes"));
+    // the residue of a removed port (encoding 2, D-PKC71) survives the same four stages
+    residue_stages();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3251,8 +3253,7 @@ fn hpt5_formats_stay_fixed_and_first_use_is_required() {
 /// gone and a residue of encoding 2 stands for it, which names the source. A dump of that store
 /// holds no change of encoding 3 or 4; its load turns `ported_change` on from the residue alone,
 /// and its source still reads in the landing facts. No format version moves.
-#[test]
-fn hpr5_residue_only_first_use_keeps_formats() {
+fn residue_stages() {
     let _clock = pin_clock(AT);
     let l = local();
     let mut t = Rdy::open(&l.t3).expect("the target");
@@ -3316,6 +3317,25 @@ fn hpr5_residue_only_first_use_keeps_formats() {
     assert_eq!(encodings(&t, kinds::REDACTION_RESIDUE, "2"), 1);
     let dump = l.at("t3.rdydump");
     t.read().dump(&dump).expect("a dump");
+    // a sync: the hub takes the canon history, the removal and the residue with it
+    let hub = seed_hub(&t, &l.at("t3-hub"));
+    assert!(
+        has_feature(&hub, FEATURE_PORTED_CHANGE),
+        "the hub takes the residue"
+    );
+    assert_eq!(encodings(&hub, kinds::REDACTION_RESIDUE, "2"), 1);
+    assert_eq!(encodings(&hub, kinds::CHANGE, "3"), 0);
+    let synced = hub
+        .store()
+        .reader()
+        .change(&change)
+        .expect("the projected change");
+    assert_eq!(
+        synced.links.ported_from,
+        Some(from),
+        "the sync keeps the source"
+    );
+    hub.close().expect("a close");
     t.close().expect("a close");
     // a load of the dump: the residue alone turns the feature on
     let to = l.at("t3-loaded");
@@ -3516,4 +3536,11 @@ fn hpt5_ported_fixture_opens_and_keeps_its_ports() {
         })
         .collect();
     assert_eq!(after, before, "the frozen files never change");
+}
+
+/// hpr5: a removed port's residue (encoding 2, D-PKC71) alone turns the feature on in a load and
+/// in a sync, keeps its source, and moves no format. See [`residue_stages`].
+#[test]
+fn hpr5_residue_only_first_use_keeps_formats() {
+    residue_stages();
 }
