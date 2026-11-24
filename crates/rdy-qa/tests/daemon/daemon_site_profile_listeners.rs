@@ -26,9 +26,11 @@ use rdy_qa::golden::tiny;
 use rdy_qa::http::{self, Sse};
 use rdy_qa::platform;
 use serde_json::{Value, json};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
@@ -144,6 +146,64 @@ fn world_with(extra: usize, config: Option<&str>, lan: Option<LanOverride>) -> W
 
 fn world() -> World {
     world_with(0, None, None)
+}
+
+/// How many temporary roots a profile-window setup tries in all.
+const WINDOW_ROOTS: usize = 32;
+/// The failure of a setup that no root served.
+const NO_WINDOW: &str = "no bindable profile port window on this machine";
+
+/// Whether a profile listener whose first choice is the first port of `candidates` that binds
+/// on `127.0.0.1` finds `[::1]` free on that same port. `bind` takes one address. For that
+/// port both sockets are held together and dropped before this returns, so the profile
+/// listener starts with every port free. No candidate that binds on IPv4 is `false`. The
+/// walk is the server's own: the first IPv4 port that binds is its port, and `[::1]` follows on it.
+fn window_binds_both<L>(
+    candidates: &[u16],
+    mut bind: impl FnMut(SocketAddr) -> std::io::Result<L>,
+) -> bool {
+    for &port in candidates {
+        let Ok(v4) = bind(sock(port)) else {
+            continue;
+        };
+        let v6 = bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port)));
+        let both = v6.is_ok();
+        drop((v4, v6));
+        return both;
+    }
+    false
+}
+
+/// The first world `make` builds that `usable` accepts. A refused world is dropped (closed)
+/// before the next is made. At most [`WINDOW_ROOTS`] worlds are made, one after another, with
+/// no wait; after that many refusals it is [`NO_WINDOW`].
+fn first_usable_world<W>(
+    mut make: impl FnMut() -> W,
+    mut usable: impl FnMut(&W) -> bool,
+) -> Result<W, String> {
+    for _ in 0..WINDOW_ROOTS {
+        let world = make();
+        if usable(&world) {
+            return Ok(world);
+        }
+        drop(world);
+    }
+    Err(NO_WINDOW.to_string())
+}
+
+/// [`world_with`], on a root whose profile window for `key` the machine can bind: the window of
+/// the key's candidates ([`profile_candidates`]) is probed on `127.0.0.1` and `[::1]` with the
+/// daemon already listening, before any recorder is installed. A case that asserts a derived
+/// profile port starts here, so the profile listener walks the window as the probe did.
+fn window_world(extra: usize, config: Option<&str>, lan: Option<LanOverride>, key: &str) -> World {
+    first_usable_world(
+        || world_with(extra, config, lan),
+        |w| {
+            let candidates = profile_candidates(&root_of(w.h.dir.path()), key);
+            window_binds_both(&candidates, |at| TcpListener::bind(at))
+        },
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn shared(h: &Hosted) -> Arc<Shared> {
@@ -667,9 +727,110 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
     assert_eq!(r.status, 405, "{}", r.head);
 }
 
+/// A socket the probes of [`r5903_profile_site_window_is_bindable_first`] hold: it counts the
+/// sockets alive, and the most that were alive together.
+struct Held {
+    alive: Rc<Cell<usize>>,
+}
+
+impl Held {
+    fn new(alive: &Rc<Cell<usize>>, peak: &Cell<usize>) -> Held {
+        alive.set(alive.get() + 1);
+        peak.set(peak.get().max(alive.get()));
+        Held {
+            alive: Rc::clone(alive),
+        }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.alive.set(self.alive.get() - 1);
+    }
+}
+
+#[test]
+fn r5903_profile_site_window_is_bindable_first() {
+    let refuse = || Err(std::io::Error::from(std::io::ErrorKind::AddrInUse));
+    // the pair of one candidate is held together, then dropped before the walk returns
+    let (alive, peak) = (Rc::new(Cell::new(0)), Cell::new(0));
+    let asked = RefCell::new(vec![]);
+    let bound = |busy_v4: &[u16], busy_v6: &[u16]| {
+        let mut bind = |at: SocketAddr| {
+            asked.borrow_mut().push(at);
+            let busy = if at.is_ipv4() { busy_v4 } else { busy_v6 };
+            if busy.contains(&at.port()) {
+                refuse()
+            } else {
+                Ok(Held::new(&alive, &peak))
+            }
+        };
+        window_binds_both(&[5000, 5001, 5002], &mut bind)
+    };
+    assert!(bound(&[], &[]));
+    assert_eq!(
+        asked.borrow().clone(),
+        [sock(5000), "[::1]:5000".parse().unwrap()]
+    );
+    assert_eq!(
+        (alive.get(), peak.get()),
+        (0, 2),
+        "both held, then both dropped"
+    );
+    // the first IPv4 port that binds is the one that counts; IPv4 busy ports are walked past
+    asked.borrow_mut().clear();
+    assert!(bound(&[5000], &[5000]));
+    assert_eq!(
+        asked.borrow().clone(),
+        [sock(5000), sock(5001), "[::1]:5001".parse().unwrap()]
+    );
+    // its IPv6 refused: not usable, whatever a later port would do; nothing stays held
+    assert!(!bound(&[], &[5000]));
+    assert!(!bound(&[5000], &[5001]));
+    assert_eq!(alive.get(), 0);
+    // no IPv4 port binds at all
+    assert!(!bound(&[5000, 5001, 5002], &[]));
+    assert_eq!(alive.get(), 0);
+
+    // an injected probe refuses the first 31 roots and takes the 32nd: one world at a time
+    let (made, open, most) = (Cell::new(0), Cell::new(0), Cell::new(0));
+    struct Root<'a>(usize, &'a Cell<usize>);
+    impl Drop for Root<'_> {
+        fn drop(&mut self) {
+            self.1.set(self.1.get() - 1);
+        }
+    }
+    let root = first_usable_world(
+        || {
+            made.set(made.get() + 1);
+            open.set(open.get() + 1);
+            most.set(most.get().max(open.get()));
+            Root(made.get(), &open)
+        },
+        |r| r.0 == 32,
+    )
+    .map(|r| r.0);
+    assert_eq!(root, Ok(32));
+    assert_eq!((made.get(), open.get(), most.get()), (32, 0, 1));
+    // all 32 refused: the exact error, and no 33rd root
+    let made = Cell::new(0);
+    let none = first_usable_world(
+        || {
+            made.set(made.get() + 1);
+            made.get()
+        },
+        |_| false,
+    );
+    assert_eq!(
+        none,
+        Err("no bindable profile port window on this machine".to_string())
+    );
+    assert_eq!(made.get(), 32);
+}
+
 #[test]
 fn spv7_same_key_concurrent_starts_return_one_port() {
-    let w = world();
+    let w = window_world(0, None, None, "guide");
     let sh = shared(&w.h);
     let rec = Recorder::on(w.h.dir.path());
     let source = port_of(&w.url);
@@ -1452,10 +1613,11 @@ fn spv7_a_removal_after_a_restore_both_unseen_by_the_worker_still_clears_the_str
 fn spv7_lan_uses_the_profile_port_and_warning() {
     // an injected private address (the stand-in 127.0.0.1)
     {
-        let w = world_with(
+        let w = window_world(
             0,
             Some("serve:\n  site_lan: true\n"),
             Some(LanOverride::Addr(Ipv4Addr::LOCALHOST)),
+            "guide",
         );
         let sh = shared(&w.h);
         let rec = Recorder::on(w.h.dir.path());
@@ -1492,10 +1654,11 @@ fn spv7_lan_uses_the_profile_port_and_warning() {
     }
     // no private address found
     {
-        let w = world_with(
+        let w = window_world(
             0,
             Some("serve:\n  site_lan: true\n"),
             Some(LanOverride::NoneFound),
+            "guide",
         );
         let sh = shared(&w.h);
         let rec = Recorder::on(w.h.dir.path());
@@ -1521,10 +1684,11 @@ fn spv7_lan_uses_the_profile_port_and_warning() {
     }
     // a LAN address this machine cannot bind
     {
-        let w = world_with(
+        let w = window_world(
             0,
             Some("serve:\n  site_lan: true\n  site_lan_address: 10.255.255.254\n"),
             None,
+            "guide",
         );
         let sh = shared(&w.h);
         let rec = Recorder::on(w.h.dir.path());
