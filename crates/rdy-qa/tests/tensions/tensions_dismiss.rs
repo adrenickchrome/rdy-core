@@ -661,7 +661,7 @@ fn tdis1_the_refusals_say_exactly_why() {
         (e.message.as_str(), e.fix.as_str()),
         (
             "dismissing a blocking tension needs the reviewer role or a human session",
-            "start a session with role reviewer, or ask a human"
+            "a writer cannot dismiss it, even between its own views: land one view first, repin the stale pin, or leave out the blocks that keep it; otherwise ask the person and relay their words with rdy_resolve {tension, dismiss: {reason, evidence}}, or ask a reviewer of another actor"
         )
     );
     let t = pick(&r, TensionKind::AreaOverlap);

@@ -286,7 +286,7 @@ impl ReadState {
                 return Err(RdyError::new(
                     E_PERMISSION,
                     format!("dismissing {what} needs the reviewer role or a human session"),
-                    "start a session with role reviewer, or ask a human",
+                    "a writer cannot dismiss it, even between its own views: land one view first, repin the stale pin, or leave out the blocks that keep it; otherwise ask the person and relay their words with rdy_resolve {tension, dismiss: {reason, evidence}}, or ask a reviewer of another actor",
                 ));
             }
             for (side, actor) in self.authors(t, &label)? {
