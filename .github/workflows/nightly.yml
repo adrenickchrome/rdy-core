@@ -19,8 +19,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, macos]
-    runs-on: [self-hosted, rdy-gate, "${{ matrix.os }}"]
+        # Linux runs on core's own machine (label rdy-core-gate); the build servers belong to rdyhub's gates.
+        include:
+          - os: linux
+            group: rdy-core-gate
+          - os: macos
+            group: rdy-gate
+    runs-on: [self-hosted, "${{ matrix.group }}", "${{ matrix.os }}"]
     timeout-minutes: 120
     permissions:
       contents: read

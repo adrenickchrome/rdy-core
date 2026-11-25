@@ -1850,8 +1850,10 @@ class NightlyPolicy(unittest.TestCase):
             if runs_on is not None:
                 self.assertEqual(jobs[name]['runs-on'], runs_on, name)
         own = jobs['own']
-        self.assertEqual(own['runs-on'], ['self-hosted', 'rdy-gate', '${{ matrix.os }}'])
-        self.assertEqual(own['strategy'], {'fail-fast': False, 'matrix': {'os': ['linux', 'macos']}})
+        # Linux on core's own machine (rdy-core-gate), as gate.yml; the build servers are rdyhub's.
+        self.assertEqual(own['runs-on'], ['self-hosted', '${{ matrix.group }}', '${{ matrix.os }}'])
+        self.assertEqual(own['strategy'], {'fail-fast': False, 'matrix': {'include': [
+            {'os': 'linux', 'group': 'rdy-core-gate'}, {'os': 'macos', 'group': 'rdy-gate'}]}})
 
     def test_only_the_report_job_writes_and_no_job_holds_a_secret(self):
         for name, job in self.doc['jobs'].items():
