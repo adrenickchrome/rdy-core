@@ -82,7 +82,7 @@ fn ls7_rdy_site_gives_the_link() {
     assert!(v.get("warning").is_none(), "{v}");
     let url = v["url"].as_str().unwrap();
     assert!(url.starts_with("http://127.0.0.1:"), "{v}");
-    assert_eq!(page(url).status, 200, "{v}");
+    assert_eq!(page(url).status, 200, "{v} (transport: {})", rdy_qa::http::last_transport());
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn ls7_rdy_site_for_a_view_and_a_proposal() {
     let url = v["url"].as_str().unwrap();
     assert!(url.ends_with("~view/editing/"), "{v}");
     let got = page(url);
-    assert_eq!(got.status, 200, "{v}");
+    assert_eq!(got.status, 200, "{v} (transport: {})", got.transport);
     assert!(
         String::from_utf8_lossy(&got.body).contains("Show changes"),
         "a view serves in review mode"
@@ -108,7 +108,7 @@ fn ls7_rdy_site_for_a_view_and_a_proposal() {
     assert_eq!(p["scope"], scope.as_str(), "{p}");
     let url = p["url"].as_str().unwrap();
     assert!(url.ends_with(&format!("~proposal/{proposal_ref}/")), "{p}");
-    assert_eq!(page(url).status, 200, "{p}");
+    assert_eq!(page(url).status, 200, "{p} (transport: {})", rdy_qa::http::last_transport());
 
     // final review M5 and M2: each form of a proposal gets the one spelling the site reads, and
     // its link serves
@@ -124,7 +124,7 @@ fn ls7_rdy_site_for_a_view_and_a_proposal() {
         let url = p["url"].as_str().unwrap();
         let want_path = format!("/~{}/", want.replacen(':', "/", 1));
         assert!(url.ends_with(&want_path), "{given}: {p}");
-        assert_eq!(page(url).status, 200, "{given}: {p}");
+        assert_eq!(page(url).status, 200, "{given}: {p} (transport: {})", rdy_qa::http::last_transport());
     }
 
     let bad = c.call("rdy_site", json!({"scope": "nosuch"}));
@@ -147,7 +147,7 @@ fn sr2_rdy_site_gives_a_tag_link() {
     let url = v["url"].as_str().unwrap();
     assert!(url.ends_with("/~tag/v1.0.0/"), "{v}");
     assert!(v.get("changes").is_none(), "{v}");
-    assert_eq!(page(url).status, 200, "{v}");
+    assert_eq!(page(url).status, 200, "{v} (transport: {})", rdy_qa::http::last_transport());
     // the stored name, whichever way the tag is spelled
     let bare = c.call("rdy_site", json!({"scope": "tag:1.0.0"})).ok();
     assert_eq!(bare["url"], v["url"], "{bare}");
@@ -175,7 +175,7 @@ fn sr2_a_long_valid_version_has_a_site() {
         .ok();
     let url = v["url"].as_str().unwrap();
     assert!(url.ends_with(&format!("/~tag/{name}/")), "{v}");
-    assert_eq!(page(url).status, 200, "{v}");
+    assert_eq!(page(url).status, 200, "{v} (transport: {})", rdy_qa::http::last_transport());
 }
 
 /// Fix round 2 (ruling task-2 (1)): the longest version name rdy stores has a site that the
@@ -202,8 +202,8 @@ fn sr2_the_longest_version_has_a_site() {
         .ok();
     let url = v["url"].as_str().unwrap();
     assert!(url.ends_with(&format!("/~tag/{name}/")), "{v}");
-    assert_eq!(page(url).status, 200, "{v}");
-    assert_eq!(page(&format!("{url}index.html")).status, 200, "{v}");
+    assert_eq!(page(url).status, 200, "{v} (transport: {})", rdy_qa::http::last_transport());
+    assert_eq!(page(&format!("{url}index.html")).status, 200, "{v} (transport: {})", rdy_qa::http::last_transport());
 }
 
 /// Ruling final (3): a stored tag over 256 bytes (only an older release could store one) has no
@@ -250,15 +250,15 @@ fn sr2_a_long_stored_tag_has_no_site_link() {
     );
     let canon = c.call("rdy_site", json!({})).ok();
     let root = canon["url"].as_str().unwrap().to_string();
-    assert_eq!(page(&format!("{root}~tag/{long}/")).status, 404);
+    assert_eq!(page(&format!("{root}~tag/{long}/")).status, 404, "transport: {}", rdy_qa::http::last_transport());
     // the 256-byte tag keeps its page
     let v = c
         .call("rdy_site", json!({"scope": format!("tag:{max}")}))
         .ok();
-    assert_eq!(page(v["url"].as_str().unwrap()).status, 200, "{v}");
+    assert_eq!(page(v["url"].as_str().unwrap()).status, 200, "{v} (transport: {})", rdy_qa::http::last_transport());
     // the versions page: the long tag as text, the other with its link
     let menu = page(&format!("{root}~versions/"));
-    assert_eq!(menu.status, 200);
+    assert_eq!(menu.status, 200, "transport: {}", menu.transport);
     let h = String::from_utf8(menu.body).unwrap();
     assert!(
         h.contains(&format!("<li><span class=\"vmenu-name\">{long}</span>")),
@@ -414,7 +414,7 @@ fn ls7_rdy_site_for_any_view_name() {
     let url = v["url"].as_str().unwrap();
     assert!(url.ends_with("/~view/team%2Fa%20b/"), "{v}");
     let got = page(url);
-    assert_eq!(got.status, 200, "{v}");
+    assert_eq!(got.status, 200, "{v} (transport: {})", got.transport);
     assert!(
         String::from_utf8_lossy(&got.body).contains("Notes"),
         "the view's page"
@@ -446,7 +446,7 @@ fn ls_final_a_hidden_glossary_doc_warns_on_the_live_path() {
     let url = v["url"].as_str().unwrap().to_string();
     // two more refreshes: a page request of the same build, then a commit to the view and
     // rdy_site again (a new build with the same warning)
-    assert_eq!(page(&url).status, 200);
+    assert_eq!(page(&url).status, 200, "transport: {}", rdy_qa::http::last_transport());
     let (ok, made) = s.json(&["--json", "new", "doc", "more", "--view", "g1"]);
     assert!(ok, "{made}");
     let again = c.call("rdy_site", json!({"scope": "g1"})).ok();
@@ -582,7 +582,7 @@ fn path_of(url: &str) -> &str {
 /// of `sentence` and no live behaviour (dgm11).
 #[track_caller]
 fn assert_themed_404(r: &http::Response, root: &str, sentence: &str, what: &str) {
-    assert_eq!(r.status, 404, "{what}: {}", r.head);
+    assert_eq!(r.status, 404, "{what}: {} (transport: {})", r.head, r.transport);
     assert_eq!(r.header("content-type"), Some("text/html; charset=utf-8"));
     let body = String::from_utf8_lossy(&r.body);
     assert!(
@@ -624,7 +624,7 @@ fn dgm11_mcp_site_links_reach_themed_404() {
     ] {
         let v = c.call("rdy_site", given.clone()).ok();
         let url = v["url"].as_str().unwrap();
-        assert_eq!(page(url).status, 200, "{v}");
+        assert_eq!(page(url).status, 200, "{v} (transport: {})", rdy_qa::http::last_transport());
         let r = page(&format!("{url}nosuch/page.html"));
         assert_themed_404(&r, path_of(url), PAGE, &given.to_string());
     }

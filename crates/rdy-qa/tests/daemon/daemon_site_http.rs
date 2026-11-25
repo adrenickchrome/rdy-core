@@ -126,7 +126,7 @@ fn body(r: &http::Response) -> String {
 /// An open stream of the page at `path` (under the site's root).
 fn open_page(url: &str, path: &str) -> Sse {
     let page = http::get(&format!("{url}{path}"));
-    assert_eq!(page.status, 200, "{path}");
+    assert_eq!(page.status, 200, "{path} (transport: {})", page.transport);
     Sse::open(&http::events_url(url, &body(&page)))
 }
 
@@ -136,7 +136,7 @@ fn restart(h: &mut Hosted) {
         project: h.dir.path().to_path_buf(),
         version: "t".into(),
         detach: false,
-        idle_timeout: Some(Duration::from_secs(60)),
+        idle_timeout: Some(rdy_qa::daemon::TEST_IDLE),
         human_actor: Some("human:qa".into()),
         site_lan_override: None,
     })
@@ -186,7 +186,7 @@ fn ls6_a_page_is_served_with_the_live_script() {
     let h = host();
     let url = url(&h);
     let r = http::get(&url);
-    assert_eq!(r.status, 200, "{}", r.head);
+    assert_eq!(r.status, 200, "{} (transport: {})", r.head, r.transport);
     assert_eq!(r.header("Content-Type"), Some("text/html; charset=utf-8"));
     let page = body(&r);
     assert!(page.contains("/_rdy/live.js"), "the live script tag");
@@ -199,7 +199,7 @@ fn ls6_a_page_is_served_with_the_live_script() {
         r.head
     );
     let js = http::get(&format!("{url}_rdy/live.js"));
-    assert_eq!(js.status, 200);
+    assert_eq!(js.status, 200, "transport: {}", js.transport);
     assert_eq!(body(&js), rdy_render::live::LIVE_JS);
 }
 
@@ -212,13 +212,13 @@ fn ls6_a_view_is_served_in_review_mode() {
     });
     let url = url(&h);
     let r = http::get(&format!("{url}~view/draft/alpha.html"));
-    assert_eq!(r.status, 200, "{}", r.head);
+    assert_eq!(r.status, 200, "{} (transport: {})", r.head, r.transport);
     let page = body(&r);
     assert!(page.contains("Show changes"), "the review toggle");
     assert!(page.contains("Edited"), "the Edited mark");
     assert!(page.contains("scope=view:draft"), "the view's stream");
     let none = http::get(&format!("{url}~view/nosuch/index.html"));
-    assert_eq!(none.status, 404, "{}", none.head);
+    assert_eq!(none.status, 404, "{} (transport: {})", none.head, none.transport);
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn ls6_a_foreign_host_gets_nothing() {
         sock(&url),
         &format!("GET /index.html HTTP/1.1\r\nHost: rebound.invalid:{port}\r\n\r\n"),
     );
-    assert_eq!(r.status, 403, "{}", r.head);
+    assert_eq!(r.status, 403, "{} (transport: {})", r.head, r.transport);
     assert!(!body(&r).contains("<html"), "no page text");
 }
 
@@ -510,7 +510,7 @@ fn ls6_a_request_after_the_project_is_replaced_gets_no_reply() {
     early.set_read_timeout(Some(T)).unwrap();
     // fence: one listener accepts in order, so once a later connection has its answer,
     // `early` was accepted, and passed the accept's check
-    assert_eq!(http::get(&url).status, 200);
+    assert_eq!(http::get(&url).status, 200, "transport: {}", rdy_qa::http::last_transport());
     rdy_qa::daemon::replace_rdy_dir(h.dir.path());
     write!(
         early,
@@ -542,7 +542,7 @@ fn ls6_a_connection_past_the_limit_gets_busy() {
         sock(&url),
         &format!("GET /index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
     );
-    assert_eq!(r.status, 503, "{}", r.head);
+    assert_eq!(r.status, 503, "{} (transport: {})", r.head, r.transport);
     assert_eq!(r.body, refusal(Refusal::Busy).body);
     drop(held);
 }
@@ -578,7 +578,7 @@ fn ls6_a_restarted_daemon_keeps_the_address() {
     let before = url(&h);
     // served answers and a stream leave the site's side of each closed connection in TIME_WAIT
     // on the port: the successor binds it all the same
-    assert_eq!(http::get(&before).status, 200);
+    assert_eq!(http::get(&before).status, 200, "transport: {}", rdy_qa::http::last_transport());
     drop(open_page(&before, "alpha.html"));
     h.stop();
     restart(&mut h);
@@ -607,7 +607,7 @@ fn ls6_a_config_edit_shows_on_the_next_load() {
     )
     .unwrap();
     let r = http::get(&url);
-    assert_eq!(r.status, 200, "{}", r.head);
+    assert_eq!(r.status, 200, "{} (transport: {})", r.head, r.transport);
     assert!(
         body(&r).contains("Renamed"),
         "the page load reloads the config"

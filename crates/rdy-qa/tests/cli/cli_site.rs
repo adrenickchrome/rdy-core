@@ -31,7 +31,7 @@ fn ls7_rdy_site_prints_the_link() {
     assert!(ok, "{v}");
     assert_eq!(format!("{}\n", v["url"].as_str().unwrap()), text, "{v}");
     assert_eq!(v["scope"], "canon", "{v}");
-    assert_eq!(http::get(text.trim_end()).status, 200);
+    assert_eq!(http::get(text.trim_end()).status, 200, "transport: {}", rdy_qa::http::last_transport());
 }
 
 #[test]
@@ -171,9 +171,9 @@ fn dgm11_cli_site_links_reach_themed_404() {
     for args in [&["site"][..], &["site", "--scope", "view:editing"][..]] {
         let text = stdout(&s.rdy(args));
         let url = text.lines().next().unwrap();
-        assert_eq!(http::get(url).status, 200, "{args:?}");
+        assert_eq!(http::get(url).status, 200, "{args:?} (transport: {})", rdy_qa::http::last_transport());
         let r = http::get(&format!("{url}nosuch/page.html"));
-        assert_eq!(r.status, 404, "{args:?}: {}", r.head);
+        assert_eq!(r.status, 404, "{args:?}: {} (transport: {})", r.head, r.transport);
         assert_eq!(r.header("content-type"), Some("text/html; charset=utf-8"));
         let body = String::from_utf8_lossy(&r.body);
         let root = &url[url[7..].find('/').unwrap() + 7..];

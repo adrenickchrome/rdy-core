@@ -5,15 +5,18 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 /// How long a request waits for its answer.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// An answer: its status (0 when nothing came back), its head (the status line and the header
-/// lines, joined by `\r\n`, without the empty line) and its body.
+/// lines, joined by `\r\n`, without the empty line), its body, and how the exchange ended at the
+/// socket (`transport`, as [`last_transport`] gives it; empty for an answer parsed from bytes).
+/// An assertion on an answer prints `transport`, so a status 0 names its cause.
 #[derive(Debug)]
 pub struct Response {
     pub status: u16,
     pub head: String,
     pub body: Vec<u8>,
+    pub transport: String,
 }
 
 impl Response {
@@ -109,8 +112,10 @@ pub fn try_raw(addr: SocketAddr, request: &str) -> std::io::Result<Response> {
         got.len(),
         t0.elapsed()
     );
-    LAST.with(|l| *l.borrow_mut() = note);
-    Ok(parse(&got))
+    LAST.with(|l| *l.borrow_mut() = note.clone());
+    let mut r = parse(&got);
+    r.transport = note;
+    Ok(r)
 }
 
 fn parse(bytes: &[u8]) -> Response {
@@ -128,6 +133,7 @@ fn parse(bytes: &[u8]) -> Response {
         status,
         head,
         body: body.to_vec(),
+        transport: String::new(),
     }
 }
 

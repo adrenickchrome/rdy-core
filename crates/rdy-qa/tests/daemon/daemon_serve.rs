@@ -218,7 +218,7 @@ fn serve1_hellos_during_warm_up_see_starting_then_ready() {
         project: dir.path().into(),
         version: "t".into(),
         detach: false,
-        idle_timeout: Some(Duration::from_secs(60)),
+        idle_timeout: Some(rdy_qa::daemon::TEST_IDLE),
         human_actor: None,
         site_lan_override: None,
     })
@@ -279,7 +279,7 @@ fn start_successor(project: &std::path::Path, version: &str) -> rdy_daemon::Serv
         project: project.into(),
         version: version.into(),
         detach: false,
-        idle_timeout: Some(Duration::from_secs(60)),
+        idle_timeout: Some(rdy_qa::daemon::TEST_IDLE),
         human_actor: None,
         site_lan_override: None,
     })

@@ -460,15 +460,15 @@ fn spv10_serve_profile_reuses_a_running_daemon() {
     // after the CLI has exited, both sites answer from the same daemon
     let url = want["url"].as_str().unwrap();
     let page = http::get(&format!("{url}manual/intro.html"));
-    assert_eq!(page.status, 200);
+    assert_eq!(page.status, 200, "transport: {}", page.transport);
     assert!(String::from_utf8_lossy(&page.body).contains("INTRO-ONLY-1"));
-    assert_eq!(http::get(&format!("{url}secret.html")).status, 404);
+    assert_eq!(http::get(&format!("{url}secret.html")).status, 404, "transport: {}", rdy_qa::http::last_transport());
     let source = stdout(&s.rdy(&["site"]));
     let source = source.trim_end();
     assert_ne!(source, url);
-    assert_eq!(http::get(source).status, 200);
+    assert_eq!(http::get(source).status, 200, "transport: {}", rdy_qa::http::last_transport());
     let secret = http::get(&format!("{source}secret.html"));
-    assert_eq!(secret.status, 200);
+    assert_eq!(secret.status, 200, "transport: {}", secret.transport);
     assert_eq!(s.daemon_pid(), Some(pid));
 }
 
@@ -508,10 +508,10 @@ fn spv10_serve_profile_starts_in_the_foreground() {
     );
     assert_eq!(s.daemon_pid(), Some(child.pid), "the command is the daemon");
     let page = http::get(&format!("{url}manual/intro.html"));
-    assert_eq!(page.status, 200);
+    assert_eq!(page.status, 200, "transport: {}", page.transport);
     assert!(String::from_utf8_lossy(&page.body).contains("INTRO-ONLY-1"));
     let source = stdout(&s.rdy(&["site"])).trim_end().to_string();
-    assert_eq!(http::get(&source).status, 200);
+    assert_eq!(http::get(&source).status, 200, "transport: {}", rdy_qa::http::last_transport());
     // a second call reuses the foreground daemon
     let again = s.rdy(&["serve", "--profile", "guide"]);
     assert_eq!(stdout(&again), serve_text(&want));
@@ -861,7 +861,7 @@ fn spv10_serve_profile_handles_start_and_exit_races() {
         project: p.clone(),
         version: VERSION.into(),
         detach: false,
-        idle_timeout: Some(Duration::from_secs(60)),
+        idle_timeout: Some(rdy_qa::daemon::TEST_IDLE),
         human_actor: Some("human:qa".into()),
         site_lan_override: None,
     };
@@ -1000,7 +1000,7 @@ fn spv10_serve_profile_unknown_key_cleans_up_its_own_start() {
         assert_eq!(s.daemon_pid(), Some(pid), "the daemon is left running");
     }
     let source = stdout(&s.rdy(&["site"])).trim_end().to_string();
-    assert_eq!(http::get(&source).status, 200);
+    assert_eq!(http::get(&source).status, 200, "transport: {}", rdy_qa::http::last_transport());
 }
 
 /// Runs `cmd` with no stdin, stdout read in full, and a stderr whose reader closed before the

@@ -92,7 +92,7 @@ fn sr8_the_versions_page_is_served() {
     let h = Hosted::start_in(dir);
     let url = url(&h);
     let got = http::get(&format!("{url}~versions/"));
-    assert_eq!(got.status, 200);
+    assert_eq!(got.status, 200, "transport: {}", got.transport);
     let body = String::from_utf8(got.body).unwrap();
     for h2 in ["<h2>Versions</h2>", "<h2>Proposals</h2>", "<h2>Views</h2>"] {
         assert!(body.contains(h2), "{h2} in {body}");

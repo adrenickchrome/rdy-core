@@ -386,7 +386,7 @@ fn sock(port: u16) -> SocketAddr {
 #[track_caller]
 fn assert_plain(r: &http::Response, f: Refusal, body: &str, what: &str) {
     let want = refusal(f);
-    assert_eq!(r.status, want.status, "{what}: {}", r.head);
+    assert_eq!(r.status, want.status, "{what}: {} (transport: {})", r.head, r.transport);
     assert_eq!(text(&r.body), body, "{what}");
     assert_eq!(text(&want.body), body, "{what}");
     assert_eq!(
@@ -525,7 +525,7 @@ fn ui3_transport_refusals_keep_plain_bodies() {
     }
     // a path the site does not hold is the themed page, so the plain answers above are the guard's
     let r = raw_req(format!("GET /nosuch.html HTTP/1.1\r\n{own}\r\n\r\n"));
-    assert_eq!(r.status, 404, "{}", r.head);
+    assert_eq!(r.status, 404, "{} (transport: {})", r.head, r.transport);
     assert_eq!(
         r.header("content-type"),
         Some("text/html; charset=utf-8"),

@@ -28,11 +28,11 @@ fn sr2_a_tag_page_is_served_frozen() {
     let h = host();
     let url = url(&h);
     let r = http::get(&format!("{url}~tag/v1.0.0/index.html"));
-    assert_eq!(r.status, 200);
+    assert_eq!(r.status, 200, "transport: {}", r.transport);
     let body = String::from_utf8(r.body).unwrap();
     assert!(body.contains("snapshot"), "{body}");
     let dir = http::get(&format!("{url}~tag/v1.0.0/"));
-    assert_eq!(dir.status, 200);
+    assert_eq!(dir.status, 200, "transport: {}", dir.transport);
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn sr2_an_unknown_tag_is_not_found() {
     let url = url(&h);
     for t in ["v9.9.9", "nosuch", "v1.0.0x"] {
         let r = http::get(&format!("{url}~tag/{t}/index.html"));
-        assert_eq!(r.status, 404, "{t}");
+        assert_eq!(r.status, 404, "{t} (transport: {})", r.transport);
     }
 }
 
@@ -50,6 +50,6 @@ fn sr2_an_unknown_tag_is_not_found() {
 fn sr8_the_versions_page_is_served() {
     let h = host();
     let url = url(&h);
-    assert_eq!(http::get(&format!("{url}~versions/")).status, 200);
-    assert_eq!(http::get(&format!("{url}~versions/index.html")).status, 200);
+    assert_eq!(http::get(&format!("{url}~versions/")).status, 200, "transport: {}", rdy_qa::http::last_transport());
+    assert_eq!(http::get(&format!("{url}~versions/index.html")).status, 200, "transport: {}", rdy_qa::http::last_transport());
 }
