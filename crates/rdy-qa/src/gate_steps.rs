@@ -1229,17 +1229,18 @@ pub fn probe_envs_of(
 /// How many test binaries run at once. Each binary already runs its tests on every thread.
 pub const BINARY_JOBS: usize = 6;
 
-/// How many heavy test binaries (an rdy-qa area, a real-disk binary) of the pool run at once.
-/// On Windows it is 4: with six heavy binaries at once (each runs its tests on all 16 threads of
-/// the gate machine, and most of them start rdy processes), every one of them took 2.5 to 3.5
-/// times as long, and the daemons they started missed their 30 s start; with five or fewer, the
-/// times held. Elsewhere it is [`BINARY_JOBS`]: no cap.
-pub const HEAVY_JOBS: usize = if cfg!(windows) { 4 } else { BINARY_JOBS };
+/// How many heavy test binaries (rdy-qa area binaries) of the pool run at once. On Windows it is
+/// 2. Each area binary runs its tests on all 16 threads of the gate machine and starts rdy
+/// processes, so one alone keeps the machine busy: alone, cli took 95 s, io 137 s and release
+/// 43 s; with three or four areas at once they took 494 s, 624 s and 292 s, the light binaries
+/// beside them two to three times their time, and daemons missed their 30 s start. Elsewhere it
+/// is [`BINARY_JOBS`]: no cap.
+pub const HEAVY_JOBS: usize = if cfg!(windows) { 2 } else { BINARY_JOBS };
 
-/// Whether the test binary `name` of `package` is heavy for [`HEAVY_JOBS`]: an rdy-qa area
-/// binary or a real-disk binary.
-pub fn is_heavy(package: &str, kind: &str, name: &str) -> bool {
-    (package == "rdy-qa" && kind == "test") || on_real_disk(package, name)
+/// Whether the test binary `name` of `package` (a target of `kind`) is heavy for
+/// [`HEAVY_JOBS`]: an rdy-qa area binary.
+pub fn is_heavy(package: &str, kind: &str, _name: &str) -> bool {
+    package == "rdy-qa" && kind == "test"
 }
 
 /// Runs `run` on every item. The items for which `alone` is false share up to `jobs` workers;
@@ -1858,7 +1859,7 @@ mod tests {
         // with no cap it is run_areas
         assert_eq!(run_areas(&items, |_| false, 3, |i| *i), items);
         assert!(is_heavy("rdy-qa", "test", "cli"));
-        assert!(is_heavy("rdy-store", "test", "durability"));
+        assert!(!is_heavy("rdy-store", "test", "durability"));
         assert!(!is_heavy("rdy-qa", "lib", "rdy_qa"));
         assert!(!is_heavy("rdy-store", "test", "format"));
         const { assert!(HEAVY_JOBS <= BINARY_JOBS) };
