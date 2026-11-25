@@ -19726,6 +19726,8 @@
       "v3-s18-holder.rdydump": "26380 0ba16663f3cc01684e1a01e36d2941cb7ae4f92d6940be4cc3a4b833ad3afbe7",
       "v3-s18.expect.json": "292331 c2bf21e87c2c4babf30750ec8d619f204367ea8d94eeae600ff394f1429603c0",
       "v3-s18.rdydump": "144168 b69978453eaf0bc06b5e8040cd152836c1a290a913603cd53a5a2e5ece53c615",
+      "v4-f1-dedup-spans.expect.json": "30476 cf7643c1e2ad43fbbfcb03c28e25295b816c55842e8abad33b7ce2aaebb50440",
+      "v4-f1-dedup-spans.rdydump": "187276 25ca2264bb1dfaab5f795818d751e33ed5072a8c26b712b0a36739d99cfe19cf",
       "v4-f1-e0-chain-1.rdydump": "22251 5b70a0ff2026dc669e0527f5cfd81284777eee7f30c671c6ffdadb8cfee5e339",
       "v4-f1-e0-chain-2.rdydump": "37174 0fbf09ec74745d52f8c0c948a866248616f6667184574f0bc8b30caec9bd76f8",
       "v4-f1-e0-chain-full.rdydump": "1137324 7f23c524d0280e02100c61f66faf7631d0548f61b39166b77cb6400de14a2f2a",
