@@ -1652,11 +1652,12 @@ class GateWorkflowPolicy(unittest.TestCase):
             with self.subTest(job=name):
                 self.assertEqual(job['runs-on'], "${{ inputs.hosted && '" + GATE_HOSTED[name]
                                  + "' || fromJSON('[\"self-hosted\",\"rdy-gate\",\"" + name + "\"]') }}")
-                # A push (release evidence) gets a 20-minute hang guard and a 1080-second gate clock; the
-                # budget job, not these limits, checks the time. Only a manual hosted proof run gets more;
-                # gate_budget.py never reads it as evidence.
-                self.assertEqual(job['timeout-minutes'], '${{ inputs.hosted && 90 || 20 }}')
+                # A push (release evidence) gets a 45-minute hang guard and a gate clock with a 1080-second
+                # target and a 2400-second ceiling; the budget job, not these limits, checks the release
+                # time. Only a manual hosted proof run gets more; gate_budget.py never reads it as evidence.
+                self.assertEqual(job['timeout-minutes'], '${{ inputs.hosted && 90 || 45 }}')
                 self.assertEqual(job['env']['GATE_BUDGET_SECS'], "${{ inputs.hosted && '5100' || '1080' }}")
+                self.assertEqual(job['env']['GATE_CEILING_SECS'], "${{ inputs.hosted && '5100' || '2400' }}")
                 self.assertEqual(job['permissions'], {'contents': 'read'})
                 self.assertNotIn('environment', job)
                 self.assertNotIn('needs', job)
@@ -1678,12 +1679,13 @@ class GateWorkflowPolicy(unittest.TestCase):
         self.assertEqual(budget.GATE_EVENT, 'push')
 
     def test_every_gate_run_is_the_release_tier_on_the_gate_clock(self):
-        clock = {'linux': 'cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --require-all '
-                          '--tmp-root "$GATE_TMP"',
-                 'macos': 'cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --require-all '
+        clock = {'linux': 'cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --ceiling-secs "$GATE_CEILING_SECS" '
+                          '--require-all --tmp-root "$GATE_TMP"',
+                 'macos': 'cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --ceiling-secs "$GATE_CEILING_SECS" '
+                          '--require-all '
                           '--tmp-root "$GATE_TMP"',
                  'windows': 'cargo qa --tier release --platform-tier windows --budget-secs $env:GATE_BUDGET_SECS '
-                            '--require-all --tmp-root $env:GATE_TMP'}
+                            '--ceiling-secs $env:GATE_CEILING_SECS --require-all --tmp-root $env:GATE_TMP'}
         for name in self.jobs:
             with self.subTest(job=name):
                 gate = [step for step in self.jobs[name]['steps'] if step.get('id') == 'gate']
@@ -1695,6 +1697,7 @@ class GateWorkflowPolicy(unittest.TestCase):
                 for line in lines:
                     self.assertIn('--tier release', line)
                     self.assertIn('--budget-secs', line)
+                    self.assertIn('--ceiling-secs', line)
                     self.assertIn('--require-all', line)
                     self.assertIn('--tmp-root', line)
                     for word in ('--local', '--skip-perf', '--deep', '--only', '--focus'):
@@ -1702,7 +1705,7 @@ class GateWorkflowPolicy(unittest.TestCase):
                 # One retry of the failed binaries, in the time left on the same clock.
                 retry = step_named({'jobs': {name: self.jobs[name]}}, 'Retry failed binaries once')
                 self.assertIn('--retry-failed target', retry['run'])
-                self.assertRegex(retry['run'], r'GATE_BUDGET_SECS.*GATE_START')
+                self.assertRegex(retry['run'], r'GATE_CEILING_SECS.*GATE_START')
                 self.assertIn("steps.gate.outputs.status != '0'", retry['if'])
         # The hosted Windows proof runs the same tier through the standard-account script.
         hosted = step_named(self.doc, 'Hosted proof under a standard account (Windows tier)')

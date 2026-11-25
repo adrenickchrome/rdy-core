@@ -228,6 +228,7 @@ def budget_file():
 # A push (release evidence) takes the value after `||`; only a manual hosted proof run takes the other.
 PUSH_VALUE = {
     '${{ inputs.hosted && 90 || 20 }}': 20,
+    '${{ inputs.hosted && 90 || 45 }}': 45,
 }
 # Job limits only stop a run that hangs; the budget job checks the time. Each job's line of the budget file
 # is its target, and its limit is at least that line, so a slow but healthy run finishes.
@@ -241,7 +242,7 @@ JOB_LINES = {
     ('release-candidate.yml', 'budget'): 'budget',
     ('release-candidate.yml', 'sign'): 'sign',
 }
-HANG_GUARD_MINUTES = {'gate': 20, 'candidate_build': 20, 'candidate_check': 1, 'manifest': 1, 'budget': 1, 'sign': 1}
+HANG_GUARD_MINUTES = {'gate': 45, 'candidate_build': 20, 'candidate_check': 1, 'manifest': 1, 'budget': 1, 'sign': 1}
 
 
 def timeout_seconds(job):
@@ -349,17 +350,25 @@ class HardStops(unittest.TestCase):
                 # The gate's own clock stops a hung run before the job limit, and never before the target.
                 self.assertGreater(int(match.group(2)), gate_line)
                 self.assertLessEqual(int(match.group(2)), timeout_seconds(job) - 120)
+                # The gate's ceiling stops a run past the target but inside the job's hang guard.
+                ceiling = re.fullmatch(r"\$\{\{ inputs\.hosted && '([0-9]+)' \|\| '([0-9]+)' \}\}",
+                                       job['env']['GATE_CEILING_SECS'])
+                self.assertIsNotNone(ceiling)
+                self.assertGreaterEqual(int(ceiling.group(2)), int(match.group(2)))
+                self.assertLessEqual(int(ceiling.group(2)), timeout_seconds(job) - 120)
                 for step in job['steps']:
                     for line in step.get('run', '').splitlines():
                         if 'cargo qa' in line:
                             self.assertIn('--tier release', line)
                             self.assertRegex(line, r'--budget-secs ("\$GATE_BUDGET_SECS"|\$env:GATE_BUDGET_SECS|'
                                                    r'"\$left"|\$left)( |$)')
+                            self.assertRegex(line, r'--ceiling-secs ("\$GATE_CEILING_SECS"|\$env:GATE_CEILING_SECS|'
+                                                   r'"\$left"|\$left)( |$)')
                     if step.get('env', {}).get('RDY_GATE_MODE') is not None:
                         self.assertEqual(step['env'], {'RDY_QA_HOSTED_CI': '1', 'RDY_GATE_MODE': 'release',
                                                        'RDY_GATE_BUDGET_SECS': '${{ env.GATE_BUDGET_SECS }}'})
                     if '$left' in step.get('run', ''):
-                        self.assertRegex(step['run'], r'GATE_BUDGET_SECS.*GATE_START')
+                        self.assertRegex(step['run'], r'GATE_CEILING_SECS.*GATE_START')
 
     def test_no_job_that_reaches_the_key_runs_on_our_machines(self):
         for path in sorted(WORKFLOWS.glob('*.yml')):

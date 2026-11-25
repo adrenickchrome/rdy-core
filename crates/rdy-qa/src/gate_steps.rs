@@ -300,6 +300,15 @@ pub const ALLOWANCE_FACTOR: f64 = 2.0;
 /// How many times its allowance a binary may take before its row fails: past it, it is a hang.
 pub const HANG_FACTOR: f64 = 4.0;
 
+/// A hang also needs this many seconds past the allowance, so a short binary slowed by a busy
+/// machine (18 s allowance, 78 s under six parallel jobs) warns and does not fail.
+pub const HANG_FLOOR_SECS: f64 = 300.0;
+
+/// The time past which a binary with allowance `a` counts as a hang.
+fn hang_limit(a: f64) -> f64 {
+    (HANG_FACTOR * a).max(a + HANG_FLOOR_SECS)
+}
+
 impl Allowances {
     /// Reads the allowances file text.
     pub fn parse(text: &str) -> Result<Allowances, String> {
@@ -478,11 +487,11 @@ impl Allowances {
                     false,
                     format!("{key} ran {secs:.1} s and has no allowance on {os}"),
                 )),
-                Some(a) if *secs > HANG_FACTOR * a => rows.push(Gate::ran(
+                Some(a) if *secs > hang_limit(*a) => rows.push(Gate::ran(
                     &format!("OVER ALLOWANCE: {key}"),
                     false,
                     format!(
-                        "{key} ran {secs:.1} s, more than {HANG_FACTOR} times its allowance of {a:.0} s on {os}: a hang"
+                        "{key} ran {secs:.1} s, past its hang limit of {:.0} s ({HANG_FACTOR} times its allowance of {a:.0} s on {os}, at least {HANG_FLOOR_SECS:.0} s over it): a hang", hang_limit(*a)
                     ),
                 )),
                 Some(a) if *secs > ALLOWANCE_FACTOR * a => rows.push(Gate::warn(
@@ -1853,13 +1862,16 @@ mod tests {
     #[test]
     fn tgs3_a_binary_past_twice_its_allowance_warns_and_past_four_times_fails() {
         let file = r#"{"schema": 1, "platforms": {"macos": {
-            "rdy-qa/test/cli": 100, "rdy-qa/test/hung": 100, "rdy-store/test/durability": 50}}}"#;
+            "rdy-qa/test/cli": 100, "rdy-qa/test/hung": 100, "rdy-store/test/durability": 50,
+            "rdy-engine/test/core": 18}}}"#;
         let allowances = Allowances::parse(file).expect("parse");
         let times = vec![
             ("rdy-qa/test/cli".to_string(), 210.0),
             ("rdy-qa/test/hung".to_string(), 401.0),
             ("rdy-store/test/durability".to_string(), 99.0),
             ("rdy-qa/test/new".to_string(), 1.0),
+            // more than four times a short allowance, but under the floor: a warning, not a hang
+            ("rdy-engine/test/core".to_string(), 77.9),
         ];
         let (rows, note) = allowances.check("macos", &times);
         assert_eq!(note, None);
@@ -1869,7 +1881,8 @@ mod tests {
             [
                 "OVER ALLOWANCE: rdy-qa/test/cli",
                 "OVER ALLOWANCE: rdy-qa/test/hung",
-                "NO ALLOWANCE: rdy-qa/test/new"
+                "NO ALLOWANCE: rdy-qa/test/new",
+                "OVER ALLOWANCE: rdy-engine/test/core"
             ]
         );
         // past twice its allowance a binary is a warning that names it; past four times, a hang
@@ -1883,6 +1896,7 @@ mod tests {
             rows[1].detail
         );
         assert!(!rows[2].pass);
+        assert!(rows[3].pass && rows[3].state == report::RowState::Warning);
         assert!(
             report::overall(&rows[..1], &[], true),
             "a warning keeps the verdict"

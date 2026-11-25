@@ -3,9 +3,11 @@
 # times every run. The candidate reads the fast-gate counts of the run that passed on a push of S to
 # rel/<V> (scripts/release/gate_budget.py gate-run), and its budget job counts every run of this workflow
 # on rel/<V>. The gate line of release/gate-budget.json (660 s) is a target, not a limit: a slow but
-# healthy run finishes, and the budget job reports it. The 20-minute job limit and the gate's own clock
-# (--budget-secs 1080, which leaves 2 minutes for the steps around it) only stop a run that hangs.
-# A failed run may retry its failed test binaries once, inside the same clock.
+# healthy run finishes, and the budget job reports it. The gate's own clock has a target (--budget-secs
+# 1080: past it the run finishes with an OVER TARGET row) and a ceiling (--ceiling-secs 2400: the run
+# stops, exit 30). The 45-minute job limit only stops a job that hangs; the release ceiling (2,700 s
+# over every run) is the budget job's. A failed run may retry its failed test binaries once, in the
+# time left before the ceiling.
 #
 # Before the founder registers the runners, a manual run with `hosted: true` proves the workflow on
 # GitHub-hosted runners. That run has a longer limit, because hosted runners are slower. It is never
@@ -28,11 +30,12 @@ jobs:
   linux:
     name: Release gate (x86_64-unknown-linux-gnu)
     runs-on: ${{ inputs.hosted && 'ubuntu-26.04' || fromJSON('["self-hosted","rdy-gate","linux"]') }}
-    timeout-minutes: ${{ inputs.hosted && 90 || 20 }}
+    timeout-minutes: ${{ inputs.hosted && 90 || 45 }}
     permissions:
       contents: read
     env:
       GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '1080' }}
+      GATE_CEILING_SECS: ${{ inputs.hosted && '5100' || '2400' }}
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Not root
@@ -83,7 +86,7 @@ jobs:
         run: |
           echo "GATE_START=$(date +%s)" >> "$GITHUB_ENV"
           status=0
-          cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --require-all --tmp-root "$GATE_TMP" || status=$?
+          cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --ceiling-secs "$GATE_CEILING_SECS" --require-all --tmp-root "$GATE_TMP" || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
       - name: Retry failed binaries once
         # Only the failed binaries, one at a time, in the time left on the clock. The gate refuses a run
@@ -92,9 +95,9 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: |
-          left=$(( GATE_BUDGET_SECS - ($(date +%s) - GATE_START) ))
+          left=$(( GATE_CEILING_SECS - ($(date +%s) - GATE_START) ))
           if [ "$left" -le 0 ]; then echo "No time is left on the gate clock for a retry"; exit 1; fi
-          cargo qa --tier release --budget-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json
+          cargo qa --tier release --budget-secs "$left" --ceiling-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json
       - name: Failing tests
         if: always() && steps.gate.outputs.status != '0'
         run: |
@@ -128,11 +131,12 @@ jobs:
   macos:
     name: Release gate (aarch64-apple-darwin)
     runs-on: ${{ inputs.hosted && 'macos-26' || fromJSON('["self-hosted","rdy-gate","macos"]') }}
-    timeout-minutes: ${{ inputs.hosted && 90 || 20 }}
+    timeout-minutes: ${{ inputs.hosted && 90 || 45 }}
     permissions:
       contents: read
     env:
       GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '1080' }}
+      GATE_CEILING_SECS: ${{ inputs.hosted && '5100' || '2400' }}
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Not root
@@ -179,7 +183,7 @@ jobs:
         run: |
           echo "GATE_START=$(date +%s)" >> "$GITHUB_ENV"
           status=0
-          cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --require-all --tmp-root "$GATE_TMP" || status=$?
+          cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --ceiling-secs "$GATE_CEILING_SECS" --require-all --tmp-root "$GATE_TMP" || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
       - name: Retry failed binaries once
         # Only the failed binaries, one at a time, in the time left on the clock. The gate refuses a run
@@ -188,9 +192,9 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: |
-          left=$(( GATE_BUDGET_SECS - ($(date +%s) - GATE_START) ))
+          left=$(( GATE_CEILING_SECS - ($(date +%s) - GATE_START) ))
           if [ "$left" -le 0 ]; then echo "No time is left on the gate clock for a retry"; exit 1; fi
-          cargo qa --tier release --budget-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json
+          cargo qa --tier release --budget-secs "$left" --ceiling-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json
       - name: Failing tests
         if: always() && steps.gate.outputs.status != '0'
         run: |
@@ -224,11 +228,12 @@ jobs:
   windows:
     name: Release gate (x86_64-pc-windows-msvc)
     runs-on: ${{ inputs.hosted && 'windows-2025' || fromJSON('["self-hosted","rdy-gate","windows"]') }}
-    timeout-minutes: ${{ inputs.hosted && 90 || 20 }}
+    timeout-minutes: ${{ inputs.hosted && 90 || 45 }}
     permissions:
       contents: read
     env:
       GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '1080' }}
+      GATE_CEILING_SECS: ${{ inputs.hosted && '5100' || '2400' }}
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Not an administrator
@@ -296,7 +301,7 @@ jobs:
           CARGO_NET_OFFLINE: "true"
         run: |
           Add-Content -Path $env:GITHUB_ENV -Value "GATE_START=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-          cargo qa --tier release --platform-tier windows --budget-secs $env:GATE_BUDGET_SECS --require-all --tmp-root $env:GATE_TMP
+          cargo qa --tier release --platform-tier windows --budget-secs $env:GATE_BUDGET_SECS --ceiling-secs $env:GATE_CEILING_SECS --require-all --tmp-root $env:GATE_TMP
           Add-Content -Path $env:GITHUB_OUTPUT -Value "status=$LASTEXITCODE"
           Add-Content -Path $env:GITHUB_ENV -Value "GATE_REPORT=target\qa\report.json"
           exit 0
@@ -308,9 +313,9 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: |
-          $left = [int]$env:GATE_BUDGET_SECS - ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$env:GATE_START)
+          $left = [int]$env:GATE_CEILING_SECS - ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$env:GATE_START)
           if ($left -le 0) { Write-Output 'No time is left on the gate clock for a retry'; exit 1 }
-          cargo qa --tier release --platform-tier windows --budget-secs $left --require-all --tmp-root $env:GATE_TMP --retry-failed target\qa\report.json
+          cargo qa --tier release --platform-tier windows --budget-secs $left --ceiling-secs $left --require-all --tmp-root $env:GATE_TMP --retry-failed target\qa\report.json
           exit $LASTEXITCODE
       - name: Hosted proof under a standard account (Windows tier)
         # The hosted runner only: a temporary standard account, a private checkout and
