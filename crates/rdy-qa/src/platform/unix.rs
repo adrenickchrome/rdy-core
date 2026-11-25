@@ -11,10 +11,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-/// A directory short enough for a socket path under it: `/tmp` (macOS `sun_path` is 104 bytes
-/// and its `temp_dir()` is already about 50).
+/// A directory short enough for a socket path under it: `$RDY_QA_SHORT_TMP` when it is set
+/// (the gate's `--tmp-root`), else `/tmp` (macOS `sun_path` is 104 bytes and its `temp_dir()` is
+/// already about 50).
 pub fn short_tmp_root() -> &'static Path {
-    Path::new("/tmp")
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| super::short_tmp_override().unwrap_or_else(|| PathBuf::from("/tmp")))
 }
 
 /// The anonymous resident memory of process `pid` in bytes: the `RssAnon:` line of
@@ -1478,7 +1480,11 @@ mod tests {
 
     #[test]
     fn ps9_short_tmp_root_is_tmp() {
-        assert_eq!(short_tmp_root(), Path::new("/tmp"));
+        // `/tmp`, unless the gate named its own temp root
+        let want = std::env::var_os(super::super::SHORT_TMP_VAR)
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        assert_eq!(short_tmp_root(), want);
     }
 
     #[test]

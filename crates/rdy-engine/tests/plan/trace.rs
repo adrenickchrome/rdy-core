@@ -673,215 +673,6 @@ fn rf11_trace_uses_governing_routes_and_keeps_sources_separate() {
     );
 }
 
-#[test]
-fn rf11_introduction_and_acceptance_are_older_than_history_page() {
-    let (_dir, mut r) = project();
-    let w = put(
-        &mut r,
-        "w",
-        json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
-            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
-            {"op": "create", "type": "claim", "id": "$k", "parent": "$s", "body": "Version 0."},
-            dec("$d1", "The plan is written down", json!({}))
-        ]),
-    );
-    let (ref1, l1) = land(&mut r, "w", "First");
-    let (k, d1, sec) = (w["$k"].clone(), w["$d1"].clone(), bid(&w["$s"]));
-    // D2 lands proposed through the raw writer, and is accepted by a later engine landing
-    let d2 = nid("D", 77);
-    commit(
-        &mut r,
-        "p",
-        vec![Op::Create {
-            block: block(
-                &d2,
-                "decision",
-                &sec,
-                json!({"statement": "Plans are reviewed", "status": "proposed"}),
-                "",
-            ),
-        }],
-    );
-    let v2 = raw_propose(&mut r, "p");
-    let l2 = raw_land(&mut r, &v2);
-    // more than a history page of later versions of K, as typed changes (one version each)
-    let mut kb = r.read().block(&Scope::Canon, &bid(&k)).unwrap();
-    let mut deps = r.read().included("w2").to_vec();
-    for n in 1..=1001 {
-        let base = kb.version_hash();
-        kb.body = format!("Version {n}.");
-        let c = r
-            .store_mut()
-            .commit_to_view(
-                "w2",
-                Change {
-                    view: "w2".into(),
-                    ops: vec![Op::Update {
-                        base,
-                        block: kb.clone(),
-                    }],
-                    deps: deps.clone(),
-                    provenance: prov(),
-                    justification: None,
-                    message: String::new(),
-                    links: Default::default(),
-                    read_identity: None,
-                },
-            )
-            .unwrap();
-        deps = vec![c];
-    }
-    r.invalidate();
-    put(
-        &mut r,
-        "w2",
-        json!([{"op": "update", "id": d2.to_string(), "fields": {"statement": "Plans are reviewed weekly"}}]),
-    );
-    let (_, l3) = land(&mut r, "w2", "Third");
-    // more than a history page of later accepted versions of D1 (a re-affirmation is the one
-    // change a frozen decision takes), carried by two later raw landings: 500, then 501
-    let mut lands = Vec::new();
-    for (view, count) in [("w3", 500), ("w4", 501)] {
-        let mut later = r.read().block(&Scope::Canon, &bid(&d1)).unwrap();
-        let mut deps = r.read().included(view).to_vec();
-        for n in 0..count {
-            let base = later.version_hash();
-            later.fields.insert(
-                "reaffirmed".into(),
-                encode_reaffirmed(&BTreeMap::from([(
-                    nid("c", 5),
-                    Reaffirmation {
-                        against: Against::Deleted,
-                        reason: format!("Still holds ({view} {n})."),
-                    },
-                )])),
-            );
-            let c = r
-                .store_mut()
-                .commit_to_view(
-                    view,
-                    Change {
-                        view: view.into(),
-                        ops: vec![Op::Update {
-                            base,
-                            block: later.clone(),
-                        }],
-                        deps: deps.clone(),
-                        provenance: prov(),
-                        justification: None,
-                        message: String::new(),
-                        links: Default::default(),
-                        read_identity: None,
-                    },
-                )
-                .unwrap();
-            deps = vec![c];
-        }
-        r.invalidate();
-        let v = raw_propose(&mut r, view);
-        lands.push(raw_land(&mut r, &v));
-    }
-    assert_ne!(l3, lands[0]);
-    assert_ne!(lands[0], lands[1]);
-    let d1_versions = r
-        .read()
-        .history(&Scope::Canon, &bid(&d1), HISTORY_MAX)
-        .unwrap();
-    assert!(d1_versions.more, "D1 has more than a history page");
-    assert!(
-        d1_versions
-            .entries
-            .iter()
-            .all(|e| e.landing.as_ref().is_none_or(|l| l.id != l1.to_string())),
-        "the page does not reach D1's acceptance"
-    );
-
-    // the history page cannot reach the create; the trace can
-    let st = r.read();
-    let page = st.history(&Scope::Canon, &bid(&k), HISTORY_MAX).unwrap();
-    assert!(page.more);
-    assert!(page.entries.iter().all(|e| e.op != "create"));
-    let v = trace_in(&st, &Scope::Canon, &k, wide(3));
-    assert_eq!(
-        v["introduced"],
-        json!({"id": l1.to_string(), "proposal": ref1, "title": "First", "approved_by": FOUNDER,
-               "assurance": "local", "dispute": {"state": "none", "disputes": []},
-               "author": {"actor": WRITER, "run": "run-1", "role": "writer", "at_ms": v["introduced"]["author"]["at_ms"]}})
-    );
-    // the oldest accepted version: D1's acceptance change in the first landing
-    let v = trace_in(&st, &Scope::Canon, &d1, wide(3));
-    let acc = &decision_row(&v, &d1)["accepted_in"];
-    assert_eq!(acc["id"], l1.to_string());
-    assert_eq!(acc["proposal"], ref1);
-    let accept = st.reader().landing(&l1).unwrap().changes;
-    let accept = st.reader().change(accept.last().unwrap()).unwrap();
-    assert_eq!(acc["author"]["actor"], accept.provenance.actor.as_str());
-    assert_eq!(v["introduced"]["id"], l1.to_string());
-    // D2: introduced proposed by the raw landing, accepted by the third
-    let v = trace_in(&st, &Scope::Canon, d2.as_str(), wide(3));
-    assert_eq!(v["introduced"]["id"], l2.to_string());
-    assert_eq!(v["introduced"]["proposal"], format!("P-{}@1", v2.short()));
-    assert_eq!(
-        decision_row(&v, d2.as_str())["accepted_in"]["id"],
-        l3.to_string()
-    );
-    assert_eq!(
-        decision_row(&v, d2.as_str())["accepted_in"]["title"],
-        "Third"
-    );
-    // a historical scope reads its own chain: at L2, D2 was never accepted
-    let v = trace_in(&st, &Scope::At(l2), d2.as_str(), wide(3));
-    assert_eq!(v["introduced"]["id"], l2.to_string());
-    assert!(
-        decision_row(&v, d2.as_str()).get("accepted_in").is_none(),
-        "{v}"
-    );
-
-    // never landed: a view's own blocks have no landing; its base chain still counts
-    let n = put(
-        &mut r,
-        "draft",
-        json!([
-            {"op": "create", "type": "claim", "id": "$n", "parent": sec.to_string(), "body": "Not yet."},
-            {"op": "create", "type": "decision", "id": "$dn", "parent": sec.to_string(), "fields": {"statement": "Maybe", "status": "proposed"}}
-        ]),
-    );
-    let draft = Scope::View("draft".into());
-    let v = trace(&r, &draft, &n["$n"], wide(3));
-    assert_eq!(v["introduced"], Value::Null);
-    let v = trace(&r, &draft, &n["$dn"], wide(3));
-    assert_eq!(v["introduced"], Value::Null);
-    assert!(
-        decision_row(&v, &n["$dn"]).get("accepted_in").is_none(),
-        "{v}"
-    );
-    assert_eq!(
-        trace(&r, &draft, &k, wide(3))["introduced"]["id"],
-        l1.to_string()
-    );
-
-    // imported: the first import landing, with the importer
-    let out = tempfile::tempdir().unwrap();
-    r.read().export(&Scope::Canon, out.path()).unwrap();
-    let (_dir2, mut b) = project();
-    b.import(&founder(), "imp", out.path()).unwrap();
-    let p = b
-        .propose(&founder(), "imp", "Import", Some(common::TEST_SUMMARY))
-        .unwrap();
-    common::confirm_exceptions(&mut b, &founder(), &p);
-    let lb = b.land(&founder(), &p.id).unwrap();
-    let v = trace(&b, &Scope::Canon, &d1, wide(3));
-    let acc = &decision_row(&v, &d1)["accepted_in"];
-    assert_eq!(acc["id"], lb);
-    assert_eq!(acc["imported_by"], json!({"actor": FOUNDER, "run": null}));
-    assert_eq!(v["introduced"]["id"], lb);
-    assert_eq!(
-        v["introduced"]["imported_by"],
-        json!({"actor": FOUNDER, "run": null})
-    );
-}
-
 /// One seal of `d` at `landing` with one item per outcome in `outcomes`, recorded for `view`.
 fn seal(
     r: &mut Rdy,
@@ -1665,4 +1456,219 @@ fn rf11_trace_writes_nothing() {
         }
     }
     assert_eq!(state(&l.r), before);
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+
+    #[test]
+    fn rf11_introduction_and_acceptance_are_older_than_history_page() {
+        let (_dir, mut r) = project();
+        let w = put(
+            &mut r,
+            "w",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
+                {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+                {"op": "create", "type": "claim", "id": "$k", "parent": "$s", "body": "Version 0."},
+                dec("$d1", "The plan is written down", json!({}))
+            ]),
+        );
+        let (ref1, l1) = land(&mut r, "w", "First");
+        let (k, d1, sec) = (w["$k"].clone(), w["$d1"].clone(), bid(&w["$s"]));
+        // D2 lands proposed through the raw writer, and is accepted by a later engine landing
+        let d2 = nid("D", 77);
+        commit(
+            &mut r,
+            "p",
+            vec![Op::Create {
+                block: block(
+                    &d2,
+                    "decision",
+                    &sec,
+                    json!({"statement": "Plans are reviewed", "status": "proposed"}),
+                    "",
+                ),
+            }],
+        );
+        let v2 = raw_propose(&mut r, "p");
+        let l2 = raw_land(&mut r, &v2);
+        // more than a history page of later versions of K, as typed changes (one version each)
+        let mut kb = r.read().block(&Scope::Canon, &bid(&k)).unwrap();
+        let mut deps = r.read().included("w2").to_vec();
+        for n in 1..=1001 {
+            let base = kb.version_hash();
+            kb.body = format!("Version {n}.");
+            let c = r
+                .store_mut()
+                .commit_to_view(
+                    "w2",
+                    Change {
+                        view: "w2".into(),
+                        ops: vec![Op::Update {
+                            base,
+                            block: kb.clone(),
+                        }],
+                        deps: deps.clone(),
+                        provenance: prov(),
+                        justification: None,
+                        message: String::new(),
+                        links: Default::default(),
+                        read_identity: None,
+                    },
+                )
+                .unwrap();
+            deps = vec![c];
+        }
+        r.invalidate();
+        put(
+            &mut r,
+            "w2",
+            json!([{"op": "update", "id": d2.to_string(), "fields": {"statement": "Plans are reviewed weekly"}}]),
+        );
+        let (_, l3) = land(&mut r, "w2", "Third");
+        // more than a history page of later accepted versions of D1 (a re-affirmation is the one
+        // change a frozen decision takes), carried by two later raw landings: 500, then 501
+        let mut lands = Vec::new();
+        for (view, count) in [("w3", 500), ("w4", 501)] {
+            let mut later = r.read().block(&Scope::Canon, &bid(&d1)).unwrap();
+            let mut deps = r.read().included(view).to_vec();
+            for n in 0..count {
+                let base = later.version_hash();
+                later.fields.insert(
+                    "reaffirmed".into(),
+                    encode_reaffirmed(&BTreeMap::from([(
+                        nid("c", 5),
+                        Reaffirmation {
+                            against: Against::Deleted,
+                            reason: format!("Still holds ({view} {n})."),
+                        },
+                    )])),
+                );
+                let c = r
+                    .store_mut()
+                    .commit_to_view(
+                        view,
+                        Change {
+                            view: view.into(),
+                            ops: vec![Op::Update {
+                                base,
+                                block: later.clone(),
+                            }],
+                            deps: deps.clone(),
+                            provenance: prov(),
+                            justification: None,
+                            message: String::new(),
+                            links: Default::default(),
+                            read_identity: None,
+                        },
+                    )
+                    .unwrap();
+                deps = vec![c];
+            }
+            r.invalidate();
+            let v = raw_propose(&mut r, view);
+            lands.push(raw_land(&mut r, &v));
+        }
+        assert_ne!(l3, lands[0]);
+        assert_ne!(lands[0], lands[1]);
+        let d1_versions = r
+            .read()
+            .history(&Scope::Canon, &bid(&d1), HISTORY_MAX)
+            .unwrap();
+        assert!(d1_versions.more, "D1 has more than a history page");
+        assert!(
+            d1_versions
+                .entries
+                .iter()
+                .all(|e| e.landing.as_ref().is_none_or(|l| l.id != l1.to_string())),
+            "the page does not reach D1's acceptance"
+        );
+
+        // the history page cannot reach the create; the trace can
+        let st = r.read();
+        let page = st.history(&Scope::Canon, &bid(&k), HISTORY_MAX).unwrap();
+        assert!(page.more);
+        assert!(page.entries.iter().all(|e| e.op != "create"));
+        let v = trace_in(&st, &Scope::Canon, &k, wide(3));
+        assert_eq!(
+            v["introduced"],
+            json!({"id": l1.to_string(), "proposal": ref1, "title": "First", "approved_by": FOUNDER,
+                   "assurance": "local", "dispute": {"state": "none", "disputes": []},
+                   "author": {"actor": WRITER, "run": "run-1", "role": "writer", "at_ms": v["introduced"]["author"]["at_ms"]}})
+        );
+        // the oldest accepted version: D1's acceptance change in the first landing
+        let v = trace_in(&st, &Scope::Canon, &d1, wide(3));
+        let acc = &decision_row(&v, &d1)["accepted_in"];
+        assert_eq!(acc["id"], l1.to_string());
+        assert_eq!(acc["proposal"], ref1);
+        let accept = st.reader().landing(&l1).unwrap().changes;
+        let accept = st.reader().change(accept.last().unwrap()).unwrap();
+        assert_eq!(acc["author"]["actor"], accept.provenance.actor.as_str());
+        assert_eq!(v["introduced"]["id"], l1.to_string());
+        // D2: introduced proposed by the raw landing, accepted by the third
+        let v = trace_in(&st, &Scope::Canon, d2.as_str(), wide(3));
+        assert_eq!(v["introduced"]["id"], l2.to_string());
+        assert_eq!(v["introduced"]["proposal"], format!("P-{}@1", v2.short()));
+        assert_eq!(
+            decision_row(&v, d2.as_str())["accepted_in"]["id"],
+            l3.to_string()
+        );
+        assert_eq!(
+            decision_row(&v, d2.as_str())["accepted_in"]["title"],
+            "Third"
+        );
+        // a historical scope reads its own chain: at L2, D2 was never accepted
+        let v = trace_in(&st, &Scope::At(l2), d2.as_str(), wide(3));
+        assert_eq!(v["introduced"]["id"], l2.to_string());
+        assert!(
+            decision_row(&v, d2.as_str()).get("accepted_in").is_none(),
+            "{v}"
+        );
+
+        // never landed: a view's own blocks have no landing; its base chain still counts
+        let n = put(
+            &mut r,
+            "draft",
+            json!([
+                {"op": "create", "type": "claim", "id": "$n", "parent": sec.to_string(), "body": "Not yet."},
+                {"op": "create", "type": "decision", "id": "$dn", "parent": sec.to_string(), "fields": {"statement": "Maybe", "status": "proposed"}}
+            ]),
+        );
+        let draft = Scope::View("draft".into());
+        let v = trace(&r, &draft, &n["$n"], wide(3));
+        assert_eq!(v["introduced"], Value::Null);
+        let v = trace(&r, &draft, &n["$dn"], wide(3));
+        assert_eq!(v["introduced"], Value::Null);
+        assert!(
+            decision_row(&v, &n["$dn"]).get("accepted_in").is_none(),
+            "{v}"
+        );
+        assert_eq!(
+            trace(&r, &draft, &k, wide(3))["introduced"]["id"],
+            l1.to_string()
+        );
+
+        // imported: the first import landing, with the importer
+        let out = tempfile::tempdir().unwrap();
+        r.read().export(&Scope::Canon, out.path()).unwrap();
+        let (_dir2, mut b) = project();
+        b.import(&founder(), "imp", out.path()).unwrap();
+        let p = b
+            .propose(&founder(), "imp", "Import", Some(common::TEST_SUMMARY))
+            .unwrap();
+        common::confirm_exceptions(&mut b, &founder(), &p);
+        let lb = b.land(&founder(), &p.id).unwrap();
+        let v = trace(&b, &Scope::Canon, &d1, wide(3));
+        let acc = &decision_row(&v, &d1)["accepted_in"];
+        assert_eq!(acc["id"], lb);
+        assert_eq!(acc["imported_by"], json!({"actor": FOUNDER, "run": null}));
+        assert_eq!(v["introduced"]["id"], lb);
+        assert_eq!(
+            v["introduced"]["imported_by"],
+            json!({"actor": FOUNDER, "run": null})
+        );
+    }
 }

@@ -1,175 +1,20 @@
-# Cheap checks (FW-HD2): fmt, clippy and the fast suite on every PR and push. The coverage report runs on push to main,
-# nightly, and on a PR only when it carries the `coverage` label. The deep and perf gates run elsewhere; the external
-# gate decides merges.
+# The CI control tests on every PR and push to main. The test suite runs in gate.yml (the release gate on a push of
+# S to rel/<V>, on our machines) and in the nightly workflow (the whole suite, the deep and perf gates, the hosted
+# OS images and coverage).
 name: ci
 on:
   pull_request:
     branches: [main]
-    # `labeled` lets the `coverage` label start the coverage job; the other jobs ignore a labeled event.
-    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
-  schedule:
-    - cron: "0 3 * * *"
   workflow_dispatch:
 permissions: {}
 concurrency:
-  # A label event has its own group, so adding a label never cancels a running fast gate.
-  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'labeled' && 'label' || 'run' }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  fast:
-    name: Fast gate (Linux x86-64)
-    if: github.event_name != 'schedule' && github.event.action != 'labeled'
-    runs-on: ubuntu-26.04
-    # the suite outgrew 60 minutes at 0cb13504 (rules from chat) and Windows added more
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    env:
-      # The same disk settings as the coverage job: no debug info, and the preinstalled
-      # toolchains we never use are removed first.
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22"
-      - name: Toolchain
-        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
-      - name: Not root
-        run: test "$(id -u)" -ne 0
-      - name: Locked dependencies
-        run: cargo fetch --locked
-      - name: Fast gate (fmt, clippy, tests; no perf)
-        # Offline after the locked fetch: the gate builds only what Cargo.lock names.
-        env:
-          CARGO_NET_OFFLINE: "true"
-        run: cargo qa --skip-perf --require-all
-      - name: Failing tests
-        if: failure()
-        run: |
-          # print the qa report's failing tests and their panic excerpts, so the log names the cause
-          test -f target/qa/report.md || exit 0
-          sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
-      - name: Test selection (shadow)
-        # Reported only (FW-HD2): which crates and rdy-qa areas this diff would select, and which of the
-        # full suite's failures that selection would have missed. It reads the report the fast gate just
-        # wrote and runs no test. It cannot fail the job, and the full suite stays the gate.
-        if: always() && github.event_name == 'pull_request'
-        continue-on-error: true
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          CARGO_NET_OFFLINE: "true"
-        run: |
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          python3 scripts/ci/select_tests.py --base "$BASE_SHA" --report target/qa/report.json --out selection-shadow.json
-          { echo '## Test selection (shadow)'; echo '```'; cat selection-shadow.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always() && github.event_name == 'pull_request'
-        continue-on-error: true
-        with:
-          name: selection-shadow
-          path: selection-shadow.json
-          if-no-files-found: ignore
-          retention-days: 30
-      - name: No tracked file changed
-        run: git diff --exit-code
-  coverage:
-    # Line and branch coverage of the workspace test suite (cargo-llvm-cov). Reported only:
-    # it is not a required check and the Core CI result ignores it. The summary goes to the run page; the HTML report
-    # is an artifact. It runs on push to main, nightly and manual runs, and on a PR only with the `coverage` label.
-    # continue-on-error keeps the ci run green; a failed nightly run opens an issue from the last step.
-    if: >-
-      github.event_name != 'pull_request'
-      || (contains(github.event.pull_request.labels.*.name, 'coverage')
-      && (github.event.action != 'labeled' || github.event.label.name == 'coverage'))
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    continue-on-error: true
-    permissions:
-      contents: read
-      # held by this job only, for the nightly failure issue (the workflow's own token, no new secrets)
-      issues: write
-    env:
-      # The instrumented build and its raw profiles fill the runner's disk: no debug info (coverage maps
-      # do not need it), and the preinstalled toolchains we never use are removed first.
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22"
-      - name: Toolchain
-        run: rustup toolchain install 1.99.0 --profile minimal --component llvm-tools-preview
-      - name: Pinned coverage tool
-        # The archive digest is checked before the tool runs (scripts/ci/tools.json).
-        run: |
-          python3 scripts/ci/install_tools.py --out "$RUNNER_TEMP/coverage-tools" cargo-llvm-cov
-          echo "$RUNNER_TEMP/coverage-tools" >> "$GITHUB_PATH"
-      - name: Not root
-        run: test "$(id -u)" -ne 0
-      - name: Locked dependencies
-        run: cargo fetch --locked
-      - name: Tests with coverage
-        env:
-          CARGO_NET_OFFLINE: "true"
-        run: |
-          cargo llvm-cov --locked --workspace --no-fail-fast --no-report
-          df -h /
-      - name: Reports
-        if: always()
-        run: |
-          set -euo pipefail
-          # The config_edit test hsa2_new_directories_are_0700_or_not_made_at_all runs its own
-          # instrumented binary under umasks 477 and 700 on purpose. The profile runtime makes each
-          # .profraw 0666 less the umask, so those profiles are whole but 0200 or 0066, and
-          # llvm-profdata crashes (SIGILL) on a file it cannot open. Give the owner read back: the
-          # data is kept, and any other merge error still fails this step.
-          find target/llvm-cov-target -name '*.profraw' ! -perm -u=r -print -exec chmod u+r {} +
-          python3 scripts/ci/set_aside_profiles.py
-          cargo llvm-cov report --summary-only | tee coverage-summary.txt
-          cargo llvm-cov report --html --output-dir coverage-html
-          cargo llvm-cov report --json --summary-only --output-path coverage-summary.json
-          { echo '## Coverage'; echo '```'; cat coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: coverage
-          path: |
-            coverage-html
-            coverage-summary.txt
-            coverage-summary.json
-          retention-days: 7
-      - name: Open an issue for a failed nightly run
-        if: failure() && github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          gh issue create --repo "$GITHUB_REPOSITORY" \
-            --title "nightly coverage failed $SHA" \
-            --body "The nightly coverage run failed on $SHA. Run: $RUN_URL"
   policy-tests:
     name: CI control tests
-    if: github.event_name != 'schedule' && github.event.action != 'labeled'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -191,11 +36,10 @@ jobs:
           . "$RUNNER_TEMP/ci-tests/bin/activate"
           python3 -m unittest discover -s tests/ci -v
   required:
-    # One result for the fast gate and the control tests together. It is not a required check.
-    # It is skipped on a nightly or label event, when neither of those jobs runs.
+    # One result for the control tests. It is not a required check. The release evidence reads it at S.
     name: Core CI
-    if: always() && github.event_name != 'schedule' && github.event.action != 'labeled'
-    needs: [fast, policy-tests]
+    if: always()
+    needs: [policy-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -207,6 +51,6 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'fast', 'policy-tests'}
+          assert set(results) == {'policy-tests'}
           assert all(value['result'] == 'success' for value in results.values()), results
           PY

@@ -375,10 +375,17 @@ fn wx8a_failed_handoff_releases_only_its_own_lock() {
         e.message
     );
     assert_eq!(f.reservation(), b"", "the parent withdrew its reservation");
-    let child: u32 = std::fs::read_to_string(f.file("at"))
-        .unwrap()
-        .parse()
-        .unwrap();
+    // a loaded machine can run the parent's 1 s out before the child reaches its claim
+    let mut child = 0u32;
+    wait_for("the late child's pid", || {
+        match std::fs::read_to_string(f.file("at")).map(|t| t.parse::<u32>()) {
+            Ok(Ok(pid)) => {
+                child = pid;
+                true
+            }
+            _ => false,
+        }
+    });
     let winner = StartGuard::try_take(&f.rdy_dir()).unwrap().expect("free");
     let token = HandoffToken::new();
     let reserved = winner.reserve(u32::MAX, &token).unwrap().unwrap();

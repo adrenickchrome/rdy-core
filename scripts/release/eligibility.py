@@ -83,16 +83,25 @@ CANDIDATE_WORKFLOW = '.github/workflows/release-candidate.yml'
 CANDIDATE_EVENTS = ('push', 'workflow_dispatch')
 CANDIDATE_JOBS = (('Candidate source and version',) + tuple('Native candidate (' + t + ')' for t in TARGETS)
                   + ('Candidate manifest',))
+GATE_WORKFLOW = '.github/workflows/gate.yml'
 SECURITY_WORKFLOWS = {
     'CodeQL (actions)': '.github/workflows/security.yml',
     'CodeQL (rust)': '.github/workflows/security.yml',
     'Core CI': '.github/workflows/ci.yml',
     'Core security': '.github/workflows/security.yml',
     'Dependency, secret and workflow policy': '.github/workflows/security.yml',
-    'Fast gate (Linux x86-64)': '.github/workflows/ci.yml',
+    'Release gate (x86_64-unknown-linux-gnu)': GATE_WORKFLOW,
 }
 # A pull_request run tests a merge commit, not S.
 SECURITY_EVENTS = ('push', 'schedule', 'workflow_dispatch')
+# A gate.yml dispatch is the proof run on GitHub-hosted runners and is never evidence: only a push of S to
+# rel/** runs the gate on our machines.
+GATE_EVENTS = ('push',)
+
+
+def security_events(path):
+    """The events whose runs of the workflow `path` can stand for a required job at S."""
+    return GATE_EVENTS if path == GATE_WORKFLOW else SECURITY_EVENTS
 ALERT_REF = 'refs/heads/main'
 BLOCKING_SEVERITIES = ('high', 'critical')
 
@@ -665,8 +674,9 @@ def _security(facts, record, commit):
     for entry in record.value['security']['jobs']:
         name, value = entry['name'], entry['job']
         run = facts.call('run_attempt', value['run_id'], value['run_attempt'])
-        if run.path != SECURITY_WORKFLOWS[name] or run.event not in SECURITY_EVENTS:
-            raise Refused(MISMATCH, 'the ' + name + ' job is not from its workflow on main')
+        if run.path != SECURITY_WORKFLOWS[name] or run.event not in security_events(run.path):
+            raise Refused(MISMATCH, 'the ' + name + ' job is not from its workflow on '
+                          + ('a push of S' if run.path == GATE_WORKFLOW else 'main'))
         if run.head_sha != commit:
             raise Refused(MISMATCH, 'the ' + name + ' job is stale: it did not run on the release commit')
         job = _job(facts, value, commit, name + ' job')

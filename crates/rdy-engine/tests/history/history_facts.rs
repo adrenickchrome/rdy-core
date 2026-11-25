@@ -4,7 +4,7 @@
 //! recomputed, and no trust verdict or gate policy is involved.
 use crate::common;
 
-use rdy_engine::history_facts::{self, BlockOp, MAX_KEYS, MAX_LANDINGS};
+use rdy_engine::history_facts::{self, BlockOp, MAX_KEYS};
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::*;
 use rdy_model::signature::{Signature, StatementSource, statement};
@@ -526,111 +526,6 @@ fn link(n: u32, prev: Option<Hash>) -> LandingRecord {
     }
 }
 
-#[test]
-fn ha10_history_depth_is_bounded() {
-    assert_eq!(MAX_LANDINGS, 100_000);
-    // a chain of 100001 stored landings, newest last
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = Rdy::create_holder(dir.path(), RepoId([1; 16])).unwrap();
-    let mut ids = Vec::with_capacity(MAX_LANDINGS + 1);
-    let mut prev = None;
-    for n in 0..=MAX_LANDINGS as u32 {
-        let id = h.store_mut().put(kinds::LANDING, &link(n, prev)).unwrap();
-        ids.push(id);
-        prev = Some(id);
-    }
-    h.seal_open().unwrap();
-    h.close().unwrap();
-    let h = Rdy::open_holder(dir.path()).unwrap();
-    let read = h.read();
-    let newest = ids[MAX_LANDINGS];
-    let second = ids[MAX_LANDINGS - 1];
-    let unknown = hs(9);
-    // 100000 landings (from the second newest) are walked to their end; 100001 are over the cap
-    assert!(!history_facts::reachable(&read, &[second], unknown).unwrap());
-    let e = history_facts::reachable(&read, &[newest], unknown).unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (
-            E_LIMIT,
-            "history exceeds 100000 landings",
-            "request a shorter history"
-        )
-    );
-    let e = history_facts::chain(&read, newest).unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str()),
-        (E_LIMIT, "history exceeds 100000 landings")
-    );
-    // the oldest landings are reachable from a head within the cap
-    assert!(history_facts::reachable(&read, &[second], ids[0]).unwrap());
-    // a short suffix of the chain is a short history
-    let c = history_facts::chain(&read, ids[2]).unwrap();
-    assert_eq!(hashes(&c), [ids[2], ids[1], ids[0]]);
-}
-
-/// One request-wide budget: the distinct landings met across all heads, and a matched target,
-/// count against [`MAX_LANDINGS`] together.
-/// A holder at `dir` with two disjoint histories of [`MAX_LANDINGS`] / 2 + 1 (50001) landings
-/// each, oldest first.
-fn two_histories(dir: &Path) -> (Rdy, Vec<Hash>, Vec<Hash>) {
-    let mut h = Rdy::create_holder(dir, RepoId([1; 16])).unwrap();
-    let half = MAX_LANDINGS / 2 + 1;
-    let mut chain = |base: u32| {
-        let mut ids = Vec::with_capacity(half);
-        let mut prev = None;
-        for n in 0..half as u32 {
-            let id = h
-                .store_mut()
-                .put(kinds::LANDING, &link(base + n, prev))
-                .unwrap();
-            ids.push(id);
-            prev = Some(id);
-        }
-        ids
-    };
-    let a = chain(0);
-    let b = chain(1_000_000);
-    h.seal_open().unwrap();
-    h.close().unwrap();
-    (Rdy::open_holder(dir).unwrap(), a, b)
-}
-
-#[test]
-fn ha10_history_budget_is_one_for_all_heads() {
-    let dir = tempfile::tempdir().unwrap();
-    let half = MAX_LANDINGS / 2 + 1; // 50001
-    // two disjoint histories of 50001 landings each, oldest first
-    let (h, a, b) = two_histories(dir.path());
-    let read = h.read();
-    let unknown = hs(9);
-    let (a_head, a_second) = (a[half - 1], a[half - 2]);
-    let (b_head, b_second) = (b[half - 1], b[half - 2]);
-    let over = |r: Result<bool, RdyError>| {
-        let e = r.unwrap_err();
-        (e.code, e.message)
-    };
-    let limit = (E_LIMIT, "history exceeds 100000 landings".to_string());
-    // 50001 + 50001 distinct landings are over the one budget, though each head alone is not
-    assert!(!history_facts::reachable(&read, &[a_head], unknown).unwrap());
-    assert!(!history_facts::reachable(&read, &[b_head], unknown).unwrap());
-    assert_eq!(
-        over(history_facts::reachable(&read, &[b_head, a_head], unknown)),
-        limit
-    );
-    // 50000 + 50000 is exactly the budget: walked to the end, and the oldest is reached
-    assert!(!history_facts::reachable(&read, &[b_second, a_second], unknown).unwrap());
-    assert!(history_facts::reachable(&read, &[b_second, a_second], a[0]).unwrap());
-    // a target that is the 100001st landing met is over the budget, not a match
-    assert_eq!(
-        over(history_facts::reachable(&read, &[b_second, a_head], a[0])),
-        limit
-    );
-    // landings both heads share are met once
-    assert!(!history_facts::reachable(&read, &[a_head, a_second], unknown).unwrap());
-    assert!(!history_facts::reachable(&read, &[a_second, a_head, a_second], unknown).unwrap());
-}
-
 // ---------------------------------------------------------------------------------------------
 // signatures
 
@@ -986,50 +881,6 @@ fn sdc2_batch_counts_inputs_before_dedup() {
 }
 
 #[test]
-fn sdc2_batch_walk_has_one_distinct_landing_budget() {
-    let dir = tempfile::tempdir().unwrap();
-    let half = MAX_LANDINGS / 2 + 1; // 50001
-    let (h, a, b) = two_histories(dir.path());
-    let read = h.read();
-    let (a_head, a_second) = (a[half - 1], a[half - 2]);
-    let (b_head, b_second) = (b[half - 1], b[half - 2]);
-    let over = |r: Result<Vec<history_facts::LandingFacts>, RdyError>| {
-        let e = r.unwrap_err();
-        (e.code, e.message)
-    };
-    let limit = (E_LIMIT, "history exceeds 100000 landings".to_string());
-    // 50001 + 50001 distinct landings are over the one budget
-    assert_eq!(
-        over(history_facts::landings(&read, &[b_head, a_head], &[a[0]])),
-        limit
-    );
-    // 50000 + 50000 is exactly the budget: both oldest landings are found, in input order
-    let got = history_facts::landings(&read, &[b_second, a_second], &[a[0], b[0], a[0]]).unwrap();
-    assert_eq!(hashes(&got), [a[0], b[0]]);
-    // a requested hash that is the 100001st distinct visit is over the budget, not a match
-    assert_eq!(
-        over(history_facts::landings(&read, &[b_second, a_head], &[a[0]])),
-        limit
-    );
-    // shared ancestors count once: 50000 + 1 (a_head, whose past was met) + 49999 = 100000
-    let got =
-        history_facts::landings(&read, &[a_second, a_head, b[half - 3]], &[b[0], a_head]).unwrap();
-    assert_eq!(hashes(&got), [b[0], a_head]);
-    // the walk stops once every requested hash is found: two visits here
-    let got = history_facts::landings(&read, &[b_head, a_head], &[b_second, b_head]).unwrap();
-    assert_eq!(hashes(&got), [b_second, b_head]);
-    // a hash still missing keeps the walk going to the budget
-    assert_eq!(
-        over(history_facts::landings(
-            &read,
-            &[b_head, a_head],
-            &[b_head, hs(9)]
-        )),
-        limit
-    );
-}
-
-#[test]
 fn sdc2_batch_uses_captured_signatures_and_removal_facts() {
     let _clock = pin_clock(1_000_000);
     let dir = tempfile::tempdir().unwrap();
@@ -1097,4 +948,161 @@ fn sdc2_batch_uses_captured_signatures_and_removal_facts() {
     }
     assert!(got[0].blocks.iter().any(|b| b.redacted));
     assert_eq!(got[1], cur[1]);
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+    use rdy_engine::history_facts::MAX_LANDINGS;
+
+    #[test]
+    fn ha10_history_budget_is_one_for_all_heads() {
+        let dir = tempfile::tempdir().unwrap();
+        let half = MAX_LANDINGS / 2 + 1; // 50001
+        // two disjoint histories of 50001 landings each, oldest first
+        let (h, a, b) = two_histories(dir.path());
+        let read = h.read();
+        let unknown = hs(9);
+        let (a_head, a_second) = (a[half - 1], a[half - 2]);
+        let (b_head, b_second) = (b[half - 1], b[half - 2]);
+        let over = |r: Result<bool, RdyError>| {
+            let e = r.unwrap_err();
+            (e.code, e.message)
+        };
+        let limit = (E_LIMIT, "history exceeds 100000 landings".to_string());
+        // 50001 + 50001 distinct landings are over the one budget, though each head alone is not
+        assert!(!history_facts::reachable(&read, &[a_head], unknown).unwrap());
+        assert!(!history_facts::reachable(&read, &[b_head], unknown).unwrap());
+        assert_eq!(
+            over(history_facts::reachable(&read, &[b_head, a_head], unknown)),
+            limit
+        );
+        // 50000 + 50000 is exactly the budget: walked to the end, and the oldest is reached
+        assert!(!history_facts::reachable(&read, &[b_second, a_second], unknown).unwrap());
+        assert!(history_facts::reachable(&read, &[b_second, a_second], a[0]).unwrap());
+        // a target that is the 100001st landing met is over the budget, not a match
+        assert_eq!(
+            over(history_facts::reachable(&read, &[b_second, a_head], a[0])),
+            limit
+        );
+        // landings both heads share are met once
+        assert!(!history_facts::reachable(&read, &[a_head, a_second], unknown).unwrap());
+        assert!(!history_facts::reachable(&read, &[a_second, a_head, a_second], unknown).unwrap());
+    }
+
+    #[test]
+    fn ha10_history_depth_is_bounded() {
+        assert_eq!(MAX_LANDINGS, 100_000);
+        // a chain of 100001 stored landings, newest last
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = Rdy::create_holder(dir.path(), RepoId([1; 16])).unwrap();
+        let mut ids = Vec::with_capacity(MAX_LANDINGS + 1);
+        let mut prev = None;
+        for n in 0..=MAX_LANDINGS as u32 {
+            let id = h.store_mut().put(kinds::LANDING, &link(n, prev)).unwrap();
+            ids.push(id);
+            prev = Some(id);
+        }
+        h.seal_open().unwrap();
+        h.close().unwrap();
+        let h = Rdy::open_holder(dir.path()).unwrap();
+        let read = h.read();
+        let newest = ids[MAX_LANDINGS];
+        let second = ids[MAX_LANDINGS - 1];
+        let unknown = hs(9);
+        // 100000 landings (from the second newest) are walked to their end; 100001 are over the cap
+        assert!(!history_facts::reachable(&read, &[second], unknown).unwrap());
+        let e = history_facts::reachable(&read, &[newest], unknown).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_LIMIT,
+                "history exceeds 100000 landings",
+                "request a shorter history"
+            )
+        );
+        let e = history_facts::chain(&read, newest).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (E_LIMIT, "history exceeds 100000 landings")
+        );
+        // the oldest landings are reachable from a head within the cap
+        assert!(history_facts::reachable(&read, &[second], ids[0]).unwrap());
+        // a short suffix of the chain is a short history
+        let c = history_facts::chain(&read, ids[2]).unwrap();
+        assert_eq!(hashes(&c), [ids[2], ids[1], ids[0]]);
+    }
+
+    #[test]
+    fn sdc2_batch_walk_has_one_distinct_landing_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let half = MAX_LANDINGS / 2 + 1; // 50001
+        let (h, a, b) = two_histories(dir.path());
+        let read = h.read();
+        let (a_head, a_second) = (a[half - 1], a[half - 2]);
+        let (b_head, b_second) = (b[half - 1], b[half - 2]);
+        let over = |r: Result<Vec<history_facts::LandingFacts>, RdyError>| {
+            let e = r.unwrap_err();
+            (e.code, e.message)
+        };
+        let limit = (E_LIMIT, "history exceeds 100000 landings".to_string());
+        // 50001 + 50001 distinct landings are over the one budget
+        assert_eq!(
+            over(history_facts::landings(&read, &[b_head, a_head], &[a[0]])),
+            limit
+        );
+        // 50000 + 50000 is exactly the budget: both oldest landings are found, in input order
+        let got =
+            history_facts::landings(&read, &[b_second, a_second], &[a[0], b[0], a[0]]).unwrap();
+        assert_eq!(hashes(&got), [a[0], b[0]]);
+        // a requested hash that is the 100001st distinct visit is over the budget, not a match
+        assert_eq!(
+            over(history_facts::landings(&read, &[b_second, a_head], &[a[0]])),
+            limit
+        );
+        // shared ancestors count once: 50000 + 1 (a_head, whose past was met) + 49999 = 100000
+        let got = history_facts::landings(&read, &[a_second, a_head, b[half - 3]], &[b[0], a_head])
+            .unwrap();
+        assert_eq!(hashes(&got), [b[0], a_head]);
+        // the walk stops once every requested hash is found: two visits here
+        let got = history_facts::landings(&read, &[b_head, a_head], &[b_second, b_head]).unwrap();
+        assert_eq!(hashes(&got), [b_second, b_head]);
+        // a hash still missing keeps the walk going to the budget
+        assert_eq!(
+            over(history_facts::landings(
+                &read,
+                &[b_head, a_head],
+                &[b_head, hs(9)]
+            )),
+            limit
+        );
+    }
+
+    /// One request-wide budget: the distinct landings met across all heads, and a matched target,
+    /// count against [`MAX_LANDINGS`] together.
+    /// A holder at `dir` with two disjoint histories of [`MAX_LANDINGS`] / 2 + 1 (50001) landings
+    /// each, oldest first.
+    fn two_histories(dir: &Path) -> (Rdy, Vec<Hash>, Vec<Hash>) {
+        let mut h = Rdy::create_holder(dir, RepoId([1; 16])).unwrap();
+        let half = MAX_LANDINGS / 2 + 1;
+        let mut chain = |base: u32| {
+            let mut ids = Vec::with_capacity(half);
+            let mut prev = None;
+            for n in 0..half as u32 {
+                let id = h
+                    .store_mut()
+                    .put(kinds::LANDING, &link(base + n, prev))
+                    .unwrap();
+                ids.push(id);
+                prev = Some(id);
+            }
+            ids
+        };
+        let a = chain(0);
+        let b = chain(1_000_000);
+        h.seal_open().unwrap();
+        h.close().unwrap();
+        (Rdy::open_holder(dir).unwrap(), a, b)
+    }
 }

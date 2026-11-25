@@ -1468,7 +1468,7 @@ import zipfile  # noqa: E402
 
 SIGNER_SHA = '2' * 40                # the policy's signer workflow commit
 E_RUN, CAND_RUN, CAND_ART = 888001, 777001, 55
-CI_RUN, SEC_RUN, RELEASE_RUN = 880001, 880002, 990201
+CI_RUN, SEC_RUN, GATE_RUN, RELEASE_RUN = 880001, 880002, 880003, 990201
 APPROVAL_RUN_E, APPROVAL_ART_E = 990301, 990303
 E_UPLOAD = 8901
 LANDING = 'L-test'
@@ -1476,8 +1476,9 @@ ROLE_ARN = 'arn:aws:iam::' + ACCOUNT + ':role/rdy-test-signer'
 EVIDENCE_WF_BYTES = b'name: release-evidence\non: workflow_dispatch\n'
 CHECKS = [{'name': n, 'passed': True} for n in cand.CHECK_NAMES]
 SECURITY_RUN = {'CodeQL (actions)': SEC_RUN, 'CodeQL (rust)': SEC_RUN, 'Core CI': CI_RUN, 'Core security': SEC_RUN,
-                'Dependency, secret and workflow policy': SEC_RUN, 'Fast gate (Linux x86-64)': CI_RUN}
-SECURITY_PATH = {CI_RUN: '.github/workflows/ci.yml', SEC_RUN: '.github/workflows/security.yml'}
+                'Dependency, secret and workflow policy': SEC_RUN, 'Release gate (x86_64-unknown-linux-gnu)': GATE_RUN}
+SECURITY_PATH = {CI_RUN: '.github/workflows/ci.yml', SEC_RUN: '.github/workflows/security.yml',
+                 GATE_RUN: '.github/workflows/gate.yml'}
 SSH_KEYGEN = '/usr/bin/ssh-keygen'
 SIGNER_PATH = PRODUCERS / 'rehearsal_test_signer.py'
 
@@ -1574,9 +1575,10 @@ class EvidenceWorld(object):
         # The security and CI runs on S.
         self.run(CI_RUN, 1, SECURITY_PATH[CI_RUN], 'push', 91, branch='main')
         self.run(SEC_RUN, 1, SECURITY_PATH[SEC_RUN], 'push', 92, branch='main')
+        self.run(GATE_RUN, 1, SECURITY_PATH[GATE_RUN], 'push', 93, branch='rel/' + VERSION)
         for n, name in enumerate(sorted(SECURITY_RUN)):
             self.job(SECURITY_RUN[name], 1, 9901 + n, name)
-        self.listed = {SECURITY_PATH[CI_RUN]: [(CI_RUN, 1)], SECURITY_PATH[SEC_RUN]: [(SEC_RUN, 1)]}
+        self.listed = {path: [(run, 1)] for run, path in SECURITY_PATH.items()}
 
         # The E run attempt that is sealing now, with both native receipts uploaded.
         self.reports = {t: install_report(t) for t in cand.TARGETS}
@@ -2093,6 +2095,7 @@ class EvidenceProducer(EvidenceCase):
             ('security run failed', lambda w: w.runs[(SEC_RUN, 1)].update(conclusion='failure')),
             ('security run stale', lambda w: w.listed.__setitem__(SECURITY_PATH[CI_RUN], [])),
             ('security job skipped', lambda w: w.jobs[(CI_RUN, 1)][0].update(conclusion='skipped')),
+            ('gate run failed', lambda w: w.runs[(GATE_RUN, 1)].update(conclusion='failure')),
             ('blocking alert', lambda w: w.alerts.append(dict(number=2, state='open', tool='CodeQL',
                                                               security_severity='high'))),
         )

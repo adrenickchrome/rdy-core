@@ -7,7 +7,9 @@ param(
     [Parameter(Mandatory = $true)][string]$NodeDir,
     [Parameter(Mandatory = $true)][string]$GitDir,
     [Parameter(Mandatory = $true)][string]$PrivateHome,
-    [switch]$HostedCi
+    [switch]$HostedCi,
+    [ValidateSet('release', 'nightly')][string]$Mode = '',
+    [int]$BudgetSecs = 0
 )
 $ErrorActionPreference = 'Stop'
 
@@ -51,6 +53,15 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Offline after the locked fetch: the gate builds only what Cargo.lock names.
 $env:CARGO_NET_OFFLINE = 'true'
-cargo qa --skip-perf --require-all
+if ($Mode -eq 'release') {
+    # The Windows tier of the release gate, on the gate clock.
+    if ($BudgetSecs -le 0) { Write-Output 'The release tier needs -BudgetSecs'; exit 1 }
+    cargo qa --tier release --platform-tier windows --budget-secs $BudgetSecs --require-all
+} elseif ($Mode -eq 'nightly') {
+    # The whole suite, each night. Perf runs on the bench only.
+    cargo qa --tier nightly --skip-perf --require-all
+} else {
+    cargo qa --skip-perf --require-all
+}
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 exit 0

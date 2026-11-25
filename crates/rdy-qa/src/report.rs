@@ -245,14 +245,17 @@ pub fn failure_lines(failures: &[String], panics: &BTreeMap<String, String>) -> 
     s
 }
 
-/// The workspace-tests gate step's cargo arguments. Every binary runs: without `--no-fail-fast`
-/// cargo stops at the first failing binary, and the ones after it neither run nor count.
-pub const WORKSPACE_TEST_ARGS: [&str; 5] = [
+/// The cargo arguments of the gate's one build: every test of the workspace, rdy-qa's included,
+/// and the `rdy` binary, in the gate profile, with one JSON record per artifact. The gate then
+/// starts every test binary itself, so every binary runs whatever another one did.
+pub const WORKSPACE_TEST_ARGS: [&str; 7] = [
     "test",
     "--workspace",
-    "--exclude",
-    "rdy-qa",
-    "--no-fail-fast",
+    "--profile",
+    "gate",
+    "--no-run",
+    "--locked",
+    "--message-format=json",
 ];
 
 /// The detail of the workspace-tests gate step: the counts, then (when tests failed) the failing
@@ -569,6 +572,9 @@ pub enum RowState {
     Ran,
     /// Not run: `after`, a step it needs, failed (the gate runs without `--all-stages`).
     Skipped { after: crate::gate_steps::StepId },
+    /// A warning: it names what to fix and leaves the verdict as it is (a run over its time
+    /// target, a binary or stage over its allowance).
+    Warning,
 }
 
 impl Gate {
@@ -579,6 +585,16 @@ impl Gate {
             pass,
             detail,
             state: RowState::Ran,
+        }
+    }
+
+    /// A warning row: it passes, so the verdict stays, and its result cell is `WARN`.
+    pub fn warn(name: &str, detail: String) -> Gate {
+        Gate {
+            name: name.into(),
+            pass: true,
+            detail,
+            state: RowState::Warning,
         }
     }
 
@@ -597,6 +613,7 @@ impl Gate {
 pub fn gate_result(g: &Gate) -> String {
     match &g.state {
         RowState::Ran => mark(g.pass).to_string(),
+        RowState::Warning => "WARN".to_string(),
         RowState::Skipped { after } => format!("SKIPPED (after {after} failed)"),
     }
 }
@@ -809,6 +826,9 @@ pub struct Timing {
     pub stages: Vec<StageTime>,
     /// The first failed stage and the seconds from the gate start to its end.
     pub first_failure: Option<(String, f64)>,
+    /// Each test binary the gate started, `<package>/<kind>/<name>`, and its seconds, slowest
+    /// first.
+    pub binaries: Vec<(String, f64)>,
 }
 
 /// The table row name of a child label: the fetch, the CLI build, clippy, the workspace
@@ -817,12 +837,17 @@ fn stage_name(label: &str) -> String {
     match label {
         "fetch locked dependencies" => "fetch".into(),
         "build rdy-cli" => "CLI build".into(),
+        "build" => "build".into(),
+        "env probe" => "env probe".into(),
+        "fresh check" => "fresh check".into(),
         "workspace compile" => "workspace compile".into(),
         "workspace tests" => "workspace run".into(),
         "discover rdy-qa test binaries" => "QA discovery".into(),
         "workspace members" => "fmt".into(),
         l if l.starts_with("fmt ") => "fmt".into(),
         "rdy-qa unit tests" => "QA lib".into(),
+        // each binary of the pool of four: their sum, not wall time
+        l if l.starts_with("workspace ") => "workspace binaries (sum)".into(),
         l => l
             .strip_prefix("rdy-qa ")
             .map_or(l.to_string(), |a| format!("QA {a}")),
@@ -856,6 +881,7 @@ impl Timing {
             queue_secs,
             stages,
             first_failure,
+            binaries: vec![],
         }
     }
 
@@ -887,6 +913,12 @@ impl Timing {
                 let _ = writeln!(s, "| first failure at | - | - |");
             }
         }
+        if !self.binaries.is_empty() {
+            s.push_str("\n### Slowest test binaries\n\n| Binary | Seconds |\n|---|---|\n");
+            for (key, secs) in self.binaries.iter().take(20) {
+                let _ = writeln!(s, "| {key} | {secs:.1} |");
+            }
+        }
         s
     }
 }
@@ -914,6 +946,9 @@ pub struct Report {
     pub os_excluded: Vec<String>,
     /// Where the time went, per stage; empty when nothing was timed.
     pub timing: Timing,
+    /// The keys (`<package>/<kind>/<name>`) of the test binaries that ran and failed: what
+    /// `--retry-failed` runs again.
+    pub failed_binaries: Vec<String>,
 }
 
 /// The M3 gate's required witnesses that another area proves, not the swarm (rulings task-8
@@ -1253,6 +1288,8 @@ struct AreaProven {
 struct JsonReport<'a> {
     #[serde(flatten)]
     report: &'a Report,
+    /// `PASS` or `FAIL`; a retry (`--retry-failed`) writes `PASS (retried: <names>)`.
+    verdict: &'static str,
     area_proven: Vec<AreaProven>,
 }
 
@@ -1268,6 +1305,7 @@ pub fn json(r: &Report) -> String {
         .collect();
     serde_json::to_string_pretty(&JsonReport {
         report: r,
+        verdict: mark(r.pass),
         area_proven,
     })
     .expect("report serializes")
@@ -1641,6 +1679,7 @@ mod tests {
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
             timing: Timing::default(),
+            failed_binaries: vec![],
         };
         assert!(
             markdown(&r).contains(
@@ -1712,6 +1751,7 @@ mod tests {
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
             timing: Timing::default(),
+            failed_binaries: vec![],
         }
     }
 
@@ -1873,19 +1913,30 @@ mod tests {
     fn wx33h_the_workspace_step_runs_every_binary_and_counts_them() {
         // cargo stops at the first failing test binary without this flag, and the binaries after
         // it neither run nor count: Windows' `read_only` failures hid behind `client`'s
+        // the gate builds once and starts every binary itself, so no binary's failure stops
+        // another (cargo without `--no-fail-fast` stopped at the first failing one)
         assert_eq!(
             WORKSPACE_TEST_ARGS,
             [
                 "test",
                 "--workspace",
-                "--exclude",
-                "rdy-qa",
-                "--no-fail-fast"
+                "--profile",
+                "gate",
+                "--no-run",
+                "--locked",
+                "--message-format=json"
             ]
         );
         assert!(
-            include_str!("bin/qa-gate.rs").contains("cargo(&report::WORKSPACE_TEST_ARGS)"),
-            "the gate runs these arguments"
+            include_str!("gate_steps.rs").contains("cargo(&report::WORKSPACE_TEST_ARGS)"),
+            "the gate builds with these arguments"
+        );
+        assert!(
+            include_str!("bin/qa-gate.rs")
+                .split_whitespace()
+                .collect::<String>()
+                .contains("run_areas_capped(&jobs,alone,BINARY_JOBS,heavy,HEAVY_JOBS"),
+            "every test binary shares the one pool and runs"
         );
         let out = "\
      Running tests/a.rs (target/debug/deps/a-1)
@@ -2011,6 +2062,7 @@ error: 2 targets failed:
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
             timing: Timing::default(),
+            failed_binaries: vec![],
         };
         let md = markdown(&r);
         assert!(
@@ -2074,6 +2126,7 @@ error: 2 targets failed:
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
             timing: Timing::default(),
+            failed_binaries: vec![],
         };
         let md = markdown(&r);
         assert!(
@@ -2095,12 +2148,14 @@ error: 2 targets failed:
     #[test]
     fn hd12_ci_runs_the_fast_gate_as_a_user_with_node() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let text = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci.yml");
+        // The release gate runs on our own machines (gate.yml); its Linux job stands for CI.
+        let text =
+            std::fs::read_to_string(root.join(".github/workflows/gate.yml")).expect("gate.yml");
         let toolchain = std::fs::read_to_string(root.join("rust-toolchain.toml")).unwrap();
         let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).unwrap();
-        let steps = ci["jobs"]["fast"]["steps"]
+        let steps = ci["jobs"]["linux"]["steps"]
             .as_sequence()
-            .expect("jobs.fast.steps");
+            .expect("jobs.linux.steps");
         let runs: Vec<&str> = steps.iter().filter_map(|s| s["run"].as_str()).collect();
         let uses: Vec<&str> = steps.iter().filter_map(|s| s["uses"].as_str()).collect();
         assert!(
@@ -2113,7 +2168,7 @@ error: 2 targets failed:
         );
         assert!(
             runs.iter()
-                .any(|r| r.contains("cargo qa --skip-perf --require-all")),
+                .any(|r| r.contains("cargo qa --tier release") && r.contains("--require-all")),
             "{runs:?}"
         );
         let channel = toolchain

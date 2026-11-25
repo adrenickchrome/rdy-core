@@ -574,19 +574,11 @@ fn queue_guidance() -> [&'static str; 6] {
 
 #[test]
 fn cp14_instructions_publish_the_change_plan_rule_at_initialization() {
-    let prose = "Before proposing, read `rdy_plan` and close or defer each item. Give every deferral a reason. Re-affirm a suspect decision that still holds with a `reaffirm` op, and supersede one that does not.";
-    // the after-write ruleset carries the rule with the proposing guidance
+    // the after-write ruleset carries the rule, served as the bundle holds it
     let (dir, r) = project();
     drop(r);
     let mut c = McpClient::start(dir.path());
-    let g = crate::mcp_instructions::loaded(&mut c, &["after-write"]);
-    let at = g
-        .find(prose)
-        .expect("the loaded guide carries the change-plan rule");
-    assert!(
-        g[..at].ends_with("Write with `rdy_write`; propose with `rdy_propose`. "),
-        "the rule sits with the proposing guidance"
-    );
+    rdy_qa::guide_bundle::assert_served(&mut c, &["after-write"]);
     // the server's initialize reply no longer holds it; it points at rdy_instructions
     let i = c.initialize_result()["result"]["instructions"]
         .as_str()

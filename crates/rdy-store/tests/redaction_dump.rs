@@ -1673,7 +1673,12 @@ fn sibling_with_another_id(d: &mut redaction_fixture::Draft, _: &Block, b: &Bloc
 /// the request's own bound (`MAX_SELECTED`), and each listed span is one frame of the log. The
 /// removal tally reads such a request's spans, so the writer's resolved facts and the file's own
 /// facts agree, and the checking reader takes the trailer.
+///
+/// On Windows it runs in the nightly tier only: erasing and punching 100001 spans one at a time
+/// takes about 670 s there, against 5 s on macOS. The release tier keeps it on macOS and Linux,
+/// and on Windows the other removal tests of this file.
 #[test]
+#[cfg(any(not(windows), feature = "nightly-tests"))]
 fn hc1_a_request_over_100000_physical_copies_keeps_its_removal_facts() {
     const COPIES: usize = rdy_store::bounded::MAX_ELEMENTS + 1;
     let dir = tempfile::tempdir().unwrap();

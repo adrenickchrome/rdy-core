@@ -309,12 +309,20 @@ fn say(line: &str) {
 }
 
 /// The barrier: says so, then waits until the parent terminates this process. An ended parent
-/// closes this stream, so a parent that failed leaves no process behind.
+/// closes this stream, so a parent that failed leaves no process behind. Only the end of the
+/// stream ends the wait: a read that fails waits again (a macOS gate run once saw the child exit
+/// with 4 before the parent's kill).
 fn stop_at_barrier() -> ! {
     say("BARRIER");
     let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-    std::process::exit(4)
+    loop {
+        line.clear();
+        match std::io::stdin().read_line(&mut line) {
+            Ok(0) => std::process::exit(4),
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
 }
 
 #[test]

@@ -957,8 +957,8 @@ exit 0
 
 
 def reports_step():
-    """The coverage job's Reports step, parsed from ci.yml."""
-    return step_named(workflow('ci.yml'), 'Reports')
+    """The coverage job's Reports step, parsed from nightly.yml."""
+    return step_named(workflow('nightly.yml'), 'Reports')
 
 
 def reports_commands():
@@ -1312,7 +1312,7 @@ class ReportsStepPolicy(unittest.TestCase):
         self.assertEqual(precheck, 'python3 scripts/ci/set_aside_profiles.py')
 
     def test_reports_are_uploaded_even_when_the_job_failed(self):
-        doc = workflow('ci.yml')
+        doc = workflow('nightly.yml')
         steps = steps_of(doc, 'coverage')
         upload = steps[steps.index(reports_step()) + 1]
         self.assertTrue(upload['uses'].startswith('actions/upload-artifact@'))
@@ -1324,7 +1324,7 @@ class ReportsStepPolicy(unittest.TestCase):
 @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0,
                  'root reads any file; the owner-read fix is for a standard account')
 class ReportsStepStandardAccount(unittest.TestCase):
-    """The real Reports step, from ci.yml, run in a bash under the current standard account.
+    """The real Reports step, from nightly.yml, run in a bash under the current standard account.
 
     Only llvm-profdata, rustc and cargo are stand-ins. Everything else runs for real: bash, find,
     chmod, python3 and scripts/ci/set_aside_profiles.py, on files with real modes.
@@ -1458,6 +1458,12 @@ class WindowsScriptPolicy(unittest.TestCase):
         gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
         inner = (ROOT / 'scripts/ci/windows_gate_inner.ps1').read_text()
         self.assertIn('cargo qa --skip-perf --require-all', inner)
+        self.assertIn('cargo qa --tier release --platform-tier windows --budget-secs $BudgetSecs --require-all', inner)
+        self.assertIn('cargo qa --tier nightly --skip-perf --require-all', inner)
+        self.assertIn("[ValidateSet('release', 'nightly')][string]$Mode = ''", inner)
+        # the mode and the clock reach the account as checked arguments, never as free text
+        self.assertIn("$env:RDY_GATE_MODE -notin @('release', 'nightly')", gate)
+        self.assertIn("$env:RDY_GATE_BUDGET_SECS -notmatch '^[1-9][0-9]{0,5}$'", gate)
         self.assertIn('cargo fetch --locked', inner)
         # an ordinary account, a private checkout, cache and profile; the credential is for this run only
         self.assertIn('New-LocalUser', gate)
@@ -1533,7 +1539,7 @@ class WindowsScriptPolicy(unittest.TestCase):
         self.assertIn('Sort-Object -Property FreeSpace -Descending', gate)
         self.assertIn('"RDY_CI_ROOT=$root"', gate)
         self.assertLess(gate.index('RDY_CI_ROOT=$root'), gate.index('New-LocalUser'))
-        for path in ('.github/workflows/platform.yml', '.github/workflows/release-candidate.yml',
+        for path in ('.github/workflows/gate.yml', '.github/workflows/release-candidate.yml',
                      'scripts/ci/windows_gate_inner.ps1', 'scripts/ci/windows_report.ps1',
                      'scripts/ci/windows_gate_cleanup.ps1', 'scripts/ci/windows_disk_report.ps1'):
             text = (ROOT / path).read_text()
@@ -1615,117 +1621,152 @@ class WindowsScriptPolicy(unittest.TestCase):
             self.assertIn(word, scripts[3])
 
 
-class PlatformWorkflowPolicy(unittest.TestCase):
-    """What .github/workflows/platform.yml must do, read from the parsed workflow."""
+GATE_TARGETS = {'linux': 'x86_64-unknown-linux-gnu', 'macos': 'aarch64-apple-darwin',
+                'windows': 'x86_64-pc-windows-msvc'}
+GATE_HOSTED = {'linux': 'ubuntu-26.04', 'macos': 'macos-26', 'windows': 'windows-2025'}
+
+
+class GateWorkflowPolicy(unittest.TestCase):
+    """What .github/workflows/gate.yml must do (the release gate, plan Task 6), read from the parsed workflow."""
 
     def setUp(self):
-        self.doc = workflow('platform.yml')
-        self.job = self.doc['jobs']['native']
-        self.steps = self.job['steps']
+        self.doc = workflow('gate.yml')
+        self.jobs = self.doc['jobs']
 
-    def on(self, os_name):
-        """The steps that run only on Windows (os_name 'Windows') or only elsewhere ('other')."""
-        mark = "runner.os == 'Windows'" if os_name == 'Windows' else "runner.os != 'Windows'"
-        return [step for step in self.steps if mark in str(step.get('if', ''))]
+    def runs(self, job):
+        return [step['run'] for step in self.jobs[job]['steps'] if 'run' in step]
 
-    def test_matrix_is_native_macos_and_windows_only_with_sufficient_limits(self):
-        # Run f17ab534: the Windows gate was still in the rdy-qa areas when the 90-minute limit
-        # cancelled it; macOS needs 70 to 80 minutes. Both jobs stay advisory.
-        include = self.job['strategy']['matrix']['include']
-        self.assertEqual({entry['runner'] for entry in include}, {'macos-26', 'windows-2025'})
-        self.assertEqual(self.job['runs-on'], '${{ matrix.runner }}')
-        self.assertIs(self.job['strategy']['fail-fast'], False)
-        self.assertEqual(self.job['timeout-minutes'], '${{ matrix.timeout }}')
-        self.assertIs(self.job['continue-on-error'], True)
-        limits = {entry['label']: entry['timeout'] for entry in include}
-        self.assertEqual(set(limits), {'macOS ARM64', 'Windows Server 2025'})
-        self.assertGreaterEqual(limits['macOS ARM64'], 120)
-        self.assertGreaterEqual(limits['Windows Server 2025'], 240)
-        self.assertLessEqual(max(limits.values()), 360)
+    def test_push_to_a_release_branch_or_a_manual_run_only(self):
+        on = triggers(self.doc)
+        self.assertEqual(sorted(on), ['push', 'workflow_dispatch'])
+        self.assertEqual(on['push'], {'branches': ['rel/**']})
+        self.assertEqual(on['workflow_dispatch'], {'inputs': {'hosted': {
+            'description': 'Prove the workflow on GitHub-hosted runners (never release evidence)',
+            'type': 'boolean', 'default': False}}})
+        self.assertEqual(self.doc['concurrency'], {'group': 'rdy-core-gate-${{ github.ref }}',
+                                                   'cancel-in-progress': False})
 
-    def test_no_arm64_linux_job_is_restored(self):
-        everything = json.dumps(self.doc)
-        for word in ('ubuntu-26.04-arm', 'Linux ARM64', 'aarch64', 'linux-arm'):
-            self.assertNotIn(word, everything)
-        labels = yaml.safe_load((ROOT / 'scripts/ci/actionlint.yaml').read_text())['self-hosted-runner']['labels']
-        self.assertEqual(labels, ['ubuntu-26.04'])
-        ci = workflow('ci.yml')
-        self.assertEqual(ci['jobs']['fast']['runs-on'], 'ubuntu-26.04')
-        gate = step_named(ci, 'Fast gate (fmt, clippy, tests; no perf)')
-        self.assertEqual(gate['run'].strip(), 'cargo qa --skip-perf --require-all')
-
-    def test_posix_runs_the_full_fast_gate_without_root(self):
-        gate = step_named(self.doc, 'Fast gate (fmt, clippy, tests; no perf)')
-        self.assertEqual(gate['run'].strip(), 'cargo qa --skip-perf --require-all')
-        self.assertIn(gate, self.on('other'))
-        self.assertIn(step_named(self.doc, 'Not root'), self.on('other'))
-        self.assertNotIn('windows-portable', json.dumps(self.doc))
-        for step in self.steps:
-            self.assertNotIn('-p rdy-model', step.get('run', ''))
-
-    def test_windows_steps_are_pwsh_and_call_the_gate_scripts(self):
-        windows = self.on('Windows')
-        self.assertTrue(windows)
-        for step in windows:
-            if 'run' in step:
-                self.assertEqual(step.get('shell'), 'pwsh', step)
-                self.assertNotRegex(step['run'], r'\b(sed|id -u|bash)\b')
-        runs = ' '.join(step.get('run', '') for step in windows)
-        for script in ('windows_gate.ps1', 'windows_report.ps1', 'windows_gate_cleanup.ps1'):
-            self.assertIn('./scripts/ci/' + script, runs)
-        cleanup = [step for step in windows if 'windows_gate_cleanup.ps1' in step.get('run', '')]
-        self.assertEqual([step['if'] for step in cleanup], ["always() && runner.os == 'Windows'"])
-        report = [step for step in windows if 'windows_report.ps1' in step.get('run', '')]
-        self.assertEqual([step['if'] for step in report], ["always() && runner.os == 'Windows'"])
-        # the root is read from RDY_CI_ROOT, never fixed to a drive
-        self.assertIn('-Report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.md"', report[0]['run'])
-        diff = [step for step in windows if 'diff --exit-code' in step.get('run', '')]
-        self.assertEqual(len(diff), 1)
-        self.assertIn("Join-Path $env:RDY_CI_ROOT 'work'", diff[0]['run'])
-        self.assertIn('exit $LASTEXITCODE', diff[0]['run'])
-        self.assertIn("$ErrorActionPreference = 'Stop'", diff[0]['run'])
-
-    def test_ci_root_is_never_a_fixed_drive_path(self):
-        for path in ('.github/workflows/platform.yml', '.github/workflows/release-candidate.yml'):
-            text = (ROOT / path).read_text()
-            self.assertNotIn('C:\\rdy-ci', text, path)
-            self.assertNotIn('C:/rdy-ci', text, path)
-
-    def test_both_platforms_upload_the_qa_report_even_after_a_failure(self):
-        uploads = uses_steps(self.doc, 'actions/upload-artifact')
-        self.assertEqual(len(uploads), 2)
-        paths = {os_name: [line for upload in uploads if upload in self.on(os_name)
-                           for line in upload['with']['path'].split('\n') if line]
-                 for os_name in ('Windows', 'other')}
-        self.assertEqual(paths['other'], ['target/qa/report.*'])
-        self.assertEqual(paths['Windows'], ['${{ env.RDY_CI_ROOT }}\\work\\target\\qa\\report.*',
-                                            '${{ env.RDY_CI_ROOT }}\\logs\\gate.*'])
-        for upload in uploads:
-            self.assertTrue(upload['if'].startswith('always()'))
-            self.assertEqual(upload['with']['name'], 'qa-report-${{ runner.os }}')
-        failing = step_named(self.doc, 'Failing tests')
-        self.assertIn('cat target/qa/report.md', failing['run'])
-        self.assertTrue(failing['if'].startswith('failure()'))
-
-    def test_failed_tracked_file_check_fails_the_job_and_nothing_else_is_hidden(self):
-        diffs = [step for step in self.steps if 'diff --exit-code' in step.get('run', '')]
-        self.assertEqual(len(diffs), 2)
-        posix = [step for step in diffs if step in self.on('other')]
-        self.assertEqual([step['run'].strip() for step in posix], ['git diff --exit-code'])
-        for step in diffs:
-            self.assertNotIn('continue-on-error', step)
-            self.assertNotIn('|| true', step['run'])
-
-    def test_permissions_credentials_and_pins(self):
+    def test_three_jobs_on_our_machines_with_the_gate_line_as_their_limit(self):
+        self.assertEqual(sorted(self.jobs), sorted(GATE_TARGETS))
+        for name, job in self.jobs.items():
+            with self.subTest(job=name):
+                self.assertEqual(job['runs-on'], "${{ inputs.hosted && '" + GATE_HOSTED[name]
+                                 + "' || fromJSON('[\"self-hosted\",\"rdy-gate\",\"" + name + "\"]') }}")
+                # A push (release evidence) gets a 45-minute hang guard and a gate clock with a 1080-second
+                # target and a 2400-second ceiling; the budget job, not these limits, checks the release
+                # time. Only a manual hosted proof run gets more; gate_budget.py never reads it as evidence.
+                self.assertEqual(job['timeout-minutes'], '${{ inputs.hosted && 90 || 45 }}')
+                self.assertEqual(job['env']['GATE_BUDGET_SECS'], "${{ inputs.hosted && '5100' || '1080' }}")
+                self.assertEqual(job['env']['GATE_CEILING_SECS'], "${{ inputs.hosted && '5100' || '2400' }}")
+                self.assertEqual(job['permissions'], {'contents': 'read'})
+                self.assertNotIn('environment', job)
+                self.assertNotIn('needs', job)
+                self.assertNotIn('continue-on-error', job)
+                for step in job['steps']:
+                    self.assertNotIn('continue-on-error', step)
         self.assertEqual(self.doc['permissions'], {})
-        self.assertEqual(self.job['permissions'], {'contents': 'read'})
-        checkouts = uses_steps(self.doc, 'actions/checkout')
-        self.assertTrue(checkouts)
-        for checkout in checkouts:
-            self.assertIs(checkout['with']['persist-credentials'], False)
-        for step in steps_of(self.doc):
-            if 'uses' in step:
-                self.assertRegex(step['uses'], r'@[0-9a-f]{40}$')
+        text = (WORKFLOWS / 'gate.yml').read_text()
+        for word in ('secrets.', 'id-token', 'github.token', 'pull_request'):
+            self.assertNotIn(word, text)
+        labels = yaml.safe_load((ROOT / 'scripts/ci/actionlint.yaml').read_text())['self-hosted-runner']['labels']
+        self.assertEqual(labels, ['ubuntu-26.04', 'rdy-gate', 'rdy-bench'])
+
+    def test_hosted_proof_runs_are_never_release_evidence(self):
+        spec = importlib.util.spec_from_file_location('gate_budget', ROOT / 'scripts/release/gate_budget.py')
+        budget = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(budget)
+        self.assertEqual(budget.GATE_WORKFLOW, 'gate.yml')
+        self.assertEqual(budget.GATE_EVENT, 'push')
+
+    def test_every_gate_run_is_the_release_tier_on_the_gate_clock(self):
+        clock = {'linux': 'cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --ceiling-secs "$GATE_CEILING_SECS" '
+                          '--require-all --tmp-root "$GATE_TMP"',
+                 'macos': 'cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --ceiling-secs "$GATE_CEILING_SECS" '
+                          '--require-all '
+                          '--tmp-root "$GATE_TMP"',
+                 'windows': 'cargo qa --tier release --platform-tier windows --budget-secs $env:GATE_BUDGET_SECS '
+                            '--ceiling-secs $env:GATE_CEILING_SECS --require-all --tmp-root $env:GATE_TMP'}
+        for name in self.jobs:
+            with self.subTest(job=name):
+                gate = [step for step in self.jobs[name]['steps'] if step.get('id') == 'gate']
+                self.assertEqual(len(gate), 1)
+                self.assertIn(clock[name], gate[0]['run'])
+                self.assertEqual(gate[0]['env'], {'CARGO_NET_OFFLINE': 'true'})
+                lines = [line for run in self.runs(name) for line in run.splitlines() if 'cargo qa' in line]
+                self.assertEqual(len(lines), 2, lines)
+                for line in lines:
+                    self.assertIn('--tier release', line)
+                    self.assertIn('--budget-secs', line)
+                    self.assertIn('--ceiling-secs', line)
+                    self.assertIn('--require-all', line)
+                    self.assertIn('--tmp-root', line)
+                    for word in ('--local', '--skip-perf', '--deep', '--only', '--focus'):
+                        self.assertNotIn(word, line)
+                # One retry of the failed binaries, in the time left on the same clock.
+                retry = step_named({'jobs': {name: self.jobs[name]}}, 'Retry failed binaries once')
+                self.assertIn('--retry-failed target', retry['run'])
+                self.assertRegex(retry['run'], r'GATE_CEILING_SECS.*GATE_START')
+                self.assertIn("steps.gate.outputs.status != '0'", retry['if'])
+        # The hosted Windows proof runs the same tier through the standard-account script.
+        hosted = step_named(self.doc, 'Hosted proof under a standard account (Windows tier)')
+        self.assertEqual(hosted['if'], '${{ inputs.hosted }}')
+        self.assertEqual(hosted['env'], {'RDY_QA_HOSTED_CI': '1', 'RDY_GATE_MODE': 'release',
+                                         'RDY_GATE_BUDGET_SECS': '${{ env.GATE_BUDGET_SECS }}'})
+        self.assertIn('./scripts/ci/windows_gate.ps1', hosted['run'])
+
+    def test_test_files_go_to_a_ram_disk_or_tmpfs_that_is_removed(self):
+        linux = ' '.join(self.runs('linux'))
+        self.assertIn('dir="/tmp/rdy-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', linux)
+        mac = ' '.join(self.runs('macos'))
+        self.assertIn('hdiutil attach -nomount ram://16777216', mac)
+        self.assertIn('diskutil erasevolume APFS', mac)
+        self.assertNotIn('HFS', mac.replace('never HFS+', ''))
+        for name, step in (('linux', 'Remove the temp root'), ('macos', 'Remove the RAM disk'),
+                           ('windows', 'Remove the temp root')):
+            removal = step_named({'jobs': {name: self.jobs[name]}}, step)
+            self.assertTrue(removal['if'].startswith('always()'), name)
+
+    def test_clean_checkout_scratch_home_and_kept_target(self):
+        for name, job in self.jobs.items():
+            with self.subTest(job=name):
+                checkouts = [step for step in job['steps'] if str(step.get('uses', '')).startswith('actions/checkout@')]
+                self.assertEqual(len(checkouts), 1)
+                self.assertEqual(checkouts[0]['with'], {'persist-credentials': False})
+                home = step_named({'jobs': {name: job}}, 'Scratch home and kept target')
+                # the work folder's parent, from github.workspace: actionlint knows no runner.workspace
+                self.assertNotIn('env', home)
+                self.assertIn('GITHUB_WORKSPACE', home['run'])
+                self.assertNotIn('runner.workspace', home['run'])
+                self.assertIn('gate-target', home['run'])
+                self.assertIn('HOME=', home['run'])
+                self.assertLess(job['steps'].index(home), job['steps'].index(checkouts[0]))
+                for step in job['steps']:
+                    if 'uses' in step:
+                        self.assertRegex(step['uses'], r'@[0-9a-f]{40}$')
+
+    def test_counts_and_reports_are_uploaded_for_the_candidate(self):
+        for name, job in self.jobs.items():
+            with self.subTest(job=name):
+                target = GATE_TARGETS[name]
+                steps = job['steps']
+                counts = step_named({'jobs': {name: job}}, 'Fast gate counts')
+                self.assertIn('scripts/release/candidate.py gate-counts --report', counts['run'])
+                self.assertRegex(counts['run'], r'--commit \$(env:)?GITHUB_SHA|--commit "\$GITHUB_SHA"')
+                self.assertNotIn('if', counts)
+                uploads = [step for step in steps if str(step.get('uses', '')).startswith('actions/upload-artifact@')]
+                self.assertEqual([u['with']['name'] for u in uploads],
+                                 ['fast-gate-' + target, 'qa-report-' + target + '-a${{ github.run_attempt }}'])
+                fast, report = uploads
+                self.assertLess(steps.index(counts), steps.index(fast))
+                self.assertNotIn('if', fast)
+                self.assertEqual(fast['with']['path'], '${{ runner.temp }}/fast-gate.json')
+                self.assertEqual(fast['with']['if-no-files-found'], 'error')
+                self.assertIs(fast['with']['overwrite'], True)
+                self.assertEqual(report['if'], 'always()')
+
+    def test_security_runs_on_the_release_branch_too(self):
+        on = triggers(workflow('security.yml'))
+        self.assertEqual(on['push']['branches'], ['main', 'rel/**'])
 
 
 def workflow_on(name):
@@ -1734,67 +1775,166 @@ def workflow_on(name):
     return doc, triggers(doc)
 
 
-def coverage_if(event_name, action=None, labels=(), label=None):
-    """Evaluate the coverage job's `if:` for one event, by translating its few operators to Python."""
-    doc, _ = workflow_on('ci.yml')
-    expr = ' '.join(str(doc['jobs']['coverage']['if']).split())
-    expr = expr.replace("contains(github.event.pull_request.labels.*.name, 'coverage')", "('coverage' in labels)")
-    expr = expr.replace('github.event_name', 'event_name').replace('github.event.action', 'action')
-    expr = expr.replace('github.event.label.name', 'label').replace('&&', ' and ').replace('||', ' or ')
-    assert not re.search(r'github\.|contains\(', expr), expr
-    return eval(expr, {}, dict(event_name=event_name, action=action, labels=list(labels), label=label))
-
-
 class CiSplit(unittest.TestCase):
-    def test_coverage_not_on_plain_pr(self):
-        self.assertFalse(coverage_if('pull_request', 'opened'))
-        self.assertFalse(coverage_if('pull_request', 'synchronize', labels=['other']))
-        self.assertFalse(coverage_if('pull_request', 'labeled', labels=['other'], label='other'))
-        self.assertTrue(coverage_if('pull_request', 'synchronize', labels=['coverage']))
-        self.assertTrue(coverage_if('pull_request', 'labeled', labels=['coverage'], label='coverage'))
-        self.assertFalse(coverage_if('pull_request', 'labeled', labels=['coverage', 'other'], label='other'))
-        for event in ('push', 'schedule', 'workflow_dispatch'):
-            self.assertTrue(coverage_if(event))
+    """ci.yml holds the cheap checks of a PR and of main; what runs at night is in nightly.yml."""
 
-    def test_coverage_runs_nightly_at_0300_utc(self):
+    def test_ci_runs_on_prs_and_main_only(self):
         doc, on = workflow_on('ci.yml')
-        self.assertEqual(on['schedule'], [{'cron': '0 3 * * *'}])
+        self.assertEqual(sorted(on), ['pull_request', 'push', 'workflow_dispatch'])
         self.assertEqual(on['push']['branches'], ['main'])
-        self.assertIn('labeled', on['pull_request']['types'])
+        self.assertEqual(on['pull_request'], {'branches': ['main']})
+        self.assertEqual(doc['concurrency']['group'], 'ci-${{ github.event.pull_request.number || github.ref }}')
 
-    def test_nightly_failure_opens_an_issue_with_the_job_token_only(self):
+    def test_ci_runs_the_control_tests_and_core_ci_only(self):
+        # The test suite runs in gate.yml and nightly.yml. The release evidence reads `Core CI` here and the
+        # release gate's Linux job in gate.yml (scripts/release/evidence.py SECURITY_JOBS).
         doc, _ = workflow_on('ci.yml')
-        job = doc['jobs']['coverage']
-        self.assertIs(job['continue-on-error'], True)
-        self.assertEqual(job['permissions'], {'contents': 'read', 'issues': 'write'})
-        step = job['steps'][-1]
-        self.assertEqual(step['if'], "failure() && github.event_name == 'schedule'")
-        self.assertEqual(step['env']['GH_TOKEN'], '${{ github.token }}')
-        self.assertIn('nightly coverage failed $SHA', step['run'])
-        self.assertNotIn('secrets.', (ROOT / '.github/workflows/ci.yml').read_text())
-        for name, other in doc['jobs'].items():
-            if name != 'coverage':
-                self.assertNotIn('issues', other.get('permissions') or {}, name)
+        self.assertEqual(sorted(doc['jobs']), ['policy-tests', 'required'])
+        required = doc['jobs']['required']
+        self.assertEqual((required['name'], required['if'], required['needs']), ('Core CI', 'always()', ['policy-tests']))
+        self.assertIn("assert set(results) == {'policy-tests'}", required['steps'][0]['run'])
+        text = (WORKFLOWS / 'ci.yml').read_text()
+        for word in ('schedule', 'labeled', 'issues: write', 'cargo qa'):
+            self.assertNotIn(word, text)
         self.assertEqual(doc['permissions'], {})
 
-    def test_label_and_nightly_events_skip_the_pr_jobs(self):
-        doc, _ = workflow_on('ci.yml')
-        for name in ('fast', 'policy-tests', 'required'):
-            self.assertIn("github.event_name != 'schedule'", doc['jobs'][name]['if'], name)
-            self.assertIn("github.event.action != 'labeled'", doc['jobs'][name]['if'], name)
+    def test_the_evidence_reads_the_gate_linux_job_by_its_name(self):
+        spec = importlib.util.spec_from_file_location('eligibility', ROOT / 'scripts/release/eligibility.py')
+        sys.path.insert(0, str(ROOT / 'scripts/release'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'scripts/release'))
+        elig = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(elig)
+        gate = workflow('gate.yml')['jobs']['linux']['name']
+        self.assertEqual(elig.SECURITY_WORKFLOWS[gate], '.github/workflows/gate.yml')
+        self.assertEqual(elig.security_events('.github/workflows/gate.yml'), ('push',))
+        self.assertEqual(workflow('ci.yml')['jobs']['required']['name'], 'Core CI')
+        self.assertEqual(elig.SECURITY_WORKFLOWS['Core CI'], '.github/workflows/ci.yml')
+        # Every required job outside the CodeQL matrix is a job name of its own workflow.
+        for name, path in elig.SECURITY_WORKFLOWS.items():
+            if not name.startswith('CodeQL ('):
+                names = [job.get('name') for job in workflow(Path(path).name)['jobs'].values()]
+                self.assertIn(name, names)
 
-    def test_platform_pr_paths(self):
-        doc, on = workflow_on('platform.yml')
-        # `pio*` matches the file only; `pio/**` and `**/windows/**` cover the directories that exist.
-        self.assertEqual(on['pull_request']['paths'], [
-            'crates/rdy-store/src/pio*', 'crates/rdy-store/src/pio/**', 'crates/rdy-daemon/src/sys/**',
-            '**/windows*', '**/windows/**', '.github/workflows/platform.yml', 'scripts/release/**'])
-        self.assertNotIn('paths', on['push'])
-        self.assertNotIn('paths-ignore', on['push'])
-        self.assertEqual(on['push']['branches'], ['main'])
-        for path in ('crates/rdy-store/src/pio.rs', 'crates/rdy-store/src/pio', 'crates/rdy-daemon/src/sys',
-                     'scripts/release'):
-            self.assertTrue((ROOT / path).exists(), path)
+
+NIGHTLY_JOBS = {
+    'own': (120, None),
+    'own-windows': (240, ['self-hosted', 'rdy-gate', 'windows']),
+    'hosted-macos': (180, 'macos-26'),
+    'hosted-windows': (300, 'windows-2025'),
+    'bench': (240, ['self-hosted', 'rdy-bench']),
+    'coverage': (180, 'ubuntu-24.04'),
+    'report': (5, 'ubuntu-24.04'),
+}
+
+
+class NightlyPolicy(unittest.TestCase):
+    """The nightly run: what no release reads, once a day on main, with one issue for a red night."""
+
+    def setUp(self):
+        self.doc, self.on = workflow_on('nightly.yml')
+        self.text = (WORKFLOWS / 'nightly.yml').read_text()
+
+    def test_triggers_and_concurrency(self):
+        self.assertEqual(self.on, {'schedule': [{'cron': '0 3 * * *'}], 'workflow_dispatch': None})
+        self.assertEqual(self.doc['concurrency'], {'group': 'rdy-core-nightly', 'cancel-in-progress': True})
+        self.assertEqual(self.doc['permissions'], {})
+
+    def test_jobs_runners_and_limits(self):
+        jobs = self.doc['jobs']
+        self.assertEqual(sorted(jobs), sorted(NIGHTLY_JOBS))
+        for name, (minutes, runs_on) in NIGHTLY_JOBS.items():
+            self.assertEqual(jobs[name]['timeout-minutes'], minutes, name)
+            if runs_on is not None:
+                self.assertEqual(jobs[name]['runs-on'], runs_on, name)
+        own = jobs['own']
+        self.assertEqual(own['runs-on'], ['self-hosted', 'rdy-gate', '${{ matrix.os }}'])
+        self.assertEqual(own['strategy'], {'fail-fast': False, 'matrix': {'os': ['linux', 'macos']}})
+
+    def test_only_the_report_job_writes_and_no_job_holds_a_secret(self):
+        for name, job in self.doc['jobs'].items():
+            expected = {'issues': 'write'} if name == 'report' else {'contents': 'read'}
+            self.assertEqual(job['permissions'], expected, name)
+            self.assertNotIn('environment', job, name)
+        for word in ('secrets.', 'id-token', 'vars.'):
+            self.assertNotIn(word, self.text)
+
+    def test_whole_suite_lines(self):
+        lines = [line.strip() for line in self.text.splitlines() if 'cargo qa' in line]
+        suite = 'run: cargo qa --tier nightly --skip-perf --require-all'
+        self.assertEqual(lines, [suite, suite, suite, 'run: cargo qa --deep --require-all'])
+        # The nightly run meets the real disk: no RAM disk and no budget.
+        code = '\n'.join(line for line in self.text.splitlines() if not line.lstrip().startswith('#'))
+        for word in ('--tmp-root', '--budget-secs', '/dev/shm', 'hdiutil', 'RDY_GATE_BUDGET_SECS'):
+            self.assertNotIn(word, code)
+        hosted = step_named({'jobs': {'w': self.doc['jobs']['hosted-windows']}},
+                            'Whole suite under a standard account')
+        self.assertEqual(hosted['run'], './scripts/ci/windows_gate.ps1')
+        self.assertEqual(hosted['env'], {'RDY_QA_HOSTED_CI': '1', 'RDY_GATE_MODE': 'nightly'})
+        cleanup = self.doc['jobs']['hosted-windows']['steps'][-1]
+        self.assertEqual((cleanup['if'], cleanup['run']), ('always()', './scripts/ci/windows_gate_cleanup.ps1'))
+
+    def test_own_machines_keep_their_own_target_and_a_scratch_home(self):
+        for name in ('own', 'own-windows'):
+            text = json.dumps(self.doc['jobs'][name])
+            self.assertIn('nightly-target', text, name)
+            self.assertNotIn('gate-target', text, name)
+            self.assertIn('home', text, name)
+
+    def test_every_suite_job_uploads_its_report_under_one_prefix(self):
+        for name, job in self.doc['jobs'].items():
+            if name in ('coverage', 'report'):
+                continue
+            uploads = [s for s in job['steps'] if str(s.get('uses', '')).startswith('actions/upload-artifact@')]
+            self.assertEqual(len(uploads), 1, name)
+            self.assertEqual(uploads[0]['if'], 'always()', name)
+            self.assertTrue(uploads[0]['with']['name'].startswith('qa-report-nightly-'), name)
+
+    def test_one_report_job_opens_one_issue_for_a_red_night(self):
+        report = self.doc['jobs']['report']
+        self.assertEqual(report['needs'], sorted(set(NIGHTLY_JOBS) - {'report'}, key=list(NIGHTLY_JOBS).index))
+        self.assertEqual(report['if'], 'always()')
+        download, issue = report['steps']
+        self.assertEqual(download['with']['pattern'], 'qa-report-nightly-*')
+        self.assertEqual(issue['env']['GH_TOKEN'], '${{ github.token }}')
+        self.assertEqual(issue['env']['RESULTS'], '${{ toJSON(needs) }}')
+        self.assertIn("'gh', 'issue', 'create'", issue['run'])
+        self.assertEqual(self.text.count('gh issue create') + self.text.count("'gh', 'issue', 'create'"), 1)
+
+    def test_coverage_moved_whole_from_ci(self):
+        job = self.doc['jobs']['coverage']
+        self.assertNotIn('if', job)
+        names = [s.get('name') for s in job['steps']]
+        self.assertIn('Reports', names)
+        self.assertIn('Pinned coverage tool', names)
+        self.assertNotIn('Open an issue for a failed nightly run', names)
+
+    def test_report_script_lists_failed_jobs_and_fail_rows(self):
+        issue = self.doc['jobs']['report']['steps'][1]
+        script = issue['run'].split("<<'PY'\n", 1)[1].rsplit('PY', 1)[0]
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        (root / 'reports/qa-report-nightly-bench').mkdir(parents=True)
+        (root / 'reports/qa-report-nightly-bench/report.md').write_text(
+            '| a | PASS |\n| perf_x | REGRESSED |\n| b | FAIL |\n')
+        bin_ = root / 'bin'
+        bin_.mkdir()
+        (bin_ / 'gh').write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$GH_ARGS"\n')
+        (bin_ / 'gh').chmod(0o755)
+        results = {'own': {'result': 'success'}, 'bench': {'result': 'failure'}, 'coverage': {'result': 'skipped'}}
+        env = dict(os.environ, RUNNER_TEMP=str(root), RESULTS=json.dumps(results), SHA='a' * 40,
+                   RUN_URL='https://example.invalid/run', GITHUB_REPOSITORY='o/r', GH_ARGS=str(root / 'args'),
+                   PATH=f'{bin_}{os.pathsep}{os.environ["PATH"]}')
+        subprocess.run([sys.executable, '-c', script], env=env, check=True, capture_output=True)
+        args = (root / 'args').read_text()
+        self.assertIn('nightly failed aaaaaaaaaaaa: bench', args)
+        self.assertIn('| perf_x | REGRESSED |', args)
+        self.assertIn('| b | FAIL |', args)
+        self.assertNotIn('| a | PASS |', args)
+        (root / 'args').unlink()
+        env['RESULTS'] = json.dumps({'own': {'result': 'success'}})
+        subprocess.run([sys.executable, '-c', script], env=env, check=True, capture_output=True)
+        self.assertFalse((root / 'args').exists())
 
 
 if __name__ == '__main__':

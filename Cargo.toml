@@ -114,6 +114,19 @@ undocumented_unsafe_blocks = "deny"
 dbg_macro = "deny"
 todo = "deny"
 
+# The gate's one build (`cargo qa`): the `rdy` binary, every crate's tests and every rdy-qa
+# binary. Optimised enough that the bound and limit tests run at release speed, and it builds in
+# two thirds of the release profile's time. Debug assertions and overflow checks stay on, as in
+# the dev profile the workspace tests ran in before. The perf tier keeps the release profile.
+[profile.gate]
+inherits = "release"
+opt-level = 1
+codegen-units = 256
+debug = false
+incremental = false
+debug-assertions = true
+overflow-checks = true
+
 [profile.dev]
 # Line tables keep backtraces with file:line but drop full debug info: test binaries link
 # much faster (an outside review measured a one-line-edit rebuild going from 3m13s to 1m08s).

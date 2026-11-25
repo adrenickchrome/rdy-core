@@ -418,127 +418,6 @@ fn cp11_cli_answers_use_the_same_atomic_request() {
 }
 
 #[test]
-fn cp11_cli_reaffirm_fetches_the_whole_briefing() {
-    let s = Served::new();
-    let (mut r, f) = build(&s, 300);
-    // a second view changes the term too: the ids form is tried there
-    let token = brief_of(&r, &Scope::Canon, &[&id(&f.t)]).base.token;
-    write_cited(
-        &mut r,
-        "w2",
-        json!([{"op": "update", "id": f.t, "body": "Balances in cents."}]),
-        Some(&token),
-    )
-    .unwrap();
-    r.close().unwrap();
-    assert_eq!(f.d.len(), 300);
-
-    // the grammar: ids xor because, and a reason
-    for (args, message) in [
-        (
-            vec!["--json", "reaffirm", "--reason", "x", "--view", "w"],
-            "reaffirm needs ids or because",
-        ),
-        (
-            vec![
-                "--json",
-                "reaffirm",
-                &f.d[0],
-                "--because",
-                &f.t,
-                "--reason",
-                "x",
-                "--view",
-                "w",
-            ],
-            "reaffirm takes ids or because, not both",
-        ),
-    ] {
-        let (ok, e) = s.json(&args);
-        assert!(!ok, "{args:?}: {e}");
-        assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
-        assert_eq!(e["message"], message, "{e}");
-    }
-    assert!(
-        !s.rdy(&["reaffirm", "--because", &f.t, "--view", "w"])
-            .status
-            .success(),
-        "a reason is required"
-    );
-    // a target that is not one of the decision's suspects is the write's refusal
-    let (ok, e) = s.json(&[
-        "--json",
-        "reaffirm",
-        &f.d[0],
-        "--reason",
-        "x",
-        "--targets",
-        &f.a,
-        "--view",
-        "w",
-    ]);
-    assert!(!ok, "{e}");
-    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
-
-    // because: every decision suspect on the term, 300 of them, one briefing, one write
-    let (ok, v) = s.json(&[
-        "--json",
-        "reaffirm",
-        "--because",
-        &f.t,
-        "--reason",
-        "Holds in pence.",
-        "--view",
-        "w",
-    ]);
-    assert!(ok, "{v}");
-    let rows = v["reaffirmed"].as_array().unwrap();
-    assert_eq!(rows.len(), 300, "{} rows", rows.len());
-    assert_eq!(
-        rows.iter()
-            .map(|r| r["id"].as_str().unwrap().to_string())
-            .collect::<Vec<_>>(),
-        f.d
-    );
-    assert!(rows.iter().all(|r| r["causes"] == json!([f.t])));
-    // nothing is left to re-affirm in that view
-    let (ok, e) = s.json(&[
-        "--json",
-        "reaffirm",
-        "--because",
-        &f.t,
-        "--reason",
-        "again",
-        "--view",
-        "w",
-    ]);
-    assert!(!ok, "{e}");
-    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
-
-    // ids: the same 300 on the command line, in a text run
-    let mut args: Vec<&str> = vec!["reaffirm"];
-    args.extend(f.d.iter().map(String::as_str));
-    args.extend(["--reason", "Holds in cents.", "--view", "w2"]);
-    let out = s.rdy(&args);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = text_of(&out);
-    let lines: Vec<&str> = text.lines().collect();
-    for (i, id) in f.d.iter().enumerate() {
-        assert_eq!(
-            lines[i],
-            format!("reaffirmed {id} (after {})", f.t),
-            "line {i}"
-        );
-    }
-    assert!(lines[300].starts_with("change "), "{}", lines[300]);
-    let _ = (&f.s, &f.b);
-}
-
-#[test]
 fn cp11_cli_repin_reports_selected_design_pin_count() {
     let s = Served::new();
     let (mut r, f) = build(&s, 1);
@@ -823,4 +702,131 @@ fn cp11_cli_writes_use_the_bound_view() {
     let (_, after) = s.json(&["--json", "plan"]);
     assert_eq!(after["scope"], "view:w");
     assert_eq!(items_of(&after, "reaffirm").len(), 2, "{after:#}");
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+
+    #[test]
+    fn cp11_cli_reaffirm_fetches_the_whole_briefing() {
+        let s = Served::new();
+        let (mut r, f) = build(&s, 300);
+        // a second view changes the term too: the ids form is tried there
+        let token = brief_of(&r, &Scope::Canon, &[&id(&f.t)]).base.token;
+        write_cited(
+            &mut r,
+            "w2",
+            json!([{"op": "update", "id": f.t, "body": "Balances in cents."}]),
+            Some(&token),
+        )
+        .unwrap();
+        r.close().unwrap();
+        assert_eq!(f.d.len(), 300);
+
+        // the grammar: ids xor because, and a reason
+        for (args, message) in [
+            (
+                vec!["--json", "reaffirm", "--reason", "x", "--view", "w"],
+                "reaffirm needs ids or because",
+            ),
+            (
+                vec![
+                    "--json",
+                    "reaffirm",
+                    &f.d[0],
+                    "--because",
+                    &f.t,
+                    "--reason",
+                    "x",
+                    "--view",
+                    "w",
+                ],
+                "reaffirm takes ids or because, not both",
+            ),
+        ] {
+            let (ok, e) = s.json(&args);
+            assert!(!ok, "{args:?}: {e}");
+            assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+            assert_eq!(e["message"], message, "{e}");
+        }
+        assert!(
+            !s.rdy(&["reaffirm", "--because", &f.t, "--view", "w"])
+                .status
+                .success(),
+            "a reason is required"
+        );
+        // a target that is not one of the decision's suspects is the write's refusal
+        let (ok, e) = s.json(&[
+            "--json",
+            "reaffirm",
+            &f.d[0],
+            "--reason",
+            "x",
+            "--targets",
+            &f.a,
+            "--view",
+            "w",
+        ]);
+        assert!(!ok, "{e}");
+        assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+
+        // because: every decision suspect on the term, 300 of them, one briefing, one write
+        let (ok, v) = s.json(&[
+            "--json",
+            "reaffirm",
+            "--because",
+            &f.t,
+            "--reason",
+            "Holds in pence.",
+            "--view",
+            "w",
+        ]);
+        assert!(ok, "{v}");
+        let rows = v["reaffirmed"].as_array().unwrap();
+        assert_eq!(rows.len(), 300, "{} rows", rows.len());
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            f.d
+        );
+        assert!(rows.iter().all(|r| r["causes"] == json!([f.t])));
+        // nothing is left to re-affirm in that view
+        let (ok, e) = s.json(&[
+            "--json",
+            "reaffirm",
+            "--because",
+            &f.t,
+            "--reason",
+            "again",
+            "--view",
+            "w",
+        ]);
+        assert!(!ok, "{e}");
+        assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+
+        // ids: the same 300 on the command line, in a text run
+        let mut args: Vec<&str> = vec!["reaffirm"];
+        args.extend(f.d.iter().map(String::as_str));
+        args.extend(["--reason", "Holds in cents.", "--view", "w2"]);
+        let out = s.rdy(&args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = text_of(&out);
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, id) in f.d.iter().enumerate() {
+            assert_eq!(
+                lines[i],
+                format!("reaffirmed {id} (after {})", f.t),
+                "line {i}"
+            );
+        }
+        assert!(lines[300].starts_with("change "), "{}", lines[300]);
+        let _ = (&f.s, &f.b);
+    }
 }
