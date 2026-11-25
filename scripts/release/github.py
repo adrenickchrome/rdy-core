@@ -59,6 +59,8 @@ RESERVE_TAG_RE = re.compile(r'reserve/v0\.[1-9][0-9]{0,8}\.0')
 RESERVE_REF_RE = re.compile(r'refs/tags/reserve/v0\.[1-9][0-9]{0,8}\.0')
 REF_NAME_RE = re.compile(r'(?:tags|heads)/[A-Za-z0-9][A-Za-z0-9._/-]{0,200}')
 PATH_RE = re.compile(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+){0,15}')
+WORKFLOW_FILE_RE = re.compile(r'[A-Za-z0-9_-]{1,64}\.ya?ml')
+UTC_RE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
 NEXT_RE = re.compile(r'<[^>]*>;\s*rel="next"')
 
 
@@ -270,6 +272,32 @@ class WorkflowFact:
     sha256: str
 
 
+@dataclass(frozen=True)
+class ListedRunFact:
+    """One row of a workflow's run list: the run's latest attempt."""
+    run_id: int
+    run_attempt: int
+    path: str
+    head_sha: str
+    head_branch: object
+    event: str
+    status: str
+    conclusion: object
+    html_url: str
+
+
+@dataclass(frozen=True)
+class AttemptTimeFact:
+    """GitHub's own start and last update of one exact run attempt (UTC, whole seconds)."""
+    run_id: int
+    run_attempt: int
+    status: str
+    conclusion: object
+    started_at: str
+    updated_at: str
+    html_url: str
+
+
 # ---------------------------------------------------------------------------------------------
 # Field checks
 # ---------------------------------------------------------------------------------------------
@@ -464,6 +492,57 @@ class GitHub(object):
             raise Malformed(operation, 'the answer is not workflow ' + str(workflow_id))
         return WorkflowFact(workflow_id, field(value, 'path', str, operation), field(value, 'state', str, operation),
                             digest)
+
+    def workflow_runs(self, workflow_file, **query):
+        """Every run of `.github/workflows/<workflow_file>` that GitHub lists for `query` (branch, head_sha,
+        event, status), each with its latest attempt number. Rows from another workflow, repository or fork
+        refuse."""
+        operation = 'workflow runs'
+        if not (isinstance(workflow_file, str) and WORKFLOW_FILE_RE.fullmatch(workflow_file)):
+            raise ControllerError('the workflow file name is malformed')
+        for key, value in query.items():
+            if key not in ('branch', 'head_sha', 'event', 'status') or not isinstance(value, str) or not value:
+                raise ControllerError('the run query is malformed')
+        path = self.root + '/actions/workflows/' + quote(workflow_file) + '/runs'
+        if query:
+            path += '?' + '&'.join(key + '=' + quote(query[key]) for key in sorted(query))
+        rows = self._pages(operation, path, 'workflow_runs')
+        runs = []
+        for value in rows:
+            if (nested_id(value, 'repository', operation, 'repository id') != REPOSITORY_ID
+                    or nested_id(value, 'head_repository', operation, 'head repository id') != REPOSITORY_ID):
+                raise Malformed(operation, 'a run is not from rdy-core')
+            run = ListedRunFact(
+                run_id=field(value, 'id', int, operation, 'run id'),
+                run_attempt=field(value, 'run_attempt', int, operation, 'run attempt'),
+                path=field(value, 'path', str, operation),
+                head_sha=field(value, 'head_sha', 'sha', operation, 'head SHA'),
+                head_branch=field(value, 'head_branch', str, operation, 'head branch', nullable=True),
+                event=field(value, 'event', str, operation),
+                status=field(value, 'status', str, operation),
+                conclusion=field(value, 'conclusion', str, operation, nullable=True),
+                html_url=field(value, 'html_url', str, operation, 'run URL'))
+            if run.path.split('@', 1)[0] != '.github/workflows/' + workflow_file:
+                raise Malformed(operation, 'a run is not from ' + workflow_file)
+            runs.append(run)
+        return runs
+
+    def attempt_time(self, run_id, attempt):
+        """The start and last update of one exact run attempt, as GitHub recorded them."""
+        operation = 'run attempt time'
+        need_id(run_id, 'run id')
+        need_id(attempt, 'run attempt')
+        value, _ = self._object(operation, self.root + '/actions/runs/' + str(run_id) + '/attempts/' + str(attempt))
+        if not (value.get('id') == run_id and value.get('run_attempt') == attempt
+                and type(value.get('id')) is int and type(value.get('run_attempt')) is int):
+            raise Malformed(operation, 'the answer is not run ' + str(run_id) + ' attempt ' + str(attempt))
+        started = field(value, 'run_started_at', str, operation, 'run start')
+        updated = field(value, 'updated_at', str, operation, 'run update')
+        if not (UTC_RE.fullmatch(started) and UTC_RE.fullmatch(updated)):
+            raise Malformed(operation, 'a run time is not UTC YYYY-MM-DDTHH:MM:SSZ')
+        return AttemptTimeFact(run_id, attempt, field(value, 'status', str, operation),
+                               field(value, 'conclusion', str, operation, nullable=True), started, updated,
+                               field(value, 'html_url', str, operation, 'run URL'))
 
     def run_attempt(self, run_id, attempt):
         """One exact run attempt: never the latest attempt, never a run found by name."""
