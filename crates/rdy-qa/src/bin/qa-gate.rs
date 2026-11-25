@@ -406,7 +406,7 @@ fn canonical(path: &Path) -> PathBuf {
 /// a time, on the clock's time left, and writes the report with both results: the first run's
 /// files are kept beside it as `report.first.json` and `report.first.md`. Returns the exit code.
 fn retry(args: &Args, path: &Path, first: &serde_json::Value, tmp_root: Option<&Path>) -> i32 {
-    use rdy_qa::retry::{Retried, apply, markdown, targets};
+    use rdy_qa::retry::{Retried, apply, apply_failures, markdown_with_failures, targets};
     let spent = || CLOCK.get().is_some_and(Clock::spent);
     let targets = match targets(first) {
         Ok(t) => t,
@@ -439,6 +439,7 @@ fn retry(args: &Args, path: &Path, first: &serde_json::Value, tmp_root: Option<&
         tmp_root,
     };
     let mut rows: Vec<Retried> = vec![];
+    let mut failures = vec![];
     for key in &targets {
         let row = match binaries.iter().find(|b| &b.key() == key) {
             Some(b) => {
@@ -447,9 +448,13 @@ fn retry(args: &Args, path: &Path, first: &serde_json::Value, tmp_root: Option<&
                 if !out.ok {
                     eprintln!("{}", report::tail(&out.combined(), 40));
                 }
+                let ok = out.ok && run.failed == 0;
+                if !ok {
+                    failures.extend(report::binary_failures(key, &run, &out.stderr));
+                }
                 Retried {
                     binary: key.clone(),
-                    ok: out.ok && run.failed == 0,
+                    ok,
                     exit: out.status_text(),
                     passed: run.passed,
                     failed: run.failed,
@@ -474,6 +479,7 @@ fn retry(args: &Args, path: &Path, first: &serde_json::Value, tmp_root: Option<&
     }
     let mut rep = first.clone();
     let pass = apply(&mut rep, &rows);
+    apply_failures(&mut rep, &failures);
     let dir = path.parent().unwrap_or(Path::new("."));
     let md = dir.join("report.md");
     let first_md = std::fs::read_to_string(&md).unwrap_or_default();
@@ -485,7 +491,12 @@ fn retry(args: &Args, path: &Path, first: &serde_json::Value, tmp_root: Option<&
                 serde_json::to_string_pretty(&rep).expect("report serializes"),
             )
         })
-        .and_then(|_| std::fs::write(&md, markdown(&first_md, &rows, pass)));
+        .and_then(|_| {
+            std::fs::write(
+                &md,
+                markdown_with_failures(&first_md, &rows, &failures, pass),
+            )
+        });
     if let Err(e) = written {
         eprintln!("--retry-failed: could not write the report: {e}");
         return 2;
@@ -1011,10 +1022,13 @@ fn main() {
         ws_out.sort_by_key(|a| a.0.key());
         let mut text = String::new();
         let mut failed = vec![];
+        let mut failures = vec![];
         for (b, out) in &ws_out {
             text.push_str(&out.combined());
             if !out.ok {
                 failed.push(format!("{} ({})", b.key(), out.status_text()));
+                let run = report::parse_cargo_test(&out.combined());
+                failures.extend(report::binary_failures(&b.key(), &run, &out.stderr));
             }
             if out.timed_out {
                 notes.push(report::tail(&out.stderr, 1));
@@ -1029,7 +1043,9 @@ fn main() {
         }
         let empty = report::ran_nothing(&run);
         stages.record(&workspace, ok && !empty);
-        gates.push(Gate::ran(&workspace.id, ok && !empty, detail));
+        let mut gate = Gate::ran(&workspace.id, ok && !empty, detail);
+        gate.failures = failures;
+        gates.push(gate);
     }
 
     for (binary, item) in plan.files.iter().zip(pending) {
