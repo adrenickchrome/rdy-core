@@ -181,8 +181,9 @@ fn scc2_fetch_is_one_batch_without_canon_or_view_moves() {
     assert!(got.records_taken > 0 && got.frames_written > got.records_taken);
     assert_eq!(got.tags_taken, ["v2.0.0"]);
     assert!(got.tags_kept.is_empty());
-    assert_eq!(got.min_rdy_before, Some(RdyVersion(0, 52, 0)));
-    assert_eq!(got.min_rdy_after, Some(RdyVersion(0, 53, 0)));
+    // the baseline's dedup_spans (0.59.0) is above hub_canon's 0.53.0: the fetch raises nothing
+    assert_eq!(got.min_rdy_before, Some(RdyVersion(0, 59, 0)));
+    assert_eq!(got.min_rdy_after, Some(RdyVersion(0, 59, 0)));
     assert!(!got.unchanged);
     assert_eq!(p.dst.store().write_count(), writes + 1, "one batch");
     // the records are held; canon and the views did not move

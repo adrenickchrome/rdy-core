@@ -1751,6 +1751,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "assessment",
             "check_request",
             "content_hash_v2",
+            "dedup_spans",
             "dispute",
             "figure_dark",
             "foreign_copy",
@@ -1773,6 +1774,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "hub_canon" => format::HUB_CANON_REQUIRED_RDY,
             "sync_state" => format::SYNC_STATE_REQUIRED_RDY,
             "ported_change" => format::PORTED_CHANGE_REQUIRED_RDY,
+            "dedup_spans" => format::DEDUP_SPANS_REQUIRED_RDY,
             _ => FEATURE_REQUIRED_RDY,
         };
         assert_eq!(f.required_rdy, want, "{}", f.name);
@@ -1782,7 +1784,12 @@ fn ok4_features_activate_in_their_first_use_batch() {
     let s = Store::create(&d.path().join("new")).unwrap();
     assert_eq!(
         names(&log_manifest(&s)),
-        ["content_hash_v2", "object_encoding", "snapshot_delta"]
+        [
+            "content_hash_v2",
+            "dedup_spans",
+            "object_encoding",
+            "snapshot_delta"
+        ]
     );
     assert_eq!(baseline_features(), log_manifest(&s));
     drop(s);
@@ -1813,7 +1820,15 @@ fn ok4_features_activate_in_their_first_use_batch() {
         s.write(vec![frame]).unwrap();
         let manifest = log_manifest(&s);
         let mut got = names(&manifest);
-        got.retain(|n| !["content_hash_v2", "object_encoding", "snapshot_delta"].contains(n));
+        got.retain(|n| {
+            ![
+                "content_hash_v2",
+                "dedup_spans",
+                "object_encoding",
+                "snapshot_delta",
+            ]
+            .contains(n)
+        });
         assert_eq!(got, [*feature], "{k}: only its feature");
         assert!(
             last_batch_refs(&s).contains(&REF_STORE_FEATURES.to_string()),
@@ -1960,6 +1975,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
         names(&log_manifest(&loaded)),
         [
             "content_hash_v2",
+            "dedup_spans",
             "object_encoding",
             "plan_tension",
             "snapshot_delta"

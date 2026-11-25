@@ -2453,9 +2453,15 @@ fn hpt5_owned_leaves_hold_the_planned_values() {
         format::PORTED_CHANGE_REQUIRED_RDY
     );
     assert_eq!(format::PORTED_CHANGE_REQUIRED_RDY, "0.58.0");
+    // the registry less span maps' dedup_spans, which came later
     assert_eq!(
         fixture["store"]["registered_names"],
-        json!(format::REGISTERED_FEATURES)
+        json!(
+            format::REGISTERED_FEATURES
+                .iter()
+                .filter(|n| **n != format::FEATURE_DEDUP_SPANS)
+                .collect::<Vec<_>>()
+        )
     );
     assert_eq!(
         fixture["store"]["features"]
@@ -3080,11 +3086,13 @@ fn open_refused(root: &Path, what: &str) -> RdyError {
 }
 
 /// The minimum rdy a store's manifest asks for: the highest `required_rdy` of its features.
+/// The minimum rdy of `r`'s features as this plan knew them: span maps' `dedup_spans` came later.
 fn minimum_rdy(r: &Rdy) -> (u32, u32, u32) {
     r.store()
         .features()
         .features
         .iter()
+        .filter(|f| f.name != format::FEATURE_DEDUP_SPANS)
         .map(|f| version_of(&f.required_rdy))
         .max()
         .expect("a feature")
@@ -3120,7 +3128,9 @@ fn hpt5_formats_stay_fixed_and_first_use_is_required() {
         "the stream formats"
     );
     assert_eq!(rdy_store::sync_stream::READ_FORMATS, [2, 3, 4]);
-    assert_eq!(format::REGISTERED_FEATURES.len(), 13);
+    // span maps' dedup_spans came later
+    assert_eq!(format::REGISTERED_FEATURES.len(), 14);
+    assert!(format::REGISTERED_FEATURES.contains(&format::FEATURE_DEDUP_SPANS));
     let (was, now) = (read(PREDECESSOR), read(CURRENT));
     // a new store starts with the features it did, and not with this one
     for member in [
@@ -3446,17 +3456,16 @@ fn hpt5_ported_fixture_opens_and_keeps_its_ports() {
         .clone();
     assert_eq!(feature["class"], "incompatible");
     assert_eq!(feature["required_rdy"], format::PORTED_CHANGE_REQUIRED_RDY);
-    // a copy with no index opens, and every recorded fact reads back
+    // a copy with no index opens, and every recorded fact reads back; it plans only span maps'
+    // optional step, whose one batch follows the recorded log
     let (_base, root) = rdy_qa::foreign_fixture::project_copy(&dir);
     let plan = rdy_store::upgrade::inspect(&root.join(".rdy/store")).expect("a plan");
-    assert!(plan.steps.is_empty(), "no step: {:?}", plan.steps);
+    assert_eq!(plan.steps, [rdy_store::upgrade::DEDUP_SPANS_STEP]);
     assert!(!plan.requires_upgrade && !plan.pending_check);
     let facts = opened_facts(&root);
     assert!(root.join(".rdy/store/index.redb").exists(), "rebuilt");
-    for member in want["store"].as_object().expect("facts").keys() {
-        assert_eq!(facts[member], want["store"][member], "{member}");
-    }
     let r = Rdy::open(&root).expect("the copy");
+    rdy_qa::foreign_fixture::assert_span_mapped_facts(&r, &want["store"], "the ported fixture");
     let world = &want["world"];
     let landing: Hash = world["landing"]
         .as_str()
@@ -3520,17 +3529,25 @@ fn hpt5_ported_fixture_opens_and_keeps_its_ports() {
         &std::fs::read(qa_dir().join("fixtures/dump").join(DUMP_EXPECT)).expect("an expect file"),
     )
     .expect("json");
-    assert_eq!(
-        dump_want["formats"],
-        rdy_qa::chain_fixture::current_formats()
-    );
+    // the formats this rdy writes, less span maps' dedup_spans, which came later
+    let mut formats = rdy_qa::chain_fixture::current_formats();
+    formats["features"]["features"]
+        .as_array_mut()
+        .expect("features")
+        .retain(|f| f["name"] != format::FEATURE_DEDUP_SPANS);
+    assert_eq!(dump_want["formats"], formats);
     assert_eq!(dump_want["world"], *world);
     let scratch = tempfile::tempdir().expect("a directory");
     let loaded = rdy_qa::foreign_fixture::dump_load_facts(&dump, &scratch.path().join("loaded"));
-    assert_eq!(
-        loaded["store"]["manifest"],
-        dump_want["whole"]["store"]["manifest"]
-    );
+    // the load's tail adds dedup_spans to the recorded manifest
+    let recorded: format::StoreFeatures =
+        serde_json::from_value(dump_want["whole"]["store"]["manifest"].clone())
+            .expect("a manifest");
+    let spans: Vec<_> = format::registered_features()
+        .into_iter()
+        .filter(|f| f.name == format::FEATURE_DEDUP_SPANS)
+        .collect();
+    assert_eq!(loaded["store"]["manifest"], json!(recorded.merged(&spans)));
     assert_eq!(
         rdy_qa::foreign_fixture::dump_file_facts(&dump)["store_format"],
         dump_want["file"]["store_format"]

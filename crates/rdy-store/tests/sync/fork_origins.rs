@@ -215,7 +215,7 @@ fn hfp1_creation_origins_keep_log_order() {
     };
     p.put_origin(&clone, None).unwrap();
     write_ref(&mut p, REF_ORIGIN, &[0xff; 3]);
-    let second = fork_of(4, None);
+    let second = fork_of(9, None);
     p.put_origin(&second, Some(id(8))).unwrap();
     let third = fork_of(10, Some("v2.0.0"));
     p.put_origin(&third, Some(id(11))).unwrap();

@@ -10602,7 +10602,8 @@ fn sdl7_contract_changes_only_delta_surfaces() {
     let plan = rdy_engine::maintenance::run(&fresh, true).unwrap();
     assert!(plan.steps.is_empty() && !plan.changed, "{plan:?}");
 
-    // an empty legacy store's upgrade report: the one step, one batch, a receipt and no delta
+    // an empty legacy store's upgrade report: the snapshot-delta step, then span maps' step, one
+    // batch, a receipt and no delta
     let legacy = t.path().join("legacy");
     {
         let _legacy = rdy_store::format::legacy_writer_for_tests();
@@ -10613,7 +10614,13 @@ fn sdl7_contract_changes_only_delta_surfaces() {
     }
     let report = rdy_engine::maintenance::run(&legacy, false).unwrap();
     assert!(report.changed, "{report:?}");
-    assert_eq!(report.steps, ["snapshot_delta".to_string()]);
+    assert_eq!(
+        report.steps,
+        [
+            "snapshot_delta".to_string(),
+            rdy_store::upgrade::DEDUP_SPANS_STEP.to_string()
+        ]
+    );
     assert!(report.batch.is_some() && report.receipt.is_some());
     {
         let s = rdy_store::Store::open_with_policy(
