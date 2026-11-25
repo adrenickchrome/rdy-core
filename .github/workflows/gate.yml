@@ -76,7 +76,7 @@ jobs:
       - name: Temp root on tmpfs
         run: |
           set -eu
-          dir="/dev/shm/rdy-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          dir="/tmp/rdy-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -m 700 "$dir"
           echo "GATE_TMP=$dir" >> "$GITHUB_ENV"
       - name: Release gate
@@ -225,6 +225,8 @@ jobs:
       - name: Remove the RAM disk
         if: always()
         run: if [ -n "${GATE_RAMDISK:-}" ]; then hdiutil detach "$GATE_RAMDISK" -force; fi
+  # Our Windows machine has Windows PowerShell 5.1 only (no pwsh), so its steps use `shell: powershell`;
+  # the hosted proof steps keep pwsh, which GitHub-hosted runners have.
   windows:
     name: Release gate (x86_64-pc-windows-msvc)
     runs-on: ${{ inputs.hosted && 'windows-2025' || fromJSON('["self-hosted","rdy-gate","windows"]') }}
@@ -240,7 +242,7 @@ jobs:
         # Our machine's runner account is a standard account. The hosted runner is elevated, so the
         # hosted proof runs the gate under a temporary standard account instead (windows_gate.ps1).
         if: ${{ !inputs.hosted }}
-        shell: pwsh
+        shell: powershell
         run: |
           $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
           if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -251,7 +253,7 @@ jobs:
         # The tests get an empty HOME. Cargo and rustup keep the runner account's own homes, and the
         # target directory stays beside the work folder, so the next run builds warm.
         if: ${{ !inputs.hosted }}
-        shell: pwsh
+        shell: powershell
         env:
           WORK_PARENT: ${{ runner.workspace }}
         run: |
@@ -268,7 +270,7 @@ jobs:
       - name: No line-ending conversion
         # A checkout with CRLF applied fails tests that compare bytes. This writes the scratch HOME's config.
         if: ${{ !inputs.hosted }}
-        shell: pwsh
+        shell: powershell
         run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -280,15 +282,15 @@ jobs:
         with:
           node-version: "22"
       - name: Toolchain
-        shell: pwsh
+        shell: powershell
         run: rustup toolchain install 1.99.0 --profile minimal
       - name: Locked dependencies
         if: ${{ !inputs.hosted }}
-        shell: pwsh
+        shell: powershell
         run: cargo fetch --locked
       - name: Temp root
         if: ${{ !inputs.hosted }}
-        shell: pwsh
+        shell: powershell
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'gate-tmp'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -296,7 +298,7 @@ jobs:
       - name: Release gate (Windows tier)
         if: ${{ !inputs.hosted }}
         id: gate
-        shell: pwsh
+        shell: powershell
         env:
           CARGO_NET_OFFLINE: "true"
         run: |
@@ -309,7 +311,7 @@ jobs:
         # Only the failed binaries, one at a time, in the time left on the clock. The gate refuses a run
         # with more than three failed binaries or a failed build. The report keeps both results.
         if: ${{ !inputs.hosted && steps.gate.outputs.status != '0' }}
-        shell: pwsh
+        shell: powershell
         env:
           CARGO_NET_OFFLINE: "true"
         run: |
@@ -335,12 +337,12 @@ jobs:
           exit $status
       - name: Failing tests
         if: always() && (steps.gate.outputs.status != '0' || steps.hosted.outcome == 'failure')
-        shell: pwsh
+        shell: powershell
         run: |
           if (-not $env:GATE_REPORT) { Write-Output 'No qa report'; exit 0 }
           ./scripts/ci/windows_report.ps1 -Report ($env:GATE_REPORT -replace '\.json$', '.md')
       - name: Fast gate counts
-        shell: pwsh
+        shell: powershell
         run: >-
           python -B scripts/release/candidate.py gate-counts --report $env:GATE_REPORT
           --commit $env:GITHUB_SHA --out "$env:RUNNER_TEMP\fast-gate.json"
@@ -368,5 +370,5 @@ jobs:
         run: ./scripts/ci/windows_gate_cleanup.ps1
       - name: Remove the temp root
         if: always() && !inputs.hosted
-        shell: pwsh
+        shell: powershell
         run: if ($env:GATE_TMP) { Remove-Item -LiteralPath $env:GATE_TMP -Recurse -Force -ErrorAction SilentlyContinue }

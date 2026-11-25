@@ -1815,12 +1815,14 @@ fn pre2_public_tree_names_no_private_project() {
         assert!(!readme.contains(private), "README names {private}");
     }
 
-    let ci = read(".github/workflows/ci.yml");
+    // The one hosted Linux job left is the nightly coverage run; the release gate runs on our own
+    // machines (gate.yml).
+    let ci = read(".github/workflows/nightly.yml");
     let fast = ci
-        .split("\n  fast:\n")
-        .nth(1)
-        .expect("the fast job")
         .split("\n  coverage:\n")
+        .nth(1)
+        .expect("the coverage job")
+        .split("\n  report:\n")
         .next()
         .unwrap();
     for env in [

@@ -1716,7 +1716,7 @@ class GateWorkflowPolicy(unittest.TestCase):
 
     def test_test_files_go_to_a_ram_disk_or_tmpfs_that_is_removed(self):
         linux = ' '.join(self.runs('linux'))
-        self.assertIn('dir="/dev/shm/rdy-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', linux)
+        self.assertIn('dir="/tmp/rdy-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', linux)
         mac = ' '.join(self.runs('macos'))
         self.assertIn('hdiutil attach -nomount ram://16777216', mac)
         self.assertIn('diskutil erasevolume APFS', mac)
