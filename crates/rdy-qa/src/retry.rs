@@ -4,6 +4,7 @@
 //! were, and a `retried` list holds the second results. After a good retry the run is
 //! `PASS (retried: <names>)`.
 use crate::gate_steps::{BUDGET_ROW, BUILD_STEP};
+use crate::report::{BinaryFailure, binary_failure_sections};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -148,6 +149,28 @@ pub fn markdown(first: &str, retried: &[Retried], pass: bool) -> String {
     out
 }
 
+/// Adds the failures of the binaries that failed their retry to the report, as a
+/// `retried_failures` list of `{binary, test, panic}`. A retry with no failure adds nothing.
+pub fn apply_failures(report: &mut Value, failures: &[BinaryFailure]) {
+    if !failures.is_empty() {
+        report["retried_failures"] =
+            serde_json::to_value(failures).expect("retry failures serialize");
+    }
+}
+
+/// [`markdown`], then a "Failing in" section for each binary that failed its retry, with the
+/// failing tests and their panic text.
+pub fn markdown_with_failures(
+    first: &str,
+    retried: &[Retried],
+    failures: &[BinaryFailure],
+    pass: bool,
+) -> String {
+    let mut out = markdown(first, retried, pass);
+    out += &binary_failure_sections(failures, " on its retry");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +288,30 @@ mod tests {
         assert_eq!(time_left(660, &r), 259);
         assert_eq!(time_left(300, &r), 0);
         assert_eq!(time_left(660, &json!({})), 0, "no duration: no time");
+    }
+
+    #[test]
+    fn r59024_a_binary_that_fails_its_retry_names_its_tests() {
+        let failures = vec![BinaryFailure {
+            binary: "rdy-daemon/test/windows_lifecycle".into(),
+            test: Some("lifecycle::stops".into()),
+            panic: Some("thread 'lifecycle::stops' panicked at a.rs:1:1:\nboom".into()),
+        }];
+        let rows = [retried("rdy-daemon/test/windows_lifecycle", false)];
+        let md = markdown_with_failures("# rdy QA gate: FAIL\n", &rows, &failures, false);
+        assert!(
+            md.contains("\nFailing in `rdy-daemon/test/windows_lifecycle` on its retry:\n- `lifecycle::stops`\n\n        thread 'lifecycle::stops' panicked at a.rs:1:1:\n        boom\n"),
+            "{md}"
+        );
+        // the plain form has no such section
+        assert!(!markdown("# rdy QA gate: FAIL\n", &rows, false).contains("Failing in"));
+        let mut r = failed_run(&["rdy-daemon/test/windows_lifecycle"], &[WORKSPACE_ROW]);
+        apply(&mut r, &rows);
+        apply_failures(&mut r, &failures);
+        assert_eq!(r["retried_failures"][0]["test"], "lifecycle::stops");
+        assert_eq!(
+            r["retried_failures"][0]["binary"],
+            "rdy-daemon/test/windows_lifecycle"
+        );
     }
 }
