@@ -193,17 +193,8 @@ fn acc1_overview_schema_and_instructions_carry_the_entity_surfaces() {
         json!(["actor", "component", "entity", "interface", "term", "value"])
     );
     assert_eq!(sc["entities"]["rule"], ENTITY_RULE);
-    let guide = crate::mcp_instructions::guide(&["write"]);
-    assert!(
-        guide.contains(
-            "Search a thing's name, key or alias with `rdy_search` to get its fact sheet."
-        ),
-        "{guide}"
-    );
-    assert!(
-        guide.contains("accept the right ones with one `rdy_accept {suggestions: [...]}` call; they never block."),
-        "{guide}"
-    );
+    // the entity guidance is in the write ruleset, served as the bundle holds it
+    rdy_qa::guide_bundle::assert_served_fresh(&["write"]);
     assert!(
         INSTRUCTIONS.starts_with("rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents. State rdy/actor and rdy/run in _meta, or call rdy_session."),
         "{INSTRUCTIONS}"

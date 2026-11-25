@@ -13,6 +13,7 @@ pub mod foreign_fixture;
 pub mod gate_steps;
 pub mod git_repo;
 pub mod golden;
+pub mod guide_bundle;
 pub mod http;
 pub mod inbox;
 pub mod instructions;
