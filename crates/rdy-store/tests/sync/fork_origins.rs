@@ -215,6 +215,8 @@ fn hfp1_creation_origins_keep_log_order() {
     };
     p.put_origin(&clone, None).unwrap();
     write_ref(&mut p, REF_ORIGIN, &[0xff; 3]);
+    // repo byte 9 (was 4): span maps' dedup_spans lengthens the creation manifest and moves the
+    // ref update payloads, and byte 9 keeps the fixture's hash order unlike its log order
     let second = fork_of(9, None);
     p.put_origin(&second, Some(id(8))).unwrap();
     let third = fork_of(10, Some("v2.0.0"));

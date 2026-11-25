@@ -563,6 +563,7 @@ fn scc2_upload_features_are_needed_features_only() {
     assert_eq!(again.features, header.features);
     // the upload's minimum is its needs', not the store's
     assert_eq!(header.features.min_rdy(), Some(RdyVersion(0, 52, 0)));
+    // the store's own minimum is its baseline's newest: span maps' dedup_spans (0.59.0, was 0.53.0)
     assert_eq!(store.min_rdy(), Some(RdyVersion(0, 59, 0)));
     // a tag history still names the source store's whole manifest
     drop(reader);
