@@ -1,12 +1,12 @@
 //! The Release 1 contract of the command line (D-TXFHR: the contract surfaces include the CLI's
 //! commands, flags, positional arguments and defaults). This test-only module walks the real clap
 //! `Command` tree, hidden commands and hidden flags included, and compares it with the `cli.tree`
-//! member of the current contract fixture (`rdy-qa/fixtures/contracts/rdy-0590-v1.json`, a byte
-//! copy of its frozen predecessor `hub-ports-v1.json` with the additions since; the earlier
-//! `release-1.json`, `repo-links-v1.json`, `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`,
+//! member of the current contract fixture (`rdy-qa/fixtures/contracts/rdy-0590-v1.json`, the
+//! successor of the frozen `m5a-v1.json`; the earlier `release-1.json`,
+//! `repo-links-v1.json`, `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`,
 //! `readme-from-rdy-v1.json`, `disclosure-review-v1.json`, `sd1-v1.json`, `sync-client-v1.json`,
-//! `sync-client-b-v1.json`, `m5b-v1.json`, `hub-forks-v1.json` and `hub-ports-v1.json` stay
-//! frozen). It adds no command,
+//! `sync-client-b-v1.json`, `m5b-v1.json`, `hub-forks-v1.json`, `hub-ports-v1.json` and
+//! `m5a-v1.json` stay frozen). It adds no command,
 //! flag or production code path. The rest of the fixture, and the runtime facts of the
 //! `cli` member, belong to the rdy-qa `release` area (`release_contract.rs`).
 //!
@@ -20,10 +20,11 @@ use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 
 /// The current contract fixture, `rdy-0590-v1.json`, which the rdy-qa `release` area also reads.
-/// The thirteen fixtures before it (`release-1.json`, `repo-links-v1.json`, `mcp-http-v1.json`,
+/// The fourteen fixtures before it (`release-1.json`, `repo-links-v1.json`, `mcp-http-v1.json`,
 /// `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json`, `disclosure-review-v1.json`,
 /// `sd1-v1.json`, `sync-client-v1.json`, `sync-client-b-v1.json`, `m5b-v1.json`,
-/// `hub-forks-v1.json` and its immediate predecessor `hub-ports-v1.json`) are frozen: a capture never
+/// `hub-forks-v1.json`, `hub-ports-v1.json` and its immediate predecessor `m5a-v1.json`) are
+/// frozen: a capture never
 /// writes them.
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rdy-qa/fixtures/contracts/rdy-0590-v1.json")

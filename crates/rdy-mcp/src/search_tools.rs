@@ -1,4 +1,4 @@
-//! msrch1: `rdy_search`, the find-text tool. The search itself is `ReadState::search`.
+//! msrch1: `rdy_search`, the find-text tool. The search itself is `ReadState::search_input`.
 use crate::tools::{McpState, check_tokens, scope_of, session};
 use rdy_engine::search::SearchFilters;
 use rdy_engine::tool_reads;
@@ -10,8 +10,12 @@ use serde_json::Value;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchParams {
-    /// The text to find; with regex: true, a pattern (Rust regex syntax, at most 1024 bytes).
-    pub query: String,
+    /// The text to find; with regex: true, a pattern (Rust regex syntax, at most 1024 bytes). Give exactly one of query, like and like_text.
+    pub query: Option<String>,
+    /// A block id: rank the blocks of the scope, of every type the filters keep, by their similarity to it (shared words and links), from a score of 0.10 up. Each hit carries score, words and links. Takes no regex or sort.
+    pub like: Option<String>,
+    /// A text of at most 16384 bytes, such as a draft paragraph: rank the blocks of the scope by their similarity to its words and to the entities it names. Each hit carries score, words and links. Takes no regex or sort.
+    pub like_text: Option<String>,
     /// Treat query as a regular expression (default false: literal text).
     pub regex: Option<bool>,
     /// Match regardless of case (default false).
@@ -48,7 +52,7 @@ pub struct SearchParams {
     pub mentions: Option<String>,
     /// Keep hits whose block coverage score is under this (0 to 100).
     pub coverage_below: Option<u32>,
-    /// "coverage": list the hits with the lowest coverage first. Leave out for the default order.
+    /// With query only. "relevance": inside the phrase tier and the all-words tier, the hits that score highest against the query's words first, each with its score. "coverage": the hits with the lowest coverage first. "reading": the default order, reading order.
     pub sort: Option<String>,
     /// Add a briefing over this page's hits and over the blocks of the entity sheets; cite its base.token to write those blocks.
     pub brief: Option<bool>,
@@ -57,33 +61,37 @@ pub struct SearchParams {
 pub fn rdy_search(st: &mut McpState, p: SearchParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
+    // vxs7: the source options become one validated input, once
+    let input = SearchInput::new(
+        p.query,
+        p.like,
+        p.like_text,
+        p.regex.unwrap_or(false),
+        p.ignore_case.unwrap_or(false),
+        SearchFilters {
+            types: p.types.unwrap_or_default(),
+            traits: p.traits.unwrap_or_default(),
+            path: p.path,
+            lifecycle: p.lifecycle,
+            changed_since: p.changed_since,
+            exclude_history: p.exclude_history.unwrap_or(false),
+            governed_by: p.governed_by,
+            describes: p.describes,
+            linked_to: p.linked_to,
+            suspect: p.suspect.unwrap_or(false),
+            tension: p.tension.unwrap_or(false),
+            mentions: p.mentions,
+            coverage_below: p.coverage_below,
+            sort: p.sort,
+        },
+    )?;
     let st_ = st.engine.read();
     let scope = scope_of(&st.view, &st_, &p.scope)?;
     let briefs = st.engine.briefs();
-    tool_reads::search_reply(
+    tool_reads::search_input_reply(
         &st_,
         &scope,
-        &SearchQuery {
-            text: p.query,
-            regex: p.regex.unwrap_or(false),
-            ignore_case: p.ignore_case.unwrap_or(false),
-            filters: SearchFilters {
-                types: p.types.unwrap_or_default(),
-                traits: p.traits.unwrap_or_default(),
-                path: p.path,
-                lifecycle: p.lifecycle,
-                changed_since: p.changed_since,
-                exclude_history: p.exclude_history.unwrap_or(false),
-                governed_by: p.governed_by,
-                describes: p.describes,
-                linked_to: p.linked_to,
-                suspect: p.suspect.unwrap_or(false),
-                tension: p.tension.unwrap_or(false),
-                mentions: p.mentions,
-                coverage_below: p.coverage_below,
-                sort: p.sort,
-            },
-        },
+        &input,
         p.page.as_deref(),
         p.max_tokens,
         p.brief.unwrap_or(false).then_some(&*briefs),

@@ -116,11 +116,12 @@ fn cc14_coverage_below_and_sort_coverage() {
         .collect();
     assert!(scores.windows(2).all(|w| w[0] <= w[1]));
     assert_eq!(sorted["total"], all["total"], "a sort keeps every hit");
-    assert!(
-        search_err(&r, "e", json!({"sort": "score"}))
-            .message
-            .contains("sort takes coverage")
+    let e = search_err(&r, "e", json!({"sort": "score"}));
+    assert_eq!(
+        e.message,
+        "sort takes coverage, relevance or reading, not score"
     );
+    assert_eq!(e.fix, "pass coverage, relevance or reading, or omit sort");
     assert!(
         search_err(&r, "e", json!({"coverage_below": 101}))
             .message

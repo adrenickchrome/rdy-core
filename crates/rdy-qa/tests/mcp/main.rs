@@ -100,6 +100,7 @@ mod mcp_tag_relay;
 mod mcp_tensions;
 mod mcp_trace;
 mod mcp_upgrade;
+mod mcp_vector_search;
 mod mcp_view_brief;
 mod mcp_views;
 mod mcp_wasm_checks;

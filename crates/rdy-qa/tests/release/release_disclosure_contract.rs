@@ -104,6 +104,10 @@ const FROZEN: &[(&str, &str)] = &[
         "hub-ports-v1.json",
         "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab",
     ),
+    (
+        "m5a-v1.json",
+        "b18e1992465210f6af99eabafb0290fb9b12f2288db5d5ac83bfa4f1a44bc4ec",
+    ),
 ];
 
 /// Task 1c: no member of this plan's fixture moves. The seam, the row model and the part

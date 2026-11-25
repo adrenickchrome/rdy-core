@@ -2,7 +2,9 @@
 //! fixture of hub ports, plan C2.
 //!
 //! `hub-ports-v1.json` is this plan's fixture. It started as a byte copy of the frozen
-//! `hub-forks-v1.json`, and every selector named it until its successor `rdy-0590-v1.json`. One capture wrote its delta: the feature
+//! `hub-forks-v1.json`, and every selector named it until its successor `m5a-v1.json`. It is
+//! frozen since, and so is `m5a-v1.json` since its successor `rdy-0590-v1.json`, which the
+//! selectors name now. One capture wrote its delta: the feature
 //! `ported_change` and its first-use rules, the port flags of `rdy view replay` and `rdy_view`,
 //! the new refusal templates, the populated probes of a local and a dump port, and the semantic
 //! probes of a hub port. The tests here pin that delta leaf by leaf, keep every earlier fixture
@@ -49,14 +51,22 @@ const PREDECESSOR: &str = "hub-forks-v1.json";
 /// successor fixture, never an edit of that file.
 const PREDECESSOR_SHA: &str = "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252";
 
-/// This plan's fixture, which every selector names.
+/// This plan's fixture, which every selector named until its successor [`SELECTED`].
 const CURRENT: &str = "hub-ports-v1.json";
 
 /// The sha256 of [`CURRENT`] after its capture, its final bytes. A later contract change is a
 /// successor.
 const CURRENT_SHA: &str = "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab";
 
-/// The successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen since.
+/// The successors of [`CURRENT`] before [`SELECTED`], in order, each frozen since its own
+/// successor, with the sha256 that its successor copied.
+const LATER: [(&str, &str); 1] = [(
+    "m5a-v1.json",
+    "b18e1992465210f6af99eabafb0290fb9b12f2288db5d5ac83bfa4f1a44bc4ec",
+)];
+
+/// The latest successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen
+/// since its first successor.
 const SELECTED: &str = "rdy-0590-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
@@ -257,7 +267,10 @@ fn hpt5_selectors_name_the_current_fixture_only() {
             text.contains(&format!("fixtures/contracts/{SELECTED}\"")),
             "{file} selects {SELECTED}"
         );
-        for earlier in [CURRENT, PREDECESSOR, "m5b-v1.json", "sync-client-b-v1.json"] {
+        for earlier in [PREDECESSOR, "m5b-v1.json", "sync-client-b-v1.json", CURRENT]
+            .into_iter()
+            .chain(LATER.map(|(n, _)| n))
+        {
             assert!(
                 !text.contains(&format!("contracts/{earlier}\"")),
                 "{file} no longer selects {earlier}"
@@ -267,8 +280,9 @@ fn hpt5_selectors_name_the_current_fixture_only() {
 }
 
 /// hpt5: the successor keeps every earlier fixture as it was. Each frozen file keeps its bytes,
-/// the folder holds those, this plan's fixture and its successor and no other, this plan's fixture
-/// differs from its predecessor, and it keeps its captured bytes.
+/// the folder holds those, this plan's fixture and its successors and no other, each earlier
+/// successor keeps its bytes, this plan's fixture differs from its predecessor, and it keeps its
+/// captured bytes.
 #[test]
 fn hpt5_predecessors_keep_their_bytes() {
     for (name, want) in FROZEN {
@@ -279,15 +293,19 @@ fn hpt5_predecessors_keep_their_bytes() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
+    for (name, want) in LATER {
+        assert_eq!(sha(&bytes(name)), want, "{name} is frozen");
+    }
     let mut want: Vec<&str> = FROZEN
         .iter()
+        .chain(LATER.iter())
         .map(|(n, _)| *n)
         .chain([CURRENT, SELECTED])
         .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds every frozen fixture, {CURRENT} and {SELECTED}"
+        "the folder holds every frozen fixture, {CURRENT}, its successors and {SELECTED}"
     );
     let now = sha(&bytes(CURRENT));
     assert_ne!(now, PREDECESSOR_SHA, "{CURRENT} is a successor, not a copy");
