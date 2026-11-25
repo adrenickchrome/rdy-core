@@ -1985,6 +1985,8 @@ fn removal_live_with_the_platform_punch() {
         captured.check_redaction_epoch(),
         Err(StoreError::RedactedState)
     ));
+    // the old reader holds the replaced index open, which Windows would not let a reopen erase
+    drop(captured);
     assert_eq!(
         holds_canary(&path.join("segments")),
         Vec::<String>::new(),
