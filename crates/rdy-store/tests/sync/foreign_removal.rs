@@ -178,13 +178,21 @@ struct Cited {
 
 impl Cited {
     fn new() -> Cited {
+        Cited::with_bodies(
+            "a leaked key in the first decision",
+            "removed, and the citing project wrote it too",
+        )
+    }
+
+    /// [`Cited::new`] with the bodies of `v1` and `v5`.
+    fn with_bodies(v1_body: &str, v5_body: &str) -> Cited {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cited");
-        let v1 = block("D-00001", "a leaked key in the first decision");
+        let v1 = block("D-00001", v1_body);
         let v2 = block("D-00002", "a leaked key in the second decision");
         let v3 = block("D-00003", "a decision that stays");
         let v4 = block("D-00004", "removed, never delivered");
-        let v5 = block("D-00005", "removed, and the citing project wrote it too");
+        let v5 = block("D-00005", v5_body);
         let repo = {
             let mut s = Store::create(&path).unwrap();
             s.commit_to_view(
@@ -834,4 +842,92 @@ fn rpl24_two_requests_of_one_landing_taken_in_turn() {
     let mut s = Store::open(&cpath).unwrap();
     assert!(removed(&s, &a) && removed(&s, &b));
     clean(&mut s, 3);
+}
+
+/// `n` bytes of lowercase text that repeat no 4,096-byte window, from `seed`.
+fn long_text(n: usize, seed: u64) -> String {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            char::from(b'a' + (x % 26) as u8)
+        })
+        .collect()
+}
+
+const CANARY: &[u8] = b"CANARYQX";
+
+/// The files under `dir` that hold the canary.
+fn canary_files(dir: &Path) -> Vec<String> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = vec![];
+    walk(dir, &mut files);
+    files
+        .into_iter()
+        .filter(|p| {
+            std::fs::read(p)
+                .unwrap()
+                .windows(CANARY.len())
+                .any(|w| w == CANARY)
+        })
+        .map(|p| p.display().to_string())
+        .collect()
+}
+
+/// r5902 (D-1ER84), the foreign case: a citing project's compact maps its local copy of the
+/// delivered `v5` to the delivery's BLOCK frame. Taking the cited removal erases the foreign
+/// `v1` (a canary), keeps `v5` because a local change produces it, and leaves every mapped copy
+/// whole: no file holds the canary, fsck (which hashes every reconstructed payload) passes on
+/// both indexes, and a reopen and a repeat compact bring nothing back.
+#[test]
+fn r5902_removal_erases_all_mapped_copies() {
+    use rdy_store::dedup::{MapOpen, SpanMap};
+    let secret = format!(
+        "{}{}",
+        std::str::from_utf8(CANARY).unwrap(),
+        long_text(40_000, 71)
+    );
+    let c = Cited::with_bodies(&secret, &long_text(40_000, 72));
+    let mut x = citing(&c, true);
+    let report = x.store.compact(false).unwrap();
+    assert!(report.deduplicated_bytes >= 4096, "{report:?}");
+    let v5_frame = frames(&x.path)
+        .into_iter()
+        .find(|(_, k, h, _)| *k == kinds::BLOCK && *h == version_of(&c.v5))
+        .map(|(l, ..)| l)
+        .unwrap();
+    let map = SpanMap::load(&x.path, MapOpen::ReadOnly).unwrap();
+    assert!(
+        map.mappings().any(|m| m.source.place == v5_frame),
+        "the local copy of v5 maps to the delivery's frame"
+    );
+    assert!(
+        !canary_files(&x.path).is_empty(),
+        "the text is on disk before"
+    );
+    let taken = take(&mut x.store, c.repo, c.repo, c.apply, &mut c.source()).unwrap();
+    assert_eq!(taken.erased, vec![pair(&c.v1), pair(&c.v2)]);
+    assert_eq!(taken.kept_local, vec![pair(&c.v5)]);
+    assert!(erased(&x.path, &c.v1));
+    assert_eq!(canary_files(&x.path), Vec::<String>::new());
+    assert_eq!(x.store.get_block(&version_of(&c.v5)).unwrap(), c.v5);
+    clean(&mut x.store, 4);
+    x.store.close().unwrap();
+    let mut s = Store::open(&x.path).unwrap();
+    assert_eq!(s.get_block(&version_of(&c.v5)).unwrap(), c.v5);
+    clean(&mut s, 4);
+    s.compact(false).unwrap();
+    drop(s);
+    assert_eq!(canary_files(&x.path), Vec::<String>::new());
 }
