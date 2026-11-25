@@ -1304,4 +1304,31 @@ mod tests {
         assert!(!release_skips_perf(Some(Tier::Nightly), None));
         assert!(!release_skips_perf(None, None));
     }
+
+    #[test]
+    fn tier4_the_windows_tier_is_in_the_allowances_file() {
+        let a = Allowances::parse(&std::fs::read_to_string(allowances_path()).unwrap()).unwrap();
+        let keys = a.platform_tier(PlatformTier::Windows.name()).unwrap();
+        for key in [
+            "rdy-store/lib/rdy_store",
+            "rdy-daemon/lib/rdy_daemon",
+            "rdy-cli/bin/rdy",
+            "rdy-qa/test/store",
+            "rdy-qa/test/daemon",
+            "rdy-qa/test/wc",
+            "rdy-qa/test/release",
+            "rdy-mcp/test/windows_contract",
+        ] {
+            assert!(keys.contains(key), "the windows tier lacks {key}");
+        }
+        for key in [
+            "rdy-engine/lib/rdy_engine",
+            "rdy-qa/test/render",
+            "rdy-qa/test/views",
+        ] {
+            assert!(!keys.contains(key), "{key} runs on Windows at night only");
+        }
+        // every platform's stages fit 80 % of the gate line
+        assert_eq!(a.stage_problems(), Vec::<String>::new());
+    }
 }
