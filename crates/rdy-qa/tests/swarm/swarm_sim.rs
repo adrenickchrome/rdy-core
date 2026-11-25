@@ -5095,7 +5095,8 @@ fn shown_of(r: &Rdy, seen: Option<&(String, String)>) -> Result<Option<SeenCard>
 
 /// Cuts the log of the closed project `project` at `cut`, the first frame of a batch: the
 /// segments after `cut.segment` go, segment `cut.segment` ends at `cut.offset`, and the index
-/// goes, so the next open rebuilds it from the cut log. The project is then the state the log
+/// goes, so the next open rebuilds it from the cut log. The span map (D-1ER84, 0.59.0) is cut
+/// back to the map the store held then (`cut_span_map`). The project is then the state the log
 /// held just before that batch.
 fn cut_log(project: &std::path::Path, cut: Location) {
     let store = project.join(".rdy").join(rdy_store::layout::STORE_DIR);
@@ -5123,6 +5124,57 @@ fn cut_log(project: &std::path::Path, cut: Location) {
     match std::fs::remove_file(store.join("index.redb")) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("remove the index: {e}"),
         _ => {}
+    }
+    cut_span_map(&store, cut);
+}
+
+/// Cuts the span map of the store at `store` back to the journal prefix through its last
+/// `Through` row at or before `cut`: the map the store held just before the batch at `cut`, since
+/// a pass appends its `Map` rows and then one `Through` at the sealed end it scanned, and every
+/// row of a pass names frames before that end. A prefix keeps the digest chain whole. With no
+/// such row the map goes: a store opens without one while its sealed bytes are intact. A row
+/// that does not read panics, so no cut gets a wrong map.
+fn cut_span_map(store: &std::path::Path, cut: Location) {
+    use rdy_store::dedup::{FILE_HEADER, SPANMAP_FILE, SpanMapRecordV1};
+    let path = store.join(SPANMAP_FILE);
+    let buf = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => panic!("read the span map: {e}"),
+    };
+    let header = FILE_HEADER as usize;
+    assert!(
+        buf.len() >= header,
+        "the span map is shorter than its header"
+    );
+    let mut at = header;
+    let mut keep = header;
+    while at < buf.len() {
+        let n = buf
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")) as usize)
+            .unwrap_or_else(|| panic!("the span map has a short row at {at}"));
+        let body = buf
+            .get(at + 4..at + 4 + n)
+            .filter(|_| at + 4 + n + 32 <= buf.len())
+            .unwrap_or_else(|| panic!("the span map has a short row at {at}"));
+        let record: SpanMapRecordV1 = postcard::from_bytes(body)
+            .unwrap_or_else(|e| panic!("the span map row at {at} does not read: {e}"));
+        at += 4 + n + 32;
+        if let SpanMapRecordV1::Through { end } = record
+            && end <= cut
+        {
+            keep = at;
+        }
+    }
+    if keep == header {
+        std::fs::remove_file(&path).expect("remove the span map");
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_len(keep as u64))
+            .expect("cut the span map");
     }
 }
 
