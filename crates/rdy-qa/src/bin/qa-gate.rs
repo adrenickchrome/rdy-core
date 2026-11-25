@@ -1,10 +1,10 @@
 //! `cargo qa`: the full regression and hardening gate, with a report in `target/qa/`.
 use clap::Parser;
 use rdy_qa::gate_steps::{
-    AreaEnv, BINARY_JOBS, BUILD_STEP, ChildOutput, GateStep, SERIAL_AREAS, StageKind, Stages,
-    TestBinary, TestExe, build_steps, cargo, default_deadline, discover_command, fail_tail,
-    fmt_step, launch_area, list_guarded, on_real_disk, parse_test_binaries, probe_envs, run_areas,
-    run_bounded, run_stage, stale_units,
+    Allowances, AreaEnv, BINARY_JOBS, BUILD_STEP, ChildOutput, Clock, GateStep, SERIAL_AREAS,
+    Stages, TestBinary, TestExe, UNBOUNDED, budget_row, build_steps, cargo, discover_command,
+    fail_tail, fmt_step, gate_exit, launch_area, list_guarded, not_started, on_real_disk,
+    parse_test_binaries, probe_envs, run_areas, run_bounded, run_stage, stale_units,
 };
 use rdy_qa::perf::{self, Baseline, Measure};
 use rdy_qa::report::{self, Area, Gate, Report, StageRecord, Timing};
@@ -53,9 +53,15 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     tmp_root: Option<PathBuf>,
     /// The test tier. `release`: the run a release reads; fmt, clippy and the Python CI tests
-    /// run on Linux only.
+    /// run on Linux only, and each test binary's time is checked against its allowance in
+    /// `gate-allowances.json`.
     #[arg(long, value_enum)]
     tier: Option<Tier>,
+    /// The seconds the whole run may take, the builds included; required with `--tier release`.
+    /// Each child's deadline is the time left. When it is spent the gate stops the running
+    /// children, adds a failed `BUDGET` row that names the stage and exits 30.
+    #[arg(long, value_name = "SECONDS", required_if_eq("tier", "release"))]
+    budget_secs: Option<u64>,
 }
 
 /// The test tiers of `--tier`.
@@ -82,6 +88,10 @@ fn root() -> PathBuf {
         .expect("workspace root")
 }
 
+/// The run's one clock, from the start of `main`.
+static CLOCK: OnceLock<Clock> = OnceLock::new();
+/// The stage that was running when the run's budget was spent.
+static SPENT_IN: OnceLock<String> = OnceLock::new();
 /// The gate's start, and every timed child so far, for the report's `## Timing` table.
 static GATE_START: OnceLock<Instant> = OnceLock::new();
 static RECORDS: Mutex<Vec<StageRecord>> = Mutex::new(Vec::new());
@@ -92,11 +102,31 @@ static BINARY_TIMES: Mutex<Vec<(String, f64)>> = Mutex::new(Vec::new());
 /// streams apart. Past the deadline the child is ended and its output names the stage.
 fn step_out(name: &str, mut cmd: Command, deadline: Duration) -> ChildOutput {
     eprintln!("==> {name}");
+    if let Some(out) = budget_spent(name) {
+        return out;
+    }
     cmd.current_dir(root());
     let t = Instant::now();
     let out = run_stage(name, cmd, deadline);
     record(name, t.elapsed().as_secs_f64(), out.ok);
+    note_spent(name, &out);
     out
+}
+
+/// What a child of `stage` returns instead of starting, once the run's budget is spent.
+fn budget_spent(stage: &str) -> Option<ChildOutput> {
+    let clock = CLOCK.get()?;
+    clock.spent().then(|| {
+        SPENT_IN.get_or_init(|| stage.to_string());
+        not_started(stage)
+    })
+}
+
+/// Names `stage` as the one the budget was spent in, when its child ran out of the run's time.
+fn note_spent(stage: &str, out: &ChildOutput) {
+    if out.timed_out && CLOCK.get().is_some_and(Clock::spent) {
+        SPENT_IN.get_or_init(|| stage.to_string());
+    }
 }
 
 /// Adds one timed child to the report's `## Timing` table.
@@ -111,20 +141,15 @@ fn record(label: &str, secs: f64, ok: bool) {
     }
 }
 
-/// The deadline of the next child.
+/// The deadline of the next child: the time left on the run's clock.
 fn left() -> Duration {
-    deadline(StageKind::WorkspaceTests)
+    CLOCK.get().map_or(UNBOUNDED, Clock::left)
 }
 
 /// Runs a command, returning (success, stdout + stderr combined).
 fn step(name: &str, cmd: Command, deadline: Duration) -> (bool, String) {
     let out = step_out(name, cmd, deadline);
     (out.ok, out.combined())
-}
-
-/// The default deadline of a child of `kind` on this OS.
-fn deadline(kind: StageKind) -> Duration {
-    default_deadline(kind, std::env::consts::OS)
 }
 
 fn git(args: &[&str]) -> Option<String> {
@@ -291,8 +316,12 @@ impl Launch<'_> {
                 env.vars.insert(k.into(), v.to_string_lossy().into_owned());
             }
         }
+        if let Some(out) = budget_spent(label) {
+            return (out, Duration::ZERO);
+        }
         let run = launch_area(&bin.path, &env, &[], label, left());
         record(label, run.elapsed.as_secs_f64(), run.out.ok);
+        note_spent(label, &run.out);
         if let Ok(mut t) = BINARY_TIMES.lock() {
             t.push((bin.key(), run.elapsed.as_secs_f64()));
         }
@@ -300,20 +329,24 @@ impl Launch<'_> {
     }
 }
 
-/// The rdy-qa binaries that start first, slowest first: on the Mac `cli` alone is about a
-/// third of the stage.
-const START_FIRST: &[&str] = &[
-    "cli",
-    "gate",
-    "views",
-    "rebase",
-    "render_quality",
-    "store",
-    "swarm",
-    "io",
-    "brief",
-    "authority",
-];
+/// The allowances of this platform's test binaries, read once in `main`.
+static ALLOWANCES: OnceLock<Allowances> = OnceLock::new();
+
+/// The path of the allowances file.
+fn allowances_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("gate-allowances.json")
+}
+
+/// The allowance of the binary `key` on this platform, in seconds; zero when it has none. The
+/// binaries with the largest allowance start first, so the last one to start is a short one.
+fn allowance(key: &str) -> f64 {
+    ALLOWANCES
+        .get()
+        .and_then(|a| a.platforms.get(std::env::consts::OS))
+        .and_then(|l| l.get(key))
+        .copied()
+        .unwrap_or(0.0)
+}
 
 /// Each test binary the gate started and its seconds, slowest first.
 fn binary_times() -> Vec<(String, f64)> {
@@ -328,7 +361,15 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 fn main() {
+    // one clock for the whole run, the builds included: under `cargo qa` it starts with the
+    // Cargo that built this gate
+    let now = Instant::now();
+    let start = rdy_qa::gate_steps::process_elapsed()
+        .and_then(|e| now.checked_sub(e))
+        .unwrap_or(now);
     let args = Args::parse();
+    let clock =
+        *CLOCK.get_or_init(|| Clock::started(start, args.budget_secs.map(Duration::from_secs)));
     if cfg!(windows)
         && let Err(e) = rdy_qa::gate_steps::step_aside()
     {
@@ -369,7 +410,15 @@ fn main() {
         None => None,
     };
     TMP_ROOT.get_or_init(|| tmp_root.clone());
-    let start = *GATE_START.get_or_init(Instant::now);
+    let allowances = std::fs::read_to_string(allowances_path())
+        .map_err(|e| format!("gate-allowances.json: {e}"))
+        .and_then(|t| Allowances::parse(&t));
+    let allowance_error = allowances.as_ref().err().cloned();
+    ALLOWANCES.get_or_init(|| allowances.unwrap_or_default());
+    GATE_START.get_or_init(|| start);
+    if now > start {
+        record("qa-gate build", (now - start).as_secs_f64(), true);
+    }
     // A crashed run must not leave a stale verdict behind.
     for f in ["report.md", "report.json"] {
         let _ = std::fs::remove_file(root().join("target/qa").join(f));
@@ -410,6 +459,9 @@ fn main() {
         None
     };
     let mut gates: Vec<Gate> = python.into_iter().collect();
+    if let Some(e) = allowance_error {
+        gates.push(Gate::ran("gate allowances", false, e));
+    }
     // the one build: the `rdy` binary, every crate's tests and every rdy-qa binary, in the
     // gate profile
     let (prerequisites, build_out) = build_steps(&mut stages, |l, c, _| step(l, c, left()));
@@ -526,10 +578,12 @@ fn main() {
                 // every crate's test binaries but rdy-qa's, four at a time
                 eprintln!("==> workspace tests");
                 let t = Instant::now();
-                // the real-disk binaries are the slowest, so they start first
+                // the largest allowances start first; with none, the real-disk binaries,
+                // which are the slowest
                 let mut mine: Vec<&TestBinary> =
                     binaries.iter().filter(|b| b.package != "rdy-qa").collect();
                 mine.sort_by_key(|b| !on_real_disk(&b.package, &b.name));
+                mine.sort_by(|a, b| allowance(&b.key()).total_cmp(&allowance(&a.key())));
                 let outputs = run_areas(
                     &mine,
                     |_| false,
@@ -652,11 +706,9 @@ fn main() {
     // the slowest binaries start first, so the last one to start is a short one; the results
     // come back in the plan's order
     let mut order: Vec<usize> = (0..to_run.len()).collect();
-    order.sort_by_key(|&i| {
-        START_FIRST
-            .iter()
-            .position(|f| *f == to_run[i])
-            .unwrap_or(usize::MAX)
+    order.sort_by(|&a, &b| {
+        let key = |i: usize| format!("rdy-qa/test/{}", to_run[i]);
+        allowance(&key(b)).total_cmp(&allowance(&key(a)))
     });
     let ordered: Vec<String> = order.iter().map(|&i| to_run[i].clone()).collect();
     let t = Instant::now();
@@ -794,8 +846,10 @@ fn main() {
                 path: b.path.clone(),
             })
             .collect();
-        let (guarded, problems) =
-            list_guarded(&exes, &dir, |c| run_stage("list guarded tests", c, left()));
+        let (guarded, problems) = list_guarded(&exes, &dir, |c| {
+            budget_spent("list guarded tests")
+                .unwrap_or_else(|| run_stage("list guarded tests", c, left()))
+        });
         for p in problems {
             notes.push(format!("guarded-id listing failed: {p}"));
         }
@@ -811,6 +865,28 @@ fn main() {
     }
     if args.all_stages {
         mode += ", all stages";
+    }
+    // In the release tier each test binary's time is held to its allowance.
+    if args.tier == Some(Tier::Release)
+        && !args.deep
+        && let Some(a) = ALLOWANCES.get()
+    {
+        let (rows, note) = a.check(std::env::consts::OS, &binary_times());
+        gates.extend(rows);
+        notes.extend(note);
+    }
+    // A spent budget fails the run, whatever ran: the row names the stage it was spent in.
+    let spent = SPENT_IN.get().cloned().or_else(|| {
+        clock.spent().then(|| {
+            RECORDS
+                .lock()
+                .ok()
+                .and_then(|r| r.last().map(|r| r.label.clone()))
+                .unwrap_or_else(|| "report".into())
+        })
+    });
+    if let (Some(stage), Some(secs)) = (&spent, clock.budget_secs()) {
+        gates.push(budget_row(secs, stage));
     }
     let pass = report::overall(&gates, &areas, perf_ok);
     let rep = Report {
@@ -849,5 +925,5 @@ fn main() {
     std::fs::write(dir.join("report.json"), report::json(&rep)).expect("write report.json");
     println!("{}", dir.join("report.md").display());
     println!("{}", if pass { "PASS" } else { "FAIL" });
-    std::process::exit(if pass { 0 } else { 1 });
+    std::process::exit(gate_exit(pass, spent.is_some()));
 }

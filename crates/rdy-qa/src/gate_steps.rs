@@ -104,76 +104,190 @@ pub fn run_steps(
 /// How long a child past its deadline has, after TERM, before KILL.
 pub const KILL_GRACE: Duration = Duration::from_secs(10);
 
-/// The shortest default deadline of a child.
-pub const DEADLINE_FLOOR: Duration = Duration::from_secs(600);
-
-/// The kinds of gate child, for their default deadlines.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StageKind {
-    /// `cargo fetch --locked`.
-    Fetch,
-    /// The release build of `rdy-cli`.
-    Build,
-    /// One `cargo fmt --check -p <member>` (or `cargo metadata`).
-    Fmt,
-    /// Workspace clippy.
-    Clippy,
-    /// The workspace tests outside `rdy-qa`.
-    WorkspaceTests,
-    /// The build of every `rdy-qa` test binary (`--no-run`).
-    Discover,
-    /// One `rdy-qa` area binary.
-    Area,
-    /// The `rdy-qa` unit tests.
-    Lib,
-    /// The perf tier.
-    Perf,
-    /// One test binary's `--list`.
-    Listing,
-    /// The Python CI tests (`tests/ci`).
-    Python,
+/// The run's one clock: the budget of the whole run, the builds included, from one start. A
+/// child's deadline is the time left on it ([`Clock::left`]). With no budget, a child has no
+/// deadline.
+#[derive(Clone, Copy, Debug)]
+pub struct Clock {
+    start: Instant,
+    budget: Option<Duration>,
 }
 
-/// The median wall time of a whole fast gate run on each platform, in seconds: Linux from 159
-/// runs on the 24-thread gate server, macOS from 16 and Windows from 23 native runs (gate
-/// records to 2026-11-19). The records hold whole runs only, so a child's median is taken as a
-/// share of its platform's whole run ([`STAGE_SHARE_PCT`]).
-pub const RUN_MEDIAN_SECS: &[(&str, u64)] = &[("linux", 3290), ("macos", 4152), ("windows", 8767)];
+impl Clock {
+    /// A clock that starts now, with `budget` for the whole run.
+    pub fn new(budget: Option<Duration>) -> Self {
+        Self::started(Instant::now(), budget)
+    }
 
-/// The share of a whole run, in percent, taken as one child's median. No child has been timed
-/// alone yet, and a deadline that kills a slow but healthy child costs more than one that waits
-/// too long for a hung one, so until per-stage times are measured every kind is 50: its deadline
-/// (twice the median) is its platform's whole-run median. A hung child is still caught well
-/// before the CI job timeout. Measured times replace these values per kind; a kind not listed
-/// gets the floor.
-pub const STAGE_SHARE_PCT: &[(StageKind, u64)] = &[
-    (StageKind::Fetch, 50),
-    (StageKind::Build, 50),
-    (StageKind::Fmt, 50),
-    (StageKind::Clippy, 50),
-    (StageKind::WorkspaceTests, 50),
-    (StageKind::Discover, 50),
-    (StageKind::Area, 50),
-    (StageKind::Lib, 50),
-    (StageKind::Perf, 50),
-    (StageKind::Listing, 50),
-    (StageKind::Python, 50),
-];
+    /// A clock that started at `start`, with `budget` for the whole run.
+    pub fn started(start: Instant, budget: Option<Duration>) -> Self {
+        Self { start, budget }
+    }
 
-/// The default deadline of a child of `kind` on `os` (`std::env::consts::OS`): twice its median
-/// ([`RUN_MEDIAN_SECS`] times [`STAGE_SHARE_PCT`]), never under [`DEADLINE_FLOOR`]. An OS with
-/// no record takes the slowest platform's median.
-pub fn default_deadline(kind: StageKind, os: &str) -> Duration {
-    let run = RUN_MEDIAN_SECS
-        .iter()
-        .find(|(o, _)| *o == os)
-        .or_else(|| RUN_MEDIAN_SECS.iter().max_by_key(|(_, s)| *s))
-        .map_or(0, |(_, s)| *s);
-    let share = STAGE_SHARE_PCT
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .map_or(0, |(_, p)| *p);
-    Duration::from_secs(2 * run * share / 100).max(DEADLINE_FLOOR)
+    /// The time left: the budget less the time since the start, never below zero. With no
+    /// budget, [`UNBOUNDED`].
+    pub fn left(&self) -> Duration {
+        self.budget
+            .map_or(UNBOUNDED, |b| b.saturating_sub(self.start.elapsed()))
+    }
+
+    /// Whether the budget is spent.
+    pub fn spent(&self) -> bool {
+        self.budget.is_some() && self.left().is_zero()
+    }
+
+    /// The budget in whole seconds, when there is one.
+    pub fn budget_secs(&self) -> Option<u64> {
+        self.budget.map(|b| b.as_secs())
+    }
+}
+
+/// The time `ps` gives as a process's elapsed time, `[[dd-]hh:]mm:ss`.
+pub fn parse_etime(text: &str) -> Option<Duration> {
+    let text = text.trim();
+    let (days, rest) = match text.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, text),
+    };
+    let mut secs = 0u64;
+    let parts: Vec<&str> = rest.split(':').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    for p in parts {
+        secs = secs * 60 + p.parse::<u64>().ok()?;
+    }
+    Some(Duration::from_secs(days * 86_400 + secs))
+}
+
+/// How long ago this process started. Under `cargo qa`, Cargo builds `qa-gate` and then runs
+/// it in its own process (an exec on Unix), so this is the time since `cargo qa` started, and
+/// the run's clock covers that build too. None when `ps` does not say; on Windows, where Cargo
+/// starts the gate as a child, the clock starts with the gate.
+pub fn process_elapsed() -> Option<Duration> {
+    #[cfg(unix)]
+    {
+        let pid = std::process::id().to_string();
+        let out = Command::new("ps")
+            .args(["-o", "etime=", "-p", &pid])
+            .output()
+            .ok()?;
+        parse_etime(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// The deadline of a child with no clock above it: [`run_stage`] then waits for it to end.
+pub const UNBOUNDED: Duration = Duration::MAX;
+
+/// The gate's exit code when the run's budget is spent.
+pub const BUDGET_EXIT: i32 = 30;
+
+/// The name of the report row of a spent budget.
+pub const BUDGET_ROW: &str = "BUDGET";
+
+/// The failed row of a run whose budget of `secs` seconds was spent in `stage`.
+pub fn budget_row(secs: u64, stage: &str) -> Gate {
+    Gate::ran(
+        BUDGET_ROW,
+        false,
+        format!("BUDGET: {secs} s spent in stage {stage}"),
+    )
+}
+
+/// The gate's exit code: [`BUDGET_EXIT`] when the budget is spent, else 0 for a passing report
+/// and 1 for a failing one.
+pub fn gate_exit(pass: bool, budget_spent: bool) -> i32 {
+    if budget_spent {
+        BUDGET_EXIT
+    } else {
+        report::exit_code(pass)
+    }
+}
+
+/// What a child that the gate does not start returns: the budget is spent.
+pub fn not_started(stage: &str) -> ChildOutput {
+    ChildOutput {
+        stderr: format!("{stage}: not started, the run's budget is spent\n"),
+        timed_out: true,
+        ..ChildOutput::default()
+    }
+}
+
+/// The seconds each test binary may take on each platform: `gate-allowances.json` beside the
+/// rdy-qa manifest, `{"schema": 1, "platforms": {"<os>": {"<package>/<kind>/<name>": <secs>}}}`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Allowances {
+    pub platforms: BTreeMap<String, BTreeMap<String, f64>>,
+}
+
+/// How many times its allowance a binary may take before its row fails.
+pub const ALLOWANCE_FACTOR: f64 = 2.0;
+
+impl Allowances {
+    /// Reads the allowances file text.
+    pub fn parse(text: &str) -> Result<Allowances, String> {
+        let v: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| format!("gate-allowances.json: {e}"))?;
+        if v["schema"] != 1 {
+            return Err("gate-allowances.json: schema is not 1".into());
+        }
+        let mut platforms = BTreeMap::new();
+        for (os, list) in v["platforms"]
+            .as_object()
+            .ok_or("gate-allowances.json: no platforms")?
+        {
+            let mut secs = BTreeMap::new();
+            for (key, s) in list
+                .as_object()
+                .ok_or_else(|| format!("gate-allowances.json: {os} is not a map"))?
+            {
+                let s = s
+                    .as_f64()
+                    .filter(|s| *s > 0.0)
+                    .ok_or_else(|| format!("gate-allowances.json: {os} {key} is not a time"))?;
+                secs.insert(key.clone(), s);
+            }
+            platforms.insert(os.clone(), secs);
+        }
+        Ok(Allowances { platforms })
+    }
+
+    /// The failed rows of the binaries in `times` (key, seconds) that ran more than
+    /// [`ALLOWANCE_FACTOR`] times their allowance on `os`, or have none; and a note when `os` has
+    /// no list, so nothing was checked.
+    pub fn check(&self, os: &str, times: &[(String, f64)]) -> (Vec<Gate>, Option<String>) {
+        let Some(list) = self.platforms.get(os) else {
+            return (
+                vec![],
+                Some(format!(
+                    "gate-allowances.json has no `{os}` list: the binary times were not checked"
+                )),
+            );
+        };
+        let mut rows = vec![];
+        for (key, secs) in times {
+            match list.get(key) {
+                None => rows.push(Gate::ran(
+                    &format!("NO ALLOWANCE: {key}"),
+                    false,
+                    format!("{key} ran {secs:.1} s and has no allowance on {os}"),
+                )),
+                Some(a) if *secs > ALLOWANCE_FACTOR * a => rows.push(Gate::ran(
+                    &format!("OVER ALLOWANCE: {key}"),
+                    false,
+                    format!(
+                        "{key} ran {secs:.1} s, more than {ALLOWANCE_FACTOR} times its allowance of {a:.0} s on {os}"
+                    ),
+                )),
+                Some(_) => {}
+            }
+        }
+        (rows, None)
+    }
 }
 
 /// The report line of a child that passed its deadline.
@@ -1015,7 +1129,7 @@ pub fn python_ci_step(
         ));
     }
     let fail = |detail: String| Ok(Gate::ran(PYTHON_CI_GATE, false, detail));
-    let deadline = default_deadline(StageKind::Python, os);
+    let deadline = UNBOUNDED;
     let mut probe = Command::new("python3");
     probe.args(["-c", "import yaml"]);
     let (ok, out) = run("python3 and PyYAML", probe, deadline);
@@ -1088,7 +1202,7 @@ pub fn workspace_members(out: &str) -> Result<Vec<String>, String> {
 /// or any member fails, and its detail names each failing member with the tail of its output.
 pub fn fmt_step(mut run: impl FnMut(&str, Command, Duration) -> (bool, String)) -> Gate {
     let fail = |detail: String| Gate::ran(FMT_GATE, false, detail);
-    let deadline = default_deadline(StageKind::Fmt, std::env::consts::OS);
+    let deadline = UNBOUNDED;
     let (ok, out) = run(
         "workspace members",
         cargo(&["metadata", "--no-deps", "--format-version", "1"]),
@@ -1263,39 +1377,94 @@ mod tests {
 
     #[test]
     fn tgs2_default_deadlines_are_twice_the_median_with_a_floor() {
-        // until stages are timed, every child's deadline is its platform's whole-run median
-        let whole = [("linux", 3290), ("macos", 4152), ("windows", 8767)];
-        for kind in [
-            StageKind::Fetch,
-            StageKind::Build,
-            StageKind::Fmt,
-            StageKind::Clippy,
-            StageKind::WorkspaceTests,
-            StageKind::Discover,
-            StageKind::Area,
-            StageKind::Lib,
-            StageKind::Perf,
-            StageKind::Listing,
-            StageKind::Python,
-        ] {
-            for (os, secs) in whole {
-                assert_eq!(
-                    default_deadline(kind, os),
-                    Duration::from_secs(secs),
-                    "{kind:?} on {os}"
-                );
-            }
-        }
-        // never under the 10 minute floor
-        assert!(DEADLINE_FLOOR == Duration::from_secs(600));
-        // an OS with no record takes the slowest platform's
-        assert_eq!(
-            default_deadline(StageKind::Build, "freebsd"),
-            default_deadline(StageKind::Build, "windows")
+        // No median sets a deadline any more: a child's deadline is the time left on the run's
+        // one clock, and a run with no budget has no deadline.
+        assert_eq!(Clock::new(None).left(), UNBOUNDED);
+        assert!(!Clock::new(None).spent());
+        // a child that sleeps past the clock is stopped, and the run exits 30 with the row
+        let clock = Clock::new(Some(Duration::from_secs(1)));
+        let t = Instant::now();
+        let out = run_stage(
+            "rdy-qa swarm",
+            crate::platform::fixture_command("hang"),
+            clock.left(),
+        );
+        assert!(out.timed_out, "{}", out.combined());
+        assert!(!out.ok);
+        assert!(t.elapsed() < Duration::from_secs(1) + KILL_GRACE + Duration::from_secs(5));
+        assert!(clock.spent());
+        assert_eq!(clock.left(), Duration::ZERO);
+        let row = budget_row(clock.budget_secs().expect("a budget"), "rdy-qa swarm");
+        assert_eq!(row.name, BUDGET_ROW);
+        assert!(!row.pass);
+        assert_eq!(row.detail, "BUDGET: 1 s spent in stage rdy-qa swarm");
+        assert_eq!(gate_exit(false, clock.spent()), 30);
+        assert_eq!(gate_exit(true, true), BUDGET_EXIT);
+        assert_eq!(gate_exit(true, false), 0);
+        assert_eq!(gate_exit(false, false), 1);
+        // a child the spent clock does not start is a timed-out failure that says so
+        let skipped = not_started("rdy-qa store");
+        assert!(skipped.timed_out && !skipped.ok);
+        assert!(
+            skipped.stderr.contains("budget is spent"),
+            "{}",
+            skipped.stderr
         );
         assert_eq!(
             deadline_line("rdy-qa swarm", Duration::from_secs(1)),
             "deadline 1s passed in stage rdy-qa swarm"
+        );
+    }
+
+    #[test]
+    fn tgs4_the_clock_covers_the_alias_build() {
+        assert_eq!(parse_etime("00:07"), Some(Duration::from_secs(7)));
+        assert_eq!(parse_etime(" 01:02 "), Some(Duration::from_secs(62)));
+        assert_eq!(parse_etime("02:00:01"), Some(Duration::from_secs(7201)));
+        assert_eq!(parse_etime("1-00:00:00"), Some(Duration::from_secs(86_400)));
+        assert_eq!(parse_etime("7"), None);
+        assert_eq!(parse_etime("a:b"), None);
+        // this test process started before this line ran
+        #[cfg(unix)]
+        assert!(process_elapsed().is_some());
+    }
+
+    #[test]
+    fn tgs3_a_binary_past_twice_its_allowance_fails_its_row() {
+        let file = r#"{"schema": 1, "platforms": {"macos": {
+            "rdy-qa/test/cli": 100, "rdy-store/test/durability": 50}}}"#;
+        let allowances = Allowances::parse(file).expect("parse");
+        let times = vec![
+            ("rdy-qa/test/cli".to_string(), 210.0),
+            ("rdy-store/test/durability".to_string(), 99.0),
+            ("rdy-qa/test/new".to_string(), 1.0),
+        ];
+        let (rows, note) = allowances.check("macos", &times);
+        assert_eq!(note, None);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "OVER ALLOWANCE: rdy-qa/test/cli",
+                "NO ALLOWANCE: rdy-qa/test/new"
+            ]
+        );
+        assert!(rows.iter().all(|r| !r.pass));
+        assert!(rows[0].detail.contains("210.0 s"), "{}", rows[0].detail);
+        // a platform with no list checks nothing and says so
+        let (rows, note) = allowances.check("linux", &times);
+        assert!(rows.is_empty());
+        assert!(note.expect("a note").contains("no `linux` list"));
+        // a bad file is an error, never an empty list
+        assert!(Allowances::parse(r#"{"schema": 2, "platforms": {}}"#).is_err());
+        assert!(Allowances::parse(r#"{"schema": 1, "platforms": {"macos": {"a": 0}}}"#).is_err());
+        // the file in the crate reads
+        let ours = Allowances::parse(include_str!("../gate-allowances.json")).expect("ours");
+        assert!(
+            ours.platforms
+                .values()
+                .flat_map(|l| l.values())
+                .all(|s| *s > 0.0)
         );
     }
 

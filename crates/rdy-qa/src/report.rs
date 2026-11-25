@@ -832,7 +832,8 @@ fn stage_name(label: &str) -> String {
         "workspace members" => "fmt".into(),
         l if l.starts_with("fmt ") => "fmt".into(),
         "rdy-qa unit tests" => "QA lib".into(),
-        l if l.starts_with("workspace ") => "workspace binaries".into(),
+        // each binary of the pool of four: their sum, not wall time
+        l if l.starts_with("workspace ") => "workspace binaries (sum)".into(),
         l => l
             .strip_prefix("rdy-qa ")
             .map_or(l.to_string(), |a| format!("QA {a}")),
