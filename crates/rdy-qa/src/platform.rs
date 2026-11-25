@@ -13,6 +13,17 @@ mod child_fixture_tests;
 // the tests that leave Windows, with their Unix mechanism and Windows counterpart (Task 32)
 pub mod exclusions;
 
+/// Names the directory that [`short_tmp_root`] returns in place of the platform's default. The
+/// gate sets it, with `TMPDIR` (or `TEMP` and `TMP`), to its `--tmp-root` for every test child.
+pub const SHORT_TMP_VAR: &str = "RDY_QA_SHORT_TMP";
+
+/// The value of [`SHORT_TMP_VAR`], when it is set and not empty.
+fn short_tmp_override() -> Option<std::path::PathBuf> {
+    std::env::var_os(SHORT_TMP_VAR)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 // the test SSH agent's protocol is the same on every platform, only its endpoint differs
 mod agent_wire;
 

@@ -316,8 +316,11 @@ fn hsa2_symlinks_and_foreign_paths_are_refused() {
                 assert!(!root_tmp.join(&sub).exists(), "nothing is made there");
             }
         }
-        // a target owned by another user, where this system lets a hard link reach one
-        #[cfg(unix)]
+        // a target owned by another user, where this system lets a hard link reach one. Not on
+        // macOS: there these files are admin files that the privacy controls guard, and a link
+        // to one asks the person at the screen to let the process administer the computer, and
+        // the test waits for the answer.
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             let theirs = format!("rdy/theirs-{private}.yaml");
             let linked = ["/private/etc/hosts", "/etc/hosts", "/etc/passwd"]

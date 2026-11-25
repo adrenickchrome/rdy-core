@@ -10046,89 +10046,6 @@ mod tests {
         }
     }
 
-    /// ck10 (D-JQD5X, D-PACK3): the four check ops are reported under their exact names, with no
-    /// ceiling and no baseline entry, and the queue's fixture builder makes the intended state:
-    /// 1,000 durable requests, 500 answered, one eligible independent request for a reviewer.
-    /// The test asserts counts, never a duration.
-    #[test]
-    fn ck10_perf_registry_reports_four_check_ops() {
-        assert_eq!(
-            CK10_OPS,
-            [
-                "check_rules_change",
-                "check_rules_propose",
-                "check_request_case",
-                "check_queue"
-            ]
-        );
-        let baseline: serde_json::Value =
-            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
-        for op in CK10_OPS {
-            assert_eq!(spec_ceiling_ms(op), None, "{op} has a ceiling");
-            let target = spec_target(op).unwrap_or_else(|| panic!("{op} has no target"));
-            assert!(target.starts_with("no spec target: "), "{target}");
-            assert!(target.ends_with("(reported; no ceiling)"), "{target}");
-            for class in baseline["classes"].as_object().expect("classes").values() {
-                assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
-            }
-            // with no baseline entry, a recorded run of it passes
-            let rec = compare(None, &[m(op, 1.0)], Mode::Record);
-            assert_eq!((rec[0].status, rec[0].pass), (Status::Recorded, true));
-        }
-        // the normal gate: compared against each checked-in class baseline, the four ops are
-        // reported and pass, while an unbaselined op and a regressed baselined op still fail
-        let classes: BTreeMap<String, Baseline> =
-            serde_json::from_value(baseline["classes"].clone()).expect("the classes parse");
-        assert!(!classes.is_empty());
-        for (class, base) in &classes {
-            let measured: Vec<Measure> = CK10_OPS.iter().map(|op| m(op, 1.0)).collect();
-            for v in compare(Some(base), &measured, Mode::Compare) {
-                assert_eq!(
-                    (v.status, v.pass, v.baseline_ms),
-                    (Status::Recorded, true, None),
-                    "{class}: {}",
-                    v.op
-                );
-            }
-            let unbaselined = compare(Some(base), &[m("ck10_not_an_op", 1.0)], Mode::Compare);
-            assert_eq!(
-                (unbaselined[0].status, unbaselined[0].pass),
-                (Status::Unbaselined, false),
-                "{class}"
-            );
-            let (op, old) = base.ops.iter().next().expect("the class has ops");
-            let worse = compare(
-                Some(base),
-                &[m(op, old.median_ms * 10.0 + 100.0)],
-                Mode::Compare,
-            );
-            assert!(!worse[0].pass, "{class}: {op} {:?}", worse[0].status);
-        }
-        // the queue's fixture
-        rdy_model::seed_ids_for_tests(0x636b_3130);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (_proj, r, fx) = coord_project(dir.path(), "check-queue");
-        let (engine, reviewer, queue) = check_queue_fixture(r, &fx.section);
-        rdy_model::unseed_ids_for_tests();
-        assert_eq!(
-            (queue.requests, queue.answered, queue.eligible),
-            (CHECK_QUEUE_REQUESTS, CHECK_QUEUE_ANSWERED, 1),
-            "{queue:?}"
-        );
-        assert_eq!((CHECK_QUEUE_REQUESTS, CHECK_QUEUE_ANSWERED), (1_000, 500));
-        // the leases were released: the eligible request is claimable again, and only it
-        assert!(claim_next(&engine, &reviewer, 3).is_some());
-        assert!(claim_next(&engine, &reviewer, 3).is_none());
-        // the rule project's pack holds the 16 rules and parses
-        let pack = check_pack();
-        assert_eq!(pack.matches("\n  - name: rule-").count(), CHECK_RULES);
-        assert_eq!(CHECK_RULES, 16);
-        let (d, r) = crate::fixtures::project();
-        drop(r);
-        crate::packs::use_pack(d.path(), "perf-checks", &pack, "");
-        Rdy::open(d.path()).expect("the pack with its rules loads");
-    }
-
     const SIG10_OPS: [&str; 3] = ["signature_check", "signature_check_sk", "signature_lookup"];
 
     /// Task 10: the three signature ops exist in both runners under their names, run at least
@@ -11667,27 +11584,6 @@ mod tests {
     }
 
     #[test]
-    fn hf1perf_the_daemon_mcp_ops_have_targets_and_run_on_a_small_project() {
-        let dir = tempfile::tempdir().unwrap();
-        let proj = dir.path().join("p");
-        std::fs::create_dir_all(&proj).unwrap();
-        testkit::generate_tree(&proj, 1, 2, 3);
-        let mut r = Rdy::open(&proj).unwrap();
-        land(&mut r, "work").unwrap();
-        r.view_create(&writer(), "va", None, true).unwrap();
-        drop(r);
-        let ms = daemon_mcp_on_copy(&proj, dir.path());
-        for op in ["daemon_mcp_overview", "daemon_read_during_big_write"] {
-            assert!(spec_target(op).is_some(), "{op}");
-            let m = ms
-                .iter()
-                .find(|m| m.op == op)
-                .unwrap_or_else(|| panic!("{op} missing"));
-            assert!(m.median_ms > 0.0, "{op}: {m:?}");
-        }
-    }
-
-    #[test]
     fn hf1perf_the_stdio_mcp_ops_have_targets_and_run() {
         let dir = tempfile::tempdir().unwrap();
         let ms = stdio_mcp_ops(dir.path());
@@ -12105,6 +12001,7 @@ mod tests {
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
             timing: Default::default(),
+            failed_binaries: vec![],
         };
         let md = crate::report::markdown(&report);
         assert!(
@@ -12862,5 +12759,116 @@ mod tests {
         drop(st);
         drop(r);
         rdy_model::unseed_ids_for_tests();
+    }
+
+    /// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+    #[cfg(feature = "nightly-tests")]
+    mod nightly {
+        use super::*;
+
+        #[test]
+        fn hf1perf_the_daemon_mcp_ops_have_targets_and_run_on_a_small_project() {
+            let dir = tempfile::tempdir().unwrap();
+            let proj = dir.path().join("p");
+            std::fs::create_dir_all(&proj).unwrap();
+            testkit::generate_tree(&proj, 1, 2, 3);
+            let mut r = Rdy::open(&proj).unwrap();
+            land(&mut r, "work").unwrap();
+            r.view_create(&writer(), "va", None, true).unwrap();
+            drop(r);
+            let ms = daemon_mcp_on_copy(&proj, dir.path());
+            for op in ["daemon_mcp_overview", "daemon_read_during_big_write"] {
+                assert!(spec_target(op).is_some(), "{op}");
+                let m = ms
+                    .iter()
+                    .find(|m| m.op == op)
+                    .unwrap_or_else(|| panic!("{op} missing"));
+                assert!(m.median_ms > 0.0, "{op}: {m:?}");
+            }
+        }
+
+        /// ck10 (D-JQD5X, D-PACK3): the four check ops are reported under their exact names, with no
+        /// ceiling and no baseline entry, and the queue's fixture builder makes the intended state:
+        /// 1,000 durable requests, 500 answered, one eligible independent request for a reviewer.
+        /// The test asserts counts, never a duration.
+        #[test]
+        fn ck10_perf_registry_reports_four_check_ops() {
+            assert_eq!(
+                CK10_OPS,
+                [
+                    "check_rules_change",
+                    "check_rules_propose",
+                    "check_request_case",
+                    "check_queue"
+                ]
+            );
+            let baseline: serde_json::Value =
+                serde_json::from_str(include_str!("../qa-baseline.json"))
+                    .expect("the baseline parses");
+            for op in CK10_OPS {
+                assert_eq!(spec_ceiling_ms(op), None, "{op} has a ceiling");
+                let target = spec_target(op).unwrap_or_else(|| panic!("{op} has no target"));
+                assert!(target.starts_with("no spec target: "), "{target}");
+                assert!(target.ends_with("(reported; no ceiling)"), "{target}");
+                for class in baseline["classes"].as_object().expect("classes").values() {
+                    assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
+                }
+                // with no baseline entry, a recorded run of it passes
+                let rec = compare(None, &[m(op, 1.0)], Mode::Record);
+                assert_eq!((rec[0].status, rec[0].pass), (Status::Recorded, true));
+            }
+            // the normal gate: compared against each checked-in class baseline, the four ops are
+            // reported and pass, while an unbaselined op and a regressed baselined op still fail
+            let classes: BTreeMap<String, Baseline> =
+                serde_json::from_value(baseline["classes"].clone()).expect("the classes parse");
+            assert!(!classes.is_empty());
+            for (class, base) in &classes {
+                let measured: Vec<Measure> = CK10_OPS.iter().map(|op| m(op, 1.0)).collect();
+                for v in compare(Some(base), &measured, Mode::Compare) {
+                    assert_eq!(
+                        (v.status, v.pass, v.baseline_ms),
+                        (Status::Recorded, true, None),
+                        "{class}: {}",
+                        v.op
+                    );
+                }
+                let unbaselined = compare(Some(base), &[m("ck10_not_an_op", 1.0)], Mode::Compare);
+                assert_eq!(
+                    (unbaselined[0].status, unbaselined[0].pass),
+                    (Status::Unbaselined, false),
+                    "{class}"
+                );
+                let (op, old) = base.ops.iter().next().expect("the class has ops");
+                let worse = compare(
+                    Some(base),
+                    &[m(op, old.median_ms * 10.0 + 100.0)],
+                    Mode::Compare,
+                );
+                assert!(!worse[0].pass, "{class}: {op} {:?}", worse[0].status);
+            }
+            // the queue's fixture
+            rdy_model::seed_ids_for_tests(0x636b_3130);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (_proj, r, fx) = coord_project(dir.path(), "check-queue");
+            let (engine, reviewer, queue) = check_queue_fixture(r, &fx.section);
+            rdy_model::unseed_ids_for_tests();
+            assert_eq!(
+                (queue.requests, queue.answered, queue.eligible),
+                (CHECK_QUEUE_REQUESTS, CHECK_QUEUE_ANSWERED, 1),
+                "{queue:?}"
+            );
+            assert_eq!((CHECK_QUEUE_REQUESTS, CHECK_QUEUE_ANSWERED), (1_000, 500));
+            // the leases were released: the eligible request is claimable again, and only it
+            assert!(claim_next(&engine, &reviewer, 3).is_some());
+            assert!(claim_next(&engine, &reviewer, 3).is_none());
+            // the rule project's pack holds the 16 rules and parses
+            let pack = check_pack();
+            assert_eq!(pack.matches("\n  - name: rule-").count(), CHECK_RULES);
+            assert_eq!(CHECK_RULES, 16);
+            let (d, r) = crate::fixtures::project();
+            drop(r);
+            crate::packs::use_pack(d.path(), "perf-checks", &pack, "");
+            Rdy::open(d.path()).expect("the pack with its rules loads");
+        }
     }
 }

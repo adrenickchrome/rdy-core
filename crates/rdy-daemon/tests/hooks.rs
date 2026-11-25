@@ -130,6 +130,9 @@ impl World {
         d
     }
 
+    /// The `hook` op as `role`, with a 60 s deadline in place of the 2 s one of a real hook run:
+    /// these checks start Git, and Git took more than 2 s on a loaded Windows gate machine. The
+    /// tests of the deadline itself pass their own run context.
     fn run_as(&self, role: Role, args: Value) -> Result<Value, RdyError> {
         let s = Session::human("human:t".into(), role).unwrap();
         let cwd = self.elsewhere();
@@ -140,7 +143,8 @@ impl World {
             cwd: &cwd,
             agent: &rdy_engine::signing_crypto::UnavailableAgent,
         };
-        dispatch(&cx, "hook", args)
+        let ctx = RunContext::new().with_deadline(Instant::now() + Duration::from_secs(60));
+        dispatch_with(&cx, "hook", args, &ctx)
     }
 
     fn run(&self, args: Value) -> Value {
@@ -736,7 +740,11 @@ impl Handler for Held {
                     count.clone(),
                 )
             }
-            None => run.clone(),
+            // an unheld run checks with Git: 60 s in place of the daemon's 2 s, which Git passed
+            // on a loaded Windows gate machine; the held runs keep the daemon's own deadline
+            None => run
+                .clone()
+                .with_deadline(Instant::now() + Duration::from_secs(60)),
         };
         let value = self.inner.ctl_run(s, r, agent, &ctx);
         let _ = self.ended.send(Ended {

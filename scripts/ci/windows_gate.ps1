@@ -150,6 +150,16 @@ $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-
     '-NodeDir', (Quote-Arg $node), '-GitDir', (Quote-Arg $git))
 # The account starts with a fresh environment: pass the hosted-runner mark on explicitly.
 if ($env:RDY_QA_HOSTED_CI -eq '1') { $arguments += '-HostedCi' }
+# The gate's tier, from the workflow: RDY_GATE_MODE `release` (the Windows tier on the gate clock in
+# RDY_GATE_BUDGET_SECS) or `nightly` (the whole suite). Unset: the fast gate as before.
+if ($env:RDY_GATE_MODE) {
+    if ($env:RDY_GATE_MODE -notin @('release', 'nightly')) { throw "RDY_GATE_MODE is not release or nightly" }
+    $arguments += @('-Mode', $env:RDY_GATE_MODE)
+    if ($env:RDY_GATE_MODE -eq 'release') {
+        if ($env:RDY_GATE_BUDGET_SECS -notmatch '^[1-9][0-9]{0,5}$') { throw 'RDY_GATE_BUDGET_SECS is not a number of seconds' }
+        $arguments += @('-BudgetSecs', $env:RDY_GATE_BUDGET_SECS)
+    }
+}
 $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Credential $credential `
     -LoadUserProfile -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err `
     -PassThru

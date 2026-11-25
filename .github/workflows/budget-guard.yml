@@ -1,0 +1,59 @@
+# The budget guard: a push that changes the release gate budget, the gate's clock or the workflows that
+# enforce them opens an issue for the founder with the diff. It blocks nothing. It makes the change
+# impossible to miss: an agent may not change a GitHub setting, so a raise of the budget needs the founder.
+name: budget-guard
+on:
+  push:
+    paths:
+      - release/gate-budget.json
+      - crates/rdy-qa/gate-allowances.json
+      - tests/ci/test_gate_budget.py
+      - scripts/release/gate_budget.py
+      - crates/rdy-qa/src/bin/qa-gate.rs
+      - crates/rdy-qa/src/gate_steps.rs
+      - .github/workflows/gate.yml
+      - .github/workflows/release-candidate.yml
+      - .github/workflows/budget-guard.yml
+permissions: {}
+jobs:
+  guard:
+    name: Gate budget files changed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Open an issue with the diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          PUSHED_REF: ${{ github.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          guarded=(release/gate-budget.json crates/rdy-qa/gate-allowances.json tests/ci/test_gate_budget.py
+            scripts/release/gate_budget.py crates/rdy-qa/src/bin/qa-gate.rs crates/rdy-qa/src/gate_steps.rs
+            .github/workflows/gate.yml .github/workflows/release-candidate.yml .github/workflows/budget-guard.yml)
+          # A new branch has no "before": compare with where it left main.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = 0000000000000000000000000000000000000000 ] \
+              || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            BEFORE=$(git merge-base origin/main "$AFTER")
+          fi
+          git diff "$BEFORE" "$AFTER" -- "${guarded[@]}" > "$RUNNER_TEMP/guard.diff"
+          if [ ! -s "$RUNNER_TEMP/guard.diff" ]; then echo "No guarded file changed."; exit 0; fi
+          {
+            echo "A push to $PUSHED_REF changed the release gate budget or the files that enforce it."
+            echo "Range: $BEFORE..$AFTER. Run: $RUN_URL"
+            echo
+            echo '```diff'
+            head -c 60000 "$RUNNER_TEMP/guard.diff"
+            echo '```'
+          } > "$RUNNER_TEMP/guard.md"
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "Gate budget files changed at ${AFTER:0:12}" \
+            --body-file "$RUNNER_TEMP/guard.md"

@@ -55,7 +55,9 @@ fn df3_a_short_project_keeps_its_socket_in_rdy_run() {
 /// one daemon.
 #[test]
 fn df3_every_spelling_of_a_long_project_path_reaches_one_socket() {
-    let base = short_tempdir();
+    // under `/tmp` itself, whatever the gate's temp root: the test checks the `/private/tmp`
+    // spelling of `/tmp`
+    let base = rdy_qa::daemon::short_tempdir_in(Path::new("/tmp"));
     let project = long_project(base.path());
     let _stop = StopOnDrop(&project);
     let sock = RunDir::of_project(&project).socket();

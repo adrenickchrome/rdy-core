@@ -1801,243 +1801,6 @@ fn tag_and_export(r: &mut Rdy, name: &str) -> Result<(), RdyError> {
     .map(|_| ())
 }
 
-/// The encoded bytes of the change `landing` landed.
-fn landed_change_bytes(r: &Rdy, landing: &Hash) -> usize {
-    let rec = r.store().landing(landing).unwrap();
-    assert_eq!(rec.changes.len(), 1);
-    let ch: Change = r.store().change(&rec.changes[0]).unwrap();
-    postcard::to_allocvec(&ch).unwrap().len()
-}
-
-/// The ops of `n` proposed decisions with `body` that depend on claim a (`$d0`, `$d1`, ...),
-/// each with a claim it decides (`$c0`, ...), so no decision lands as an exception.
-fn applied_decisions(w: &World, tag: &str, n: usize, body: &str) -> Vec<Value> {
-    (0..n)
-        .flat_map(|i| {
-            [
-                json!({"op": "create", "type": "decision", "id": format!("$d{i}"), "parent": w.s, "body": body,
-                    "fields": {"statement": format!("Rule {tag}{i} holds."), "status": "proposed", "reversibility": "two_way"},
-                    "links": {"depends_on": [{"target": w.a}]}}),
-                json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": w.s,
-                    "body": format!("Rule {tag}{i} applies."), "links": {"decided_by": [{"target": format!("$d{i}")}]}}),
-            ]
-        })
-        .collect()
-}
-
-/// D-CQMA4, FW-UP1a: one card answer is one change in one landing. `They still hold` on a card
-/// of 9002 members with a 2000-character note would write a change past one record, so it is
-/// refused before anything is written: no view, change, landing or ANSWER, the card and its hash
-/// stand, and the history still exports. Once the person re-affirms some members with the write
-/// op, the same answer lands a change just under the bound, and its tag exports.
-#[test]
-fn cp16_oversized_card_answer_refuses_before_append() {
-    let (_d, mut r) = project();
-    let w = world(&mut r);
-    let n = 9002;
-    write(&mut r, "many", json!(applied_decisions(&w, "", n, ""))).unwrap();
-    land(&mut r, "many").unwrap();
-    change(&mut r, "x", &w.a, "A holds 60 days.");
-    let c = the_card(&r, &w.a);
-    let all = members(&c);
-    assert_eq!(all.len(), n);
-    tag_and_export(&mut r, "v1.0.0").unwrap();
-
-    // the reviewer's case: refused, nothing written
-    let note = "r".repeat(2000);
-    let end = log_end(&r);
-    let e = answer(&mut r, &c.r#ref, "o1", Some(&note), Some(&c.card_hash)).unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (
-            E_LIMIT,
-            "re-affirmation change exceeds 16777216 record bytes",
-            "Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again."
-        )
-    );
-    assert_eq!(log_end(&r), end, "nothing is written");
-    assert!(internal_views(&r).is_empty());
-    assert!(r.read().reader().answer_of(&c.r#ref).unwrap().is_none());
-    assert_eq!(the_card(&r, &w.a).card_hash, c.card_hash, "the card stands");
-    tag_and_export(&mut r, "v1.1.0").unwrap();
-
-    // the person re-affirms 1702 members with the write op; the card keeps the other 7300
-    let ops: Vec<Value> = all[..1702]
-        .iter()
-        .map(|d| json!({"op": "reaffirm", "id": d, "targets": [w.a], "reason": "Checked by hand."}))
-        .collect();
-    write(&mut r, "some", json!(ops)).unwrap();
-    land(&mut r, "some").unwrap();
-    let rest = the_card(&r, &w.a);
-    assert_eq!(members(&rest), all[1702..].to_vec());
-    let v = answer(
-        &mut r,
-        &rest.r#ref,
-        "o1",
-        Some(&note),
-        Some(&rest.card_hash),
-    )
-    .unwrap();
-    assert_eq!(v["act"], "reaffirm", "{v}");
-    let landing: Hash = v["landing"]["landing"].as_str().unwrap().parse().unwrap();
-    let bytes = landed_change_bytes(&r, &landing);
-    assert!(
-        bytes <= rdy_store::bounded::MAX_RECORD_BYTES
-            && bytes > rdy_store::bounded::MAX_RECORD_BYTES / 100 * 98,
-        "just under the bound: {bytes}"
-    );
-    assert!(card(&r, &w.a).is_none());
-    tag_and_export(&mut r, "v2.0.0").unwrap();
-}
-
-/// The bulk reaffirm write op grows with its decisions too: a write whose one change would pass
-/// one record is refused before anything is written, and a smaller group lands.
-#[test]
-fn cp16_oversized_reaffirm_write_refuses_before_append() {
-    let (_d, mut r) = project();
-    let w = world(&mut r);
-    // 168 decisions of 110000 bytes each, landed 42 at a time so no change of the fixture passes
-    // one record
-    let text = "t".repeat(110_000);
-    let mut ids = vec![];
-    for g in 0..4 {
-        let view = format!("big{g}");
-        let made = write(
-            &mut r,
-            &view,
-            json!(applied_decisions(&w, &format!("{g}-"), 42, &text)),
-        )
-        .unwrap();
-        ids.extend(
-            made.created
-                .into_iter()
-                .filter(|(k, _)| k.starts_with("$d"))
-                .map(|(_, v)| v),
-        );
-        land(&mut r, &view).unwrap();
-    }
-    ids.sort();
-    change(&mut r, "x", &w.a, "A holds 60 days.");
-    let end = log_end(&r);
-    let e = write(
-        &mut r,
-        "all",
-        json!([{"op": "reaffirm", "because": w.a, "reason": "They all still hold."}]),
-    )
-    .unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (
-            E_LIMIT,
-            "re-affirmation change exceeds 16777216 record bytes",
-            "Re-affirm these decisions in smaller groups, one write for each group."
-        )
-    );
-    assert_eq!(log_end(&r), end, "nothing is written");
-    let ops: Vec<Value> = ids[..84]
-        .iter()
-        .map(|d| json!({"op": "reaffirm", "id": d, "targets": [w.a], "reason": "Still holds."}))
-        .collect();
-    let done = write(&mut r, "half", json!(ops)).unwrap();
-    assert_eq!(done.reaffirmed.len(), 84);
-}
-
-/// The reaffirm ops of `ids`, one each against `target`, the i-th with a reason of `reasons[i]`
-/// characters.
-fn reaffirm_ops(ids: &[String], target: &str, reasons: &[usize]) -> Value {
-    json!(
-        ids.iter()
-            .zip(reasons)
-            .map(|(d, n)| json!({"op": "reaffirm", "id": d, "targets": [target], "reason": "r".repeat(*n)}))
-            .collect::<Vec<_>>()
-    )
-}
-
-/// `base` reason lengths grown by `extra` characters in all, spread over them, each at most
-/// 2000.
-fn grown(base: usize, n: usize, extra: i64) -> Vec<usize> {
-    let room = (2000 - base) as i64;
-    assert!(
-        (0..=room * n as i64).contains(&extra),
-        "the fixture's reasons cannot reach the boundary: {extra} more characters needed"
-    );
-    let (each, rest) = (extra / n as i64, extra % n as i64);
-    (0..n as i64)
-        .map(|i| base + (each + i64::from(i < rest)) as usize)
-        .collect()
-}
-
-/// FW-UP1a, D-EJBPD: the record bound applies to the change the store writes, which holds its
-/// deps. A bulk reaffirm write whose change fits one record without its deps, and passes it
-/// with them, is refused before anything is written, and the history still exports. The same
-/// write a few bytes smaller lands, and its tag exports.
-#[test]
-fn cp16_reaffirm_write_bound_counts_the_change_deps() {
-    let max = rdy_store::bounded::MAX_RECORD_BYTES;
-    let (_d, mut r) = project();
-    let w = world(&mut r);
-    // 16 decisions of 1047000 bytes each, accepted by two landings, so the re-affirmation of
-    // all of them depends on two changes
-    let text = "t".repeat(1_047_000);
-    let mut ids = vec![];
-    for g in 0..2 {
-        let view = format!("big{g}");
-        let made = write(
-            &mut r,
-            &view,
-            json!(applied_decisions(&w, &format!("{g}-"), 8, &text)),
-        )
-        .unwrap();
-        ids.extend(
-            made.created
-                .into_iter()
-                .filter(|(k, _)| k.starts_with("$d"))
-                .map(|(_, v)| v),
-        );
-        land(&mut r, &view).unwrap();
-    }
-    ids.sort();
-    change(&mut r, "x", &w.a, "A holds 60 days.");
-    let n = ids.len();
-
-    // a probe in a view of its own (a name as long as the measured writes' view) measures the
-    // change: its bytes without and with its deps
-    let probe = write(&mut r, "probe", reaffirm_ops(&ids, &w.a, &vec![200; n])).unwrap();
-    let mut ch: Change = r.store().change(&probe.change.parse().unwrap()).unwrap();
-    // a forged record from a read: it no longer has the read's identity
-    ch.read_identity = None;
-    let with = postcard::to_allocvec(&ch).unwrap().len();
-    ch.deps.clear();
-    let without = postcard::to_allocvec(&ch).unwrap().len();
-    let deps = with - without;
-    assert!(deps >= 64, "the change has deps: {deps} bytes");
-
-    // without its deps the change is `deps / 2` bytes under the bound; with them, over it
-    let over = grown(200, n, (max - deps / 2) as i64 - without as i64);
-    tag_and_export(&mut r, "v1.0.0").unwrap();
-    let end = log_end(&r);
-    let e = write(&mut r, "whole", reaffirm_ops(&ids, &w.a, &over)).unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (
-            E_LIMIT,
-            "re-affirmation change exceeds 16777216 record bytes",
-            "Re-affirm these decisions in smaller groups, one write for each group."
-        )
-    );
-    assert_eq!(log_end(&r), end, "nothing is written");
-    tag_and_export(&mut r, "v1.1.0").unwrap();
-
-    // `deps` bytes fewer: with its deps the change is `deps / 2` bytes under the bound
-    let fit = grown(200, n, (max - deps - deps / 2) as i64 - without as i64);
-    let done = write(&mut r, "whole", reaffirm_ops(&ids, &w.a, &fit)).unwrap();
-    assert_eq!(done.reaffirmed.len(), n);
-    let ch: Change = r.store().change(&done.change.parse().unwrap()).unwrap();
-    assert_eq!(postcard::to_allocvec(&ch).unwrap().len(), max - deps / 2);
-    land(&mut r, "whole").unwrap();
-    tag_and_export(&mut r, "v2.0.0").unwrap();
-}
-
 /// `n` claims under `parent` (`$k0`, ...) with bodies of `body` bytes and `extra` bytes more in
 /// all, spread over them. Each body stays within one record's text bound, so only the change's
 /// size is measured.
@@ -2102,76 +1865,319 @@ fn cp16_oversized_write_refuses_before_append() {
     tag_and_export(&mut r, "v2.0.0").unwrap();
 }
 
-/// The open proposals, as their refs.
-fn open_refs(r: &Rdy) -> Vec<String> {
-    r.read()
-        .open_proposals()
-        .unwrap()
-        .into_iter()
-        .map(|(p, _)| p.to_string())
-        .collect()
-}
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
 
-/// FW-UP1a (D-69AY3): a landing's acceptance change holds every decision it accepts, so it can
-/// pass one record although each write of the view fits one. Such a landing is refused before
-/// anything is written: the proposal stays open and the history still exports. A landing whose
-/// acceptance change is just under the bound lands, and its tag exports.
-#[test]
-fn cp16_oversized_acceptance_change_refuses_before_append() {
-    let max = rdy_store::bounded::MAX_RECORD_BYTES;
-    let (_d, mut r) = project();
-    let w = world(&mut r);
-    // 18 proposed decisions of 1000000 bytes, written 6 at a time in one view
-    let text = "t".repeat(1_000_000);
-    for g in 0..3 {
-        write(
+    /// The ops of `n` proposed decisions with `body` that depend on claim a (`$d0`, `$d1`, ...),
+    /// each with a claim it decides (`$c0`, ...), so no decision lands as an exception.
+    fn applied_decisions(w: &World, tag: &str, n: usize, body: &str) -> Vec<Value> {
+        (0..n)
+            .flat_map(|i| {
+                [
+                    json!({"op": "create", "type": "decision", "id": format!("$d{i}"), "parent": w.s, "body": body,
+                        "fields": {"statement": format!("Rule {tag}{i} holds."), "status": "proposed", "reversibility": "two_way"},
+                        "links": {"depends_on": [{"target": w.a}]}}),
+                    json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": w.s,
+                        "body": format!("Rule {tag}{i} applies."), "links": {"decided_by": [{"target": format!("$d{i}")}]}}),
+                ]
+            })
+            .collect()
+    }
+
+    /// The reaffirm ops of `ids`, one each against `target`, the i-th with a reason of `reasons[i]`
+    /// characters.
+    fn reaffirm_ops(ids: &[String], target: &str, reasons: &[usize]) -> Value {
+        json!(
+            ids.iter()
+                .zip(reasons)
+                .map(|(d, n)| json!({"op": "reaffirm", "id": d, "targets": [target], "reason": "r".repeat(*n)}))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    /// `base` reason lengths grown by `extra` characters in all, spread over them, each at most
+    /// 2000.
+    fn grown(base: usize, n: usize, extra: i64) -> Vec<usize> {
+        let room = (2000 - base) as i64;
+        assert!(
+            (0..=room * n as i64).contains(&extra),
+            "the fixture's reasons cannot reach the boundary: {extra} more characters needed"
+        );
+        let (each, rest) = (extra / n as i64, extra % n as i64);
+        (0..n as i64)
+            .map(|i| base + (each + i64::from(i < rest)) as usize)
+            .collect()
+    }
+
+    /// The open proposals, as their refs.
+    fn open_refs(r: &Rdy) -> Vec<String> {
+        r.read()
+            .open_proposals()
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p.to_string())
+            .collect()
+    }
+
+    /// D-CQMA4, FW-UP1a: one card answer is one change in one landing. `They still hold` on a card
+    /// of 9002 members with a 2000-character note would write a change past one record, so it is
+    /// refused before anything is written: no view, change, landing or ANSWER, the card and its hash
+    /// stand, and the history still exports. Once the person re-affirms some members with the write
+    /// op, the same answer lands a change just under the bound, and its tag exports.
+    #[test]
+    fn cp16_oversized_card_answer_refuses_before_append() {
+        let (_d, mut r) = project();
+        let w = world(&mut r);
+        let n = 9002;
+        write(&mut r, "many", json!(applied_decisions(&w, "", n, ""))).unwrap();
+        land(&mut r, "many").unwrap();
+        change(&mut r, "x", &w.a, "A holds 60 days.");
+        let c = the_card(&r, &w.a);
+        let all = members(&c);
+        assert_eq!(all.len(), n);
+        tag_and_export(&mut r, "v1.0.0").unwrap();
+
+        // the reviewer's case: refused, nothing written
+        let note = "r".repeat(2000);
+        let end = log_end(&r);
+        let e = answer(&mut r, &c.r#ref, "o1", Some(&note), Some(&c.card_hash)).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_LIMIT,
+                "re-affirmation change exceeds 16777216 record bytes",
+                "Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again."
+            )
+        );
+        assert_eq!(log_end(&r), end, "nothing is written");
+        assert!(internal_views(&r).is_empty());
+        assert!(r.read().reader().answer_of(&c.r#ref).unwrap().is_none());
+        assert_eq!(the_card(&r, &w.a).card_hash, c.card_hash, "the card stands");
+        tag_and_export(&mut r, "v1.1.0").unwrap();
+
+        // the person re-affirms 1702 members with the write op; the card keeps the other 7300
+        let ops: Vec<Value> = all[..1702]
+            .iter()
+            .map(|d| json!({"op": "reaffirm", "id": d, "targets": [w.a], "reason": "Checked by hand."}))
+            .collect();
+        write(&mut r, "some", json!(ops)).unwrap();
+        land(&mut r, "some").unwrap();
+        let rest = the_card(&r, &w.a);
+        assert_eq!(members(&rest), all[1702..].to_vec());
+        let v = answer(
             &mut r,
-            "over",
-            json!(applied_decisions(&w, &format!("o{g}-"), 6, &text)),
+            &rest.r#ref,
+            "o1",
+            Some(&note),
+            Some(&rest.card_hash),
         )
         .unwrap();
+        assert_eq!(v["act"], "reaffirm", "{v}");
+        let landing: Hash = v["landing"]["landing"].as_str().unwrap().parse().unwrap();
+        let bytes = landed_change_bytes(&r, &landing);
+        assert!(
+            bytes <= rdy_store::bounded::MAX_RECORD_BYTES
+                && bytes > rdy_store::bounded::MAX_RECORD_BYTES / 100 * 98,
+            "just under the bound: {bytes}"
+        );
+        assert!(card(&r, &w.a).is_none());
+        tag_and_export(&mut r, "v2.0.0").unwrap();
     }
-    let summary = rdy_qa::intake::summary_for(&r, "over");
-    let p = r.propose(&writer(), "over", "over", summary).unwrap();
-    rdy_qa::intake::confirm_before_landing(&mut r, &approver(), &p);
-    tag_and_export(&mut r, "v1.0.0").unwrap();
-    let open = open_refs(&r);
-    let end = log_end(&r);
-    let e = r.land(&approver(), &p.id).unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (
-            E_LIMIT,
-            "acceptance change exceeds 16777216 record bytes",
-            "Land these decisions in smaller groups: propose each group from a view of its own, then land it."
-        )
-    );
-    assert_eq!(log_end(&r), end, "nothing is written");
-    assert_eq!(open_refs(&r), open, "the proposal stays open");
-    tag_and_export(&mut r, "v1.1.0").unwrap();
 
-    // 16 decisions of 1040000 bytes, written 8 at a time: the acceptance change fits
-    let text = "t".repeat(1_040_000);
-    for g in 0..2 {
-        write(
-            &mut r,
-            "under",
-            json!(applied_decisions(&w, &format!("u{g}-"), 8, &text)),
-        )
-        .unwrap();
+    /// The encoded bytes of the change `landing` landed.
+    fn landed_change_bytes(r: &Rdy, landing: &Hash) -> usize {
+        let rec = r.store().landing(landing).unwrap();
+        assert_eq!(rec.changes.len(), 1);
+        let ch: Change = r.store().change(&rec.changes[0]).unwrap();
+        postcard::to_allocvec(&ch).unwrap().len()
     }
-    let landing: Hash = land(&mut r, "under").unwrap().parse().unwrap();
-    let rec = r.store().landing(&landing).unwrap();
-    let accept: Change = r.store().change(rec.changes.last().unwrap()).unwrap();
-    assert!(
-        accept.message.starts_with("accept decisions"),
-        "{}",
-        accept.message
-    );
-    let bytes = postcard::to_allocvec(&accept).unwrap().len();
-    assert!(
-        bytes <= max && bytes > max / 100 * 98,
-        "just under the bound: {bytes}"
-    );
-    tag_and_export(&mut r, "v2.0.0").unwrap();
+
+    /// FW-UP1a, D-EJBPD: the record bound applies to the change the store writes, which holds its
+    /// deps. A bulk reaffirm write whose change fits one record without its deps, and passes it
+    /// with them, is refused before anything is written, and the history still exports. The same
+    /// write a few bytes smaller lands, and its tag exports.
+    #[test]
+    fn cp16_reaffirm_write_bound_counts_the_change_deps() {
+        let max = rdy_store::bounded::MAX_RECORD_BYTES;
+        let (_d, mut r) = project();
+        let w = world(&mut r);
+        // 16 decisions of 1047000 bytes each, accepted by two landings, so the re-affirmation of
+        // all of them depends on two changes
+        let text = "t".repeat(1_047_000);
+        let mut ids = vec![];
+        for g in 0..2 {
+            let view = format!("big{g}");
+            let made = write(
+                &mut r,
+                &view,
+                json!(applied_decisions(&w, &format!("{g}-"), 8, &text)),
+            )
+            .unwrap();
+            ids.extend(
+                made.created
+                    .into_iter()
+                    .filter(|(k, _)| k.starts_with("$d"))
+                    .map(|(_, v)| v),
+            );
+            land(&mut r, &view).unwrap();
+        }
+        ids.sort();
+        change(&mut r, "x", &w.a, "A holds 60 days.");
+        let n = ids.len();
+
+        // a probe in a view of its own (a name as long as the measured writes' view) measures the
+        // change: its bytes without and with its deps
+        let probe = write(&mut r, "probe", reaffirm_ops(&ids, &w.a, &vec![200; n])).unwrap();
+        let mut ch: Change = r.store().change(&probe.change.parse().unwrap()).unwrap();
+        // a forged record from a read: it no longer has the read's identity
+        ch.read_identity = None;
+        let with = postcard::to_allocvec(&ch).unwrap().len();
+        ch.deps.clear();
+        let without = postcard::to_allocvec(&ch).unwrap().len();
+        let deps = with - without;
+        assert!(deps >= 64, "the change has deps: {deps} bytes");
+
+        // without its deps the change is `deps / 2` bytes under the bound; with them, over it
+        let over = grown(200, n, (max - deps / 2) as i64 - without as i64);
+        tag_and_export(&mut r, "v1.0.0").unwrap();
+        let end = log_end(&r);
+        let e = write(&mut r, "whole", reaffirm_ops(&ids, &w.a, &over)).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_LIMIT,
+                "re-affirmation change exceeds 16777216 record bytes",
+                "Re-affirm these decisions in smaller groups, one write for each group."
+            )
+        );
+        assert_eq!(log_end(&r), end, "nothing is written");
+        tag_and_export(&mut r, "v1.1.0").unwrap();
+
+        // `deps` bytes fewer: with its deps the change is `deps / 2` bytes under the bound
+        let fit = grown(200, n, (max - deps - deps / 2) as i64 - without as i64);
+        let done = write(&mut r, "whole", reaffirm_ops(&ids, &w.a, &fit)).unwrap();
+        assert_eq!(done.reaffirmed.len(), n);
+        let ch: Change = r.store().change(&done.change.parse().unwrap()).unwrap();
+        assert_eq!(postcard::to_allocvec(&ch).unwrap().len(), max - deps / 2);
+        land(&mut r, "whole").unwrap();
+        tag_and_export(&mut r, "v2.0.0").unwrap();
+    }
+
+    /// FW-UP1a (D-69AY3): a landing's acceptance change holds every decision it accepts, so it can
+    /// pass one record although each write of the view fits one. Such a landing is refused before
+    /// anything is written: the proposal stays open and the history still exports. A landing whose
+    /// acceptance change is just under the bound lands, and its tag exports.
+    #[test]
+    fn cp16_oversized_acceptance_change_refuses_before_append() {
+        let max = rdy_store::bounded::MAX_RECORD_BYTES;
+        let (_d, mut r) = project();
+        let w = world(&mut r);
+        // 18 proposed decisions of 1000000 bytes, written 6 at a time in one view
+        let text = "t".repeat(1_000_000);
+        for g in 0..3 {
+            write(
+                &mut r,
+                "over",
+                json!(applied_decisions(&w, &format!("o{g}-"), 6, &text)),
+            )
+            .unwrap();
+        }
+        let summary = rdy_qa::intake::summary_for(&r, "over");
+        let p = r.propose(&writer(), "over", "over", summary).unwrap();
+        rdy_qa::intake::confirm_before_landing(&mut r, &approver(), &p);
+        tag_and_export(&mut r, "v1.0.0").unwrap();
+        let open = open_refs(&r);
+        let end = log_end(&r);
+        let e = r.land(&approver(), &p.id).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_LIMIT,
+                "acceptance change exceeds 16777216 record bytes",
+                "Land these decisions in smaller groups: propose each group from a view of its own, then land it."
+            )
+        );
+        assert_eq!(log_end(&r), end, "nothing is written");
+        assert_eq!(open_refs(&r), open, "the proposal stays open");
+        tag_and_export(&mut r, "v1.1.0").unwrap();
+
+        // 16 decisions of 1040000 bytes, written 8 at a time: the acceptance change fits
+        let text = "t".repeat(1_040_000);
+        for g in 0..2 {
+            write(
+                &mut r,
+                "under",
+                json!(applied_decisions(&w, &format!("u{g}-"), 8, &text)),
+            )
+            .unwrap();
+        }
+        let landing: Hash = land(&mut r, "under").unwrap().parse().unwrap();
+        let rec = r.store().landing(&landing).unwrap();
+        let accept: Change = r.store().change(rec.changes.last().unwrap()).unwrap();
+        assert!(
+            accept.message.starts_with("accept decisions"),
+            "{}",
+            accept.message
+        );
+        let bytes = postcard::to_allocvec(&accept).unwrap().len();
+        assert!(
+            bytes <= max && bytes > max / 100 * 98,
+            "just under the bound: {bytes}"
+        );
+        tag_and_export(&mut r, "v2.0.0").unwrap();
+    }
+
+    /// The bulk reaffirm write op grows with its decisions too: a write whose one change would pass
+    /// one record is refused before anything is written, and a smaller group lands.
+    #[test]
+    fn cp16_oversized_reaffirm_write_refuses_before_append() {
+        let (_d, mut r) = project();
+        let w = world(&mut r);
+        // 168 decisions of 110000 bytes each, landed 42 at a time so no change of the fixture passes
+        // one record
+        let text = "t".repeat(110_000);
+        let mut ids = vec![];
+        for g in 0..4 {
+            let view = format!("big{g}");
+            let made = write(
+                &mut r,
+                &view,
+                json!(applied_decisions(&w, &format!("{g}-"), 42, &text)),
+            )
+            .unwrap();
+            ids.extend(
+                made.created
+                    .into_iter()
+                    .filter(|(k, _)| k.starts_with("$d"))
+                    .map(|(_, v)| v),
+            );
+            land(&mut r, &view).unwrap();
+        }
+        ids.sort();
+        change(&mut r, "x", &w.a, "A holds 60 days.");
+        let end = log_end(&r);
+        let e = write(
+            &mut r,
+            "all",
+            json!([{"op": "reaffirm", "because": w.a, "reason": "They all still hold."}]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_LIMIT,
+                "re-affirmation change exceeds 16777216 record bytes",
+                "Re-affirm these decisions in smaller groups, one write for each group."
+            )
+        );
+        assert_eq!(log_end(&r), end, "nothing is written");
+        let ops: Vec<Value> = ids[..84]
+            .iter()
+            .map(|d| json!({"op": "reaffirm", "id": d, "targets": [w.a], "reason": "Still holds."}))
+            .collect();
+        let done = write(&mut r, "half", json!(ops)).unwrap();
+        assert_eq!(done.reaffirmed.len(), 84);
+    }
 }

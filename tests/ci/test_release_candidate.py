@@ -366,7 +366,7 @@ class rsig4_Candidate(Fixture):
         self.assertEqual(str(caught.exception), "duplicate field 'pass'")
 
         jobs = workflow_jobs(WORKFLOW)
-        self.assertEqual(sorted(jobs), ['assemble', 'build-linux', 'build-mac', 'build-windows', 'check', 'sign'])
+        self.assertEqual(sorted(jobs), ['assemble', 'budget', 'build-linux', 'build-mac', 'build-windows', 'check', 'sign'])
         self.assertIn('\npermissions: {}\n', WORKFLOW)
         self.assertNotIn('continue-on-error', WORKFLOW)
         self.assertNotIn('secrets.', WORKFLOW)
@@ -380,85 +380,65 @@ class rsig4_Candidate(Fixture):
         for line in WORKFLOW.splitlines():
             if line.strip().startswith('- uses:') or line.strip().startswith('uses:'):
                 self.assertRegex(line, r'uses: [\w./-]+@[0-9a-f]{40} # v')
+        # The build jobs run no test (plan Task 1): each reads its target's counts from the gate.yml run that
+        # the check job found at S, and builds from git archive within its 12-minute line.
         for name, runner in (('build-mac', 'macos-26'), ('build-linux', 'ubuntu-26.04')):
             job = jobs[name]
             self.assertIn('    runs-on: ' + runner + '\n', job)
-            self.assertIn('    timeout-minutes: 180\n', job)
+            self.assertIn('    timeout-minutes: 20\n', job)
             self.assertIn('    needs: check\n', job)
-            self.assertIn('    permissions:\n      contents: read\n    outputs:', job)
-            self.assertIn('cargo qa --skip-perf --require-all', job)
-            self.assertIn('candidate.py gate-counts', job)
+            self.assertIn('    permissions:\n      actions: read\n      contents: read\n    outputs:', job)
             self.assertIn('candidate.py check-ref', job)
             self.assertIn('fetch-depth: 0', job)
-            self.assertLess(job.index('candidate.py check-ref'), job.index('cargo qa'))
             self.assertIn('candidate.py build', job)
-            self.assertIn('--fast-gate', job)
+            self.assertIn('--fast-gate "$RUNNER_TEMP/gate/fast-gate.json"', job)
             self.assertIn('persist-credentials: false', job)
+            self.assertIn('rustup toolchain install 1.99.0 --profile minimal\n', job)
             target = MAC if name == 'build-mac' else LINUX
             self.assertIn('--target ' + target, job)
             self.assertIn('name: rdy-candidate-' + target + '-a${{ github.run_attempt }}', job)
             self.assertIn('if-no-files-found: error', job)
             self.assertIn('artifact_id: ${{ steps.upload.outputs.artifact-id }}', job)
             self.assertIn('artifact_digest: ${{ steps.upload.outputs.artifact-digest }}', job)
-        # the Windows job builds natively on the hosted Windows runner: the existing gate scripts,
-        # literal Python and Rust setup, PowerShell steps, no POSIX path or interpreter
         windows = jobs['build-windows']
         self.assertIn('    runs-on: windows-2025\n', windows)
-        self.assertIn('    timeout-minutes: 240\n', windows)
+        self.assertIn('    timeout-minutes: 20\n', windows)
         self.assertIn('    needs: check\n', windows)
-        self.assertIn('    permissions:\n      contents: read\n    outputs:', windows)
-        self.assertIn('./scripts/ci/windows_gate.ps1', windows)
-        self.assertIn('RDY_QA_HOSTED_CI: "1"', windows)
+        self.assertIn('    permissions:\n      actions: read\n      contents: read\n    outputs:', windows)
         self.assertIn('actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0', windows)
         self.assertIn('python-version: "3.13"', windows)
-        self.assertIn('rustup toolchain install 1.99.0 --profile minimal', windows)
+        self.assertIn('rustup toolchain install 1.99.0 --profile minimal\n', windows)
         for word in ('/usr/bin/python3', 'python3', 'bash', ' sh ', '/tmp', '$RUNNER_TEMP', '$GITHUB_', '&&'):
             self.assertNotIn(word, windows, word)
         self.assertEqual(windows.count('shell: pwsh'), windows.count('        run:'))
-        self.assertLess(windows.index('candidate.py check-ref'), windows.index('windows_gate.ps1'))
-        self.assertLess(windows.index('windows_gate.ps1'), windows.index('candidate.py gate-counts'))
-        self.assertLess(windows.index('candidate.py gate-counts'), windows.index('candidate.py build'))
         self.assertIn('--target x86_64-pc-windows-msvc', windows)
-        # the CI root is the one the gate chose (run 42959710193 filled C:); no step names a drive
-        self.assertIn('candidate.py gate-counts --report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.json"', windows)
-        self.assertIn("$work = Join-Path $env:RDY_CI_ROOT 'work'", windows)
-        self.assertNotIn('rdy-ci', windows)
-        self.assertIn('--fast-gate', windows)
+        self.assertIn('--fast-gate "$env:RUNNER_TEMP\\gate\\fast-gate.json"', windows)
         self.assertIn('persist-credentials: false', windows)
         self.assertIn('fetch-depth: 0', windows)
         self.assertIn('name: rdy-candidate-x86_64-pc-windows-msvc-a${{ github.run_attempt }}', windows)
         self.assertIn('if-no-files-found: error', windows)
         self.assertIn('artifact_id: ${{ steps.upload.outputs.artifact-id }}', windows)
         self.assertIn('artifact_digest: ${{ steps.upload.outputs.artifact-digest }}', windows)
-        # Candidate run 42959728195: a failed fast gate logged only "FAIL". Each build job prints the
-        # report's failing tests after a failed gate and uploads the report under a qa-report-* name,
-        # which never clashes with candidate.py's build artifact names.
-        for name, target in (('build-mac', MAC), ('build-linux', LINUX), ('build-windows', 'x86_64-pc-windows-msvc')):
+        for name, target in (('build-mac', MAC), ('build-linux', LINUX), ('build-windows', WINDOWS)):
             job = jobs[name]
-            gate = job.index('windows_gate.ps1') if name == 'build-windows' else job.index('cargo qa --skip-perf')
-            counts = job.index('candidate.py gate-counts')
-            between = job[gate:counts]
-            self.assertEqual(between.count('        if: failure()\n'), 2, name)
-            if name == 'build-windows':
-                self.assertIn('run: ./scripts/ci/windows_report.ps1 -Report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.md"', between)
-                self.assertIn('${{ env.RDY_CI_ROOT }}\\work\\target\\qa\\report.*', between)
-                self.assertIn('${{ env.RDY_CI_ROOT }}\\logs\\gate.*', between)
-            else:
-                self.assertIn("sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md", between)
-                self.assertIn('path: target/qa/report.*', between)
-            self.assertIn('uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2', between)
-            report = 'qa-report-' + target + '-a${{ github.run_attempt }}'
-            self.assertIn('name: ' + report, between)
-            self.assertNotIn('id: upload', between)
-            for attempt in (1, 2):
-                self.assertNotEqual(report.replace('${{ github.run_attempt }}', str(attempt)),
-                                    CANDIDATE.artifact_name(target, attempt))
-                self.assertFalse(report.startswith(CANDIDATE.candidate_artifact_name(attempt)[:-2]))
-            # the build artifact and its outputs are unchanged
+            # No test, gate, lint or qa report step is left in a build job.
+            for word in ('cargo qa', 'windows_gate', 'windows_report', 'gate-counts', 'clippy', 'rustfmt',
+                         'setup-node', 'qa-report', 'Test parser', 'diff --exit-code', 'if: failure()'):
+                self.assertNotIn(word, job, (name, word))
+            # The counts come from the gate run the check job found, by name, with a digest check.
+            download = job.index('uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2')
+            step = job[download:job.index('      - name: Build from git archive', download)]
+            self.assertIn('name: fast-gate-' + target + '\n', step)
+            self.assertIn('run-id: ${{ needs.check.outputs.gate_run_id }}\n', step)
+            self.assertIn('github-token: ${{ github.token }}\n', step)
+            self.assertIn('path: ${{ runner.temp }}/gate\n', step)
+            self.assertIn('digest-mismatch: error\n', step)
+            self.assertLess(job.index('candidate.py check-ref'), download)
+            self.assertLess(download, job.index('candidate.py build'))
             self.assertEqual(job.count('id: upload'), 1)
-            self.assertLess(job.index('name: ' + report), job.index('id: upload'))
         assemble = jobs['assemble']
         self.assertIn('    needs: [check, build-mac, build-windows, build-linux]\n', assemble)
+        self.assertIn('    timeout-minutes: 1\n', assemble)
         self.assertIn('    permissions:\n      contents: read\n', assemble)
         self.assertEqual(assemble.count('skip-decompress: true'), 3)
         self.assertEqual(assemble.count('digest-mismatch: error'), 3)
@@ -469,8 +449,15 @@ class rsig4_Candidate(Fixture):
         self.assertIn('--source "$GITHUB_WORKSPACE"', assemble)
         self.assertIn('--input "x86_64-pc-windows-msvc=', assemble)
         self.assertIn('name: rdy-candidate-a${{ github.run_attempt }}', assemble)
-        self.assertIn('    permissions:\n      contents: read\n', jobs['check'])
-        self.assertIn('candidate.py check-ref', jobs['check'])
+        check = jobs['check']
+        self.assertIn('    timeout-minutes: 1\n', check)
+        self.assertIn('    permissions:\n      actions: read\n      contents: read\n', check)
+        self.assertIn('candidate.py check-ref', check)
+        self.assertIn('gate_run_id: ${{ steps.gate.outputs.gate_run_id }}\n', check)
+        self.assertIn('scripts/release/gate_budget.py gate-run --version "$VERSION" --commit "$COMMIT"', check)
+        self.assertIn('GITHUB_TOKEN: ${{ github.token }}\n', check)
+        self.assertLess(check.index('candidate.py check-ref'), check.index('gate_budget.py gate-run'))
+        self.assertIn('    timeout-minutes: 1\n', jobs['sign'])
         self.assertIn('fetch-depth: 0', jobs['check'])
         self.assertIn('group: rdy-core-candidate-${{ github.ref }}\n  cancel-in-progress: false\n', WORKFLOW)
         self.assertNotIn('rdy-core-release-authority', WORKFLOW)
@@ -575,13 +562,15 @@ class agi6_Candidate(Fixture):
         bin_dir.mkdir()
         guide_tests.write_executable(bin_dir / 'cargo', (
             '#!/usr/bin/env python3\n'
-            'import os, shutil, sys\n'
+            'import json, os, shutil, sys\n'
+            'open(%r, "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'
             'if sys.argv[1] == "build":\n'
             '    release = os.path.join(os.environ["CARGO_TARGET_DIR"], "release")\n'
             '    os.makedirs(release)\n'
             '    shutil.copy(%r, os.path.join(release, "rdy%s"))\n'
             '    for tool in ("qa-release-sources%s", "qa-release-package%s"):\n'
-            '        shutil.copy(os.path.join(%r, tool), release)\n' % (str(tools / 'built-rdy'), exe, exe, exe, str(tools))))
+            '        shutil.copy(os.path.join(%r, tool), release)\n'
+            % (str(self.tmp / 'cargo-calls.jsonl'), str(tools / 'built-rdy'), exe, exe, exe, str(tools))))
         gate = self.tmp / 'fast-gate.json'
         gate.write_bytes(plain_json(FAST_GATE))
         return bin_dir, gate, log
@@ -769,6 +758,20 @@ class agi6_Candidate(Fixture):
         self.assertEqual(git(repo, 'show', commit + ':release/agent-guide.sha256'), sha(raw))
         self.assertEqual(receipt['archive']['sha256'], sha((self.tmp / 'out' / name).read_bytes()))
         self.assertEqual(sorted(p.name for p in (self.tmp / 'out').iterdir()), sorted([name, 'build-' + LINUX + '.json']))
+
+    def test_relc2_the_build_compiles_rdy_and_the_two_release_tools_only(self):
+        # rdy-qa has nine binaries; the candidate build runs two of them, so it builds only those.
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        repo, commit = self.source_commit(raw)
+        bin_dir, gate, _ = self.toolchain(reply, reply)
+        self.build(repo, commit, bin_dir, gate)
+        calls = [json.loads(line) for line in (self.tmp / 'cargo-calls.jsonl').read_text().splitlines()]
+        self.assertEqual(calls, [
+            ['fetch', '--locked'],
+            ['build', '--release', '--locked', '-p', 'rdy-cli', '-p', 'rdy-qa', '--bin', 'rdy',
+             '--bin', 'qa-release-sources', '--bin', 'qa-release-package'],
+        ])
 
     def test_agi6_the_guide_at_the_commit_must_stand_on_its_own(self):
         raw = guide_tests.valid_bundle(V)

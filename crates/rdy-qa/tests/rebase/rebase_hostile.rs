@@ -2,7 +2,7 @@
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
 use rdy_qa::intake::TEST_SUMMARY;
-use rdy_qa::invariants::{check, check_views};
+use rdy_qa::invariants::check;
 use rdy_store::segment::CrashPoint;
 use rdy_store::view::{Owner, ViewOpKind};
 use serde_json::json;
@@ -116,114 +116,6 @@ fn vhost1_hostile_view_names() {
             assert_eq!(*got, write, "{label}: {op} disagrees with write");
         }
     }
-}
-
-#[test]
-fn vhost1_a_5000_change_include_and_a_50_view_landing_stay_correct() {
-    let (n, views, hot) = if deep() {
-        (20_000, 200, 40)
-    } else {
-        (5_000, 50, 10)
-    };
-    // one view with n one-claim changes, included into another in one call
-    {
-        let (_d, mut r) = project();
-        let (_doc, section, _c) = seed_doc(&mut r, "seed");
-        land(&mut r, "seed").unwrap();
-        let a = as_agent("agent:a", "r1");
-        let mut changes = vec![];
-        for i in 0..n {
-            changes.push(
-                write_as(&mut r, &a, "src", claim(&section, &format!("c{i}")))
-                    .unwrap()
-                    .change,
-            );
-        }
-        let res = r.view_include(&a, "dst", &changes).unwrap();
-        assert_eq!(res.added.len(), n, "the include added every change");
-        assert_eq!(r.read().included("dst").len(), n);
-        assert!(check_views(&r).is_ok(), "{:?}", check_views(&r));
-        check(&r, &Scope::Canon).unwrap();
-        check(&r, &Scope::View("dst".into())).unwrap();
-    }
-    // `views` unrelated views, `hot` views on the landed claim, and the proposer
-    let (_d, mut r) = project();
-    let mut ops = vec![
-        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "seed", "title": "Seed", "doc_type": "page"}}),
-        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
-    ];
-    for i in 0..=views {
-        ops.push(json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("claim {i}")}));
-    }
-    let seeded = write(&mut r, "seed", serde_json::Value::Array(ops)).unwrap();
-    land(&mut r, "seed").unwrap();
-    let canon = Scope::Canon;
-    let claim_id = |i: usize| seeded.created[&format!("$c{i}")].clone();
-    for i in 0..views {
-        let s = as_agent(&format!("agent:v{i}"), "r");
-        let c = claim_id(i);
-        let base = version_of(&r, &canon, &c);
-        write_as(
-            &mut r,
-            &s,
-            &format!("v{i}"),
-            update(&c, &base, &format!("v{i} edit")),
-        )
-        .unwrap();
-    }
-    let hot_claim = claim_id(views);
-    let hot_base = version_of(&r, &canon, &hot_claim);
-    for j in 0..hot {
-        let s = as_agent(&format!("agent:h{j}"), "r");
-        write_as(
-            &mut r,
-            &s,
-            &format!("h{j}"),
-            update(&hot_claim, &hot_base, &format!("h{j} edit")),
-        )
-        .unwrap();
-    }
-    let p = as_agent("agent:p", "r");
-    write_as(
-        &mut r,
-        &p,
-        "p",
-        update(&hot_claim, &hot_base, "the landing's edit"),
-    )
-    .unwrap();
-    let prop = r.propose(&p, "p", "land", Some(TEST_SUMMARY)).unwrap();
-    let info = r.land_report(&approver(), &prop.r#ref).unwrap();
-    assert_eq!(
-        info.rebased.len(),
-        views + hot + 1,
-        "the views plus the proposer"
-    );
-    let conflicted: Vec<&RebasedInfo> = info.rebased.iter().filter(|x| x.conflicts > 0).collect();
-    assert_eq!(conflicted.len(), hot, "exactly the hot views conflict");
-    assert!(
-        conflicted
-            .iter()
-            .all(|x| x.conflicts == 1 && x.view.starts_with('h'))
-    );
-    for j in 0..hot {
-        assert_eq!(
-            r.read()
-                .conflicts(&Scope::View(format!("h{j}")))
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-    for i in 0..views {
-        assert!(
-            r.read()
-                .conflicts(&Scope::View(format!("v{i}")))
-                .unwrap()
-                .is_empty()
-        );
-    }
-    assert!(check_views(&r).is_ok(), "{:?}", check_views(&r));
-    check(&r, &Scope::Canon).unwrap();
 }
 
 /// View names that mean something to a file system or a shell, and names at and past the limit.
@@ -698,5 +590,121 @@ fn vhost1_a_huge_bad_id_comes_back_clipped_in_the_error() {
             e.message.len(),
             e.message.chars().take(200).collect::<String>()
         );
+    }
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+    use rdy_qa::invariants::check_views;
+
+    #[test]
+    fn vhost1_a_5000_change_include_and_a_50_view_landing_stay_correct() {
+        let (n, views, hot) = if deep() {
+            (20_000, 200, 40)
+        } else {
+            (5_000, 50, 10)
+        };
+        // one view with n one-claim changes, included into another in one call
+        {
+            let (_d, mut r) = project();
+            let (_doc, section, _c) = seed_doc(&mut r, "seed");
+            land(&mut r, "seed").unwrap();
+            let a = as_agent("agent:a", "r1");
+            let mut changes = vec![];
+            for i in 0..n {
+                changes.push(
+                    write_as(&mut r, &a, "src", claim(&section, &format!("c{i}")))
+                        .unwrap()
+                        .change,
+                );
+            }
+            let res = r.view_include(&a, "dst", &changes).unwrap();
+            assert_eq!(res.added.len(), n, "the include added every change");
+            assert_eq!(r.read().included("dst").len(), n);
+            assert!(check_views(&r).is_ok(), "{:?}", check_views(&r));
+            check(&r, &Scope::Canon).unwrap();
+            check(&r, &Scope::View("dst".into())).unwrap();
+        }
+        // `views` unrelated views, `hot` views on the landed claim, and the proposer
+        let (_d, mut r) = project();
+        let mut ops = vec![
+            json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "seed", "title": "Seed", "doc_type": "page"}}),
+            json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
+        ];
+        for i in 0..=views {
+            ops.push(json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("claim {i}")}));
+        }
+        let seeded = write(&mut r, "seed", serde_json::Value::Array(ops)).unwrap();
+        land(&mut r, "seed").unwrap();
+        let canon = Scope::Canon;
+        let claim_id = |i: usize| seeded.created[&format!("$c{i}")].clone();
+        for i in 0..views {
+            let s = as_agent(&format!("agent:v{i}"), "r");
+            let c = claim_id(i);
+            let base = version_of(&r, &canon, &c);
+            write_as(
+                &mut r,
+                &s,
+                &format!("v{i}"),
+                update(&c, &base, &format!("v{i} edit")),
+            )
+            .unwrap();
+        }
+        let hot_claim = claim_id(views);
+        let hot_base = version_of(&r, &canon, &hot_claim);
+        for j in 0..hot {
+            let s = as_agent(&format!("agent:h{j}"), "r");
+            write_as(
+                &mut r,
+                &s,
+                &format!("h{j}"),
+                update(&hot_claim, &hot_base, &format!("h{j} edit")),
+            )
+            .unwrap();
+        }
+        let p = as_agent("agent:p", "r");
+        write_as(
+            &mut r,
+            &p,
+            "p",
+            update(&hot_claim, &hot_base, "the landing's edit"),
+        )
+        .unwrap();
+        let prop = r.propose(&p, "p", "land", Some(TEST_SUMMARY)).unwrap();
+        let info = r.land_report(&approver(), &prop.r#ref).unwrap();
+        assert_eq!(
+            info.rebased.len(),
+            views + hot + 1,
+            "the views plus the proposer"
+        );
+        let conflicted: Vec<&RebasedInfo> =
+            info.rebased.iter().filter(|x| x.conflicts > 0).collect();
+        assert_eq!(conflicted.len(), hot, "exactly the hot views conflict");
+        assert!(
+            conflicted
+                .iter()
+                .all(|x| x.conflicts == 1 && x.view.starts_with('h'))
+        );
+        for j in 0..hot {
+            assert_eq!(
+                r.read()
+                    .conflicts(&Scope::View(format!("h{j}")))
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        for i in 0..views {
+            assert!(
+                r.read()
+                    .conflicts(&Scope::View(format!("v{i}")))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(check_views(&r).is_ok(), "{:?}", check_views(&r));
+        check(&r, &Scope::Canon).unwrap();
     }
 }

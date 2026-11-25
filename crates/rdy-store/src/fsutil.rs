@@ -287,6 +287,26 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// `std::fs::rename(from, to)`, for a `to` whose file is being erased (a removal's replaced
+/// index). On Windows, another process can hold a file it maps, such as a virus scanner that
+/// reads a file once its writer closes it, and while it does, a rename that replaces the file
+/// is refused with `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32) for up to many
+/// seconds, though the file can still be removed. Then `to` is removed and `from` takes the
+/// free name; if the removal fails, the rename's error is returned. A kill in between leaves no
+/// file at `to`. On Unix this is `std::fs::rename`.
+pub fn rename_over_held(from: &Path, to: &Path) -> io::Result<()> {
+    match std::fs::rename(from, to) {
+        Err(e) if cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32)) => {
+            match std::fs::remove_file(to) {
+                Err(r) if r.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            std::fs::rename(from, to)
+        }
+        r => r,
+    }
+}
+
 /// Makes `bytes` the durable content of `path`, as a replacement that is atomic against crashes:
 /// writes `<parent>/.<file name>.tmp`, fsyncs it, renames it over `path` ([`pio::rename_durable`]),
 /// then fsyncs the parent directory (`.` for a bare file name). Records `path`, then the parent,
@@ -602,5 +622,23 @@ mod tests {
         assert_eq!(at, dir.path().join("missing/y.txt"), "the path that failed");
         assert!(!dir.path().join(".x.txt.tmp").exists());
         assert!(!dir.path().join("x.txt").exists());
+    }
+
+    /// A rename into a free name, or over a file nobody holds, is a plain rename.
+    #[test]
+    fn rename_over_held_replaces_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (
+            dir.path().join("index.redb.tmp"),
+            dir.path().join("index.redb"),
+        );
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&to, b"old").unwrap();
+        rename_over_held(&from, &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+        assert!(!from.exists());
+        let e = rename_over_held(&from, &to).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
     }
 }

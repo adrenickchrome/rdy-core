@@ -22,6 +22,9 @@ miniz_oxide.workspace = true
 sha2.workspace = true
 
 [features]
+# Tests of the nightly tier only (`cargo qa --tier nightly`): `mod nightly` in a test file. The
+# release tier builds without them.
+nightly-tests = []
 # Counts the render entry points and the preparations (see `probe`); on for the adapter's and
 # the daemon's tests, off otherwise.
 probe = []

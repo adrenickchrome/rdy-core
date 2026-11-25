@@ -1,5 +1,6 @@
 [alias]
-qa = "run -p rdy-qa --release --bin qa-gate --"
+# the gate profile, so the gate binary shares the gate's one build
+qa = "run -p rdy-qa --profile gate --bin qa-gate --"
 
 # Linux x86_64: build all C code (ring, zstd-sys) for the x86-64 baseline. Some build hosts' C
 # compilers default to x86-64-v3 (AVX2, BMI2, MOVBE), and the code they make dies with SIGILL on an

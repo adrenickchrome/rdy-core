@@ -554,105 +554,6 @@ fn nb7_mcp_and_cli_share_neighbor_rows_and_counts() {
     s.stop();
 }
 
-/// A raw section of `n` claims c-00000.. under doc d-0000M, each with a short body.
-fn section_of(n: usize) -> Vec<Block> {
-    let mut v = vec![
-        doc("d-0000M", "limits"),
-        blk("s-0000M", "section", "d-0000M", "a1", ""),
-    ];
-    for i in 0..n {
-        v.push(blk(&nid("c", i), "claim", "s-0000M", "a1", "x"));
-    }
-    v
-}
-
-fn refused(r: &Rdy, c: &Coverage) -> RdyError {
-    let e = r.read().brief(&work(), c, None).unwrap_err();
-    assert_eq!(e.code, E_LIMIT, "{e}");
-    e
-}
-
-#[test]
-fn nb7_neighbor_limit_returns_no_successful_partial_brief() {
-    // section: a source with 100,001 section neighbors
-    let (_d, mut r) = project();
-    raw_commit(&mut r, "work", section_of(100_002));
-    let e = refused(&r, &cov(&["c-00000"]));
-    assert_eq!(
-        (e.message.as_str(), e.fix.as_str()),
-        (
-            "section neighbors of c-00000 exceed 100000 blocks",
-            "split the parent of c-00000 into smaller sections"
-        )
-    );
-    drop((r, _d));
-
-    // entity: an entity with 100,001 tied content blocks, 1,000 to a section
-    let (_d, mut r) = project();
-    let mut blocks = vec![
-        doc("d-0000E", "tied"),
-        blk("s-0000E", "section", "d-0000E", "a1", ""),
-        entity("en-0000E", "s-0000E", "Gauge"),
-    ];
-    for i in 0..100_001 {
-        let s = nid("sx", i / 1_000);
-        if i % 1_000 == 0 {
-            blocks.push(blk(&s, "section", "d-0000E", "a2", ""));
-        }
-        blocks.push(blk(&nid("c", i), "claim", &s, "a1", "{{en-0000E}}"));
-    }
-    raw_commit(&mut r, "work", blocks);
-    let e = refused(&r, &cov(&["c-00000"]));
-    assert_eq!(
-        (e.message.as_str(), e.fix.as_str()),
-        (
-            "entity en-0000E exceeds 100000 tied content blocks",
-            "split en-0000E into narrower entities"
-        )
-    );
-    drop((r, _d));
-
-    // rows: two sources in two sections, 50,001 section neighbors each
-    let (_d, mut r) = project();
-    let mut blocks = vec![
-        doc("d-0000R", "rows"),
-        blk("s-0000R", "section", "d-0000R", "a1", ""),
-        blk("s-0000S", "section", "d-0000R", "a2", ""),
-    ];
-    for i in 0..50_002 {
-        blocks.push(blk(&nid("c", i), "claim", "s-0000R", "a1", "x"));
-        blocks.push(blk(&nid("k", i), "claim", "s-0000S", "a1", "x"));
-    }
-    raw_commit(&mut r, "work", blocks);
-    let e = refused(&r, &cov(&["c-00000", "k-00000"]));
-    assert_eq!(
-        (e.message.as_str(), e.fix.as_str()),
-        (
-            "neighbor result exceeds 100000 rows",
-            "brief fewer blocks, or split the change into smaller proposals"
-        )
-    );
-    drop((r, _d));
-
-    // visits: every block of a doc whose one section holds 1,000 claims
-    let (_d, mut r) = project();
-    raw_commit(&mut r, "work", section_of(1_000));
-    let e = refused(
-        &r,
-        &Coverage {
-            ids: vec![],
-            path: Some("limits".into()),
-        },
-    );
-    assert_eq!(
-        (e.message.as_str(), e.fix.as_str()),
-        (
-            "neighbor walk exceeds 1000000 visits",
-            "brief fewer blocks, or split the change into smaller proposals"
-        )
-    );
-}
-
 #[test]
 fn nb7_hundred_thousand_block_briefing_pages_local_neighbors() {
     let (_d, mut r) = project();
@@ -776,5 +677,110 @@ fn nbp2_a_briefing_is_cut_exactly_when_its_json_is_over_the_budget() {
             .brief_ids(&work(), &covered, Some(tokens - 1))
             .unwrap();
         assert!(cut.truncated, "{} tokens cut it at {i}", tokens - 1);
+    }
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+
+    #[test]
+    fn nb7_neighbor_limit_returns_no_successful_partial_brief() {
+        // section: a source with 100,001 section neighbors
+        let (_d, mut r) = project();
+        raw_commit(&mut r, "work", section_of(100_002));
+        let e = refused(&r, &cov(&["c-00000"]));
+        assert_eq!(
+            (e.message.as_str(), e.fix.as_str()),
+            (
+                "section neighbors of c-00000 exceed 100000 blocks",
+                "split the parent of c-00000 into smaller sections"
+            )
+        );
+        drop((r, _d));
+
+        // entity: an entity with 100,001 tied content blocks, 1,000 to a section
+        let (_d, mut r) = project();
+        let mut blocks = vec![
+            doc("d-0000E", "tied"),
+            blk("s-0000E", "section", "d-0000E", "a1", ""),
+            entity("en-0000E", "s-0000E", "Gauge"),
+        ];
+        for i in 0..100_001 {
+            let s = nid("sx", i / 1_000);
+            if i % 1_000 == 0 {
+                blocks.push(blk(&s, "section", "d-0000E", "a2", ""));
+            }
+            blocks.push(blk(&nid("c", i), "claim", &s, "a1", "{{en-0000E}}"));
+        }
+        raw_commit(&mut r, "work", blocks);
+        let e = refused(&r, &cov(&["c-00000"]));
+        assert_eq!(
+            (e.message.as_str(), e.fix.as_str()),
+            (
+                "entity en-0000E exceeds 100000 tied content blocks",
+                "split en-0000E into narrower entities"
+            )
+        );
+        drop((r, _d));
+
+        // rows: two sources in two sections, 50,001 section neighbors each
+        let (_d, mut r) = project();
+        let mut blocks = vec![
+            doc("d-0000R", "rows"),
+            blk("s-0000R", "section", "d-0000R", "a1", ""),
+            blk("s-0000S", "section", "d-0000R", "a2", ""),
+        ];
+        for i in 0..50_002 {
+            blocks.push(blk(&nid("c", i), "claim", "s-0000R", "a1", "x"));
+            blocks.push(blk(&nid("k", i), "claim", "s-0000S", "a1", "x"));
+        }
+        raw_commit(&mut r, "work", blocks);
+        let e = refused(&r, &cov(&["c-00000", "k-00000"]));
+        assert_eq!(
+            (e.message.as_str(), e.fix.as_str()),
+            (
+                "neighbor result exceeds 100000 rows",
+                "brief fewer blocks, or split the change into smaller proposals"
+            )
+        );
+        drop((r, _d));
+
+        // visits: every block of a doc whose one section holds 1,000 claims
+        let (_d, mut r) = project();
+        raw_commit(&mut r, "work", section_of(1_000));
+        let e = refused(
+            &r,
+            &Coverage {
+                ids: vec![],
+                path: Some("limits".into()),
+            },
+        );
+        assert_eq!(
+            (e.message.as_str(), e.fix.as_str()),
+            (
+                "neighbor walk exceeds 1000000 visits",
+                "brief fewer blocks, or split the change into smaller proposals"
+            )
+        );
+    }
+
+    /// A raw section of `n` claims c-00000.. under doc d-0000M, each with a short body.
+    fn section_of(n: usize) -> Vec<Block> {
+        let mut v = vec![
+            doc("d-0000M", "limits"),
+            blk("s-0000M", "section", "d-0000M", "a1", ""),
+        ];
+        for i in 0..n {
+            v.push(blk(&nid("c", i), "claim", "s-0000M", "a1", "x"));
+        }
+        v
+    }
+
+    fn refused(r: &Rdy, c: &Coverage) -> RdyError {
+        let e = r.read().brief(&work(), c, None).unwrap_err();
+        assert_eq!(e.code, E_LIMIT, "{e}");
+        e
     }
 }
