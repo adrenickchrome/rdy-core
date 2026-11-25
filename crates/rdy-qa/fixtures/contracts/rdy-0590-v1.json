@@ -260,6 +260,17 @@
                 "summary": "string"
               }
             ],
+            "docs?": [
+              {
+                "blocks": "number",
+                "dependents": "number",
+                "doc": "string",
+                "governs": "number",
+                "suspects": "number",
+                "title": "string",
+                "will_go_stale": "number"
+              }
+            ],
             "governs": [
               {
                 "blocks": [
@@ -294,9 +305,32 @@
                 "doc": "string"
               }
             ],
+            "next?": "string",
+            "omitted?": {
+              "base.blocks?": "number",
+              "neighbors?": "number",
+              "vector_neighbors?": "number"
+            },
             "recorded": "bool",
             "reminder": "string",
             "suspects": [],
+            "truncated?": "bool",
+            "vector_neighbors?": [
+              {
+                "block": "string",
+                "doc": "string",
+                "for": "string",
+                "links": [
+                  "string"
+                ],
+                "score": "number",
+                "summary": "string",
+                "words": [
+                  "string"
+                ]
+              }
+            ],
+            "vector_neighbors_skipped?": "number",
             "will_go_stale": [
               {
                 "block": "string",
@@ -3173,6 +3207,154 @@
             }
           }
         },
+        "search like": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "ignore_case": "bool",
+            "like": "string",
+            "matches": [
+              {
+                "confidence": "string",
+                "coverage": "number",
+                "id": "string",
+                "issues": "number",
+                "lines": [
+                  {
+                    "field": "string",
+                    "line": "number",
+                    "text": "string"
+                  }
+                ],
+                "links": [
+                  "string"
+                ],
+                "path": "string",
+                "score": "number",
+                "type": "string",
+                "words": [
+                  "string"
+                ]
+              }
+            ],
+            "query": "string",
+            "regex": "bool",
+            "total": "number",
+            "totals": {
+              "docs": [
+                {
+                  "hits": "number",
+                  "path": "string"
+                }
+              ],
+              "types": {
+                "claim": "number",
+                "doc": "number",
+                "term": "number"
+              }
+            }
+          }
+        },
+        "search like refused": {
+          "exits": [
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          }
+        },
+        "search like_text": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "ignore_case": "bool",
+            "like_text": "string",
+            "matches": [
+              {
+                "confidence": "string",
+                "coverage": "number",
+                "id": "string",
+                "issues": "number",
+                "lines": [
+                  {
+                    "field": "string",
+                    "line": "number",
+                    "text": "string"
+                  }
+                ],
+                "links": [
+                  "string"
+                ],
+                "path": "string",
+                "score": "number",
+                "type": "string",
+                "words": [
+                  "string"
+                ]
+              }
+            ],
+            "query": "string",
+            "regex": "bool",
+            "total": "number",
+            "totals": {
+              "docs": [
+                {
+                  "hits": "number",
+                  "path": "string"
+                }
+              ],
+              "types": {
+                "claim": "number",
+                "doc": "number",
+                "term": "number"
+              }
+            }
+          }
+        },
+        "search relevance": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "ignore_case": "bool",
+            "matches": [
+              {
+                "confidence": "string",
+                "coverage": "number",
+                "id": "string",
+                "issues": "number",
+                "lines": [
+                  {
+                    "field": "string",
+                    "line": "number",
+                    "text": "string"
+                  }
+                ],
+                "path": "string",
+                "score": "number",
+                "type": "string"
+              }
+            ],
+            "query": "string",
+            "regex": "bool",
+            "total": "number",
+            "totals": {
+              "docs": [
+                {
+                  "hits": "number",
+                  "path": "string"
+                }
+              ],
+              "types": {
+                "claim": "number"
+              }
+            }
+          }
+        },
         "setup": {
           "exits": [
             0
@@ -4617,9 +4799,26 @@
               "index": 1,
               "num_args": "1",
               "positional": true,
-              "required": true,
               "value_names": [
                 "QUERY"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "like",
+              "long": "like",
+              "num_args": "1",
+              "value_names": [
+                "ID"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "like_text",
+              "long": "like-text",
+              "num_args": "1",
+              "value_names": [
+                "TEXT"
               ]
             },
             {
@@ -4863,6 +5062,8 @@
                 "governed_by",
                 "ignore_case",
                 "lifecycle",
+                "like",
+                "like_text",
                 "linked_to",
                 "max_tokens",
                 "mentions",
@@ -22219,6 +22420,17 @@
               "summary": "string"
             }
           ],
+          "docs?": [
+            {
+              "blocks": "number",
+              "dependents": "number",
+              "doc": "string",
+              "governs": "number",
+              "suspects": "number",
+              "title": "string",
+              "will_go_stale": "number"
+            }
+          ],
           "governs": [
             {
               "blocks": [
@@ -22253,8 +22465,31 @@
               "doc": "string"
             }
           ],
+          "next?": "string",
+          "omitted?": {
+            "base.blocks?": "number",
+            "neighbors?": "number",
+            "vector_neighbors?": "number"
+          },
           "reminder": "string",
           "suspects": [],
+          "truncated?": "bool",
+          "vector_neighbors?": [
+            {
+              "block": "string",
+              "doc": "string",
+              "for": "string",
+              "links": [
+                "string"
+              ],
+              "score": "number",
+              "summary": "string",
+              "words": [
+                "string"
+              ]
+            }
+          ],
+          "vector_neighbors_skipped?": "number",
           "will_go_stale": [
             {
               "block": "string",
@@ -22876,6 +23111,18 @@
               "kind": "string",
               "line": "number",
               "path": "string"
+            }
+          ],
+          "vector_neighbors": [
+            {
+              "block": "string",
+              "doc": "string",
+              "for": "string",
+              "links": [],
+              "score": "number",
+              "words": [
+                "string"
+              ]
             }
           ],
           "warning_docs": {
@@ -26104,6 +26351,164 @@
           }
         }
       },
+      "rdy_search like": {
+        "ok": {
+          "ignore_case": "bool",
+          "like": "string",
+          "matches": [
+            {
+              "confidence": "string",
+              "coverage": "number",
+              "id": "string",
+              "issues": "number",
+              "lines": [
+                {
+                  "field": "string",
+                  "line": "number",
+                  "text": "string"
+                }
+              ],
+              "links": [
+                "string"
+              ],
+              "path": "string",
+              "score": "number",
+              "type": "string",
+              "words": [
+                "string"
+              ]
+            }
+          ],
+          "query": "string",
+          "regex": "bool",
+          "total": "number",
+          "totals": {
+            "docs": [
+              {
+                "hits": "number",
+                "path": "string"
+              }
+            ],
+            "types": {
+              "claim": "number",
+              "term": "number"
+            }
+          }
+        }
+      },
+      "rdy_search like refused": {
+        "refusal_codes": [
+          "E_BAD_INPUT",
+          "E_LIMIT",
+          "E_UNKNOWN_BLOCK"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_search like_text": {
+        "ok": {
+          "ignore_case": "bool",
+          "like_text": "string",
+          "matches": [
+            {
+              "confidence": "string",
+              "coverage": "number",
+              "id": "string",
+              "issues": "number",
+              "lines": [
+                {
+                  "field": "string",
+                  "line": "number",
+                  "text": "string"
+                }
+              ],
+              "links": [
+                "string"
+              ],
+              "path": "string",
+              "score": "number",
+              "type": "string",
+              "words": [
+                "string"
+              ]
+            }
+          ],
+          "query": "string",
+          "regex": "bool",
+          "total": "number",
+          "totals": {
+            "docs": [
+              {
+                "hits": "number",
+                "path": "string"
+              }
+            ],
+            "types": {
+              "claim": "number",
+              "term": "number"
+            }
+          }
+        }
+      },
+      "rdy_search refused": {
+        "refusal_codes": [
+          "E_BAD_INPUT"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_search relevance": {
+        "ok": {
+          "ignore_case": "bool",
+          "matches": [
+            {
+              "also": [
+                {
+                  "id": "string",
+                  "path": "string",
+                  "score": "number"
+                }
+              ],
+              "confidence": "string",
+              "coverage": "number",
+              "id": "string",
+              "issues": "number",
+              "lines": [
+                {
+                  "field": "string",
+                  "line": "number",
+                  "text": "string"
+                }
+              ],
+              "path": "string",
+              "score": "number",
+              "type": "string"
+            }
+          ],
+          "query": "string",
+          "regex": "bool",
+          "total": "number",
+          "totals": {
+            "docs": [
+              {
+                "hits": "number",
+                "path": "string"
+              }
+            ],
+            "types": {
+              "claim": "number"
+            }
+          }
+        }
+      },
       "rdy_session": {
         "ok": {
           "areas": [
@@ -26644,7 +27049,18 @@
           },
           "created": {
             "$k?": "string",
-            "$n?": "string"
+            "$n?": "string",
+            "op0?": "string",
+            "op10?": "string",
+            "op1?": "string",
+            "op2?": "string",
+            "op3?": "string",
+            "op4?": "string",
+            "op5?": "string",
+            "op6?": "string",
+            "op7?": "string",
+            "op8?": "string",
+            "op9?": "string"
           },
           "on_change": {
             "checks": [
@@ -26689,6 +27105,21 @@
             ]
           },
           "suggestions": [],
+          "vector_neighbors?": [
+            {
+              "block": "string",
+              "doc": "string",
+              "for": "string",
+              "links": [
+                "string"
+              ],
+              "score": "number",
+              "words": [
+                "string"
+              ]
+            }
+          ],
+          "vector_neighbors_skipped?": "number",
           "warnings": [
             {
               "block": "string",
@@ -30063,6 +30494,20 @@
                 "null"
               ]
             },
+            "like": {
+              "description": "A block id: rank the blocks of the scope, of every type the filters keep, by their similarity to it (shared words and links), from a score of 0.10 up. Each hit carries score, words and links. Takes no regex or sort.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "like_text": {
+              "description": "A text of at most 16384 bytes, such as a draft paragraph: rank the blocks of the scope by their similarity to its words and to the entities it names. Each hit carries score, words and links. Takes no regex or sort.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "linked_to": {
               "description": "Keep blocks with any link or reference to or from this block.",
               "type": [
@@ -30101,8 +30546,11 @@
               ]
             },
             "query": {
-              "description": "The text to find; with regex: true, a pattern (Rust regex syntax, at most 1024 bytes).",
-              "type": "string"
+              "description": "The text to find; with regex: true, a pattern (Rust regex syntax, at most 1024 bytes). Give exactly one of query, like and like_text.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "regex": {
               "description": "Treat query as a regular expression (default false: literal text).",
@@ -30119,7 +30567,7 @@
               ]
             },
             "sort": {
-              "description": "\"coverage\": list the hits with the lowest coverage first. Leave out for the default order.",
+              "description": "With query only. \"relevance\": inside the phrase tier and the all-words tier, the hits that score highest against the query's words first, each with its score. \"coverage\": the hits with the lowest coverage first. \"reading\": the default order, reading order.",
               "type": [
                 "string",
                 "null"
@@ -30160,9 +30608,6 @@
               ]
             }
           },
-          "required": [
-            "query"
-          ],
           "type": "object"
         }
       },

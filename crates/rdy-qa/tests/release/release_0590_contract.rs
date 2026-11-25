@@ -4,18 +4,27 @@
 //! `hub-ports-v1.json`, and every selector names it. The first capture, taken with the integrated
 //! agent text, wrote no leaf: the fixture holds shapes, codes and probes, and the changed tool
 //! descriptions and refusal fixes sit outside them. Later tasks of the release add their own
-//! leaves. The tests here keep every earlier fixture as it was and pin that the agent delta is
-//! descriptive only: no parameter type, required set, code or result shape moves.
-use serde_json::Value;
+//! leaves. M5a's `m5a-v1.json`, frozen when M5a merged into this release, is the predecessor
+//! since: a re-capture on the merged code carries M5a's surfaces, and the delta from M5a is this
+//! release's own. The tests here keep every earlier fixture as it was, pin that delta, and pin that
+//! the agent delta is descriptive only: no parameter type, required set, code or result shape moves.
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// The predecessor of this plan's fixture, frozen from here on.
-const PREDECESSOR: &str = "hub-ports-v1.json";
+/// The predecessor of this plan's fixture: M5a's fixture, frozen from here on.
+const PREDECESSOR: &str = "m5a-v1.json";
 
-/// The sha256 of [`PREDECESSOR`], its final bytes. It never moves: a later contract change is a
+/// The sha256 of [`PREDECESSOR`] as M5a froze it. It never moves: a later contract change is a
 /// successor fixture, never an edit of that file.
-const PREDECESSOR_SHA: &str = "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab";
+const PREDECESSOR_SHA: &str = "b18e1992465210f6af99eabafb0290fb9b12f2288db5d5ac83bfa4f1a44bc4ec";
+
+/// The fixture this plan's fixture started from, and M5a's predecessor. It is frozen.
+const STARTED_FROM: &str = "hub-ports-v1.json";
+
+/// The sha256 of [`STARTED_FROM`], its final bytes.
+const STARTED_FROM_SHA: &str = "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab";
 
 /// This plan's fixture, which every selector names.
 const SELECTED: &str = "rdy-0590-v1.json";
@@ -29,7 +38,7 @@ const SELECTORS: [&str; 3] = [
 
 /// The fixtures that a selector named before this plan's fixture. No selector names one now.
 /// (`release-1.json` is no earlier selection: the released baseline stays a named source.)
-const PREVIOUSLY_SELECTED: [&str; 8] = [
+const PREVIOUSLY_SELECTED: [&str; 9] = [
     "repo-links-v1.json",
     "readme-from-rdy-v1.json",
     "disclosure-review-v1.json",
@@ -38,6 +47,7 @@ const PREVIOUSLY_SELECTED: [&str; 8] = [
     "m5b-v1.json",
     "hub-forks-v1.json",
     "hub-ports-v1.json",
+    "m5a-v1.json",
 ];
 
 /// Every frozen contract fixture, with the sha256 of its bytes.
@@ -90,6 +100,7 @@ const FROZEN: &[(&str, &str)] = &[
         "hub-forks-v1.json",
         "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252",
     ),
+    (STARTED_FROM, STARTED_FROM_SHA),
     (PREDECESSOR, PREDECESSOR_SHA),
 ];
 
@@ -115,6 +126,169 @@ fn sha(bytes: &[u8]) -> String {
 
 fn read(name: &str) -> Value {
     serde_json::from_slice(&bytes(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+/// A list of identified entries as an object keyed by identity (`key=`, `name=`, `id=` or the
+/// first string of a row), so a change reads as the entry's own path. Other lists stay lists.
+fn keyed(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => Value::Object(m.iter().map(|(k, x)| (k.clone(), keyed(x))).collect()),
+        Value::Array(a) => {
+            let identity = |e: &Value| -> Option<String> {
+                for k in ["key", "name", "id"] {
+                    if let Some(s) = e.get(k).and_then(Value::as_str) {
+                        return Some(format!("{k}={s}"));
+                    }
+                }
+                e.as_array()?.first()?.as_str().map(|s| format!("row={s}"))
+            };
+            let ids: Option<Vec<String>> = a.iter().map(identity).collect();
+            match ids {
+                Some(ids)
+                    if !a.is_empty() && ids.iter().collect::<BTreeSet<_>>().len() == ids.len() =>
+                {
+                    let mut m = Map::new();
+                    for (id, e) in ids.into_iter().zip(a) {
+                        m.insert(id, keyed(e));
+                    }
+                    Value::Object(m)
+                }
+                _ => Value::Array(a.iter().map(keyed).collect()),
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// Every member where `now` differs from `was`, keyed by its path, as `added|removed|changed`
+/// with the member's value in `now` (null for a removal).
+fn leaves(was: &Value, now: &Value, path: &str, out: &mut BTreeMap<String, (String, Value)>) {
+    match (was, now) {
+        (Value::Object(a), Value::Object(b)) => {
+            let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            for k in keys {
+                let at = format!("{path}/{k}");
+                match (a.get(k), b.get(k)) {
+                    (None, Some(y)) => {
+                        out.insert(at, ("added".into(), y.clone()));
+                    }
+                    (Some(_), None) => {
+                        out.insert(at, ("removed".into(), Value::Null));
+                    }
+                    (Some(x), Some(y)) => leaves(x, y, &at, out),
+                    (None, None) => unreachable!("the key is in one of the objects"),
+                }
+            }
+        }
+        _ if was != now => {
+            out.insert(path.to_string(), ("changed".into(), now.clone()));
+        }
+        _ => {}
+    }
+}
+
+/// The keyed delta from fixture `was` to fixture `now`.
+fn delta(was: &str, now: &str) -> BTreeMap<String, (String, Value)> {
+    let mut out = BTreeMap::new();
+    leaves(&keyed(&read(was)), &keyed(&read(now)), "", &mut out);
+    out
+}
+
+/// This release's closed contract delta so far, from its predecessor: span maps' (`dedup_spans`)
+/// leaves. The integrated agent text adds none. A later task of the release adds its own rows.
+const RELEASE_DELTA: [&str; 11] = [
+    "added /cli/runtime/probes/compact/stdout/deduplicated_bytes",
+    "added /cli/runtime/probes/fsck/stdout/deduplicated_bytes",
+    "added /cli/runtime/probes/status/stdout/deduplicated_bytes",
+    "added /dump_load/fixture_digests/v4-f1-dedup-spans.expect.json",
+    "added /dump_load/fixture_digests/v4-f1-dedup-spans.rdydump",
+    "added /mcp/result_fields/rdy_compact/ok/deduplicated_bytes",
+    "added /store/creation_baseline/features/name=dedup_spans",
+    "changed /store/creation_baseline_text",
+    "added /store/feature_rules/dedup_spans",
+    "added /store/features/name=dedup_spans",
+    "changed /store/registered_names",
+];
+
+/// r5901: M5a's fixture is the predecessor of this plan's fixture. It keeps M5a's frozen bytes,
+/// it follows the fixture this plan's fixture started from, every earlier fixture keeps its
+/// bytes, and every selector still names this plan's fixture.
+#[test]
+fn r5901_m5a_is_the_successor_predecessor() {
+    assert_eq!(PREDECESSOR, "m5a-v1.json");
+    assert_eq!(
+        sha(&bytes(PREDECESSOR)),
+        PREDECESSOR_SHA,
+        "{PREDECESSOR} is frozen"
+    );
+    assert_eq!(
+        FROZEN.last().copied(),
+        Some((PREDECESSOR, PREDECESSOR_SHA)),
+        "the predecessor is the last frozen fixture"
+    );
+    assert_eq!(
+        FROZEN[FROZEN.len() - 2],
+        (STARTED_FROM, STARTED_FROM_SHA),
+        "M5a follows the fixture this plan's fixture started from"
+    );
+    for (name, want) in FROZEN {
+        assert_eq!(&sha(&bytes(name)), want, "{name} is frozen");
+    }
+    assert_ne!(
+        sha(&bytes(SELECTED)),
+        PREDECESSOR_SHA,
+        "{SELECTED} is a successor"
+    );
+    for file in SELECTORS {
+        let text =
+            std::fs::read_to_string(root().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        assert!(
+            text.contains(&format!("fixtures/contracts/{SELECTED}\"")),
+            "{file} selects {SELECTED}"
+        );
+        assert!(
+            !text.contains(&format!("contracts/{PREDECESSOR}\"")),
+            "{file} no longer selects {PREDECESSOR}"
+        );
+    }
+}
+
+/// r5901: M5a's surfaces survive the re-freeze. Every member where M5a's fixture differs from
+/// the fixture it followed (the vector briefing, write and import rows and the search inputs,
+/// modes and relevance) holds the same value in this plan's fixture, and the only delta from
+/// M5a is [`RELEASE_DELTA`]: no input mode, output member, error code or format vanishes.
+#[test]
+fn r5901_m5a_surfaces_survive_refreeze() {
+    let now = keyed(&read(SELECTED));
+    let m5a = delta(STARTED_FROM, PREDECESSOR);
+    assert!(!m5a.is_empty(), "M5a has a delta");
+    for (path, (kind, value)) in &m5a {
+        let here = path
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .try_fold(&now, |cur, k| cur.get(k));
+        if kind == "removed" {
+            assert!(here.is_none(), "{path} stays removed");
+        } else {
+            assert_eq!(here, Some(value), "{kind} {path} survives");
+        }
+    }
+    let mut ours: Vec<String> = delta(PREDECESSOR, SELECTED)
+        .into_iter()
+        .map(|(path, (kind, _))| format!("{kind} {path}"))
+        .collect();
+    ours.sort();
+    let mut want: Vec<String> = RELEASE_DELTA.iter().map(|s| s.to_string()).collect();
+    want.sort();
+    assert_eq!(ours, want, "the delta from M5a is this release's own");
+    let (Value::Object(was), Value::Object(now)) = (read(PREDECESSOR), read(SELECTED)) else {
+        panic!("the fixtures are objects");
+    };
+    assert_eq!(
+        was.keys().collect::<Vec<_>>(),
+        now.keys().collect::<Vec<_>>(),
+        "every row of {PREDECESSOR} is there, in order"
+    );
 }
 
 /// r5901: every selector names this plan's fixture and no earlier one, every earlier fixture keeps
