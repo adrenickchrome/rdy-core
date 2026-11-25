@@ -47,7 +47,10 @@ fn pre1_package_classifies_real_shell_probe_children() {
         None,
         Expiry::expire,
     );
-    assert_eq!(classify_probe(run.result, V, Path::new("rdy")), Err(Failure::FileOperation));
+    assert_eq!(
+        classify_probe(run.result, V, Path::new("rdy")),
+        Err(Failure::FileOperation)
+    );
 }
 
 #[test]

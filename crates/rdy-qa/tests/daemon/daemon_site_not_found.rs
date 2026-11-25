@@ -67,7 +67,11 @@ pub(crate) fn assert_themed(
     name: &str,
     what: &str,
 ) {
-    assert_eq!(r.status, 404, "{what}: {} (transport: {})", r.head, r.transport);
+    assert_eq!(
+        r.status, 404,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(
         r.header("content-type"),
         Some("text/html; charset=utf-8"),
@@ -144,7 +148,11 @@ pub(crate) fn assert_inert(body: &str, what: &str) {
 #[track_caller]
 pub(crate) fn assert_plain(r: &http::Response, f: Refusal, what: &str) {
     let want = refusal(f);
-    assert_eq!(r.status, want.status, "{what}: {} (transport: {})", r.head, r.transport);
+    assert_eq!(
+        r.status, want.status,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(text(r), String::from_utf8(want.body).unwrap(), "{what}");
     assert_eq!(
         r.header("content-type"),
@@ -426,7 +434,11 @@ fn dgm11_every_live_scope_gets_its_own_404() {
         let name = if profiled { profile } else { "Tiny" };
         // the scope serves its pages
         let home = get(port, &root[1..]);
-        assert_eq!(home.status, 200, "{root}: {} (transport: {})", home.head, home.transport);
+        assert_eq!(
+            home.status, 200,
+            "{root}: {} (transport: {})",
+            home.head, home.transport
+        );
         assert!(
             text(&home).contains(doc),
             "{root}: the fixture's own revision"
@@ -540,7 +552,11 @@ fn dgm11_profile_only_never_falls_back_to_source() {
     let sh = shared(&w.h);
     let only = only_port(&sh, "guide");
     let intro = get(only, "manual/intro.html");
-    assert_eq!(intro.status, 200, "{} (transport: {})", intro.head, intro.transport);
+    assert_eq!(
+        intro.status, 200,
+        "{} (transport: {})",
+        intro.head, intro.transport
+    );
     let first = get(only, "nosuch.html");
     for path in [
         "nosuch.html",
@@ -618,8 +634,16 @@ fn dgm11_head_and_get_share_404_headers() {
     ] {
         let g = get(port, path);
         let h = ask(port, "HEAD", path);
-        assert_eq!(g.status, 404, "{path}: {} (transport: {})", g.head, g.transport);
-        assert_eq!(h.status, g.status, "HEAD {path} (transport: {})", h.transport);
+        assert_eq!(
+            g.status, 404,
+            "{path}: {} (transport: {})",
+            g.head, g.transport
+        );
+        assert_eq!(
+            h.status, g.status,
+            "HEAD {path} (transport: {})",
+            h.transport
+        );
         assert_eq!(headers(&h), headers(&g), "HEAD {path}");
         assert!(h.body.is_empty(), "HEAD {path}: no body");
         assert_eq!(

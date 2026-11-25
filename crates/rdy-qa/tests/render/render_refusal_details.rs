@@ -386,7 +386,11 @@ fn sock(port: u16) -> SocketAddr {
 #[track_caller]
 fn assert_plain(r: &http::Response, f: Refusal, body: &str, what: &str) {
     let want = refusal(f);
-    assert_eq!(r.status, want.status, "{what}: {} (transport: {})", r.head, r.transport);
+    assert_eq!(
+        r.status, want.status,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(text(&r.body), body, "{what}");
     assert_eq!(text(&want.body), body, "{what}");
     assert_eq!(

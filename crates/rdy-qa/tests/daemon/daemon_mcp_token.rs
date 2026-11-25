@@ -572,7 +572,11 @@ fn assert_site_and_ctl_serve(h: &Hosted) {
         .and_then(|i| i.url.clone().ok())
         .expect("the site listens");
     let page = rdy_qa::http::get(&url);
-    assert_eq!(page.status, 200, "{} (transport: {})", page.head, page.transport);
+    assert_eq!(
+        page.status, 200,
+        "{} (transport: {})",
+        page.head, page.transport
+    );
     Hosted::rt().block_on(async {
         let mut c = h.client(None, None).await;
         c.ctl("status", json!({})).await.expect("status");

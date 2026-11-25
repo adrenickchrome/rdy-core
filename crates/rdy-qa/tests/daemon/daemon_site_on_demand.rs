@@ -1200,7 +1200,11 @@ fn sod2_review_http_preserves_files_and_refusals() {
     for path in paths {
         let want = rdy_render::live::page(&whole, path, &a).unwrap();
         let g = get(&w, &format!("~view/a/{path}"));
-        assert_eq!(g.status, 200, "{path}: {} (transport: {})", g.head, g.transport);
+        assert_eq!(
+            g.status, 200,
+            "{path}: {} (transport: {})",
+            g.head, g.transport
+        );
         assert!(g.body == want, "{path}: the whole build's bytes");
         let h = head(&w, &format!("~view/a/{path}"));
         assert_eq!((h.status, headers(&h)), (200, headers(&g)), "HEAD {path}");
@@ -1222,7 +1226,11 @@ fn sod2_review_http_preserves_files_and_refusals() {
         ("~proposal/P-0000000000000/", "is not on the site now"),
     ] {
         let g = get(&w, path);
-        assert_eq!(g.status, 404, "{path}: {} (transport: {})", g.head, g.transport);
+        assert_eq!(
+            g.status, 404,
+            "{path}: {} (transport: {})",
+            g.head, g.transport
+        );
         assert!(text(&g.body).contains(sentence), "{path}");
         assert!(
             !text(&g.body).contains("/_rdy/live.js"),
@@ -1308,7 +1316,12 @@ fn sod2_eager_targets_keep_their_existing_path() {
             "{path}"
         );
     }
-    assert_eq!(get(&w, "~versions/").status, 200, "transport: {}", rdy_qa::http::last_transport());
+    assert_eq!(
+        get(&w, "~versions/").status,
+        200,
+        "transport: {}",
+        rdy_qa::http::last_transport()
+    );
     // a review target has no whole build
     let err = sh
         .site

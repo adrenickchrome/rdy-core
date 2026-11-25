@@ -64,7 +64,11 @@ impl LiveHost {
                 continue;
             }
             let r = http::get(&format!("{}{prefix}{path}", self.url));
-            assert_eq!(r.status, 200, "GET {prefix}{path}: {} (transport: {})", r.head, r.transport);
+            assert_eq!(
+                r.status, 200,
+                "GET {prefix}{path}: {} (transport: {})",
+                r.head, r.transport
+            );
             if path.ends_with(".html") {
                 let ty = r.header("content-type").unwrap_or_default();
                 assert!(ty.starts_with("text/html"), "{prefix}{path}: {ty}");
@@ -444,7 +448,11 @@ fn sr10_scopes(g: &Golden) -> [(&'static str, &Scope, &str); 4] {
 /// The versions page, as the server sends it.
 pub(crate) fn versions_page(g: &Golden) -> String {
     let r = http::get(&format!("{}~versions/", g.live.url));
-    assert_eq!(r.status, 200, "GET /~versions/: {} (transport: {})", r.head, r.transport);
+    assert_eq!(
+        r.status, 200,
+        "GET /~versions/: {} (transport: {})",
+        r.head, r.transport
+    );
     String::from_utf8(r.body).expect("the versions page is text")
 }
 

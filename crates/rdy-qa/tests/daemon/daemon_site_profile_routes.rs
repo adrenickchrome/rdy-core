@@ -240,7 +240,11 @@ fn text(r: &http::Response) -> String {
 #[track_caller]
 fn assert_refusal(r: &http::Response, f: Refusal, what: &str) {
     let want = refusal(f);
-    assert_eq!(r.status, want.status, "{what}: {} (transport: {})", r.head, r.transport);
+    assert_eq!(
+        r.status, want.status,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(text(r), String::from_utf8(want.body).unwrap(), "{what}");
     assert!(
         r.header("content-type")
@@ -405,7 +409,11 @@ fn spv6_profile_routes_serve_each_scopes_revision() {
         ("~profile/GUIDE/manual/intro.html".into(), "INTRO-CANON-2"),
     ] {
         let page = get(&w, &path);
-        assert_eq!(page.status, 200, "{path}: {} (transport: {})", page.head, page.transport);
+        assert_eq!(
+            page.status, 200,
+            "{path}: {} (transport: {})",
+            page.head, page.transport
+        );
         let body = text(&page);
         assert!(body.contains(want), "{path}: {want}");
         for other in [
@@ -419,13 +427,21 @@ fn spv6_profile_routes_serve_each_scopes_revision() {
         }
         assert!(!body.contains("SECRET-"), "{path}: an excluded doc");
         let h = head(&w, &path);
-        assert_eq!(h.status, 200, "HEAD {path}: {} (transport: {})", h.head, h.transport);
+        assert_eq!(
+            h.status, 200,
+            "HEAD {path}: {} (transport: {})",
+            h.head, h.transport
+        );
         assert!(h.body.is_empty(), "HEAD {path}: no body");
         assert_eq!(h.header("content-type"), page.header("content-type"));
         // the profile's home page under the same root
         let root = &path[..path.len() - "manual/intro.html".len()];
         let home = get(&w, root);
-        assert_eq!(home.status, 200, "{root}: {} (transport: {})", home.head, home.transport);
+        assert_eq!(
+            home.status, 200,
+            "{root}: {} (transport: {})",
+            home.head, home.transport
+        );
         assert!(text(&home).contains("Intro page"), "{root}");
     }
     // a proposal-only profile: canon, the tag and the view hold no such profile. A target the
@@ -440,14 +456,24 @@ fn spv6_profile_routes_serve_each_scopes_revision() {
         "~view/nowhere/~profile/guide/",
     ] {
         assert_themed(&get(&w, path), Variant::Scope, "/", "Tiny", path);
-        assert_eq!(head(&w, path).status, 404, "HEAD {path} (transport: {})", rdy_qa::http::last_transport());
+        assert_eq!(
+            head(&w, path).status,
+            404,
+            "HEAD {path} (transport: {})",
+            rdy_qa::http::last_transport()
+        );
     }
     // a page the selection does not have: the profile route's Page variant (dgm11)
     for path in ["~profile/guide/secret.html", "~profile/guide/nope.html"] {
         let r = get(&w, path);
         assert_themed(&r, Variant::Page, "/~profile/guide/", "Guide book", path);
         assert!(!text(&r).contains("SECRET-"), "{path}: an excluded doc");
-        assert_eq!(head(&w, path).status, 404, "HEAD {path} (transport: {})", rdy_qa::http::last_transport());
+        assert_eq!(
+            head(&w, path).status,
+            404,
+            "HEAD {path} (transport: {})",
+            rdy_qa::http::last_transport()
+        );
     }
     // malformed profile metadata is a build error, not a missing page
     assert_refusal(
@@ -480,13 +506,21 @@ fn spv6_queries_preserve_first_values_and_statuses() {
         let plain = get(&w, path);
         let asked = get(&w, &format!("{path}{query}"));
         assert_eq!(plain.status, 200, "{path} (transport: {})", plain.transport);
-        assert_eq!(asked.status, 200, "{path}{query} (transport: {})", asked.transport);
+        assert_eq!(
+            asked.status, 200,
+            "{path}{query} (transport: {})",
+            asked.transport
+        );
         assert_eq!(asked.body, plain.body, "{path}{query}");
     }
 
     // the versions page reads the first scope and profile, decodes only those, ignores the rest
     let ctx = get(&w, "~versions/?scope=view%3Awork&profile=guide");
-    assert_eq!(ctx.status, 200, "{} (transport: {})", ctx.head, ctx.transport);
+    assert_eq!(
+        ctx.status, 200,
+        "{} (transport: {})",
+        ctx.head, ctx.transport
+    );
     let body = text(&ctx);
     assert!(
         body.contains("aria-current=\"page\"") && body.contains("Guide book"),
@@ -506,7 +540,11 @@ fn spv6_queries_preserve_first_values_and_statuses() {
             None => format!("~versions/{query}"),
         };
         let got = get(&w, &path);
-        assert_eq!(got.status, 200, "{path}: {} (transport: {})", got.head, got.transport);
+        assert_eq!(
+            got.status, 200,
+            "{path}: {} (transport: {})",
+            got.head, got.transport
+        );
         assert_eq!(got.body, ctx.body, "{path}");
     }
     // no context is canon's menu, and `/~versions/` stays bare in its own links
@@ -873,7 +911,11 @@ fn spv6_profile_history_reuses_memo_and_warns_once() {
     sh.site.set_history_ceiling(Some(2));
     for _ in 0..3 {
         let page = get(&w, "~view/work/~profile/guide/");
-        assert_eq!(page.status, 200, "{} (transport: {})", page.head, page.transport);
+        assert_eq!(
+            page.status, 200,
+            "{} (transport: {})",
+            page.head, page.transport
+        );
         let body = text(&page);
         assert!(!body.contains("since v1.0.0"), "no neutral chip: {body}");
         assert!(!body.contains("changes-since.html"), "no since link");
@@ -994,7 +1036,11 @@ fn spv6_open_targets_leave_inactive_slots_for_profile_memo() {
         let again = sh.site.refresh(&sh, &guide).unwrap();
         assert!(Arc::ptr_eq(&first, &again), "the build is reused");
         let page = get(&w, "~profile/guide/");
-        assert_eq!(page.status, 200, "{} (transport: {})", page.head, page.transport);
+        assert_eq!(
+            page.status, 200,
+            "{} (transport: {})",
+            page.head, page.transport
+        );
     }
     assert_eq!(sh.site.builds(), builds, "no cold rebuild");
     assert!(sh.site.history_evaluations(&guide).is_some());
@@ -1051,7 +1097,11 @@ fn spv6_profile_redaction_wins_publish_and_subscribe_races() {
     assert_eq!(b.live.epoch, epoch(&sh));
     assert!(!holds(&b, "SECRET-B") && holds(&b, STUB));
     let page = get(&w, "~profile/other/secret.html");
-    assert_eq!(page.status, 200, "{} (transport: {})", page.head, page.transport);
+    assert_eq!(
+        page.status, 200,
+        "{} (transport: {})",
+        page.head, page.transport
+    );
     assert!(!text(&page).contains("SECRET-B") && text(&page).contains(STUB));
 
     // a contextual menu build reads the state before a removal and pauses at its check
@@ -1074,7 +1124,12 @@ fn spv6_profile_redaction_wins_publish_and_subscribe_races() {
     }
     sh.site.set_before_publish(None);
     assert_eq!(sh.site.refresh(&sh, &cx).unwrap().live.epoch, epoch(&sh));
-    assert_eq!(get(&w, "~versions/?profile=other").status, 200, "transport: {}", rdy_qa::http::last_transport());
+    assert_eq!(
+        get(&w, "~versions/?profile=other").status,
+        200,
+        "transport: {}",
+        rdy_qa::http::last_transport()
+    );
 
     // a subscribe whose refresh built the old state, held before its stream registers while a
     // removal lands, still gets the refresh: the old build is never compared as current
@@ -1131,7 +1186,11 @@ fn spv6_blocked_public_live_serves_while_output_refuses() {
         ("pubfig", "figdoc.html", true),
     ] {
         let got = get(&w, &format!("~profile/{key}/{page}"));
-        assert_eq!(got.status, 200, "{key}: {} (transport: {})", got.head, got.transport);
+        assert_eq!(
+            got.status, 200,
+            "{key}: {} (transport: {})",
+            got.head, got.transport
+        );
         let b = sh
             .site
             .refresh(&sh, &profile(ScopeRef::Canon, key))

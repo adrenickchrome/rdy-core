@@ -452,7 +452,9 @@ impl Work<'_> {
         let mut tar = (setup.tar)(&stem);
         let start = platform::start_in_dir(&mut tar, &self.out_dir)
             .map_err(failed("start tar in", self.out))?;
-        let into = reserved.try_clone().map_err(failed("clone the handle of", &path))?;
+        let into = reserved
+            .try_clone()
+            .map_err(failed("clone the handle of", &path))?;
         let tarred = platform::run_bounded_to(
             tar,
             None,
@@ -482,9 +484,15 @@ impl Work<'_> {
                 path.display()
             )));
         }
-        let len = reserved.metadata().map_err(failed("read the metadata of", &path))?.len();
+        let len = reserved
+            .metadata()
+            .map_err(failed("read the metadata of", &path))?
+            .len();
         if len == 0 {
-            return Err(file_failure(format!("tar wrote nothing to {}", path.display())));
+            return Err(file_failure(format!(
+                "tar wrote nothing to {}",
+                path.display()
+            )));
         }
         if len > setup.archive_max {
             return Err(Failure::SizeLimit);
@@ -514,7 +522,10 @@ impl Work<'_> {
                     &stage.path,
                 ),
                 Ok(false) => {
-                    file_failure(format!("{} no longer names the stage", stage.path.display()));
+                    file_failure(format!(
+                        "{} no longer names the stage",
+                        stage.path.display()
+                    ));
                     false
                 }
                 Err(e) => cleaned_up(Err(e), "check", &stage.path),
@@ -602,7 +613,9 @@ fn open_input(path: &Path, max: u64) -> Result<File, Failure> {
         | io::ErrorKind::InvalidInput => Failure::InputFile,
         _ => failed("open", path)(e),
     })?;
-    let meta = file.metadata().map_err(failed("read the metadata of", path))?;
+    let meta = file
+        .metadata()
+        .map_err(failed("read the metadata of", path))?;
     if !meta.is_file() || meta.len() == 0 {
         return Err(Failure::InputFile);
     }

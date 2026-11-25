@@ -50,6 +50,16 @@ fn sr2_an_unknown_tag_is_not_found() {
 fn sr8_the_versions_page_is_served() {
     let h = host();
     let url = url(&h);
-    assert_eq!(http::get(&format!("{url}~versions/")).status, 200, "transport: {}", rdy_qa::http::last_transport());
-    assert_eq!(http::get(&format!("{url}~versions/index.html")).status, 200, "transport: {}", rdy_qa::http::last_transport());
+    assert_eq!(
+        http::get(&format!("{url}~versions/")).status,
+        200,
+        "transport: {}",
+        rdy_qa::http::last_transport()
+    );
+    assert_eq!(
+        http::get(&format!("{url}~versions/index.html")).status,
+        200,
+        "transport: {}",
+        rdy_qa::http::last_transport()
+    );
 }

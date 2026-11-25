@@ -386,7 +386,15 @@ pub fn base(root: &Path) -> Result<String, String> {
 pub fn added_lines(root: &Path, base: &str) -> Result<BTreeMap<String, Added>, String> {
     let diff = git(
         root,
-        &["diff", "-U0", "--no-color", "--no-ext-diff", base, "--", "crates"],
+        &[
+            "diff",
+            "-U0",
+            "--no-color",
+            "--no-ext-diff",
+            base,
+            "--",
+            "crates",
+        ],
     )?;
     let mut lines = parse_diff(&diff);
     let untracked = git(
@@ -467,13 +475,21 @@ mod tests {
     fn th1_a_new_sleep_is_refused_with_its_file_and_line() {
         let out = check(&one(
             T,
-            &["fn a() {", "    std::thread::sleep(Duration::from_millis(50));", "}"],
+            &[
+                "fn a() {",
+                "    std::thread::sleep(Duration::from_millis(50));",
+                "}",
+            ],
             &[2],
         ));
         assert_eq!(out.refused.len(), 1, "{out:?}");
         assert_eq!(out.refused[0].line, 2);
         assert_eq!(out.refused[0].rule, Rule::Wait);
-        assert!(out.refused[0].to_string().starts_with(&format!("{T}:2: wait: ")));
+        assert!(
+            out.refused[0]
+                .to_string()
+                .starts_with(&format!("{T}:2: wait: "))
+        );
         let out = check(&one(T, &["tokio::time::sleep(d).await;"], &[1]));
         assert_eq!(out.refused.len(), 1, "{out:?}");
     }
@@ -534,7 +550,10 @@ mod tests {
         ));
         assert!(with.refused.is_empty(), "{with:?}");
         assert_eq!(with.allowed.len(), 1);
-        assert_eq!(with.allowed[0].reason, "the child's exec cannot be observed");
+        assert_eq!(
+            with.allowed[0].reason,
+            "the child's exec cannot be observed"
+        );
         let same_line = check(&one(
             T,
             &["let p = \"127.0.0.1:1\"; // test-hygiene: allow port a port no one listens on"],
@@ -549,7 +568,10 @@ mod tests {
         assert_eq!(bare.refused.len(), 1, "an allow with no reason: {bare:?}");
         let other_rule = check(&one(
             T,
-            &["// test-hygiene: allow port no listener", "std::thread::sleep(d);"],
+            &[
+                "// test-hygiene: allow port no listener",
+                "std::thread::sleep(d);",
+            ],
             &[2],
         ));
         assert_eq!(other_rule.refused.len(), 1, "{other_rule:?}");
@@ -570,7 +592,11 @@ mod tests {
         assert_eq!(out.refused.len(), 1, "{out:?}");
         assert_eq!(out.refused[0].line, 5);
         // a product file with no test module, and a file that is not Rust, are not read
-        assert!(check(&one("crates/rdy-daemon/src/y.rs", &src[..1], &[1])).refused.is_empty());
+        assert!(
+            check(&one("crates/rdy-daemon/src/y.rs", &src[..1], &[1]))
+                .refused
+                .is_empty()
+        );
         assert!(
             check(&one("crates/rdy-qa/tests/x.py", &["time.sleep(1)"], &[1]))
                 .refused

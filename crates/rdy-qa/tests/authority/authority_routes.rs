@@ -2496,7 +2496,11 @@ fn assert_no_ui(url: &str, what: &str) {
     let base = format!("http://{authority}");
     for path in ["/~ui/", "/~ui/item/P-abc@1"] {
         let r = http::get(&format!("{base}{path}"));
-        assert_eq!(r.status, 404, "{what}: GET {path} (transport: {})", r.transport);
+        assert_eq!(
+            r.status, 404,
+            "{what}: GET {path} (transport: {})",
+            r.transport
+        );
         let page = String::from_utf8_lossy(&r.body);
         for needle in ["~ui", "approval", "ui-card", "<form"] {
             assert!(!page.contains(needle), "{what}: {path} names {needle:?}");
@@ -2504,7 +2508,11 @@ fn assert_no_ui(url: &str, what: &str) {
     }
     let addr: std::net::SocketAddr = authority.parse().unwrap();
     let post = http::raw(addr, &http::ui_answer_request(&authority, &[("ref", "r")]));
-    assert_eq!(post.status, 405, "{what}: POST {} (transport: {})", post.head, post.transport);
+    assert_eq!(
+        post.status, 405,
+        "{what}: POST {} (transport: {})",
+        post.head, post.transport
+    );
 }
 
 #[test]

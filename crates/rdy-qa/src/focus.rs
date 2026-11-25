@@ -309,7 +309,10 @@ pub fn main(
             return 1;
         }
         Err(e) => {
-            println!("test hygiene: could not read the changes ({e}); set {} to a base commit", crate::test_hygiene::BASE_VAR);
+            println!(
+                "test hygiene: could not read the changes ({e}); set {} to a base commit",
+                crate::test_hygiene::BASE_VAR
+            );
             println!("FAIL");
             return 1;
         }

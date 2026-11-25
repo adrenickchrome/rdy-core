@@ -136,7 +136,11 @@ fn send(port: u16, request: &str) -> http::Response {
 /// names no UI.
 #[track_caller]
 fn assert_themed_404(r: &http::Response, what: &str) {
-    assert_eq!(r.status, 404, "{what}: {} (transport: {})", r.head, r.transport);
+    assert_eq!(
+        r.status, 404,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(
         r.header("content-type"),
         Some("text/html; charset=utf-8"),
@@ -153,7 +157,11 @@ fn assert_themed_404(r: &http::Response, what: &str) {
 #[track_caller]
 fn assert_plain(r: &http::Response, f: Refusal, what: &str) {
     let want = refusal(f);
-    assert_eq!(r.status, want.status, "{what}: {} (transport: {})", r.head, r.transport);
+    assert_eq!(
+        r.status, want.status,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(r.body, want.body, "{what}");
     assert_eq!(
         r.header("content-type"),
@@ -177,7 +185,11 @@ fn ordinary_answers(port: u16, what: &str) {
             port,
             &format!("HEAD {path} HTTP/1.1\r\nHost: {host}\r\n\r\n"),
         );
-        assert_eq!(head.status, 404, "{what}: HEAD {path} (transport: {})", head.transport);
+        assert_eq!(
+            head.status, 404,
+            "{what}: HEAD {path} (transport: {})",
+            head.transport
+        );
         assert!(head.body.is_empty(), "{what}: HEAD {path} sends no body");
         assert_eq!(
             head.header("content-length"),

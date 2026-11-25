@@ -219,7 +219,11 @@ fn ls6_a_view_is_served_in_review_mode() {
     assert!(page.contains("Edited"), "the Edited mark");
     assert!(page.contains("scope=view:draft"), "the view's stream");
     let none = http::get(&format!("{url}~view/nosuch/index.html"));
-    assert_eq!(none.status, 404, "{} (transport: {})", none.head, none.transport);
+    assert_eq!(
+        none.status, 404,
+        "{} (transport: {})",
+        none.head, none.transport
+    );
 }
 
 #[test]
@@ -511,7 +515,12 @@ fn ls6_a_request_after_the_project_is_replaced_gets_no_reply() {
     early.set_read_timeout(Some(T)).unwrap();
     // fence: one listener accepts in order, so once a later connection has its answer,
     // `early` was accepted, and passed the accept's check
-    assert_eq!(http::get(&url).status, 200, "transport: {}", rdy_qa::http::last_transport());
+    assert_eq!(
+        http::get(&url).status,
+        200,
+        "transport: {}",
+        rdy_qa::http::last_transport()
+    );
     rdy_qa::daemon::replace_rdy_dir(h.dir.path());
     write!(
         early,
@@ -579,7 +588,12 @@ fn ls6_a_restarted_daemon_keeps_the_address() {
     let before = url(&h);
     // served answers and a stream leave the site's side of each closed connection in TIME_WAIT
     // on the port: the successor binds it all the same
-    assert_eq!(http::get(&before).status, 200, "transport: {}", rdy_qa::http::last_transport());
+    assert_eq!(
+        http::get(&before).status,
+        200,
+        "transport: {}",
+        rdy_qa::http::last_transport()
+    );
     drop(open_page(&before, "alpha.html"));
     h.stop();
     restart(&mut h);

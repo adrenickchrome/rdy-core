@@ -84,8 +84,14 @@ fn refused_naming(out: &Output, code: i32, message: &str, names: &str, what: &st
             .strip_prefix(&format!("{message}: "))
             .and_then(|rest| rest.strip_suffix('\n'))
             .unwrap_or_else(|| panic!("{what}: {stderr:?}"));
-        assert!(!detail.is_empty() && !detail.contains('\n'), "{what}: {stderr:?}");
-        assert!(detail.contains(names), "{what}: names {names:?}: {stderr:?}");
+        assert!(
+            !detail.is_empty() && !detail.contains('\n'),
+            "{what}: {stderr:?}"
+        );
+        assert!(
+            detail.contains(names),
+            "{what}: names {names:?}: {stderr:?}"
+        );
     } else {
         assert_eq!(stderr, format!("{message}\n"), "{what}");
     }

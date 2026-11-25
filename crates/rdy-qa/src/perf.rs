@@ -4965,7 +4965,12 @@ fn site_profiles(
     assert!(b.live.revs.contains_key(&page), "no page {page} live");
     let url = format!("{base}{page}");
     // one untimed request, so the timed ones read a warm build
-    assert_eq!(crate::http::get(&url).status, 200, "GET {url} (transport: {})", crate::http::last_transport());
+    assert_eq!(
+        crate::http::get(&url).status,
+        200,
+        "GET {url} (transport: {})",
+        crate::http::last_transport()
+    );
     out.push(measure(&name(3), SITE_PROFILE_GET_RUNS, |_| {
         let got = crate::http::get(&url);
         assert_eq!(got.status, 200, "GET {url} (transport: {})", got.transport);
@@ -5960,7 +5965,12 @@ fn site_ops(
         .expect("a doc");
     let url = format!("{base}{longest}.html");
     // one untimed request, so the timed ones read a warm build
-    assert_eq!(crate::http::get(&url).status, 200, "GET {url} (transport: {})", crate::http::last_transport());
+    assert_eq!(
+        crate::http::get(&url).status,
+        200,
+        "GET {url} (transport: {})",
+        crate::http::last_transport()
+    );
     out.push(measure(&format!("site_get_page{sfx}"), 50, |_| {
         let got = crate::http::get(&url);
         assert_eq!(got.status, 200, "GET {url} (transport: {})", got.transport);

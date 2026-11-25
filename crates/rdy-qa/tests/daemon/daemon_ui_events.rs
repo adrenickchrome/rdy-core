@@ -58,7 +58,11 @@ fn base(s: &Site) -> String {
 /// The events URL the pending page names.
 fn events_of(s: &Site) -> String {
     let page = s.get("/~ui/");
-    assert_eq!(page.status, 200, "{} (transport: {})", page.head, page.transport);
+    assert_eq!(
+        page.status, 200,
+        "{} (transport: {})",
+        page.head, page.transport
+    );
     http::events_url(&base(s), &body(&page))
 }
 
@@ -78,7 +82,13 @@ fn answer_something(s: &Site) {
     let page = body(&s.get("/~ui/"));
     let form = http::ui_forms(&page).remove(0);
     let done = s.send(&http::ui_answer(&s.host(), &form, "reject"));
-    assert_eq!(done.status, 303, "{} (transport: {})", body(&done), done.transport);
+    assert_eq!(
+        done.status,
+        303,
+        "{} (transport: {})",
+        body(&done),
+        done.transport
+    );
 }
 
 const RELOAD: Option<(&str, &str)> = Some(("reload", "{}"));
@@ -218,7 +228,11 @@ fn ui9_ui_stream_shares_limits_epoch_and_shutdown() {
         "the 33rd"
     );
     let over = s.get(&format!("/_rdy/events?ui=1&rev={rev}"));
-    assert_eq!(over.status, 503, "{} (transport: {})", over.head, over.transport);
+    assert_eq!(
+        over.status, 503,
+        "{} (transport: {})",
+        over.head, over.transport
+    );
     assert_eq!(over.body, refusal(Refusal::Busy).body, "the existing text");
     assert!(
         s.sh.site
@@ -272,7 +286,11 @@ fn ui9_ui_stream_shares_limits_epoch_and_shutdown() {
     // a pause of the accept loop never orders these: the head is read by the connection's task,
     // so the answer below proves the permit count
     let busy = s.get("/~ui/");
-    assert_eq!(busy.status, 503, "{} (transport: {})", busy.head, busy.transport);
+    assert_eq!(
+        busy.status, 503,
+        "{} (transport: {})",
+        busy.head, busy.transport
+    );
     assert_eq!(busy.body, refusal(Refusal::Busy).body);
     drop(held);
     streams.truncate(1);
@@ -319,7 +337,11 @@ fn ui9_ui_stream_shares_limits_epoch_and_shutdown() {
     local(s.h.dir.path(), &format!("{PERSON}serve:\n  ui: false\n"));
     // the next UI path reads it, and answers as an ordinary path
     let off = s.get("/~ui/");
-    assert_eq!(off.status, 404, "{} (transport: {})", off.head, off.transport);
+    assert_eq!(
+        off.status, 404,
+        "{} (transport: {})",
+        off.head, off.transport
+    );
     assert_reload(&mut ui, "off");
     assert_eq!(ui.next_event(T), None, "closed");
     assert!(ui.ended());
@@ -330,7 +352,11 @@ fn ui9_ui_stream_shares_limits_epoch_and_shutdown() {
         "/_rdy/events?ui=1&rev={}",
         LiveSite::ui_revision(&s.sh.state.load_full())
     ));
-    assert_eq!(refused.status, 400, "{} (transport: {})", refused.head, refused.transport);
+    assert_eq!(
+        refused.status, 400,
+        "{} (transport: {})",
+        refused.head, refused.transport
+    );
     assert_eq!(refused.body, refusal(Refusal::Malformed).body);
     assert!(!doc.ended(), "a site stream stays");
     drop(doc);
@@ -398,17 +424,29 @@ fn ui9_an_answer_that_writes_nothing_reloads_no_stream() {
     quiet(&mut sub, "an empty publish");
     // a UI Later and two refusals: each runs on the writer, and each writes nothing
     let later = s.send(&http::ui_answer(&s.host(), &form, "later"));
-    assert_eq!(later.status, 200, "{} (transport: {})", later.head, later.transport);
+    assert_eq!(
+        later.status, 200,
+        "{} (transport: {})",
+        later.head, later.transport
+    );
     quiet(&mut sub, "a Later");
     let wrong = http::UiForm {
         card_hash: Hash::of(b"another card").to_string(),
         ..form.clone()
     };
     let moved = s.send(&http::ui_answer(&s.host(), &wrong, "approve"));
-    assert_eq!(moved.status, 409, "{} (transport: {})", moved.head, moved.transport);
+    assert_eq!(
+        moved.status, 409,
+        "{} (transport: {})",
+        moved.head, moved.transport
+    );
     quiet(&mut sub, "a moved card");
     let bad = s.send(&http::ui_answer(&s.host(), &form, "nosuch"));
-    assert_eq!(bad.status, 400, "{} (transport: {})", bad.head, bad.transport);
+    assert_eq!(
+        bad.status, 400,
+        "{} (transport: {})",
+        bad.head, bad.transport
+    );
     quiet(&mut sub, "an unknown option");
     // a write reloads once; another message after it adds none
     on_writer(&s.sh, move |r| {
