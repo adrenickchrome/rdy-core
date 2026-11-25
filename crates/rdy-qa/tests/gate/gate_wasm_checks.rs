@@ -984,6 +984,10 @@ fn wck6_module_reach_at_and_past_existing_limit() {
         set.add_yaml(&rules(depth)).unwrap();
         set.resolve("wck6").unwrap()
     };
+    // seeded ids: the version writes claims c-00000 up to about c-01GTG, and a random id of a
+    // canon claim fell in that range now and then; that write then updated a placed claim, whose
+    // parents joined the reach, and the bound refused one block early
+    let _ids = SeededIds::new(0x5743_4b36_5245_4143);
     let (_d, mut r) = wck6_project(&mrule("m", "type = claim", PASS, "", "advisory"), "");
     let seeded = write(&mut r, "seed", json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}},
@@ -1059,6 +1063,23 @@ fn wck6_module_reach_at_and_past_existing_limit() {
     assert!(!got.contains(&nth("r", 0)));
     assert!(got.len() < MAX_ROWS, "{}", got.len());
     drop(st);
+}
+
+/// Seeds this thread's new block ids while it lives; its drop returns the thread to random ids,
+/// also when the test panics.
+struct SeededIds;
+
+impl SeededIds {
+    fn new(seed: u64) -> SeededIds {
+        rdy_model::seed_ids_for_tests(seed);
+        SeededIds
+    }
+}
+
+impl Drop for SeededIds {
+    fn drop(&mut self) {
+        rdy_model::unseed_ids_for_tests();
+    }
 }
 
 /// The `n`th valid block id with prefix `p`, in order.
