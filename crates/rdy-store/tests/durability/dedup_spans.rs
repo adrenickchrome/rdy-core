@@ -1681,11 +1681,11 @@ fn holds_canary(dir: &Path) -> Vec<String> {
     walk(dir, &mut files);
     files
         .into_iter()
-        .filter(|p| {
-            std::fs::read(p)
-                .unwrap()
-                .windows(CANARY.len())
-                .any(|w| w == CANARY.as_bytes())
+        .filter(|p| match std::fs::read(p) {
+            Ok(bytes) => bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()),
+            // an open store's lock file is locked on Windows; it holds no payload byte
+            Err(_) if p.file_name().is_some_and(|n| n == "lock") => false,
+            Err(e) => panic!("{}: {e}", p.display()),
         })
         .map(|p| p.display().to_string())
         .collect()
