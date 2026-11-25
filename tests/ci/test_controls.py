@@ -1650,8 +1650,10 @@ class GateWorkflowPolicy(unittest.TestCase):
         self.assertEqual(sorted(self.jobs), sorted(GATE_TARGETS))
         for name, job in self.jobs.items():
             with self.subTest(job=name):
+                # Linux runs on the bench; the build servers share one physical host with other gates.
+                labels = '\"rdy-bench\"' if name == 'linux' else '\"rdy-gate\",\"' + name + '\"'
                 self.assertEqual(job['runs-on'], "${{ inputs.hosted && '" + GATE_HOSTED[name]
-                                 + "' || fromJSON('[\"self-hosted\",\"rdy-gate\",\"" + name + "\"]') }}")
+                                 + "' || fromJSON('[\"self-hosted\"," + labels + "]') }}")
                 # A push (release evidence) gets a 45-minute hang guard and a gate clock with a 1080-second
                 # target and a 2400-second ceiling; the budget job, not these limits, checks the release
                 # time. Only a manual hosted proof run gets more; gate_budget.py never reads it as evidence.

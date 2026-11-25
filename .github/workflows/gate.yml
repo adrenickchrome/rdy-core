@@ -29,7 +29,9 @@ concurrency:
 jobs:
   linux:
     name: Release gate (x86_64-unknown-linux-gnu)
-    runs-on: ${{ inputs.hosted && 'ubuntu-26.04' || fromJSON('["self-hosted","rdy-gate","linux"]') }}
+    # The bench, not the build server: the build servers share one physical host with other gates,
+    # and a runner takes one job at a time, so a release gate and the nightly bench job never overlap.
+    runs-on: ${{ inputs.hosted && 'ubuntu-26.04' || fromJSON('["self-hosted","rdy-bench"]') }}
     timeout-minutes: ${{ inputs.hosted && 90 || 45 }}
     permissions:
       contents: read
