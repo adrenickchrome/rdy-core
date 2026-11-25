@@ -3157,8 +3157,10 @@ impl Store {
             Err(_) => Ok(()),
         };
         // the new index takes the name even when the zeros failed, so the old file is gone; the
-        // rename is not `pio::rename_durable` for the reason `reindex_with` gives
-        let renamed = std::fs::rename(tmp, path);
+        // rename is not `pio::rename_durable` for the reason `reindex_with` gives. On Windows a
+        // scanner can map the zeroed file and refuse its replacement: the old name is then
+        // removed first (a kill in between leaves no index, and the next open rebuilds it)
+        let renamed = fsutil::rename_over_held(tmp, path);
         erased?;
         renamed?;
         crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterIndexPublish)?;

@@ -50,6 +50,9 @@ tempfile.workspace = true
 zstd.workspace = true
 
 [features]
+# Tests of the nightly tier only (`cargo qa --tier nightly`): `mod nightly` in a test file. The
+# release tier builds without them.
+nightly-tests = []
 # Test hooks that lower the redaction report's bounds for a test thread
 # (`redaction::override_limits_for_tests`) and count the kungfu derivations
 # (`kungfu::derivations_for_tests`). Never enabled by a normal build: only this crate's own tests

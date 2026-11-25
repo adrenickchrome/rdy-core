@@ -1,0 +1,1 @@
+{"schema":1,"target_seconds":1800,"ceiling_seconds":2700,"lines":{"gate":660,"candidate_check":60,"candidate_build":720,"manifest":60,"budget":60,"sign":60,"install_check":180}}

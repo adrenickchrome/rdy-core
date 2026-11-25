@@ -3,9 +3,9 @@
 //! actor runs (the freeze), the project is copied, and the drain lands every live view.
 //!
 //! Every assertion reads the final state or the journal, never an order of events. One run per
-//! seed is shared by every test of this file: seeds 1 to 6 in the fast gate (each runs every
-//! check; together they must exercise every act, ruling task-5.2), seeds 1, 2 and 3 in the deep
-//! gate (`RDY_QA_DEEP=1`). Every failure names its seed, so a person can run it again:
+//! seed is shared by every test of this file: seeds 1 to 6 in the nightly tier (each runs every
+//! check; together they must exercise every act, ruling task-5.2), seed 1 in the release tier,
+//! seeds 1, 2 and 3 in the deep gate (`RDY_QA_DEEP=1`). Every failure names its seed, so a person can run it again:
 //! `RDY_QA_SWARM_SEEDS=<seed>,...` runs only those seeds.
 //!
 //! rg15 (M3b, D-VF4RH, D-ME2HD): the run goes through the readiness gate. Each agent answers its
@@ -54,9 +54,12 @@ fn seeded<T>(seed: u64, f: impl FnOnce() -> T) -> Result<T, String> {
     })
 }
 
-/// The fast gate's seeds. Each one runs every check, and their union must exercise every act
+/// The nightly tier's seeds. Each one runs every check, and their union must exercise every act
 /// (ruling task-5.2).
 const FAST_SEEDS: [u64; 6] = [1, 2, 3, 4, 5, 6];
+/// The release tier's seed: one of the six (plan Task 5). The union of the six is checked at
+/// night.
+const RELEASE_SEEDS: [u64; 1] = [1];
 /// The deep gate's seeds.
 const DEEP_SEEDS: [u64; 3] = [1, 2, 3];
 
@@ -75,8 +78,10 @@ fn seeds() -> Vec<u64> {
     }
     if deep() {
         DEEP_SEEDS.to_vec()
-    } else {
+    } else if cfg!(feature = "nightly-tests") {
         FAST_SEEDS.to_vec()
+    } else {
+        RELEASE_SEEDS.to_vec()
     }
 }
 
@@ -140,319 +145,6 @@ fn logged_kinds(o: &Outcome) -> BTreeMap<String, String> {
 
 /// The person's actor: a landing it made is a direct `rdy approve`.
 const HUMAN: &str = "human:qa";
-
-/// The acts every seed's run reaches before the freeze (ruling task-5.2).
-const CORE: [&str; 7] = [
-    "write",
-    "brief",
-    "propose",
-    "land",
-    "review_submit",
-    "inbox",
-    // the forced advice sequence reaches it in every seed (`script::advice_steps`)
-    "accept_advice",
-];
-
-/// What one seed's run did before the freeze (ruling task-5.2: the drain's acts do not count).
-struct Coverage {
-    /// The acts acknowledged (`write_no_brief`: refused with `E_BRIEF_REQUIRED`; `inbox`: an
-    /// agent's read, resumed or not).
-    acts: BTreeSet<&'static str>,
-    lost: bool,
-    landings: usize,
-    chose: bool,
-    kinds: BTreeSet<String>,
-    opened: bool,
-    /// A member that won its set by a landing lands again, choosing nothing (seed 3's pattern;
-    /// ruling task-5-round1.2).
-    winner_again: bool,
-    /// An include of a change that a set binds (msw20), that set chosen by a landing of the run,
-    /// and a landing after the choice (ruling task-5-round1.1). Printed as evidence only: the
-    /// random seeds reach it rarely (fix round 2 measured 1 seed in 16), so the directed run
-    /// `sg5_an_included_change_bound_to_the_winner_lands_after_the_choice` asserts it, and
-    /// `sg3_a_fast_seed_includes_before_a_set_and_lands_after_it` asserts the scripts allow it.
-    bound_include: bool,
-    /// A landing by a direct `rdy approve` (the person, with no relay: the CLI parity path).
-    direct: bool,
-}
-
-/// Whether the run (before the freeze) included a change that a set binds, chose that set by a
-/// landing, and landed again after the choice. The bindings and the choices are read from the
-/// drained store; the order from the journal.
-fn bound_include(o: &Outcome) -> bool {
-    let (_keep, copy) = copy_of(&o.dir);
-    let r = Rdy::open(&copy).expect("open the drained copy");
-    let st = r.read();
-    let chosen_by: BTreeMap<String, Hash> = st
-        .reader()
-        .landings()
-        .expect("read canon's chain")
-        .iter()
-        .filter_map(|(l, rec)| Some((l.to_string(), rec.chosen.as_ref()?.set)))
-        .collect();
-    let run = o.before_freeze();
-    // the sets that bind a change an include of the run brought into another view
-    let mut bound: BTreeSet<Hash> = BTreeSet::new();
-    let mut found = false;
-    // the sets chosen so far, each with whether a landing came after its choice
-    let mut chosen: BTreeSet<Hash> = BTreeSet::new();
-    for e in run.iter().filter(|e| e.outcome == Met::Ok) {
-        if e.act == "include" {
-            for c in e
-                .reply
-                .as_ref()
-                .and_then(|r| r["included"].as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|c| c.as_str()?.parse::<Hash>().ok())
-            {
-                bound.extend(bindings_of(&st, &c).into_iter().map(|(set, _)| set));
-            }
-        }
-        let Some(l) = e
-            .reply
-            .as_ref()
-            .filter(|_| e.act == "land" || e.act == run::LAND_FOUND)
-            .and_then(|r| landing_fields(r)["landing"].as_str())
-        else {
-            continue;
-        };
-        found |= chosen.iter().any(|set| bound.contains(set));
-        if let Some(set) = chosen_by.get(l) {
-            chosen.insert(*set);
-        }
-    }
-    drop(st);
-    r.close().expect("close the drained copy");
-    found
-}
-
-fn coverage(o: &Outcome) -> Coverage {
-    let run = o.before_freeze();
-    let mut acts: BTreeSet<&'static str> = run
-        .iter()
-        .filter(|e| e.outcome == Met::Ok)
-        // an approve whose reply the kill cut, found landed (`land_found`), was not acknowledged:
-        // it is no `land` act (final review M14)
-        .map(|e| match e.act {
-            "inbox_resume" => "inbox",
-            act => act,
-        })
-        .collect();
-    // the daemon never acknowledges an unbriefed stable write: its refusal is the act
-    acts.remove("write_no_brief");
-    if run
-        .iter()
-        .any(|e| e.act == "write_no_brief" && e.outcome == Met::Refused("E_BRIEF_REQUIRED".into()))
-    {
-        acts.insert("write_no_brief");
-    }
-    let landed: Vec<&Entry> = run
-        .iter()
-        .filter(|e| {
-            (e.act == "land" && e.outcome == Met::Ok)
-                || (e.act == run::LAND_FOUND && e.reply.is_some())
-        })
-        .collect();
-    let logged = logged_kinds(o);
-    let mut kinds: BTreeSet<String> = o
-        .reported
-        .values()
-        .filter_map(|t| t["kind"].as_str().map(str::to_string))
-        .collect();
-    kinds.extend(
-        run.iter()
-            .flat_map(|e| e.seen.iter())
-            .filter_map(|l| logged.get(l).cloned()),
-    );
-    // the views that won a set by a landing of the run, and whether one landed again choosing
-    // nothing
-    let mut won: BTreeSet<&str> = BTreeSet::new();
-    let mut winner_again = false;
-    for e in run
-        .iter()
-        .filter(|e| e.act == "land" && e.outcome == Met::Ok)
-    {
-        let (Some(view), Some(reply)) = (e.view.as_deref(), e.reply.as_ref()) else {
-            continue;
-        };
-        match landing_fields(reply).get("chosen").filter(|c| !c.is_null()) {
-            Some(c) => {
-                if c["member"] == view {
-                    won.insert(view);
-                }
-            }
-            None => winner_again |= won.contains(view),
-        }
-    }
-    Coverage {
-        winner_again,
-        bound_include: bound_include(o),
-        direct: run
-            .iter()
-            .any(|e| e.act == "land" && e.outcome == Met::Ok && e.actor == HUMAN),
-        acts,
-        lost: run.iter().any(|e| e.outcome == Met::Lost),
-        landings: landed.len(),
-        chose: landed.iter().any(|e| {
-            e.reply.as_ref().is_some_and(|r| {
-                landing_fields(r)
-                    .get("chosen")
-                    .is_some_and(|c| !c.is_null())
-            })
-        }),
-        kinds,
-        opened: run.iter().any(|e| {
-            e.inbox
-                .as_ref()
-                .is_some_and(|r| r.entries.iter().any(|x| x["event"] == "tension_opened"))
-        }),
-    }
-}
-
-/// The M3 route acts each fast tier acknowledges before the freeze (plan Task 10). The role
-/// route's acts are visible gaps, proven by the authority area (ruling task-8 finding 1).
-const M3_ACKNOWLEDGED: [&str; 10] = [
-    "m3_relay_answer",
-    "m3_elicit_first_rev",
-    "m3_elicit_second_rev",
-    "m3_elicit_decline",
-    "m3_relay_after_decline",
-    "m3_moved_card",
-    "m3_publication_check",
-    "m3_publication_output",
-    "m3_blob_remove",
-    "m3_compact_real",
-];
-
-/// Ruling task-5.2: the run, not the drain, exercises the acts. Every seed reaches the core acts
-/// and lands at least once before the freeze; the union of the seeds reaches every act of the
-/// closed list, a lost call, a seed with 4 landings, a landing that chose a member of a set, an
-/// `edit_collision` and a `premise_shift`, and a `tension_opened` inbox entry. Ruling
-/// task-5-round1.2: the union also reaches a set's winner landing again with no choice. Final
-/// review M4: the union also lands by a direct `rdy approve`. Ruling task-10.4: the union also
-/// accepts a check verdict (`accept_check_verdict`). Plan Task 10: the union also acknowledges
-/// every M3 route act of `M3_ACKNOWLEDGED`. Only acknowledged `land` calls count
-/// as `land` (final review M14). With `RDY_QA_SWARM_SEEDS` set, only each seed's core acts are
-/// checked: the union is a property of the tier's seeds.
-#[test]
-fn sg5_the_run_exercised_every_act() {
-    let mut all = Coverage {
-        acts: BTreeSet::new(),
-        lost: false,
-        landings: 0,
-        chose: false,
-        kinds: BTreeSet::new(),
-        opened: false,
-        winner_again: false,
-        bound_include: false,
-        direct: false,
-    };
-    let mut failed = vec![];
-    for (seed, r) in runs() {
-        let o = match r {
-            Ok(o) => o,
-            Err(text) => {
-                failed.push(text.clone());
-                continue;
-            }
-        };
-        let c = coverage(o);
-        // the evidence a person reads with --nocapture: what each seed's run reached
-        eprintln!(
-            "swarm seed {seed}: {} acts, lost {}, {} landings, chose {}, kinds {:?}, opened {}, accept_advice {}, accept_check_verdict {}, winner lands again {}, bound include then choice {}, direct landing {}",
-            c.acts.len(),
-            c.lost,
-            c.landings,
-            c.chose,
-            c.kinds,
-            c.opened,
-            c.acts.contains("accept_advice"),
-            c.acts.contains("accept_check_verdict"),
-            c.winner_again,
-            c.bound_include,
-            c.direct
-        );
-        let missing: Vec<&str> = CORE
-            .iter()
-            .copied()
-            .filter(|a| !c.acts.contains(a))
-            .collect();
-        if !missing.is_empty() {
-            failed.push(format!(
-                "swarm seed {seed}: before the freeze, no acknowledged act of {missing:?}"
-            ));
-        }
-        all.acts.extend(c.acts);
-        all.lost |= c.lost;
-        all.landings = all.landings.max(c.landings);
-        all.chose |= c.chose;
-        all.kinds.extend(c.kinds);
-        all.opened |= c.opened;
-        all.winner_again |= c.winner_again;
-        all.direct |= c.direct;
-    }
-    // the union is a property of the tier's seeds: a run of listed seeds (to run a failing
-    // seed again) checks each seed's core acts only (final review M8, minors item 46)
-    if std::env::var("RDY_QA_SWARM_SEEDS").is_ok() {
-        eprintln!("RDY_QA_SWARM_SEEDS is set: the union of the seeds is not checked");
-        assert!(failed.is_empty(), "{}", failed.join("\n\n"));
-        return;
-    }
-    let seeds: Vec<u64> = runs().iter().map(|(s, _)| *s).collect();
-    let missing: Vec<&str> = Act::ALL_NAMES
-        .iter()
-        .copied()
-        .chain([
-            "review_submit",
-            "land",
-            "dismiss",
-            "accept_advice",
-            "wc_commit",
-            "inbox_ack",
-            "accept_check_verdict",
-            "ui_answer",
-        ])
-        // plan Task 10: the acknowledged M3 route acts (the role route is the authority area's)
-        .chain(M3_ACKNOWLEDGED)
-        .filter(|a| !all.acts.contains(a))
-        .collect();
-    if !missing.is_empty() {
-        failed.push(format!(
-            "swarm seeds {seeds:?}: no run reached an acknowledged act of {missing:?} before the freeze"
-        ));
-    }
-    let mut lacks = vec![];
-    if !all.lost {
-        lacks.push("a call the kill cut".to_string());
-    }
-    if all.landings < 4 {
-        lacks.push(format!("4 landings in one run (at most {})", all.landings));
-    }
-    if !all.chose {
-        lacks.push("a landing that chose a member of an alternative set".to_string());
-    }
-    for kind in ["edit_collision", "premise_shift"] {
-        if !all.kinds.contains(kind) {
-            lacks.push(format!("a reported or seen {kind}"));
-        }
-    }
-    if !all.opened {
-        lacks.push("an inbox read with a tension_opened entry".to_string());
-    }
-    if !all.winner_again {
-        lacks.push("a set's winner that landed again, choosing nothing".to_string());
-    }
-    if !all.direct {
-        lacks.push("a landing by a direct rdy approve (no relay)".to_string());
-    }
-    if !lacks.is_empty() {
-        failed.push(format!(
-            "swarm seeds {seeds:?}: before the freeze, no run had {lacks:?}"
-        ));
-    }
-    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
-}
 
 /// Final review I1: each run's project and frozen copy live under this process's directory,
 /// which a later swarm process removes once this one has exited (`project::sweep`).
@@ -4816,9 +4508,8 @@ use rdy_qa::m3_audit::{
     assessment_id, audit_m3, check_m3_in, check_temporal, holds_of,
 };
 use rdy_qa::publication_scenario::{scan_local_links, tree};
-use rdy_qa::report::AREA_PROVEN_WITNESSES;
 use rdy_qa::swarm::journal::Reply;
-use rdy_qa::swarm::m3::{COVERED_BY_AREA, LAND_CARD};
+use rdy_qa::swarm::m3::LAND_CARD;
 use rdy_qa::swarm::script::{Route, m3_scenarios};
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
@@ -4853,278 +4544,12 @@ fn replay(seed: u64, e: &Entry) -> String {
     )
 }
 
-/// The M3 route acts (`Route::acts`).
-fn is_route_act(act: &str) -> bool {
-    Route::ALL.iter().any(|r| r.acts().contains(&act))
-}
-
 /// The landing ids an acknowledged route attempt names.
 fn route_records(e: &Entry) -> Vec<String> {
     match e.route.as_ref().map(|a| &a.reply) {
         Some(Reply::Acknowledged { records, .. }) if e.outcome == Met::Ok => records.clone(),
         _ => vec![],
     }
-}
-
-/// The witnesses the swarm itself must give, across the fixed seed set (plan Task 10). A witness
-/// another area proves is in `report::AREA_PROVEN_WITNESSES`, never here.
-const SWARM_WITNESSES: [&str; 13] = [
-    "relayed landing",
-    "policy landing",
-    "refused stale card then new-card answer",
-    "accepted elicited answer (2025-11-25, in-call)",
-    "accepted elicited answer (2026-07-28, inline)",
-    "declined elicitation",
-    "local UI answer",
-    "explicit CLI fallback",
-    "accepted blocking verdict that does not land",
-    "answered plan or deferral",
-    "compact with removed bytes",
-    "org profile check of a held landing",
-    "output link scan",
-];
-
-/// How many times one seed's run (before the freeze, except the store's own policy landings and
-/// verdict holds) gave each witness of `SWARM_WITNESSES`.
-fn swarm_witnesses(o: &Outcome) -> BTreeMap<&'static str, usize> {
-    let run = o.before_freeze();
-    let ok = |act: &str| {
-        run.iter()
-            .filter(|e| e.act == act && e.outcome == Met::Ok)
-            .count()
-    };
-    let mut w: BTreeMap<&'static str, usize> = SWARM_WITNESSES.iter().map(|n| (*n, 0)).collect();
-    let mut set = |name: &'static str, n: usize| {
-        *w.get_mut(name).expect("a listed witness") += n;
-    };
-    set(
-        "relayed landing",
-        run.iter()
-            .filter(|e| {
-                matches!(e.act, "m3_relay_answer" | "m3_relay_after_decline")
-                    && !route_records(e).is_empty()
-            })
-            .count(),
-    );
-    set("policy landing", landing_counts(o).0);
-    // a refusal of the old card, then an acknowledged answer on a newer card, in one scenario
-    let mut moved = 0;
-    for (i, e) in run.iter().enumerate() {
-        if e.act != "m3_moved_card" || e.outcome != Met::Refused("E_PROPOSAL_MOVED".into()) {
-            continue;
-        }
-        let old = e.route.as_ref().and_then(|a| a.card_hash.clone());
-        moved += usize::from(run[i + 1..].iter().any(|n| {
-            n.act == "m3_moved_card"
-                && n.actor == e.actor
-                && n.step == e.step
-                && !route_records(n).is_empty()
-                && n.route.as_ref().and_then(|a| a.card_hash.clone()) != old
-        }));
-    }
-    set("refused stale card then new-card answer", moved);
-    set(
-        "accepted elicited answer (2025-11-25, in-call)",
-        run.iter()
-            .filter(|e| e.act == "m3_elicit_first_rev" && !route_records(e).is_empty())
-            .count(),
-    );
-    set(
-        "accepted elicited answer (2026-07-28, inline)",
-        run.iter()
-            .filter(|e| e.act == "m3_elicit_second_rev" && !route_records(e).is_empty())
-            .count(),
-    );
-    set(
-        "declined elicitation",
-        run.iter()
-            .filter(|e| e.act == "m3_elicit_decline" && e.outcome == Met::Ok)
-            .filter(|e| e.reply.as_ref().is_some_and(|r| r["state"] == "declined"))
-            .count(),
-    );
-    set(
-        "local UI answer",
-        run.iter()
-            .filter(|e| e.act == "ui_answer" && e.outcome == Met::Ok)
-            .filter(|e| e.ui.as_ref().is_some_and(|u| u.landing.is_some()))
-            .count(),
-    );
-    set(
-        "explicit CLI fallback",
-        run.iter()
-            .filter(|e| e.act == "land" && e.outcome == Met::Ok && e.actor == HUMAN)
-            .count(),
-    );
-    let stored = oracle::stored_checks(&o.dir, &oracle::proposed_versions(&o.journal));
-    set(
-        "accepted blocking verdict that does not land",
-        stored
-            .holds
-            .iter()
-            .filter(|(v, h)| !h.is_empty() && !stored.landed.contains(*v))
-            .count(),
-    );
-    // the random seeds answer plans; a deferral card comes in the directed rg15 run
-    // (`rg15_the_person_accepts_a_deferral_card_before_the_approve`)
-    set(
-        "answered plan or deferral",
-        ok("plan_answer") + ok("accept_deferrals"),
-    );
-    set(
-        "compact with removed bytes",
-        run.iter()
-            .filter(|e| e.act == "m3_compact_real" && e.outcome == Met::Ok)
-            .filter(|e| {
-                e.reply
-                    .as_ref()
-                    .and_then(|r| r["removed_bytes"].as_u64())
-                    .is_some_and(|n| n > 0)
-            })
-            .count(),
-    );
-    set(
-        "org profile check of a held landing",
-        run.iter()
-            .filter(|e| e.act == "m3_publication_check" && e.outcome == Met::Ok)
-            .filter(|e| {
-                e.route
-                    .as_ref()
-                    .and_then(|a| a.observed_ref.as_deref())
-                    .is_some_and(|s| s.starts_with("landing:"))
-            })
-            .count(),
-    );
-    set(
-        "output link scan",
-        run.iter()
-            .filter(|e| e.act == "m3_publication_output" && e.outcome == Met::Ok)
-            .filter(|e| e.route.as_ref().is_some_and(|a| a.counts.links_checked > 0))
-            .count(),
-    );
-    w
-}
-
-/// How many org profile checks of a held landing read `warning`.
-fn org_warnings(o: &Outcome) -> usize {
-    o.before_freeze()
-        .iter()
-        .filter(|e| e.act == "m3_publication_check" && e.outcome == Met::Ok)
-        .filter(|e| {
-            e.reply
-                .as_ref()
-                .is_some_and(|v| v["references"]["status"] == "warning")
-        })
-        .count()
-}
-
-/// The source of the test file `file` under `tests/`.
-fn test_source(file: &str) -> String {
-    let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join(file);
-    std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("read {}: {e}", at.display()))
-}
-
-/// Plan Task 10 (as rulings task-8 and task-10 finding 1 amend it): across the fixed seed set the
-/// swarm gave every witness of `SWARM_WITNESSES`, and each area-proven witness still names an
-/// existing area test (a guard only; the area run proves it). Every M3 route attempt met an
-/// outcome of its act's closed set, and each failure names the line that replays it.
-#[test]
-fn mg10_swarm_exercised_every_required_m3_scenario() {
-    let mut all: BTreeMap<&'static str, usize> = SWARM_WITNESSES.iter().map(|n| (*n, 0)).collect();
-    let mut failed = vec![];
-    for (seed, r) in runs() {
-        let o = match r {
-            Ok(o) => o,
-            Err(text) => {
-                failed.push(text.clone());
-                continue;
-            }
-        };
-        let w = swarm_witnesses(o);
-        // the queue items the person worked down before an M3 card past the cap (deep-drain
-        // ruling, finding 2)
-        let worked = o
-            .journal
-            .iter()
-            .filter(|e| e.act == rdy_qa::swarm::people::WORK_DOWN)
-            .count();
-        eprintln!(
-            "swarm seed {seed}: M3 witnesses {w:?}, org warnings {}, work-down items {worked}",
-            org_warnings(o)
-        );
-        for (k, n) in w {
-            *all.get_mut(k).expect("a listed witness") += n;
-        }
-        // every scheduled route left a trace: an attempt, or a visible gap with its reason
-        let scheduled = m3_scenarios(&Config::for_run(*seed));
-        for sc in &scheduled {
-            let trace = o.journal.iter().any(|e| {
-                sc.route.acts().contains(&e.act) && e.actor == format!("agent:a{}", sc.agent)
-            });
-            if !trace {
-                failed.push(format!(
-                    "RDY_QA_SWARM_SEEDS={seed}: scenario {} (agent a{}, step {}) left no entry",
-                    sc.route.name(),
-                    sc.agent,
-                    sc.step
-                ));
-            }
-        }
-        for e in o.journal.iter().filter(|e| is_route_act(e.act)) {
-            // the role route is proven by the authority area: its entries are visible gaps that
-            // carry no attempt, never a witness (ruling task-8 finding 1)
-            if matches!(e.act, "m3_wrong_role" | "m3_right_role") {
-                if e.outcome != Met::Skipped
-                    || e.route.is_some()
-                    || e.message.as_deref() != Some(COVERED_BY_AREA)
-                {
-                    failed.push(format!(
-                        "the role route ran in the swarm: {}",
-                        replay(*seed, e)
-                    ));
-                }
-                continue;
-            }
-            let fine = match (&e.outcome, &e.route) {
-                (Met::Skipped, None) => true,
-                (_, Some(a)) => a.is_allowed() && !a.is_pending(),
-                (_, None) => false,
-            };
-            if !fine {
-                failed.push(format!(
-                    "an outcome outside the closed set: {}",
-                    replay(*seed, e)
-                ));
-            }
-        }
-    }
-    eprintln!("swarm seeds: M3 witnesses {all:?}");
-    if std::env::var("RDY_QA_SWARM_SEEDS").is_err() {
-        let missing: Vec<&str> = all
-            .iter()
-            .filter(|(_, n)| **n == 0)
-            .map(|(k, _)| *k)
-            .collect();
-        if !missing.is_empty() {
-            let seeds: Vec<u64> = runs().iter().map(|(s, _)| *s).collect();
-            failed.push(format!(
-                "swarm seeds {seeds:?}: no run gave the M3 witness {missing:?}"
-            ));
-        }
-    }
-    // A guard against a rename or a deletion of the area test each area-proven witness names
-    // (rulings task-8 and task-10 finding 1). It is not swarm evidence and proves no execution:
-    // the gate's area run executes that test, and the gate report lists each such witness as
-    // area-proven, not exercised under swarm concurrency.
-    for (witness, file, test) in AREA_PROVEN_WITNESSES {
-        if !test_source(file).contains(&format!("fn {test}()")) {
-            failed.push(format!(
-                "the witness {witness:?} names {test} in tests/{file}, which has no such test"
-            ));
-        }
-    }
-    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
 /// The person's queue in `st`, every card whole, as the swarm's person sees it with no session:
@@ -6536,4 +5961,592 @@ fn mg10_profile_outputs_pass_disclosure_and_link_checks() {
         "swarm seeds: {} outputs scanned for the removed text after its removal",
         after_removal.get()
     );
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+    use rdy_qa::report::AREA_PROVEN_WITNESSES;
+    use rdy_qa::swarm::m3::COVERED_BY_AREA;
+
+    /// The acts every seed's run reaches before the freeze (ruling task-5.2).
+    const CORE: [&str; 7] = [
+        "write",
+        "brief",
+        "propose",
+        "land",
+        "review_submit",
+        "inbox",
+        // the forced advice sequence reaches it in every seed (`script::advice_steps`)
+        "accept_advice",
+    ];
+
+    /// What one seed's run did before the freeze (ruling task-5.2: the drain's acts do not count).
+    struct Coverage {
+        /// The acts acknowledged (`write_no_brief`: refused with `E_BRIEF_REQUIRED`; `inbox`: an
+        /// agent's read, resumed or not).
+        acts: BTreeSet<&'static str>,
+        lost: bool,
+        landings: usize,
+        chose: bool,
+        kinds: BTreeSet<String>,
+        opened: bool,
+        /// A member that won its set by a landing lands again, choosing nothing (seed 3's pattern;
+        /// ruling task-5-round1.2).
+        winner_again: bool,
+        /// An include of a change that a set binds (msw20), that set chosen by a landing of the run,
+        /// and a landing after the choice (ruling task-5-round1.1). Printed as evidence only: the
+        /// random seeds reach it rarely (fix round 2 measured 1 seed in 16), so the directed run
+        /// `sg5_an_included_change_bound_to_the_winner_lands_after_the_choice` asserts it, and
+        /// `sg3_a_fast_seed_includes_before_a_set_and_lands_after_it` asserts the scripts allow it.
+        bound_include: bool,
+        /// A landing by a direct `rdy approve` (the person, with no relay: the CLI parity path).
+        direct: bool,
+    }
+
+    /// Whether the run (before the freeze) included a change that a set binds, chose that set by a
+    /// landing, and landed again after the choice. The bindings and the choices are read from the
+    /// drained store; the order from the journal.
+    fn bound_include(o: &Outcome) -> bool {
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let st = r.read();
+        let chosen_by: BTreeMap<String, Hash> = st
+            .reader()
+            .landings()
+            .expect("read canon's chain")
+            .iter()
+            .filter_map(|(l, rec)| Some((l.to_string(), rec.chosen.as_ref()?.set)))
+            .collect();
+        let run = o.before_freeze();
+        // the sets that bind a change an include of the run brought into another view
+        let mut bound: BTreeSet<Hash> = BTreeSet::new();
+        let mut found = false;
+        // the sets chosen so far, each with whether a landing came after its choice
+        let mut chosen: BTreeSet<Hash> = BTreeSet::new();
+        for e in run.iter().filter(|e| e.outcome == Met::Ok) {
+            if e.act == "include" {
+                for c in e
+                    .reply
+                    .as_ref()
+                    .and_then(|r| r["included"].as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c.as_str()?.parse::<Hash>().ok())
+                {
+                    bound.extend(bindings_of(&st, &c).into_iter().map(|(set, _)| set));
+                }
+            }
+            let Some(l) = e
+                .reply
+                .as_ref()
+                .filter(|_| e.act == "land" || e.act == run::LAND_FOUND)
+                .and_then(|r| landing_fields(r)["landing"].as_str())
+            else {
+                continue;
+            };
+            found |= chosen.iter().any(|set| bound.contains(set));
+            if let Some(set) = chosen_by.get(l) {
+                chosen.insert(*set);
+            }
+        }
+        drop(st);
+        r.close().expect("close the drained copy");
+        found
+    }
+
+    fn coverage(o: &Outcome) -> Coverage {
+        let run = o.before_freeze();
+        let mut acts: BTreeSet<&'static str> = run
+            .iter()
+            .filter(|e| e.outcome == Met::Ok)
+            // an approve whose reply the kill cut, found landed (`land_found`), was not acknowledged:
+            // it is no `land` act (final review M14)
+            .map(|e| match e.act {
+                "inbox_resume" => "inbox",
+                act => act,
+            })
+            .collect();
+        // the daemon never acknowledges an unbriefed stable write: its refusal is the act
+        acts.remove("write_no_brief");
+        if run.iter().any(|e| {
+            e.act == "write_no_brief" && e.outcome == Met::Refused("E_BRIEF_REQUIRED".into())
+        }) {
+            acts.insert("write_no_brief");
+        }
+        let landed: Vec<&Entry> = run
+            .iter()
+            .filter(|e| {
+                (e.act == "land" && e.outcome == Met::Ok)
+                    || (e.act == run::LAND_FOUND && e.reply.is_some())
+            })
+            .collect();
+        let logged = logged_kinds(o);
+        let mut kinds: BTreeSet<String> = o
+            .reported
+            .values()
+            .filter_map(|t| t["kind"].as_str().map(str::to_string))
+            .collect();
+        kinds.extend(
+            run.iter()
+                .flat_map(|e| e.seen.iter())
+                .filter_map(|l| logged.get(l).cloned()),
+        );
+        // the views that won a set by a landing of the run, and whether one landed again choosing
+        // nothing
+        let mut won: BTreeSet<&str> = BTreeSet::new();
+        let mut winner_again = false;
+        for e in run
+            .iter()
+            .filter(|e| e.act == "land" && e.outcome == Met::Ok)
+        {
+            let (Some(view), Some(reply)) = (e.view.as_deref(), e.reply.as_ref()) else {
+                continue;
+            };
+            match landing_fields(reply).get("chosen").filter(|c| !c.is_null()) {
+                Some(c) => {
+                    if c["member"] == view {
+                        won.insert(view);
+                    }
+                }
+                None => winner_again |= won.contains(view),
+            }
+        }
+        Coverage {
+            winner_again,
+            bound_include: bound_include(o),
+            direct: run
+                .iter()
+                .any(|e| e.act == "land" && e.outcome == Met::Ok && e.actor == HUMAN),
+            acts,
+            lost: run.iter().any(|e| e.outcome == Met::Lost),
+            landings: landed.len(),
+            chose: landed.iter().any(|e| {
+                e.reply.as_ref().is_some_and(|r| {
+                    landing_fields(r)
+                        .get("chosen")
+                        .is_some_and(|c| !c.is_null())
+                })
+            }),
+            kinds,
+            opened: run.iter().any(|e| {
+                e.inbox
+                    .as_ref()
+                    .is_some_and(|r| r.entries.iter().any(|x| x["event"] == "tension_opened"))
+            }),
+        }
+    }
+
+    /// The M3 route acts each fast tier acknowledges before the freeze (plan Task 10). The role
+    /// route's acts are visible gaps, proven by the authority area (ruling task-8 finding 1).
+    const M3_ACKNOWLEDGED: [&str; 10] = [
+        "m3_relay_answer",
+        "m3_elicit_first_rev",
+        "m3_elicit_second_rev",
+        "m3_elicit_decline",
+        "m3_relay_after_decline",
+        "m3_moved_card",
+        "m3_publication_check",
+        "m3_publication_output",
+        "m3_blob_remove",
+        "m3_compact_real",
+    ];
+
+    /// The M3 route acts (`Route::acts`).
+    fn is_route_act(act: &str) -> bool {
+        Route::ALL.iter().any(|r| r.acts().contains(&act))
+    }
+
+    /// The witnesses the swarm itself must give, across the fixed seed set (plan Task 10). A witness
+    /// another area proves is in `report::AREA_PROVEN_WITNESSES`, never here.
+    const SWARM_WITNESSES: [&str; 13] = [
+        "relayed landing",
+        "policy landing",
+        "refused stale card then new-card answer",
+        "accepted elicited answer (2025-11-25, in-call)",
+        "accepted elicited answer (2026-07-28, inline)",
+        "declined elicitation",
+        "local UI answer",
+        "explicit CLI fallback",
+        "accepted blocking verdict that does not land",
+        "answered plan or deferral",
+        "compact with removed bytes",
+        "org profile check of a held landing",
+        "output link scan",
+    ];
+
+    /// How many times one seed's run (before the freeze, except the store's own policy landings and
+    /// verdict holds) gave each witness of `SWARM_WITNESSES`.
+    fn swarm_witnesses(o: &Outcome) -> BTreeMap<&'static str, usize> {
+        let run = o.before_freeze();
+        let ok = |act: &str| {
+            run.iter()
+                .filter(|e| e.act == act && e.outcome == Met::Ok)
+                .count()
+        };
+        let mut w: BTreeMap<&'static str, usize> =
+            SWARM_WITNESSES.iter().map(|n| (*n, 0)).collect();
+        let mut set = |name: &'static str, n: usize| {
+            *w.get_mut(name).expect("a listed witness") += n;
+        };
+        set(
+            "relayed landing",
+            run.iter()
+                .filter(|e| {
+                    matches!(e.act, "m3_relay_answer" | "m3_relay_after_decline")
+                        && !route_records(e).is_empty()
+                })
+                .count(),
+        );
+        set("policy landing", landing_counts(o).0);
+        // a refusal of the old card, then an acknowledged answer on a newer card, in one scenario
+        let mut moved = 0;
+        for (i, e) in run.iter().enumerate() {
+            if e.act != "m3_moved_card" || e.outcome != Met::Refused("E_PROPOSAL_MOVED".into()) {
+                continue;
+            }
+            let old = e.route.as_ref().and_then(|a| a.card_hash.clone());
+            moved += usize::from(run[i + 1..].iter().any(|n| {
+                n.act == "m3_moved_card"
+                    && n.actor == e.actor
+                    && n.step == e.step
+                    && !route_records(n).is_empty()
+                    && n.route.as_ref().and_then(|a| a.card_hash.clone()) != old
+            }));
+        }
+        set("refused stale card then new-card answer", moved);
+        set(
+            "accepted elicited answer (2025-11-25, in-call)",
+            run.iter()
+                .filter(|e| e.act == "m3_elicit_first_rev" && !route_records(e).is_empty())
+                .count(),
+        );
+        set(
+            "accepted elicited answer (2026-07-28, inline)",
+            run.iter()
+                .filter(|e| e.act == "m3_elicit_second_rev" && !route_records(e).is_empty())
+                .count(),
+        );
+        set(
+            "declined elicitation",
+            run.iter()
+                .filter(|e| e.act == "m3_elicit_decline" && e.outcome == Met::Ok)
+                .filter(|e| e.reply.as_ref().is_some_and(|r| r["state"] == "declined"))
+                .count(),
+        );
+        set(
+            "local UI answer",
+            run.iter()
+                .filter(|e| e.act == "ui_answer" && e.outcome == Met::Ok)
+                .filter(|e| e.ui.as_ref().is_some_and(|u| u.landing.is_some()))
+                .count(),
+        );
+        set(
+            "explicit CLI fallback",
+            run.iter()
+                .filter(|e| e.act == "land" && e.outcome == Met::Ok && e.actor == HUMAN)
+                .count(),
+        );
+        let stored = oracle::stored_checks(&o.dir, &oracle::proposed_versions(&o.journal));
+        set(
+            "accepted blocking verdict that does not land",
+            stored
+                .holds
+                .iter()
+                .filter(|(v, h)| !h.is_empty() && !stored.landed.contains(*v))
+                .count(),
+        );
+        // the random seeds answer plans; a deferral card comes in the directed rg15 run
+        // (`rg15_the_person_accepts_a_deferral_card_before_the_approve`)
+        set(
+            "answered plan or deferral",
+            ok("plan_answer") + ok("accept_deferrals"),
+        );
+        set(
+            "compact with removed bytes",
+            run.iter()
+                .filter(|e| e.act == "m3_compact_real" && e.outcome == Met::Ok)
+                .filter(|e| {
+                    e.reply
+                        .as_ref()
+                        .and_then(|r| r["removed_bytes"].as_u64())
+                        .is_some_and(|n| n > 0)
+                })
+                .count(),
+        );
+        set(
+            "org profile check of a held landing",
+            run.iter()
+                .filter(|e| e.act == "m3_publication_check" && e.outcome == Met::Ok)
+                .filter(|e| {
+                    e.route
+                        .as_ref()
+                        .and_then(|a| a.observed_ref.as_deref())
+                        .is_some_and(|s| s.starts_with("landing:"))
+                })
+                .count(),
+        );
+        set(
+            "output link scan",
+            run.iter()
+                .filter(|e| e.act == "m3_publication_output" && e.outcome == Met::Ok)
+                .filter(|e| e.route.as_ref().is_some_and(|a| a.counts.links_checked > 0))
+                .count(),
+        );
+        w
+    }
+
+    /// How many org profile checks of a held landing read `warning`.
+    fn org_warnings(o: &Outcome) -> usize {
+        o.before_freeze()
+            .iter()
+            .filter(|e| e.act == "m3_publication_check" && e.outcome == Met::Ok)
+            .filter(|e| {
+                e.reply
+                    .as_ref()
+                    .is_some_and(|v| v["references"]["status"] == "warning")
+            })
+            .count()
+    }
+
+    /// The source of the test file `file` under `tests/`.
+    fn test_source(file: &str) -> String {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join(file);
+        std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("read {}: {e}", at.display()))
+    }
+
+    /// Ruling task-5.2: the run, not the drain, exercises the acts. Every seed reaches the core acts
+    /// and lands at least once before the freeze; the union of the seeds reaches every act of the
+    /// closed list, a lost call, a seed with 4 landings, a landing that chose a member of a set, an
+    /// `edit_collision` and a `premise_shift`, and a `tension_opened` inbox entry. Ruling
+    /// task-5-round1.2: the union also reaches a set's winner landing again with no choice. Final
+    /// review M4: the union also lands by a direct `rdy approve`. Ruling task-10.4: the union also
+    /// accepts a check verdict (`accept_check_verdict`). Plan Task 10: the union also acknowledges
+    /// every M3 route act of `M3_ACKNOWLEDGED`. Only acknowledged `land` calls count
+    /// as `land` (final review M14). With `RDY_QA_SWARM_SEEDS` set, only each seed's core acts are
+    /// checked: the union is a property of the tier's seeds.
+    #[test]
+    fn sg5_the_run_exercised_every_act() {
+        let mut all = Coverage {
+            acts: BTreeSet::new(),
+            lost: false,
+            landings: 0,
+            chose: false,
+            kinds: BTreeSet::new(),
+            opened: false,
+            winner_again: false,
+            bound_include: false,
+            direct: false,
+        };
+        let mut failed = vec![];
+        for (seed, r) in runs() {
+            let o = match r {
+                Ok(o) => o,
+                Err(text) => {
+                    failed.push(text.clone());
+                    continue;
+                }
+            };
+            let c = coverage(o);
+            // the evidence a person reads with --nocapture: what each seed's run reached
+            eprintln!(
+                "swarm seed {seed}: {} acts, lost {}, {} landings, chose {}, kinds {:?}, opened {}, accept_advice {}, accept_check_verdict {}, winner lands again {}, bound include then choice {}, direct landing {}",
+                c.acts.len(),
+                c.lost,
+                c.landings,
+                c.chose,
+                c.kinds,
+                c.opened,
+                c.acts.contains("accept_advice"),
+                c.acts.contains("accept_check_verdict"),
+                c.winner_again,
+                c.bound_include,
+                c.direct
+            );
+            let missing: Vec<&str> = CORE
+                .iter()
+                .copied()
+                .filter(|a| !c.acts.contains(a))
+                .collect();
+            if !missing.is_empty() {
+                failed.push(format!(
+                    "swarm seed {seed}: before the freeze, no acknowledged act of {missing:?}"
+                ));
+            }
+            all.acts.extend(c.acts);
+            all.lost |= c.lost;
+            all.landings = all.landings.max(c.landings);
+            all.chose |= c.chose;
+            all.kinds.extend(c.kinds);
+            all.opened |= c.opened;
+            all.winner_again |= c.winner_again;
+            all.direct |= c.direct;
+        }
+        // the union is a property of the tier's seeds: a run of listed seeds (to run a failing
+        // seed again) checks each seed's core acts only (final review M8, minors item 46)
+        if std::env::var("RDY_QA_SWARM_SEEDS").is_ok() {
+            eprintln!("RDY_QA_SWARM_SEEDS is set: the union of the seeds is not checked");
+            assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+            return;
+        }
+        let seeds: Vec<u64> = runs().iter().map(|(s, _)| *s).collect();
+        let missing: Vec<&str> = Act::ALL_NAMES
+            .iter()
+            .copied()
+            .chain([
+                "review_submit",
+                "land",
+                "dismiss",
+                "accept_advice",
+                "wc_commit",
+                "inbox_ack",
+                "accept_check_verdict",
+                "ui_answer",
+            ])
+            // plan Task 10: the acknowledged M3 route acts (the role route is the authority area's)
+            .chain(M3_ACKNOWLEDGED)
+            .filter(|a| !all.acts.contains(a))
+            .collect();
+        if !missing.is_empty() {
+            failed.push(format!(
+                "swarm seeds {seeds:?}: no run reached an acknowledged act of {missing:?} before the freeze"
+            ));
+        }
+        let mut lacks = vec![];
+        if !all.lost {
+            lacks.push("a call the kill cut".to_string());
+        }
+        if all.landings < 4 {
+            lacks.push(format!("4 landings in one run (at most {})", all.landings));
+        }
+        if !all.chose {
+            lacks.push("a landing that chose a member of an alternative set".to_string());
+        }
+        for kind in ["edit_collision", "premise_shift"] {
+            if !all.kinds.contains(kind) {
+                lacks.push(format!("a reported or seen {kind}"));
+            }
+        }
+        if !all.opened {
+            lacks.push("an inbox read with a tension_opened entry".to_string());
+        }
+        if !all.winner_again {
+            lacks.push("a set's winner that landed again, choosing nothing".to_string());
+        }
+        if !all.direct {
+            lacks.push("a landing by a direct rdy approve (no relay)".to_string());
+        }
+        if !lacks.is_empty() {
+            failed.push(format!(
+                "swarm seeds {seeds:?}: before the freeze, no run had {lacks:?}"
+            ));
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+    }
+
+    /// Plan Task 10 (as rulings task-8 and task-10 finding 1 amend it): across the fixed seed set the
+    /// swarm gave every witness of `SWARM_WITNESSES`, and each area-proven witness still names an
+    /// existing area test (a guard only; the area run proves it). Every M3 route attempt met an
+    /// outcome of its act's closed set, and each failure names the line that replays it.
+    #[test]
+    fn mg10_swarm_exercised_every_required_m3_scenario() {
+        let mut all: BTreeMap<&'static str, usize> =
+            SWARM_WITNESSES.iter().map(|n| (*n, 0)).collect();
+        let mut failed = vec![];
+        for (seed, r) in runs() {
+            let o = match r {
+                Ok(o) => o,
+                Err(text) => {
+                    failed.push(text.clone());
+                    continue;
+                }
+            };
+            let w = swarm_witnesses(o);
+            // the queue items the person worked down before an M3 card past the cap (deep-drain
+            // ruling, finding 2)
+            let worked = o
+                .journal
+                .iter()
+                .filter(|e| e.act == rdy_qa::swarm::people::WORK_DOWN)
+                .count();
+            eprintln!(
+                "swarm seed {seed}: M3 witnesses {w:?}, org warnings {}, work-down items {worked}",
+                org_warnings(o)
+            );
+            for (k, n) in w {
+                *all.get_mut(k).expect("a listed witness") += n;
+            }
+            // every scheduled route left a trace: an attempt, or a visible gap with its reason
+            let scheduled = m3_scenarios(&Config::for_run(*seed));
+            for sc in &scheduled {
+                let trace = o.journal.iter().any(|e| {
+                    sc.route.acts().contains(&e.act) && e.actor == format!("agent:a{}", sc.agent)
+                });
+                if !trace {
+                    failed.push(format!(
+                        "RDY_QA_SWARM_SEEDS={seed}: scenario {} (agent a{}, step {}) left no entry",
+                        sc.route.name(),
+                        sc.agent,
+                        sc.step
+                    ));
+                }
+            }
+            for e in o.journal.iter().filter(|e| is_route_act(e.act)) {
+                // the role route is proven by the authority area: its entries are visible gaps that
+                // carry no attempt, never a witness (ruling task-8 finding 1)
+                if matches!(e.act, "m3_wrong_role" | "m3_right_role") {
+                    if e.outcome != Met::Skipped
+                        || e.route.is_some()
+                        || e.message.as_deref() != Some(COVERED_BY_AREA)
+                    {
+                        failed.push(format!(
+                            "the role route ran in the swarm: {}",
+                            replay(*seed, e)
+                        ));
+                    }
+                    continue;
+                }
+                let fine = match (&e.outcome, &e.route) {
+                    (Met::Skipped, None) => true,
+                    (_, Some(a)) => a.is_allowed() && !a.is_pending(),
+                    (_, None) => false,
+                };
+                if !fine {
+                    failed.push(format!(
+                        "an outcome outside the closed set: {}",
+                        replay(*seed, e)
+                    ));
+                }
+            }
+        }
+        eprintln!("swarm seeds: M3 witnesses {all:?}");
+        if std::env::var("RDY_QA_SWARM_SEEDS").is_err() {
+            let missing: Vec<&str> = all
+                .iter()
+                .filter(|(_, n)| **n == 0)
+                .map(|(k, _)| *k)
+                .collect();
+            if !missing.is_empty() {
+                let seeds: Vec<u64> = runs().iter().map(|(s, _)| *s).collect();
+                failed.push(format!(
+                    "swarm seeds {seeds:?}: no run gave the M3 witness {missing:?}"
+                ));
+            }
+        }
+        // A guard against a rename or a deletion of the area test each area-proven witness names
+        // (rulings task-8 and task-10 finding 1). It is not swarm evidence and proves no execution:
+        // the gate's area run executes that test, and the gate report lists each such witness as
+        // area-proven, not exercised under swarm concurrency.
+        for (witness, file, test) in AREA_PROVEN_WITNESSES {
+            if !test_source(file).contains(&format!("fn {test}()")) {
+                failed.push(format!(
+                    "the witness {witness:?} names {test} in tests/{file}, which has no such test"
+                ));
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+    }
 }

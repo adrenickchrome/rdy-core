@@ -3,7 +3,7 @@
 //! created block cites it with no new `rdy_brief`. It is registered only after the write is
 //! published, and a write past its bounds is refused before anything is appended.
 use rdy_engine::accept::AcceptItem;
-use rdy_engine::brief::{BriefRecord, CreatedBriefing, MAX_CREATED_BRIEFING, W_BRIEF_STALE};
+use rdy_engine::brief::{BriefRecord, CreatedBriefing, W_BRIEF_STALE};
 use rdy_engine::engine::{Engine, Local};
 use rdy_engine::*;
 use rdy_model::BlockId;
@@ -12,7 +12,7 @@ use rdy_qa::edit_loop::*;
 use rdy_qa::fixtures::*;
 use rdy_qa::mcp::McpClient;
 use rdy_qa::wc;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::BTreeSet;
 
 fn view(v: &str) -> Scope {
@@ -329,108 +329,6 @@ fn nb9_receipt_is_published_atomically_and_forgotten_on_restart() {
     );
 }
 
-/// The state the bounds test compares: the log's end, the view and the registry.
-fn state(r: &Rdy) -> (rdy_store::segment::Location, Hash, usize, usize) {
-    (
-        r.store().log_end(),
-        r.read().materialized(&view("w")).unwrap().snapshot_id(),
-        r.briefs().len(),
-        r.briefs().entries(),
-    )
-}
-
-use rdy_model::Hash;
-
-/// `n` claims under `parent`; the first `on_e` describe `e` and the first `on_f` describe `f`.
-fn claims(parent: &str, n: usize, e: &str, on_e: usize, f: &str, on_f: usize) -> Value {
-    Value::Array(
-        (0..n)
-            .map(|i| {
-                let mut targets = vec![];
-                if i < on_e {
-                    targets.push(json!({"target": e}));
-                }
-                if i < on_f {
-                    targets.push(json!({"target": f}));
-                }
-                let mut op = json!({"op": "create", "type": "claim", "parent": parent, "body": format!("C{i}.")});
-                if !targets.is_empty() {
-                    op["links"] = json!({"describes": targets});
-                }
-                op
-            })
-            .collect(),
-    )
-}
-
-#[test]
-fn nb9_created_briefing_bounds_fail_before_append() {
-    assert_eq!(MAX_CREATED_BRIEFING, 100_000);
-    assert_eq!(rdy_engine::brief::BRIEF_REGISTRY_ENTRIES, 1_000_000);
-    let (_d, mut r) = project();
-    // a draft section; entity E, which eight decisions affect, and entity F, which one affects
-    let w = write(&mut r, "w", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}},
-        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
-        {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger"}},
-        {"op": "create", "type": "entity", "id": "$f", "parent": "$s", "fields": {"name": "Queue"}}
-    ]))
-    .unwrap();
-    let (section, e, f) = (
-        w.created["$s"].clone(),
-        w.created["$e"].clone(),
-        w.created["$f"].clone(),
-    );
-    for i in 0..9 {
-        r.decide(
-            &writer(),
-            "w",
-            DecisionInput {
-                parent: section.clone(),
-                statement: format!("Rule {i} holds"),
-                affects: vec![if i < 8 { e.clone() } else { f.clone() }],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    }
-    // 100,000 creates: covers 100,000; recorded 100,000 + E, F and nine decisions; routes
-    // 8 x 99,998 + 5: exactly 1,000,000 entries. One more route is one past.
-    let past_entries = claims(&section, 100_000, &e, 99_998, &f, 6);
-    let before = state(&r);
-    let err = write(&mut r, "w", past_entries).unwrap_err();
-    assert_eq!(
-        (err.code, err.message.as_str(), err.fix.as_str()),
-        (
-            E_LIMIT,
-            "briefing exceeds 1000000 entries",
-            "brief fewer blocks, or split the write into smaller changes"
-        )
-    );
-    assert_eq!(state(&r), before, "refused before the append");
-
-    let past_creates = claims(&section, 100_001, &e, 0, &f, 0);
-    let err = write(&mut r, "w", past_creates).unwrap_err();
-    assert_eq!(
-        (err.code, err.message.as_str(), err.fix.as_str()),
-        (
-            E_LIMIT,
-            "write briefing exceeds 100000 created blocks",
-            "split the write into smaller changes"
-        )
-    );
-    assert_eq!(state(&r), before, "refused before the append");
-
-    let at = claims(&section, 100_000, &e, 99_998, &f, 5);
-    let w = write(&mut r, "w", at).unwrap();
-    let receipt = w.briefing.clone().unwrap();
-    assert_eq!(receipt.covers, 100_000);
-    assert_ne!(r.store().log_end(), before.0);
-    // the registry keeps the briefing inserted last, at exactly the entry budget
-    assert_eq!((r.briefs().len(), r.briefs().entries()), (1, 1_000_000));
-    assert!(r.briefs().get(&receipt.token).is_some());
-}
-
 /// A served project with [`stable_spec`] in canon.
 fn served_stable() -> (Served, Spec) {
     let s = Served::new();
@@ -722,4 +620,113 @@ fn nb9_a_human_commit_returns_the_receipt_and_the_cited_briefing() {
     assert_eq!(v["briefing"]["covers"], 1, "{v}");
     assert!(is_token(v["briefing"]["token"].as_str().unwrap()), "{v}");
     assert!(v.get("cited_briefing").is_none(), "{v}");
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+    use rdy_engine::brief::MAX_CREATED_BRIEFING;
+    use rdy_model::Hash;
+    use serde_json::Value;
+
+    #[test]
+    fn nb9_created_briefing_bounds_fail_before_append() {
+        assert_eq!(MAX_CREATED_BRIEFING, 100_000);
+        assert_eq!(rdy_engine::brief::BRIEF_REGISTRY_ENTRIES, 1_000_000);
+        let (_d, mut r) = project();
+        // a draft section; entity E, which eight decisions affect, and entity F, which one affects
+        let w = write(&mut r, "w", json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
+            {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger"}},
+            {"op": "create", "type": "entity", "id": "$f", "parent": "$s", "fields": {"name": "Queue"}}
+        ]))
+        .unwrap();
+        let (section, e, f) = (
+            w.created["$s"].clone(),
+            w.created["$e"].clone(),
+            w.created["$f"].clone(),
+        );
+        for i in 0..9 {
+            r.decide(
+                &writer(),
+                "w",
+                DecisionInput {
+                    parent: section.clone(),
+                    statement: format!("Rule {i} holds"),
+                    affects: vec![if i < 8 { e.clone() } else { f.clone() }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        // 100,000 creates: covers 100,000; recorded 100,000 + E, F and nine decisions; routes
+        // 8 x 99,998 + 5: exactly 1,000,000 entries. One more route is one past.
+        let past_entries = claims(&section, 100_000, &e, 99_998, &f, 6);
+        let before = state(&r);
+        let err = write(&mut r, "w", past_entries).unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str(), err.fix.as_str()),
+            (
+                E_LIMIT,
+                "briefing exceeds 1000000 entries",
+                "brief fewer blocks, or split the write into smaller changes"
+            )
+        );
+        assert_eq!(state(&r), before, "refused before the append");
+
+        let past_creates = claims(&section, 100_001, &e, 0, &f, 0);
+        let err = write(&mut r, "w", past_creates).unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str(), err.fix.as_str()),
+            (
+                E_LIMIT,
+                "write briefing exceeds 100000 created blocks",
+                "split the write into smaller changes"
+            )
+        );
+        assert_eq!(state(&r), before, "refused before the append");
+
+        let at = claims(&section, 100_000, &e, 99_998, &f, 5);
+        let w = write(&mut r, "w", at).unwrap();
+        let receipt = w.briefing.clone().unwrap();
+        assert_eq!(receipt.covers, 100_000);
+        assert_ne!(r.store().log_end(), before.0);
+        // the registry keeps the briefing inserted last, at exactly the entry budget
+        assert_eq!((r.briefs().len(), r.briefs().entries()), (1, 1_000_000));
+        assert!(r.briefs().get(&receipt.token).is_some());
+    }
+
+    /// The state the bounds test compares: the log's end, the view and the registry.
+    fn state(r: &Rdy) -> (rdy_store::segment::Location, Hash, usize, usize) {
+        (
+            r.store().log_end(),
+            r.read().materialized(&view("w")).unwrap().snapshot_id(),
+            r.briefs().len(),
+            r.briefs().entries(),
+        )
+    }
+
+    /// `n` claims under `parent`; the first `on_e` describe `e` and the first `on_f` describe `f`.
+    fn claims(parent: &str, n: usize, e: &str, on_e: usize, f: &str, on_f: usize) -> Value {
+        Value::Array(
+            (0..n)
+                .map(|i| {
+                    let mut targets = vec![];
+                    if i < on_e {
+                        targets.push(json!({"target": e}));
+                    }
+                    if i < on_f {
+                        targets.push(json!({"target": f}));
+                    }
+                    let mut op = json!({"op": "create", "type": "claim", "parent": parent, "body": format!("C{i}.")});
+                    if !targets.is_empty() {
+                        op["links"] = json!({"describes": targets});
+                    }
+                    op
+                })
+                .collect(),
+        )
+    }
 }

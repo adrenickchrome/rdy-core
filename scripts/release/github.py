@@ -59,6 +59,8 @@ RESERVE_TAG_RE = re.compile(r'reserve/v0\.[1-9][0-9]{0,8}\.0')
 RESERVE_REF_RE = re.compile(r'refs/tags/reserve/v0\.[1-9][0-9]{0,8}\.0')
 REF_NAME_RE = re.compile(r'(?:tags|heads)/[A-Za-z0-9][A-Za-z0-9._/-]{0,200}')
 PATH_RE = re.compile(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+){0,15}')
+WORKFLOW_FILE_RE = re.compile(r'[A-Za-z0-9_-]{1,64}\.ya?ml')
+UTC_RE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
 NEXT_RE = re.compile(r'<[^>]*>;\s*rel="next"')
 
 
@@ -270,6 +272,36 @@ class WorkflowFact:
     sha256: str
 
 
+@dataclass(frozen=True)
+class ListedRunFact:
+    """One row of a workflow's run list: the run's latest attempt."""
+    run_id: int
+    run_attempt: int
+    path: str
+    head_sha: str
+    head_branch: object
+    event: str
+    status: str
+    conclusion: object
+    html_url: str
+
+
+@dataclass(frozen=True)
+class JobTimeFact:
+    """GitHub's own times of one job of one exact run attempt (UTC, whole seconds). `runner_id` is None for a
+    job that no runner took; `started_at` and `completed_at` are None until GitHub records them."""
+    job_id: int
+    run_id: int
+    run_attempt: int
+    name: str
+    status: str
+    conclusion: object
+    runner_id: object
+    created_at: str
+    started_at: object
+    completed_at: object
+
+
 # ---------------------------------------------------------------------------------------------
 # Field checks
 # ---------------------------------------------------------------------------------------------
@@ -465,6 +497,40 @@ class GitHub(object):
         return WorkflowFact(workflow_id, field(value, 'path', str, operation), field(value, 'state', str, operation),
                             digest)
 
+    def workflow_runs(self, workflow_file, **query):
+        """Every run of `.github/workflows/<workflow_file>` that GitHub lists for `query` (branch, head_sha,
+        event, status), each with its latest attempt number. Rows from another workflow, repository or fork
+        refuse."""
+        operation = 'workflow runs'
+        if not (isinstance(workflow_file, str) and WORKFLOW_FILE_RE.fullmatch(workflow_file)):
+            raise ControllerError('the workflow file name is malformed')
+        for key, value in query.items():
+            if key not in ('branch', 'head_sha', 'event', 'status') or not isinstance(value, str) or not value:
+                raise ControllerError('the run query is malformed')
+        path = self.root + '/actions/workflows/' + quote(workflow_file) + '/runs'
+        if query:
+            path += '?' + '&'.join(key + '=' + quote(query[key]) for key in sorted(query))
+        rows = self._pages(operation, path, 'workflow_runs')
+        runs = []
+        for value in rows:
+            if (nested_id(value, 'repository', operation, 'repository id') != REPOSITORY_ID
+                    or nested_id(value, 'head_repository', operation, 'head repository id') != REPOSITORY_ID):
+                raise Malformed(operation, 'a run is not from rdy-core')
+            run = ListedRunFact(
+                run_id=field(value, 'id', int, operation, 'run id'),
+                run_attempt=field(value, 'run_attempt', int, operation, 'run attempt'),
+                path=field(value, 'path', str, operation),
+                head_sha=field(value, 'head_sha', 'sha', operation, 'head SHA'),
+                head_branch=field(value, 'head_branch', str, operation, 'head branch', nullable=True),
+                event=field(value, 'event', str, operation),
+                status=field(value, 'status', str, operation),
+                conclusion=field(value, 'conclusion', str, operation, nullable=True),
+                html_url=field(value, 'html_url', str, operation, 'run URL'))
+            if run.path.split('@', 1)[0] != '.github/workflows/' + workflow_file:
+                raise Malformed(operation, 'a run is not from ' + workflow_file)
+            runs.append(run)
+        return runs
+
     def run_attempt(self, run_id, attempt):
         """One exact run attempt: never the latest attempt, never a run found by name."""
         operation = 'run attempt'
@@ -518,6 +584,37 @@ class GitHub(object):
             if entry.run_id != run_id or entry.run_attempt != attempt:
                 raise Malformed(operation, 'a job is not from run ' + str(run_id) + ' attempt ' + str(attempt))
         return jobs
+
+    def attempt_job_times(self, run_id, attempt):
+        """The times of every job of one exact run attempt (at most 64): when GitHub queued it, when a runner
+        started it and when it completed."""
+        operation = 'job times'
+        need_id(run_id, 'run id')
+        need_id(attempt, 'run attempt')
+        rows = self._pages(operation, self.root + '/actions/runs/' + str(run_id) + '/attempts/' + str(attempt)
+                           + '/jobs', 'jobs', JOBS_MAX)
+        facts = []
+        for row in rows:
+            runner = row.get('runner_id') if isinstance(row, dict) else None
+            if not (runner is None or (cand.is_int(runner, 0))):
+                raise Malformed(operation, 'the job runner id is malformed')
+            times = [field(row, 'created_at', str, operation, 'job queue time')]
+            times += [field(row, key, str, operation, what, nullable=True)
+                      for key, what in (('started_at', 'job start'), ('completed_at', 'job end'))]
+            if not all(value is None or UTC_RE.fullmatch(value) for value in times):
+                raise Malformed(operation, 'a job time is not UTC YYYY-MM-DDTHH:MM:SSZ')
+            fact = JobTimeFact(
+                job_id=field(row, 'id', int, operation, 'job id'),
+                run_id=field(row, 'run_id', int, operation, 'job run id'),
+                run_attempt=field(row, 'run_attempt', int, operation, 'job run attempt'),
+                name=field(row, 'name', str, operation, 'job name'),
+                status=field(row, 'status', str, operation, 'job status'),
+                conclusion=field(row, 'conclusion', str, operation, 'job conclusion', nullable=True),
+                runner_id=runner or None, created_at=times[0], started_at=times[1], completed_at=times[2])
+            if fact.run_id != run_id or fact.run_attempt != attempt:
+                raise Malformed(operation, 'a job is not from run ' + str(run_id) + ' attempt ' + str(attempt))
+            facts.append(fact)
+        return facts
 
     def job(self, job_id):
         operation = 'job'

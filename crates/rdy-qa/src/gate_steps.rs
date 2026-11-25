@@ -104,76 +104,426 @@ pub fn run_steps(
 /// How long a child past its deadline has, after TERM, before KILL.
 pub const KILL_GRACE: Duration = Duration::from_secs(10);
 
-/// The shortest default deadline of a child.
-pub const DEADLINE_FLOOR: Duration = Duration::from_secs(600);
-
-/// The kinds of gate child, for their default deadlines.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StageKind {
-    /// `cargo fetch --locked`.
-    Fetch,
-    /// The release build of `rdy-cli`.
-    Build,
-    /// One `cargo fmt --check -p <member>` (or `cargo metadata`).
-    Fmt,
-    /// Workspace clippy.
-    Clippy,
-    /// The workspace tests outside `rdy-qa`.
-    WorkspaceTests,
-    /// The build of every `rdy-qa` test binary (`--no-run`).
-    Discover,
-    /// One `rdy-qa` area binary.
-    Area,
-    /// The `rdy-qa` unit tests.
-    Lib,
-    /// The perf tier.
-    Perf,
-    /// One test binary's `--list`.
-    Listing,
-    /// The Python CI tests (`tests/ci`).
-    Python,
+/// The run's one clock, from one start, the builds included, with two numbers: the target
+/// (`--budget-secs`) and the ceiling (`--ceiling-secs`, by default twice the target). A run past
+/// its target finishes and the report gets a warning row ([`over_target_row`]); the ceiling is
+/// the hard stop: a child's deadline is the time left before it ([`Clock::left`]), and a run that
+/// reaches it exits [`BUDGET_EXIT`]. With no ceiling, a child has no deadline.
+#[derive(Clone, Copy, Debug)]
+pub struct Clock {
+    start: Instant,
+    target: Option<Duration>,
+    ceiling: Option<Duration>,
 }
 
-/// The median wall time of a whole fast gate run on each platform, in seconds: Linux from 159
-/// runs on the 24-thread gate server, macOS from 16 and Windows from 23 native runs (gate
-/// records to 2026-11-19). The records hold whole runs only, so a child's median is taken as a
-/// share of its platform's whole run ([`STAGE_SHARE_PCT`]).
-pub const RUN_MEDIAN_SECS: &[(&str, u64)] = &[("linux", 3290), ("macos", 4152), ("windows", 8767)];
+/// How many times the target the ceiling is, when the run names no ceiling.
+pub const CEILING_FACTOR: u32 = 2;
 
-/// The share of a whole run, in percent, taken as one child's median. No child has been timed
-/// alone yet, and a deadline that kills a slow but healthy child costs more than one that waits
-/// too long for a hung one, so until per-stage times are measured every kind is 50: its deadline
-/// (twice the median) is its platform's whole-run median. A hung child is still caught well
-/// before the CI job timeout. Measured times replace these values per kind; a kind not listed
-/// gets the floor.
-pub const STAGE_SHARE_PCT: &[(StageKind, u64)] = &[
-    (StageKind::Fetch, 50),
-    (StageKind::Build, 50),
-    (StageKind::Fmt, 50),
-    (StageKind::Clippy, 50),
-    (StageKind::WorkspaceTests, 50),
-    (StageKind::Discover, 50),
-    (StageKind::Area, 50),
-    (StageKind::Lib, 50),
-    (StageKind::Perf, 50),
-    (StageKind::Listing, 50),
-    (StageKind::Python, 50),
-];
+impl Clock {
+    /// A clock that starts now, with `target` and `ceiling` for the whole run.
+    pub fn new(target: Option<Duration>, ceiling: Option<Duration>) -> Self {
+        Self::started(Instant::now(), target, ceiling)
+    }
 
-/// The default deadline of a child of `kind` on `os` (`std::env::consts::OS`): twice its median
-/// ([`RUN_MEDIAN_SECS`] times [`STAGE_SHARE_PCT`]), never under [`DEADLINE_FLOOR`]. An OS with
-/// no record takes the slowest platform's median.
-pub fn default_deadline(kind: StageKind, os: &str) -> Duration {
-    let run = RUN_MEDIAN_SECS
+    /// A clock that started at `start`, with `target` and `ceiling` for the whole run. With a
+    /// target and no ceiling, the ceiling is [`CEILING_FACTOR`] times the target.
+    pub fn started(start: Instant, target: Option<Duration>, ceiling: Option<Duration>) -> Self {
+        let ceiling = ceiling.or_else(|| target.map(|t| t * CEILING_FACTOR));
+        Self {
+            start,
+            target,
+            ceiling,
+        }
+    }
+
+    /// The time left before the ceiling, never below zero. With no ceiling, [`UNBOUNDED`].
+    pub fn left(&self) -> Duration {
+        self.ceiling
+            .map_or(UNBOUNDED, |b| b.saturating_sub(self.start.elapsed()))
+    }
+
+    /// Whether the ceiling is reached: the run stops.
+    pub fn spent(&self) -> bool {
+        self.ceiling.is_some() && self.left().is_zero()
+    }
+
+    /// The ceiling in whole seconds, when there is one.
+    pub fn budget_secs(&self) -> Option<u64> {
+        self.ceiling.map(|b| b.as_secs())
+    }
+
+    /// The target in whole seconds, when there is one.
+    pub fn target_secs(&self) -> Option<u64> {
+        self.target.map(|t| t.as_secs())
+    }
+
+    /// The seconds since the start and the target, when the run is past its target.
+    pub fn over_target(&self) -> Option<(f64, u64)> {
+        let elapsed = self.start.elapsed();
+        self.target
+            .filter(|t| elapsed > *t)
+            .map(|t| (elapsed.as_secs_f64(), t.as_secs()))
+    }
+}
+
+/// The name of the warning row of a run past its time target.
+pub const OVER_TARGET_ROW: &str = "OVER TARGET";
+
+/// The warning row of a run that took `secs` seconds against a target of `target` seconds, with
+/// its five slowest binaries (`slowest`, slowest first). The verdict stays as it is.
+pub fn over_target_row(secs: f64, target: u64, slowest: &[(String, f64)]) -> Gate {
+    let names: Vec<String> = slowest
         .iter()
-        .find(|(o, _)| *o == os)
-        .or_else(|| RUN_MEDIAN_SECS.iter().max_by_key(|(_, s)| *s))
-        .map_or(0, |(_, s)| *s);
-    let share = STAGE_SHARE_PCT
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .map_or(0, |(_, p)| *p);
-    Duration::from_secs(2 * run * share / 100).max(DEADLINE_FLOOR)
+        .take(5)
+        .map(|(k, s)| format!("{k} {s:.1} s"))
+        .collect();
+    Gate::warn(
+        OVER_TARGET_ROW,
+        format!(
+            "OVER TARGET: {secs:.0} s, target {target} s; slowest binaries: {}",
+            if names.is_empty() {
+                "none ran".to_string()
+            } else {
+                names.join(", ")
+            }
+        ),
+    )
+}
+
+/// The time `ps` gives as a process's elapsed time, `[[dd-]hh:]mm:ss`.
+pub fn parse_etime(text: &str) -> Option<Duration> {
+    let text = text.trim();
+    let (days, rest) = match text.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, text),
+    };
+    let mut secs = 0u64;
+    let parts: Vec<&str> = rest.split(':').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    for p in parts {
+        secs = secs * 60 + p.parse::<u64>().ok()?;
+    }
+    Some(Duration::from_secs(days * 86_400 + secs))
+}
+
+/// How long ago this process started. Under `cargo qa`, Cargo builds `qa-gate` and then runs
+/// it in its own process (an exec on Unix), so this is the time since `cargo qa` started, and
+/// the run's clock covers that build too. None when `ps` does not say; on Windows, where Cargo
+/// starts the gate as a child, the clock starts with the gate.
+pub fn process_elapsed() -> Option<Duration> {
+    #[cfg(unix)]
+    {
+        let pid = std::process::id().to_string();
+        let out = Command::new("ps")
+            .args(["-o", "etime=", "-p", &pid])
+            .output()
+            .ok()?;
+        parse_etime(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// The deadline of a child with no clock above it: [`run_stage`] then waits for it to end.
+pub const UNBOUNDED: Duration = Duration::MAX;
+
+/// The gate's exit code when the run's budget is spent.
+pub const BUDGET_EXIT: i32 = 30;
+
+/// The name of the report row of a spent budget.
+pub const BUDGET_ROW: &str = "BUDGET";
+
+/// The failed row of a run whose budget of `secs` seconds was spent in `stage`.
+pub fn budget_row(secs: u64, stage: &str) -> Gate {
+    Gate::ran(
+        BUDGET_ROW,
+        false,
+        format!("BUDGET: {secs} s spent in stage {stage}"),
+    )
+}
+
+/// The gate's exit code: [`BUDGET_EXIT`] when the budget is spent, else 0 for a passing report
+/// and 1 for a failing one.
+pub fn gate_exit(pass: bool, budget_spent: bool) -> i32 {
+    if budget_spent {
+        BUDGET_EXIT
+    } else {
+        report::exit_code(pass)
+    }
+}
+
+/// What a child that the gate does not start returns: the budget is spent.
+pub fn not_started(stage: &str) -> ChildOutput {
+    ChildOutput {
+        stderr: format!("{stage}: not started, the run's budget is spent\n"),
+        timed_out: true,
+        ..ChildOutput::default()
+    }
+}
+
+/// The seconds each test binary may take on each platform: `gate-allowances.json` beside the
+/// rdy-qa manifest, `{"schema": 1, "platforms": {"<os>": {"<package>/<kind>/<name>": <secs>}}}`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Allowances {
+    pub platforms: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Each platform's two stage allowances, in seconds: the builds and the test pool.
+    pub stages: BTreeMap<String, StageAllowance>,
+    /// The tests of each binary that run in the nightly tier only (`mod nightly`), by binary key.
+    pub nightly_only: BTreeMap<String, usize>,
+}
+
+/// One platform's stage allowances, in seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StageAllowance {
+    /// The builds: the gate's own build and the one test build.
+    pub build: f64,
+    /// The test pool: every test binary of the tier.
+    pub tests: f64,
+}
+
+/// How many times its allowance a stage may take before its row fails.
+pub const STAGE_FACTOR: f64 = 1.25;
+
+/// The gate line of one platform's gate job, in seconds (`release/gate-budget.json`, `gate`).
+pub const GATE_LINE_SECS: f64 = 660.0;
+
+/// The share of the gate line that a platform's two stage allowances may hold together.
+pub const STAGE_SHARE: f64 = 0.8;
+
+/// How many times its allowance a binary may take before it gets a warning row that names it.
+pub const ALLOWANCE_FACTOR: f64 = 2.0;
+
+/// How many times its allowance a binary may take before its row fails: past it, it is a hang.
+pub const HANG_FACTOR: f64 = 4.0;
+
+/// A hang also needs this many seconds past the allowance, so a short binary slowed by a busy
+/// machine (18 s allowance, 78 s under six parallel jobs) warns and does not fail.
+pub const HANG_FLOOR_SECS: f64 = 300.0;
+
+/// The time past which a binary with allowance `a` counts as a hang.
+fn hang_limit(a: f64) -> f64 {
+    (HANG_FACTOR * a).max(a + HANG_FLOOR_SECS)
+}
+
+impl Allowances {
+    /// Reads the allowances file text.
+    pub fn parse(text: &str) -> Result<Allowances, String> {
+        let v: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| format!("gate-allowances.json: {e}"))?;
+        if v["schema"] != 1 {
+            return Err("gate-allowances.json: schema is not 1".into());
+        }
+        let mut platforms = BTreeMap::new();
+        for (os, list) in v["platforms"]
+            .as_object()
+            .ok_or("gate-allowances.json: no platforms")?
+        {
+            let mut secs = BTreeMap::new();
+            for (key, s) in list
+                .as_object()
+                .ok_or_else(|| format!("gate-allowances.json: {os} is not a map"))?
+            {
+                let s = s
+                    .as_f64()
+                    .filter(|s| *s > 0.0)
+                    .ok_or_else(|| format!("gate-allowances.json: {os} {key} is not a time"))?;
+                secs.insert(key.clone(), s);
+            }
+            platforms.insert(os.clone(), secs);
+        }
+        let mut stages = BTreeMap::new();
+        if let Some(list) = v.get("stages") {
+            for (os, s) in list
+                .as_object()
+                .ok_or("gate-allowances.json: stages is not a map")?
+            {
+                let secs = |name: &str| {
+                    s[name].as_f64().filter(|s| *s > 0.0).ok_or_else(|| {
+                        format!("gate-allowances.json: stages {os} {name} is not a time")
+                    })
+                };
+                stages.insert(
+                    os.clone(),
+                    StageAllowance {
+                        build: secs("build")?,
+                        tests: secs("tests")?,
+                    },
+                );
+            }
+        }
+        let mut nightly_only = BTreeMap::new();
+        if let Some(list) = v.get("nightly_only") {
+            for (key, n) in list
+                .as_object()
+                .ok_or("gate-allowances.json: nightly_only is not a map")?
+            {
+                let n = n.as_u64().filter(|n| *n > 0).ok_or_else(|| {
+                    format!("gate-allowances.json: nightly_only {key} is not a count")
+                })?;
+                nightly_only.insert(key.clone(), n as usize);
+            }
+        }
+        Ok(Allowances {
+            platforms,
+            stages,
+            nightly_only,
+        })
+    }
+
+    /// The platforms whose two stage allowances hold more than [`STAGE_SHARE`] of the gate line,
+    /// each with its sum; and the platforms of `platforms` with no stage allowances.
+    pub fn stage_problems(&self) -> Vec<String> {
+        let mut problems = vec![];
+        for os in self.platforms.keys() {
+            match self.stages.get(os) {
+                None => problems.push(format!("{os} has no stage allowances")),
+                Some(s) if s.build + s.tests > STAGE_SHARE * GATE_LINE_SECS => problems.push(format!(
+                    "{os}: build {:.0} s and tests {:.0} s make {:.0} s, more than {:.0} s ({:.0} % of the {GATE_LINE_SECS:.0} s gate line)",
+                    s.build,
+                    s.tests,
+                    s.build + s.tests,
+                    STAGE_SHARE * GATE_LINE_SECS,
+                    STAGE_SHARE * 100.0
+                )),
+                Some(_) => {}
+            }
+        }
+        problems
+    }
+
+    /// The warning rows of the stages of `os` that ran more than [`STAGE_FACTOR`] times their
+    /// allowance: `build` and `tests` are the seconds each took. Nothing when `os` has none.
+    pub fn check_stages(&self, os: &str, build: f64, tests: f64) -> Vec<Gate> {
+        let Some(a) = self.stages.get(os) else {
+            return vec![];
+        };
+        [("build", build, a.build), ("tests", tests, a.tests)]
+            .into_iter()
+            .filter(|(_, secs, allowed)| *secs > STAGE_FACTOR * allowed)
+            .map(|(stage, secs, allowed)| {
+                Gate::warn(
+                    &format!("OVER ALLOWANCE: stage {stage}"),
+                    format!(
+                        "the {stage} stage ran {secs:.1} s, more than {STAGE_FACTOR} times its allowance of {allowed:.0} s on {os}"
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// The report line of the tests that run in the nightly tier only, and so did not run in
+    /// this release-tier run; none when there are none.
+    pub fn nightly_note(&self) -> Option<String> {
+        let total: usize = self.nightly_only.values().sum();
+        (total > 0).then(|| {
+            let each: Vec<String> = self
+                .nightly_only
+                .iter()
+                .map(|(k, n)| format!("{k} {n}"))
+                .collect();
+            format!(
+                "{total} tests run in the nightly tier only and did not run here (gate-allowances.json): {}",
+                each.join(", ")
+            )
+        })
+    }
+
+    /// The failed rows of the binaries whose nightly-only test count in `found` (binary key to
+    /// the count its `--list` gives) is not the count of the allowances file.
+    pub fn check_nightly(&self, found: &BTreeMap<String, usize>) -> Vec<Gate> {
+        let keys: BTreeSet<&String> = found
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, _)| k)
+            .chain(self.nightly_only.keys())
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| {
+                let listed = found.get(k).copied().unwrap_or(0);
+                let filed = self.nightly_only.get(k).copied().unwrap_or(0);
+                (listed != filed).then(|| {
+                    Gate::ran(
+                        &format!("NIGHTLY COUNT: {k}"),
+                        false,
+                        format!(
+                            "{k} lists {listed} nightly-only tests; gate-allowances.json says {filed}"
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// The binary keys of the platform tier `name` (the `<name>` list of `platforms`), or why
+    /// there is none.
+    pub fn platform_tier(&self, name: &str) -> Result<BTreeSet<String>, String> {
+        self.platforms
+            .get(name)
+            .map(|l| l.keys().cloned().collect())
+            .ok_or_else(|| format!("gate-allowances.json has no `{name}` list: no {name} tier"))
+    }
+
+    /// The rdy-qa area binaries of `files` that the tier of `keys` runs, and the keys of the
+    /// ones it leaves to the nightly run. With no tier, every area runs.
+    pub fn split_tier_areas(
+        files: &[String],
+        keys: Option<&BTreeSet<String>>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut kept = vec![];
+        let mut outside = vec![];
+        for f in files {
+            let key = format!("rdy-qa/test/{f}");
+            if keys.is_none_or(|k| k.contains(&key)) {
+                kept.push(f.clone());
+            } else {
+                outside.push(key);
+            }
+        }
+        (kept, outside)
+    }
+
+    /// The rows of the binaries in `times` (key, seconds): a warning for one that ran more than
+    /// [`ALLOWANCE_FACTOR`] times its allowance on `os`, a failure for one past [`HANG_FACTOR`]
+    /// times it (a hang) or with none; and a note when `os` has no list, so nothing was checked.
+    pub fn check(&self, os: &str, times: &[(String, f64)]) -> (Vec<Gate>, Option<String>) {
+        let Some(list) = self.platforms.get(os) else {
+            return (
+                vec![],
+                Some(format!(
+                    "gate-allowances.json has no `{os}` list: the binary times were not checked"
+                )),
+            );
+        };
+        let mut rows = vec![];
+        for (key, secs) in times {
+            match list.get(key) {
+                None => rows.push(Gate::ran(
+                    &format!("NO ALLOWANCE: {key}"),
+                    false,
+                    format!("{key} ran {secs:.1} s and has no allowance on {os}"),
+                )),
+                Some(a) if *secs > hang_limit(*a) => rows.push(Gate::ran(
+                    &format!("OVER ALLOWANCE: {key}"),
+                    false,
+                    format!(
+                        "{key} ran {secs:.1} s, past its hang limit of {:.0} s ({HANG_FACTOR} times its allowance of {a:.0} s on {os}, at least {HANG_FLOOR_SECS:.0} s over it): a hang", hang_limit(*a)
+                    ),
+                )),
+                Some(a) if *secs > ALLOWANCE_FACTOR * a => rows.push(Gate::warn(
+                    &format!("OVER ALLOWANCE: {key}"),
+                    format!(
+                        "{key} ran {secs:.1} s, more than {ALLOWANCE_FACTOR} times its allowance of {a:.0} s on {os}: make it faster or move tests to the nightly tier"
+                    ),
+                )),
+                Some(_) => {}
+            }
+        }
+        (rows, None)
+    }
 }
 
 /// The report line of a child that passed its deadline.
@@ -409,16 +759,55 @@ pub struct TestExe {
     pub path: PathBuf,
 }
 
-/// The command that builds every `rdy-qa` test and prints one JSON record per artifact.
+/// The gate's one build ([`report::WORKSPACE_TEST_ARGS`]): it builds every test of the
+/// workspace, rdy-qa's included, and prints one JSON record per artifact.
 pub fn discover_command() -> Command {
-    cargo(&[
-        "test",
-        "-p",
-        "rdy-qa",
-        "--release",
-        "--no-run",
-        "--message-format=json",
-    ])
+    let mut c = cargo(&report::WORKSPACE_TEST_ARGS);
+    c.args(tier_feature_args());
+    c
+}
+
+/// The Cargo feature of the nightly tier's tests. A test moves to the nightly tier by moving into
+/// a module `nightly` of its file, behind `#[cfg(feature = "nightly-tests")]`; every workspace
+/// crate has the empty feature. The release tier builds without it, so it neither compiles nor
+/// runs those tests.
+pub const NIGHTLY_FEATURE: &str = "nightly-tests";
+
+/// Whether this run is the nightly tier ([`set_nightly_tier`]).
+static NIGHTLY_TIER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes every Cargo call of the gate's build (the build, the fresh check, the env probe) enable
+/// [`NIGHTLY_FEATURE`] on every workspace crate.
+pub fn set_nightly_tier() {
+    NIGHTLY_TIER.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The Cargo arguments of the run's tier: `--features nightly-tests` in the nightly tier, none
+/// in the release tier.
+pub fn tier_feature_args() -> Vec<&'static str> {
+    feature_args_for(NIGHTLY_TIER.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// The Cargo arguments of the nightly tier (`nightly`) or the release tier.
+pub fn feature_args_for(nightly: bool) -> Vec<&'static str> {
+    if nightly {
+        vec!["--features", NIGHTLY_FEATURE]
+    } else {
+        vec![]
+    }
+}
+
+/// Whether a `--list` line names a test of the nightly tier: a test under a module `nightly`.
+pub fn is_nightly_test(list_line: &str) -> bool {
+    list_line
+        .trim()
+        .strip_suffix(": test")
+        .is_some_and(|name| name.split("::").any(|seg| seg == "nightly"))
+}
+
+/// The count of nightly-tier tests in one binary's `--list` output.
+pub fn nightly_count(list_stdout: &str) -> usize {
+    list_stdout.lines().filter(|l| is_nightly_test(l)).count()
 }
 
 /// The integration-test executables in Cargo's `--message-format=json` output, by target name.
@@ -494,48 +883,364 @@ pub fn list_guarded(
     (guarded, problems)
 }
 
-pub fn cargo(args: &[&str]) -> Command {
-    let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    c.args(args);
-    c
-}
-
-/// The area binaries that run alone: no other area runs while one of them runs. Each one's tests
-/// load the machine in a way that slows a neighbour's timing-sensitive tests or is slowed by it:
-/// - `cli`: most files start the release `rdy` binary or a daemon, with waits on its endpoint;
-/// - `daemon`: nearly every file starts a daemon and times its endpoints, stops and restarts;
-/// - `io`: crash, fsync and reindex runs, and follower and migration child processes;
-/// - `mcp`: most files start a daemon or the HTTP MCP surface, with the largest payloads;
-/// - `release`: runs Cargo itself, packages and installs the release binary;
-/// - `store`: crash, reopen and fsync runs over many stores (disk-heavy);
-/// - `swarm`: many concurrent agents against one store, with kills and restarts.
-pub const SERIAL_AREAS: &[&str] = &["cli", "daemon", "io", "mcp", "release", "store", "swarm"];
-
-/// The area binaries launched directly when [`DIRECT_AREAS_VAR`] is not set: the pilot.
-pub const PILOT_AREAS: &[&str] = &["model", "schema"];
-
-/// Names the area binaries the gate launches directly: `all`, `none`, or a comma list. Unset, it
-/// is [`PILOT_AREAS`]. Every other area runs through `cargo test`, alone, as before.
-pub const DIRECT_AREAS_VAR: &str = "RDY_QA_DIRECT_AREAS";
-
-/// The area binaries of `files` to launch directly, for the value of [`DIRECT_AREAS_VAR`].
-pub fn direct_areas(value: Option<&str>, files: &[String]) -> BTreeSet<String> {
-    let chosen: Vec<&str> = match value.map(str::trim) {
-        None => PILOT_AREAS.to_vec(),
-        Some("all") => files.iter().map(String::as_str).collect(),
-        Some(v) => v.split(',').map(str::trim).collect(),
+/// The variables that point a test child's temporary files at `root`: `TMPDIR` (Unix) or `TEMP`
+/// and `TMP` (Windows), and [`crate::platform::SHORT_TMP_VAR`], which moves the short root of the
+/// daemon and swarm tests too.
+pub fn tmp_root_vars(root: &Path) -> Vec<(&'static str, PathBuf)> {
+    let names: &[&str] = if cfg!(windows) {
+        &["TEMP", "TMP"]
+    } else {
+        &["TMPDIR"]
     };
-    files
+    names
         .iter()
-        .filter(|f| chosen.contains(&f.as_str()))
-        .cloned()
+        .chain([&crate::platform::SHORT_TMP_VAR])
+        .map(|n| (*n, root.to_path_buf()))
         .collect()
 }
 
-/// How many area binaries run at once on a machine with `cpus` threads: a quarter of them, from
-/// 1 to 4. Each binary already runs its tests on every thread.
-pub fn area_jobs(cpus: usize) -> usize {
-    (cpus / 4).clamp(1, 4)
+/// The checked `--tmp-root` of the gate: the directory itself, or why the gate refuses it.
+pub fn check_tmp_root(dir: &Path) -> Result<PathBuf, String> {
+    if !dir.is_dir() {
+        return Err(format!(
+            "--tmp-root {}: the directory does not exist",
+            dir.display()
+        ));
+    }
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| format!("--tmp-root {}: {e}", dir.display()))?;
+    Ok(PathBuf::from(plain_tmp_root(&canonical.to_string_lossy())))
+}
+
+/// The temp root as the tests get it: on Windows without the `\\?\` prefix that `canonicalize`
+/// adds to a plain drive path. Git for Windows cannot read a configuration file named by a `\\?\`
+/// path, and a test that compares a path it built with one rdy shows gets two spellings.
+fn plain_tmp_root(text: &str) -> &str {
+    rdy_store::pio::plain_drive_path(text)
+}
+
+/// The test binaries that keep the real temp directory whatever `--tmp-root` names, as
+/// (package, test target): one real-disk pass over the flush path in every run.
+pub const REAL_DISK_BINARIES: &[(&str, &str)] = &[("rdy-store", "durability"), ("rdy-qa", "store")];
+
+/// Whether the test target `name` of `package` keeps the real temp directory.
+pub fn on_real_disk(package: &str, name: &str) -> bool {
+    REAL_DISK_BINARIES
+        .iter()
+        .any(|(p, n)| *p == package && *n == name)
+}
+
+pub fn cargo(args: &[&str]) -> Command {
+    let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    c.args(args);
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str()
+            && is_run_package_var(name)
+        {
+            c.env_remove(name);
+        }
+    }
+    c
+}
+
+/// Whether `name` is a variable that `cargo run` sets for qa-gate's own package (rdy-qa), and
+/// that a Cargo call of the gate must not inherit. Build scripts read some of them, ring's
+/// `CARGO_PKG_NAME` and `CARGO_MANIFEST_DIR` among them, and Cargo reruns a build script, and
+/// rebuilds everything that depends on it, when such a variable differs from the last build:
+/// `cargo qa` from the shell and the gate's own build then rebuilt each other's ring, rustls,
+/// ureq and rdy-engine on every run.
+pub fn is_run_package_var(name: &str) -> bool {
+    name.starts_with("CARGO_PKG_")
+        || matches!(
+            name,
+            "CARGO_MANIFEST_DIR"
+                | "CARGO_MANIFEST_PATH"
+                | "CARGO_MANIFEST_LINKS"
+                | "CARGO_CRATE_NAME"
+                | "CARGO_BIN_NAME"
+                | "CARGO_PRIMARY_PACKAGE"
+                | "OUT_DIR"
+        )
+}
+
+/// The area binaries that run alone: no other binary runs while one of them runs. The list is
+/// empty. It was written for a disk that took about 360 flushes a second. On a RAM disk, with
+/// `cli`, `daemon`, `mcp` and `swarm` in the pool of four, every test passed and the rdy-qa
+/// areas took 233 s on the Mac, against 455 s with those four alone. Put a binary back on the
+/// list only when a run with it in the pool fails or is slower.
+pub const SERIAL_AREAS: &[&str] = &[];
+
+/// The Cargo profile of the gate's one build (`[profile.gate]` in the root `Cargo.toml`): the
+/// release profile at `opt-level = 1`, with debug assertions and overflow checks on.
+pub const GATE_PROFILE: &str = "gate";
+
+/// The gate's one build step: the `rdy` binary, every crate's tests and every rdy-qa binary.
+pub const BUILD_STEP: &str = "cargo test --workspace --profile gate --no-run";
+
+/// One test executable of the gate's build: its package, target kind (`lib`, `bin`, `test`) and
+/// target name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TestBinary {
+    pub package: String,
+    pub kind: String,
+    pub name: String,
+    pub path: PathBuf,
+}
+
+impl TestBinary {
+    /// `<package>/<kind>/<name>`: unique in a workspace, and the binary's name in the report.
+    pub fn key(&self) -> String {
+        format!("{}/{}/{}", self.package, self.kind, self.name)
+    }
+}
+
+/// The package name of a Cargo package id: `path+file:///w/crates/rdy-qa#0.58.0` (the name is
+/// the last path segment), `path+file:///w/x#rdy-qa@0.58.0`, or the old `rdy-qa 0.58.0 (...)`.
+pub fn package_name(id: &str) -> Option<&str> {
+    if !id.contains("://") || id.contains(" (") {
+        return id.split_whitespace().next();
+    }
+    let (path, frag) = id.rsplit_once('#')?;
+    match frag.split_once('@') {
+        Some((name, _)) => Some(name),
+        None => path.rsplit('/').next(),
+    }
+}
+
+/// Every test executable in Cargo's `--message-format=json` output, sorted by key: the test
+/// builds of libraries, binaries and test targets. A line that is not a record is skipped.
+pub fn parse_test_binaries(json_lines: &str) -> Vec<TestBinary> {
+    let mut found: BTreeSet<TestBinary> = BTreeSet::new();
+    for line in json_lines.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if v["reason"] != "compiler-artifact" || v["profile"]["test"] != true {
+            continue;
+        }
+        let (Some(id), Some(kind), Some(name), Some(path)) = (
+            v["package_id"].as_str(),
+            v["target"]["kind"][0].as_str(),
+            v["target"]["name"].as_str(),
+            v["executable"].as_str(),
+        ) else {
+            continue;
+        };
+        let Some(package) = package_name(id) else {
+            continue;
+        };
+        found.insert(TestBinary {
+            package: package.into(),
+            kind: kind.into(),
+            name: name.into(),
+            path: PathBuf::from(path),
+        });
+    }
+    found.into_iter().collect()
+}
+
+/// The units that a build compiled instead of finding fresh, from Cargo's JSON output, one
+/// `<package> <target>` line each.
+pub fn stale_units(json_lines: &str) -> Vec<String> {
+    json_lines
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter(|v| v["reason"] == "compiler-artifact" && v["fresh"] == false)
+        .map(|v| {
+            format!(
+                "{} {}",
+                v["package_id"]
+                    .as_str()
+                    .and_then(package_name)
+                    .unwrap_or("?"),
+                v["target"]["name"].as_str().unwrap_or("?")
+            )
+        })
+        .collect()
+}
+
+/// The rendered compiler errors in Cargo's JSON output, then its last plain lines.
+pub fn build_errors(output: &str) -> String {
+    let mut errors: Vec<String> = output
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter(|v| v["reason"] == "compiler-message" && v["message"]["level"] == "error")
+        .filter_map(|v| v["message"]["rendered"].as_str().map(String::from))
+        .take(5)
+        .collect();
+    let plain: String = output
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('{'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    errors.push(report::tail(&plain, 10));
+    errors.join("\n")
+}
+
+/// The name of the profile directory of the executable `exe`: a test runs from
+/// `target/<profile>/deps/`, a binary from `target/<profile>/`.
+pub fn profile_dir_of(exe: &Path) -> Option<String> {
+    let dir = exe.parent()?;
+    let dir = if dir.file_name().is_some_and(|n| n == "deps") {
+        dir.parent()?
+    } else {
+        dir
+    };
+    Some(dir.file_name()?.to_string_lossy().into_owned())
+}
+
+/// The Cargo arguments that select the profile this process was built in: none for `debug`
+/// (Cargo's default), `--release`, or `--profile <name>`. A Cargo call of a test then builds in
+/// the profile, and the target directory, of the run that started it.
+pub fn own_profile_args() -> Vec<String> {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| profile_dir_of(&e))
+        .unwrap_or_else(|| "debug".into());
+    match dir.as_str() {
+        "debug" => vec![],
+        "release" => vec!["--release".into()],
+        other => vec!["--profile".into(), other.into()],
+    }
+}
+
+/// Names the directory where the probe runner writes one record per test binary.
+pub const RUNNER_PROBE_VAR: &str = "RDY_QA_RUNNER_PROBE";
+
+/// The name of the probe runner, built beside the gate.
+pub const RUNNER_PROBE_BIN: &str = "qa-env-probe";
+
+/// Cargo's runner variable for the target `triple`: `CARGO_TARGET_<TRIPLE>_RUNNER`.
+pub fn runner_var(triple: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_RUNNER",
+        triple.to_ascii_uppercase().replace(['-', '.'], "_")
+    )
+}
+
+/// The host triple in `rustc -vV` output.
+pub fn host_of(rustc_vv: &str) -> Option<&str> {
+    rustc_vv
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .map(str::trim)
+}
+
+/// The probe runner's record of one test binary: the binary, and [`env_probe_record`]'s
+/// working directory and variables.
+pub fn runner_record(exe: &str) -> String {
+    let mut v: serde_json::Value =
+        serde_json::from_str(&env_probe_record()).expect("the env probe record is JSON");
+    v["exe"] = exe.into();
+    v.to_string()
+}
+
+/// The command that runs every test target of the gate's build once through the probe runner
+/// `probe`, which writes each binary's record into `dir`. It builds nothing new: the selection is
+/// the build's, in the profile this process was built in (the gate profile under `cargo qa`).
+pub fn probe_command(probe: &Path, dir: &Path, triple: &str, targets: &[&str]) -> Command {
+    let mut args: Vec<String> = ["test", "--workspace"].map(String::from).to_vec();
+    args.extend(own_profile_args());
+    args.extend(["--locked", "--no-fail-fast"].map(String::from));
+    args.extend(targets.iter().map(|t| t.to_string()));
+    args.extend(tier_feature_args().into_iter().map(String::from));
+    let mut c = cargo(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    c.env(runner_var(triple), probe).env(RUNNER_PROBE_VAR, dir);
+    c
+}
+
+/// The records in `dir`, by test binary, each without the probe's own two variables.
+pub fn read_runner_records(dir: &Path, triple: &str) -> Result<BTreeMap<PathBuf, AreaEnv>, String> {
+    let mut envs = BTreeMap::new();
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("env probe records: {e}"))?;
+    for entry in entries {
+        let path = entry.map_err(|e| format!("env probe records: {e}"))?.path();
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("env probe record {}: {e}", path.display()))?;
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("env probe record {}: {e}", path.display()))?;
+        let exe = v["exe"]
+            .as_str()
+            .ok_or_else(|| format!("env probe record {} names no binary", path.display()))?;
+        let mut env = parse_env_probe(&text)?;
+        env.vars.remove(RUNNER_PROBE_VAR);
+        env.vars.remove(&runner_var(triple));
+        envs.insert(PathBuf::from(exe), env);
+    }
+    if envs.is_empty() {
+        return Err("the env probe recorded no test binary".into());
+    }
+    Ok(envs)
+}
+
+/// Asks Cargo for the working directory and environment it gives each test binary of the gate's
+/// build: Cargo runs every test target through the probe runner (built beside this gate), which
+/// records them. `run` runs the command (the caller sets the working directory).
+pub fn probe_envs(
+    run: impl FnOnce(Command) -> ChildOutput,
+) -> Result<BTreeMap<PathBuf, AreaEnv>, String> {
+    probe_envs_of(&PROBE_TARGETS, run)
+}
+
+/// The target filters of the gate's probe: every test binary.
+pub const PROBE_TARGETS: [&str; 3] = ["--lib", "--bins", "--tests"];
+
+/// [`probe_envs`] for the test targets that `targets` selects (Cargo's filters, such as
+/// `--test model`). A test that probes while other test binaries run probes only its own
+/// target: a probe of every target makes Cargo link each binary of the workspace again, `rdy`
+/// too, and a test that starts `rdy` at that moment finds no file.
+pub fn probe_envs_of(
+    targets: &[&str],
+    run: impl FnOnce(Command) -> ChildOutput,
+) -> Result<BTreeMap<PathBuf, AreaEnv>, String> {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let vv = Command::new(rustc)
+        .arg("-vV")
+        .output()
+        .map_err(|e| format!("rustc -vV: {e}"))?;
+    let vv = String::from_utf8_lossy(&vv.stdout).into_owned();
+    let triple = host_of(&vv).ok_or("rustc -vV names no host")?.to_string();
+    let exe = std::env::current_exe().map_err(|e| format!("the gate's own path: {e}"))?;
+    // the profile directory: the gate's own, or a test's (`target/<profile>/deps/`)
+    let mut dir = exe.parent().ok_or("the gate has no directory")?;
+    if dir.file_name().is_some_and(|n| n == "deps") {
+        dir = dir.parent().ok_or("the test has no profile directory")?;
+    }
+    let probe = dir.join(format!(
+        "{RUNNER_PROBE_BIN}{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    if !probe.is_file() {
+        return Err(format!("the probe runner {} is missing", probe.display()));
+    }
+    let dir = tempfile::tempdir().map_err(|e| format!("env probe: {e}"))?;
+    let out = run(probe_command(&probe, dir.path(), &triple, targets));
+    if !out.ok {
+        return Err(format!(
+            "the env probe exited with {}: {}",
+            out.status_text(),
+            report::tail(&out.combined(), 5)
+        ));
+    }
+    read_runner_records(dir.path(), &triple)
+}
+
+/// How many test binaries run at once. Each binary already runs its tests on every thread.
+pub const BINARY_JOBS: usize = 6;
+
+/// How many heavy test binaries (rdy-qa area binaries) of the pool run at once. On Windows it is
+/// 2. Each area binary runs its tests on all 16 threads of the gate machine and starts rdy
+/// processes, so one alone keeps the machine busy: alone, cli took 95 s, io 137 s and release
+/// 43 s; with three or four areas at once they took 494 s, 624 s and 292 s, the light binaries
+/// beside them two to three times their time, and daemons missed their 30 s start. Elsewhere it
+/// is [`BINARY_JOBS`]: no cap.
+pub const HEAVY_JOBS: usize = if cfg!(windows) { 2 } else { BINARY_JOBS };
+
+/// Whether the test binary `name` of `package` (a target of `kind`) is heavy for
+/// [`HEAVY_JOBS`]: an rdy-qa area binary.
+pub fn is_heavy(package: &str, kind: &str, _name: &str) -> bool {
+    package == "rdy-qa" && kind == "test"
 }
 
 /// Runs `run` on every item. The items for which `alone` is false share up to `jobs` workers;
@@ -547,17 +1252,68 @@ pub fn run_areas<T: Sync, R: Send>(
     jobs: usize,
     run: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    run_areas_capped(items, alone, jobs, |_| false, jobs, run)
+}
+
+/// [`run_areas`], with at most `cap` of the items for which `heavy` is true running at once.
+/// A free worker takes the first item not yet started, in the order of `items`, that is light or
+/// fits under the cap; when only heavy items are left and the cap is full, it waits for one to
+/// end.
+pub fn run_areas_capped<T: Sync, R: Send>(
+    items: &[T],
+    alone: impl Fn(&T) -> bool,
+    jobs: usize,
+    heavy: impl Fn(&T) -> bool + Sync,
+    cap: usize,
+    run: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    use std::sync::{Condvar, Mutex};
+    struct Queue {
+        waiting: Vec<usize>,
+        heavy_running: usize,
+    }
     let shared: Vec<usize> = (0..items.len()).filter(|&i| !alone(&items[i])).collect();
-    let next = AtomicUsize::new(0);
+    let workers = jobs.max(1).min(shared.len());
+    let cap = cap.max(1);
+    let queue = Mutex::new(Queue {
+        waiting: shared,
+        heavy_running: 0,
+    });
+    let ended = Condvar::new();
     let done: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(items.len()));
     std::thread::scope(|s| {
-        for _ in 0..jobs.max(1).min(shared.len()) {
+        for _ in 0..workers {
             s.spawn(|| {
-                while let Some(&i) = shared.get(next.fetch_add(1, Ordering::SeqCst)) {
+                loop {
+                    let (i, is_heavy) = {
+                        let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
+                        loop {
+                            if q.waiting.is_empty() {
+                                return;
+                            }
+                            let room = q.heavy_running < cap;
+                            if let Some(at) =
+                                q.waiting.iter().position(|&i| room || !heavy(&items[i]))
+                            {
+                                let i = q.waiting.remove(at);
+                                let h = heavy(&items[i]);
+                                if h {
+                                    q.heavy_running += 1;
+                                }
+                                break (i, h);
+                            }
+                            q = ended.wait(q).unwrap_or_else(|p| p.into_inner());
+                        }
+                    };
                     let r = run(&items[i]);
                     done.lock().unwrap_or_else(|p| p.into_inner()).push((i, r));
+                    if is_heavy {
+                        queue
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .heavy_running -= 1;
+                        ended.notify_all();
+                    }
                 }
             });
         }
@@ -674,38 +1430,15 @@ pub fn parse_env_probe(text: &str) -> Result<AreaEnv, String> {
     })
 }
 
-/// The `cargo test` arguments that run the env probe test alone.
-pub const ENV_PROBE_ARGS: [&str; 9] = [
-    "test",
-    "-p",
-    "rdy-qa",
-    "--release",
-    "--test",
-    ENV_PROBE_BINARY,
-    "--",
-    ENV_PROBE_TEST,
-    "--exact",
-];
-
-/// Asks Cargo for the environment it gives an `rdy-qa` test binary: runs the env probe test
-/// through `run` (the command in, its output back; the caller sets the working directory) and
-/// reads its record.
-pub fn capture_area_env(run: impl FnOnce(Command) -> ChildOutput) -> Result<AreaEnv, String> {
-    let dir = tempfile::tempdir().map_err(|e| format!("env probe: {e}"))?;
-    let file = dir.path().join("env.json");
-    let mut c = cargo(&ENV_PROBE_ARGS);
-    c.env(ENV_PROBE_VAR, &file);
-    let out = run(c);
-    if !out.ok {
-        return Err(format!(
-            "env probe exited with {}: {}",
-            out.status_text(),
-            report::tail(&out.combined(), 5)
-        ));
-    }
-    let text = std::fs::read_to_string(&file)
-        .map_err(|e| format!("env probe wrote no record ({e}): no test matched?"))?;
-    parse_env_probe(&text)
+/// The `cargo test` arguments that run the env probe test alone, in the profile this process
+/// was built in ([`own_profile_args`]). The selection is `--workspace`, as in the gate's build: a
+/// selection of rdy-qa alone resolves other features and builds rdy-qa again.
+pub fn env_probe_args() -> Vec<String> {
+    let mut args: Vec<String> = ["test", "--workspace"].map(String::from).to_vec();
+    args.extend(own_profile_args());
+    args.extend(tier_feature_args().into_iter().map(String::from));
+    args.extend(["--test", ENV_PROBE_BINARY, "--", ENV_PROBE_TEST, "--exact"].map(String::from));
+    args
 }
 
 pub fn fail_tail(ok: bool, out: &str) -> String {
@@ -716,51 +1449,60 @@ pub fn fail_tail(ok: bool, out: &str) -> String {
     }
 }
 
-/// The prerequisite steps: the locked fetch of every target's crates, then the release build,
-/// which needs it.
-pub fn prerequisite_steps(os: &str) -> [GateStep; 2] {
+/// The prerequisite steps: the locked fetch of every target's crates, then the one build, which
+/// needs it.
+pub fn prerequisite_steps() -> [GateStep; 2] {
     [
-        GateStep::new(
-            "cargo fetch --locked",
-            &[],
-            default_deadline(StageKind::Fetch, os),
-        ),
-        GateStep::new(
-            "cargo build --release -p rdy-cli",
-            &["cargo fetch --locked"],
-            default_deadline(StageKind::Build, os),
-        ),
+        GateStep::new("cargo fetch --locked", &[], Duration::ZERO),
+        GateStep::new(BUILD_STEP, &["cargo fetch --locked"], Duration::ZERO),
     ]
 }
 
 /// Runs the prerequisite steps ([`prerequisite_steps`]) through `run` (label, command and
-/// deadline in, success and output back). A failed step is a failed gate row, and its output goes
-/// to stderr; a failed fetch skips the build unless `stages` runs every stage.
+/// deadline in, success and output back), and returns their rows and the build's output (Cargo's
+/// JSON artifact records). A failed step is a failed gate row, and its errors go to stderr; a
+/// failed fetch skips the build unless `stages` runs every stage.
 pub fn build_steps(
     stages: &mut Stages,
     mut run: impl FnMut(&str, Command, Duration) -> (bool, String),
-) -> Vec<Gate> {
-    let commands: [(&str, &[&str]); 2] = [
-        ("fetch locked dependencies", &["fetch", "--locked"]),
-        ("build rdy-cli", &["build", "--release", "-p", "rdy-cli"]),
-    ];
-    let mut gates = Vec::with_capacity(commands.len());
-    for (step, (label, args)) in prerequisite_steps(std::env::consts::OS)
-        .iter()
-        .zip(commands)
-    {
+) -> (Vec<Gate>, String) {
+    let [fetch, build] = prerequisite_steps();
+    let mut gates = Vec::with_capacity(2);
+    let mut build_out = String::new();
+    for (step, label, cmd) in [
+        (
+            &fetch,
+            "fetch locked dependencies",
+            cargo(&["fetch", "--locked"]),
+        ),
+        (&build, "build", {
+            let mut c = cargo(&report::WORKSPACE_TEST_ARGS);
+            c.args(tier_feature_args());
+            c
+        }),
+    ] {
         if let Some(root) = stages.blocked(step) {
             gates.push(stages.skip(step, root));
             continue;
         }
-        let (ok, out) = run(label, cargo(args), step.deadline);
+        let (ok, out) = run(label, cmd, step.deadline);
+        let detail = if ok {
+            String::new()
+        } else if step.id == BUILD_STEP {
+            build_errors(&out)
+        } else {
+            report::tail(&out, 20)
+        };
         if !ok {
-            eprintln!("{out}");
+            eprintln!("{detail}");
         }
         stages.record(step, ok);
-        gates.push(Gate::ran(&step.id, ok, fail_tail(ok, &out)));
+        gates.push(Gate::ran(&step.id, ok, detail));
+        if step.id == BUILD_STEP {
+            build_out = out;
+        }
     }
-    gates
+    (gates, build_out)
 }
 
 /// The gate row of the Python CI tests (`tests/ci`).
@@ -790,7 +1532,7 @@ pub fn python_ci_step(
         ));
     }
     let fail = |detail: String| Ok(Gate::ran(PYTHON_CI_GATE, false, detail));
-    let deadline = default_deadline(StageKind::Python, os);
+    let deadline = UNBOUNDED;
     let mut probe = Command::new("python3");
     probe.args(["-c", "import yaml"]);
     let (ok, out) = run("python3 and PyYAML", probe, deadline);
@@ -863,7 +1605,7 @@ pub fn workspace_members(out: &str) -> Result<Vec<String>, String> {
 /// or any member fails, and its detail names each failing member with the tail of its output.
 pub fn fmt_step(mut run: impl FnMut(&str, Command, Duration) -> (bool, String)) -> Gate {
     let fail = |detail: String| Gate::ran(FMT_GATE, false, detail);
-    let deadline = default_deadline(StageKind::Fmt, std::env::consts::OS);
+    let deadline = UNBOUNDED;
     let (ok, out) = run(
         "workspace members",
         cargo(&["metadata", "--no-deps", "--format-version", "1"]),
@@ -913,11 +1655,238 @@ mod tests {
     }
 
     #[test]
+    fn tgs5_a_run_past_its_target_finishes_and_only_the_ceiling_stops_it() {
+        // the ceiling is twice the target unless the run names one
+        let start = Instant::now() - Duration::from_secs(30);
+        let c = Clock::started(start, Some(Duration::from_secs(20)), None);
+        assert_eq!(c.budget_secs(), Some(40));
+        assert_eq!(c.target_secs(), Some(20));
+        // past the target: the run goes on, with time left before the ceiling
+        assert!(!c.spent());
+        assert!(c.left() > Duration::from_secs(9) && c.left() <= Duration::from_secs(10));
+        let (secs, target) = c.over_target().expect("past the target");
+        assert!(secs >= 30.0 && target == 20);
+        let slowest = vec![
+            ("rdy-qa/test/cli".to_string(), 12.34),
+            ("rdy-qa/test/gate".to_string(), 9.0),
+        ];
+        let row = over_target_row(31.2, 20, &slowest);
+        assert_eq!(row.name, OVER_TARGET_ROW);
+        assert!(row.pass, "the verdict stays as it is");
+        assert_eq!(row.state, report::RowState::Warning);
+        assert_eq!(
+            row.detail,
+            "OVER TARGET: 31 s, target 20 s; slowest binaries: rdy-qa/test/cli 12.3 s, rdy-qa/test/gate 9.0 s"
+        );
+        assert!(report::overall(&[row], &[], true));
+        // an explicit ceiling wins; past it the run is spent and exits 30
+        let c = Clock::started(
+            start,
+            Some(Duration::from_secs(20)),
+            Some(Duration::from_secs(25)),
+        );
+        assert!(c.spent());
+        assert_eq!(gate_exit(true, c.spent()), BUDGET_EXIT);
+        // inside the target there is no warning
+        assert_eq!(
+            Clock::new(Some(Duration::from_secs(60)), None).over_target(),
+            None
+        );
+    }
+
+    #[test]
+    fn tier1_allowances_hold_stages_and_nightly_counts() {
+        let text = r#"{"schema": 1,
+            "stages": {"macos": {"build": 250, "tests": 270}, "linux": {"build": 300, "tests": 260}},
+            "nightly_only": {"rdy-qa/test/cli": 2},
+            "platforms": {"macos": {"rdy-qa/test/cli": 60}, "linux": {"rdy-qa/test/cli": 60},
+                          "windows": {"rdy-store/test/durability": 90, "rdy-qa/test/wc": 20}}}"#;
+        let a = Allowances::parse(text).unwrap();
+        assert_eq!(
+            a.stages["macos"],
+            StageAllowance {
+                build: 250.0,
+                tests: 270.0
+            }
+        );
+        // 80 % of the 660 s gate line is 528 s: linux's 560 s is over, and windows has none
+        let problems = a.stage_problems();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].starts_with("linux: build 300 s and tests 260 s make 560 s"));
+        assert_eq!(problems[1], "windows has no stage allowances");
+        // a stage fails past 1.25 times its allowance
+        assert!(a.check_stages("macos", 312.0, 337.0).is_empty());
+        let rows = a.check_stages("macos", 313.0, 338.0);
+        let names: Vec<&str> = rows.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["OVER ALLOWANCE: stage build", "OVER ALLOWANCE: stage tests"]
+        );
+        assert!(
+            rows.iter().all(|g| g.pass),
+            "a stage over its allowance is a warning"
+        );
+        assert!(a.check_stages("freebsd", 9e9, 9e9).is_empty());
+        // the release report names what the nightly tier holds
+        assert_eq!(
+            a.nightly_note().unwrap(),
+            "2 tests run in the nightly tier only and did not run here (gate-allowances.json): rdy-qa/test/cli 2"
+        );
+        // the nightly run checks the count each listing gives
+        let mut found = BTreeMap::from([("rdy-qa/test/cli".to_string(), 2)]);
+        assert!(a.check_nightly(&found).is_empty());
+        found.insert("rdy-qa/test/gate".into(), 1);
+        found.insert("rdy-qa/test/cli".into(), 1);
+        let names: Vec<String> = a
+            .check_nightly(&found)
+            .into_iter()
+            .map(|g| g.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "NIGHTLY COUNT: rdy-qa/test/cli",
+                "NIGHTLY COUNT: rdy-qa/test/gate"
+            ]
+        );
+        // a bad count or stage is an error, not a default
+        for bad in [
+            r#"{"schema": 1, "platforms": {}, "nightly_only": {"k": 0}}"#,
+            r#"{"schema": 1, "platforms": {}, "stages": {"macos": {"build": 1}}}"#,
+        ] {
+            assert!(Allowances::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn tier2_the_nightly_tier_builds_its_tests_and_the_release_tier_does_not() {
+        assert_eq!(feature_args_for(false), Vec::<&str>::new());
+        assert_eq!(feature_args_for(true), ["--features", NIGHTLY_FEATURE]);
+        assert_eq!(NIGHTLY_FEATURE, "nightly-tests");
+        // every workspace crate declares the feature, so `--features` reaches each one
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let manifest = entry.unwrap().path().join("Cargo.toml");
+            if manifest.is_file() {
+                let text = std::fs::read_to_string(&manifest).unwrap();
+                assert!(
+                    text.contains("\nnightly-tests = []\n"),
+                    "{} lacks the nightly-tests feature",
+                    manifest.display()
+                );
+            }
+        }
+        // a test under a module `nightly` is a nightly-tier test
+        let list = "a::nightly::cp11_slow: test\na::cp11_fast: test\nnightly::x: test\nnightly_ish::y: test\nnightly::bench: bench\n";
+        assert!(is_nightly_test("cli_plan::nightly::cp11_slow: test"));
+        assert!(!is_nightly_test("cli_plan::nightly_ish::y: test"));
+        assert_eq!(nightly_count(list), 2);
+    }
+
+    #[test]
+    fn tier3_a_platform_tier_is_the_list_of_its_name() {
+        let a = Allowances::parse(
+            r#"{"schema": 1, "platforms": {"windows": {"rdy-qa/test/wc": 20, "rdy-store/lib/rdy_store": 5}}}"#,
+        )
+        .unwrap();
+        let keys = a.platform_tier("windows").unwrap();
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            ["rdy-qa/test/wc", "rdy-store/lib/rdy_store"]
+        );
+        assert!(
+            a.platform_tier("plan9")
+                .unwrap_err()
+                .contains("no `plan9` list")
+        );
+    }
+
+    #[test]
+    fn tier7_the_temp_root_is_a_plain_drive_path() {
+        assert_eq!(plain_tmp_root(r"\\?\C:\wx\run-tmp"), r"C:\wx\run-tmp");
+        assert_eq!(plain_tmp_root(r"\\?\UNC\host\share"), r"\\?\UNC\host\share");
+        assert_eq!(plain_tmp_root("/tmp/x"), "/tmp/x");
+    }
+
+    #[test]
+    fn tier8_a_gate_cargo_call_drops_the_run_package_vars() {
+        for v in [
+            "CARGO_PKG_NAME",
+            "CARGO_PKG_VERSION_MAJOR",
+            "CARGO_MANIFEST_DIR",
+            "CARGO_MANIFEST_PATH",
+            "CARGO_CRATE_NAME",
+            "OUT_DIR",
+        ] {
+            assert!(is_run_package_var(v), "{v}");
+        }
+        for v in [
+            "CARGO",
+            "CARGO_HOME",
+            "CARGO_TARGET_DIR",
+            "CARGO_NET_OFFLINE",
+            "CARGO_INCREMENTAL",
+            "PATH",
+        ] {
+            assert!(!is_run_package_var(v), "{v}");
+        }
+    }
+
+    #[test]
+    fn tier9_at_most_cap_heavy_items_run_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // items 0..8 are heavy, 8..14 light: four workers, at most two heavy at a time
+        let items: Vec<usize> = (0..14).collect();
+        let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let out = run_areas_capped(
+            &items,
+            |_| false,
+            4,
+            |i| *i < 8,
+            2,
+            |i| {
+                if *i < 8 {
+                    let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(n, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                    now.fetch_sub(1, Ordering::SeqCst);
+                }
+                *i * 10
+            },
+        );
+        assert_eq!(out, (0..14).map(|i| i * 10).collect::<Vec<_>>());
+        assert!(most.load(Ordering::SeqCst) <= 2, "never more than the cap");
+        // with no cap it is run_areas
+        assert_eq!(run_areas(&items, |_| false, 3, |i| *i), items);
+        assert!(is_heavy("rdy-qa", "test", "cli"));
+        assert!(!is_heavy("rdy-store", "test", "durability"));
+        assert!(!is_heavy("rdy-qa", "lib", "rdy_qa"));
+        assert!(!is_heavy("rdy-store", "test", "format"));
+        const { assert!(HEAVY_JOBS <= BINARY_JOBS) };
+    }
+
+    #[test]
+    fn tier6_a_platform_tier_runs_only_its_listed_areas() {
+        let files: Vec<String> = ["cli", "engine", "engine_read", "wc"]
+            .map(String::from)
+            .to_vec();
+        let keys: BTreeSet<String> = ["rdy-qa/test/wc", "rdy-qa/test/cli", "rdy-store/lib/x"]
+            .map(String::from)
+            .into();
+        let (kept, outside) = Allowances::split_tier_areas(&files, Some(&keys));
+        assert_eq!(kept, ["cli", "wc"]);
+        assert_eq!(outside, ["rdy-qa/test/engine", "rdy-qa/test/engine_read"]);
+        let (kept, outside) = Allowances::split_tier_areas(&files, None);
+        assert_eq!(kept, files);
+        assert!(outside.is_empty());
+    }
+
+    #[test]
     fn plz3_fetch_precedes_build() {
         let mut seen: Vec<(String, Vec<String>)> = vec![];
-        let gates = build_steps(&mut Stages::new(false), |label, cmd, _| {
+        let (gates, out) = build_steps(&mut Stages::new(false), |label, cmd, _| {
             seen.push((label.to_string(), args_of(&cmd)));
-            (true, String::new())
+            (true, format!("{label} output"))
         });
         let want: Vec<(String, Vec<String>)> = vec![
             (
@@ -925,26 +1894,23 @@ mod tests {
                 vec!["fetch".into(), "--locked".into()],
             ),
             (
-                "build rdy-cli".into(),
-                ["build", "--release", "-p", "rdy-cli"]
-                    .map(String::from)
-                    .to_vec(),
+                "build".into(),
+                report::WORKSPACE_TEST_ARGS.map(String::from).to_vec(),
             ),
         ];
         assert_eq!(seen, want);
         let names: Vec<&str> = gates.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["cargo fetch --locked", "cargo build --release -p rdy-cli"]
-        );
+        assert_eq!(names, ["cargo fetch --locked", BUILD_STEP]);
         assert!(gates.iter().all(|g| g.pass));
+        // the build's output comes back for its artifact records
+        assert_eq!(out, "build output");
     }
 
     #[test]
     fn plz3_fetch_failure_remains_a_failed_gate() {
         // a failed fetch skips the build, which needs it
         let mut labels: Vec<String> = vec![];
-        let gates = build_steps(&mut Stages::new(false), |label, _, _| {
+        let (gates, _) = build_steps(&mut Stages::new(false), |label, _, _| {
             labels.push(label.to_string());
             (false, "locked fetch failed".to_string())
         });
@@ -962,7 +1928,7 @@ mod tests {
         assert!(!report::overall(&gates, &[], true));
         // with every stage, both run
         let mut labels: Vec<String> = vec![];
-        let gates = build_steps(&mut Stages::new(true), |label, _, _| {
+        let (gates, _) = build_steps(&mut Stages::new(true), |label, _, _| {
             labels.push(label.to_string());
             if label == "fetch locked dependencies" {
                 (false, "locked fetch failed".to_string())
@@ -970,7 +1936,7 @@ mod tests {
                 (true, String::new())
             }
         });
-        assert_eq!(labels, ["fetch locked dependencies", "build rdy-cli"]);
+        assert_eq!(labels, ["fetch locked dependencies", "build"]);
         assert!(!gates[0].pass);
         assert!(gates[1].pass);
         assert!(!report::overall(&gates, &[], true));
@@ -1041,39 +2007,114 @@ mod tests {
 
     #[test]
     fn tgs2_default_deadlines_are_twice_the_median_with_a_floor() {
-        // until stages are timed, every child's deadline is its platform's whole-run median
-        let whole = [("linux", 3290), ("macos", 4152), ("windows", 8767)];
-        for kind in [
-            StageKind::Fetch,
-            StageKind::Build,
-            StageKind::Fmt,
-            StageKind::Clippy,
-            StageKind::WorkspaceTests,
-            StageKind::Discover,
-            StageKind::Area,
-            StageKind::Lib,
-            StageKind::Perf,
-            StageKind::Listing,
-            StageKind::Python,
-        ] {
-            for (os, secs) in whole {
-                assert_eq!(
-                    default_deadline(kind, os),
-                    Duration::from_secs(secs),
-                    "{kind:?} on {os}"
-                );
-            }
-        }
-        // never under the 10 minute floor
-        assert!(DEADLINE_FLOOR == Duration::from_secs(600));
-        // an OS with no record takes the slowest platform's
-        assert_eq!(
-            default_deadline(StageKind::Build, "freebsd"),
-            default_deadline(StageKind::Build, "windows")
+        // No median sets a deadline any more: a child's deadline is the time left on the run's
+        // one clock, and a run with no budget has no deadline.
+        assert_eq!(Clock::new(None, None).left(), UNBOUNDED);
+        assert!(!Clock::new(None, None).spent());
+        // a child that sleeps past the ceiling is stopped, and the run exits 30 with the row
+        let clock = Clock::new(None, Some(Duration::from_secs(1)));
+        let t = Instant::now();
+        let out = run_stage(
+            "rdy-qa swarm",
+            crate::platform::fixture_command("hang"),
+            clock.left(),
+        );
+        assert!(out.timed_out, "{}", out.combined());
+        assert!(!out.ok);
+        assert!(t.elapsed() < Duration::from_secs(1) + KILL_GRACE + Duration::from_secs(5));
+        assert!(clock.spent());
+        assert_eq!(clock.left(), Duration::ZERO);
+        let row = budget_row(clock.budget_secs().expect("a budget"), "rdy-qa swarm");
+        assert_eq!(row.name, BUDGET_ROW);
+        assert!(!row.pass);
+        assert_eq!(row.detail, "BUDGET: 1 s spent in stage rdy-qa swarm");
+        assert_eq!(gate_exit(false, clock.spent()), 30);
+        assert_eq!(gate_exit(true, true), BUDGET_EXIT);
+        assert_eq!(gate_exit(true, false), 0);
+        assert_eq!(gate_exit(false, false), 1);
+        // a child the spent clock does not start is a timed-out failure that says so
+        let skipped = not_started("rdy-qa store");
+        assert!(skipped.timed_out && !skipped.ok);
+        assert!(
+            skipped.stderr.contains("budget is spent"),
+            "{}",
+            skipped.stderr
         );
         assert_eq!(
             deadline_line("rdy-qa swarm", Duration::from_secs(1)),
             "deadline 1s passed in stage rdy-qa swarm"
+        );
+    }
+
+    #[test]
+    fn tgs4_the_clock_covers_the_alias_build() {
+        assert_eq!(parse_etime("00:07"), Some(Duration::from_secs(7)));
+        assert_eq!(parse_etime(" 01:02 "), Some(Duration::from_secs(62)));
+        assert_eq!(parse_etime("02:00:01"), Some(Duration::from_secs(7201)));
+        assert_eq!(parse_etime("1-00:00:00"), Some(Duration::from_secs(86_400)));
+        assert_eq!(parse_etime("7"), None);
+        assert_eq!(parse_etime("a:b"), None);
+        // this test process started before this line ran
+        #[cfg(unix)]
+        assert!(process_elapsed().is_some());
+    }
+
+    #[test]
+    fn tgs3_a_binary_past_twice_its_allowance_warns_and_past_four_times_fails() {
+        let file = r#"{"schema": 1, "platforms": {"macos": {
+            "rdy-qa/test/cli": 100, "rdy-qa/test/hung": 100, "rdy-store/test/durability": 50,
+            "rdy-engine/test/core": 18}}}"#;
+        let allowances = Allowances::parse(file).expect("parse");
+        let times = vec![
+            ("rdy-qa/test/cli".to_string(), 210.0),
+            ("rdy-qa/test/hung".to_string(), 401.0),
+            ("rdy-store/test/durability".to_string(), 99.0),
+            ("rdy-qa/test/new".to_string(), 1.0),
+            // more than four times a short allowance, but under the floor: a warning, not a hang
+            ("rdy-engine/test/core".to_string(), 77.9),
+        ];
+        let (rows, note) = allowances.check("macos", &times);
+        assert_eq!(note, None);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "OVER ALLOWANCE: rdy-qa/test/cli",
+                "OVER ALLOWANCE: rdy-qa/test/hung",
+                "NO ALLOWANCE: rdy-qa/test/new",
+                "OVER ALLOWANCE: rdy-engine/test/core"
+            ]
+        );
+        // past twice its allowance a binary is a warning that names it; past four times, a hang
+        // that fails
+        assert!(rows[0].pass && rows[0].state == report::RowState::Warning);
+        assert_eq!(report::gate_result(&rows[0]), "WARN");
+        assert!(rows[0].detail.contains("210.0 s"), "{}", rows[0].detail);
+        assert!(
+            !rows[1].pass && rows[1].detail.ends_with(": a hang"),
+            "{}",
+            rows[1].detail
+        );
+        assert!(!rows[2].pass);
+        assert!(rows[3].pass && rows[3].state == report::RowState::Warning);
+        assert!(
+            report::overall(&rows[..1], &[], true),
+            "a warning keeps the verdict"
+        );
+        // a platform with no list checks nothing and says so
+        let (rows, note) = allowances.check("linux", &times);
+        assert!(rows.is_empty());
+        assert!(note.expect("a note").contains("no `linux` list"));
+        // a bad file is an error, never an empty list
+        assert!(Allowances::parse(r#"{"schema": 2, "platforms": {}}"#).is_err());
+        assert!(Allowances::parse(r#"{"schema": 1, "platforms": {"macos": {"a": 0}}}"#).is_err());
+        // the file in the crate reads
+        let ours = Allowances::parse(include_str!("../gate-allowances.json")).expect("ours");
+        assert!(
+            ours.platforms
+                .values()
+                .flat_map(|l| l.values())
+                .all(|s| *s > 0.0)
         );
     }
 
@@ -1238,6 +2279,50 @@ not json at all
             "{e}"
         );
         assert_eq!(discovered(&done(true, 0, ARTIFACTS)).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn tgb1_the_gate_reads_every_test_binary_of_its_one_build() {
+        let json = r#"{"reason":"compiler-artifact","package_id":"path+file:///w/crates/rdy-store#0.58.0","profile":{"test":true},"target":{"kind":["test"],"name":"durability"},"executable":"/t/gate/deps/durability-1","fresh":true}
+{"reason":"compiler-artifact","package_id":"path+file:///w/crates/rdy-store#0.58.0","profile":{"test":true},"target":{"kind":["lib"],"name":"rdy_store"},"executable":"/t/gate/deps/rdy_store-2","fresh":false}
+{"reason":"compiler-artifact","package_id":"path+file:///w/x#rdy-qa@0.58.0","profile":{"test":true},"target":{"kind":["test"],"name":"cli"},"executable":"/t/gate/deps/cli-3","fresh":true}
+{"reason":"compiler-artifact","package_id":"path+file:///w/crates/rdy-cli#0.58.0","profile":{"test":false},"target":{"kind":["bin"],"name":"rdy"},"executable":"/t/gate/rdy","fresh":true}
+not json
+"#;
+        let found = parse_test_binaries(json);
+        let keys: Vec<String> = found.iter().map(TestBinary::key).collect();
+        assert_eq!(
+            keys,
+            [
+                "rdy-qa/test/cli",
+                "rdy-store/lib/rdy_store",
+                "rdy-store/test/durability"
+            ]
+        );
+        assert_eq!(stale_units(json), ["rdy-store rdy_store"]);
+        assert_eq!(
+            package_name("rdy-qa 0.58.0 (path+file:///w)"),
+            Some("rdy-qa")
+        );
+        assert_eq!(
+            runner_var("x86_64-pc-windows-msvc"),
+            "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER"
+        );
+        assert_eq!(
+            host_of("rustc 1.99.0\nhost: aarch64-apple-darwin\n"),
+            Some("aarch64-apple-darwin")
+        );
+        assert_eq!(
+            profile_dir_of(Path::new("/t/gate/deps/cli-3")).as_deref(),
+            Some("gate")
+        );
+        assert_eq!(
+            profile_dir_of(Path::new("/t/release/qa-gate")).as_deref(),
+            Some("release")
+        );
+        // the real-disk binaries keep one pass over the flush path
+        assert!(on_real_disk("rdy-store", "durability") && on_real_disk("rdy-qa", "store"));
+        assert!(!on_real_disk("rdy-qa", "durability"));
     }
 
     #[test]

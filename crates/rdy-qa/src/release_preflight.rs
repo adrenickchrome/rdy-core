@@ -87,12 +87,17 @@ fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// The workspace's release CLI: `<target dir>/release/rdy`.
+/// The workspace's CLI of the gate's own build: `<target dir>/<profile>/rdy`, in the profile of
+/// this process (`gate` under `cargo qa`).
 pub fn built_cli(root: &Path) -> PathBuf {
     let target =
         env_nonempty("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+    let profile = std::env::current_exe()
+        .ok()
+        .and_then(|e| crate::gate_steps::profile_dir_of(&e))
+        .unwrap_or_else(|| "release".into());
     target
-        .join("release")
+        .join(profile)
         .join(format!("rdy{}", std::env::consts::EXE_SUFFIX))
 }
 

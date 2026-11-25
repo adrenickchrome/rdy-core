@@ -688,7 +688,9 @@ def build(repo, commit, version, target, work, out, fast_gate_path, run_id, run_
                 'CARGO_INCREMENTAL': '0'})
     build_step(['cargo', 'fetch', '--locked'], source, env)
     env['CARGO_NET_OFFLINE'] = 'true'
-    build_step(['cargo', 'build', '--release', '--locked', '-p', 'rdy-cli', '-p', 'rdy-qa'], source, env)
+    # rdy and the two rdy-qa tools this build runs: rdy-qa's other binaries are not needed here
+    build_step(['cargo', 'build', '--release', '--locked', '-p', 'rdy-cli', '-p', 'rdy-qa', '--bin', 'rdy',
+                '--bin', 'qa-release-sources', '--bin', 'qa-release-package'], source, env)
 
     release = target_dir / 'release'
     exe = binary_name(target)

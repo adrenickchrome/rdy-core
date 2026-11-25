@@ -122,11 +122,7 @@ fn rdx12_chat_can_report_record_and_show_the_request() {
     );
     session(&mut c, "agent:a", "r1", "writer");
     // the removal guidance is loaded from the project-ops ruleset
-    let g = crate::mcp_instructions::loaded(&mut c, &["project-ops"]);
-    assert!(
-        g.contains("Before proposing content removal, call `rdy_redact` with `dry_run` true. Show its report and warnings. Record the request, then use `rdy_propose` and `rdy_pending`. Only a person can approve it."),
-        "{g}"
-    );
+    rdy_qa::guide_bundle::assert_served(&mut c, &["project-ops"]);
 
     // the dry run: exactly the daemon op's reply, and nothing written
     let dry = c.call("rdy_redact", args).ok();

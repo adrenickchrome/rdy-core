@@ -439,15 +439,12 @@ fn ck8_tool_and_error_texts_are_exact() {
     let schema = rd.call("rdy_schema", json!({})).ok();
     assert_eq!(schema["reviews"], guide);
 
-    // the one new server instruction
-    let instruction = "Run an authoring check only when the author or a person asks. Show its verdict on the current approval card before relaying a person's answer.";
-    let review = crate::mcp_instructions::guide(&["review"]);
-    assert_eq!(review.matches(instruction).count(), 1, "{review}");
-    assert!(!rdy_mcp::server::INSTRUCTIONS.contains(instruction));
+    // the authoring-check guidance is in the review ruleset, served as the bundle holds it
+    rdy_qa::guide_bundle::assert_served_fresh(&["review"]);
     assert!(
         !rdy_mcp::server::INSTRUCTIONS.contains("execute a reviewer")
-            && !review.contains("execute a reviewer"),
-        "nothing tells an agent to run a reviewer by itself"
+            && !rdy_mcp::server::INSTRUCTIONS.contains("authoring check"),
+        "the server text tells an agent to run no reviewer"
     );
 
     // the three new rows, in the engine's order, directly after E_ALT_CHOSEN
