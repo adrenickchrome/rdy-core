@@ -1420,8 +1420,9 @@ mod tests {
             drop(listener);
             assert!(path.exists(), "the listener's drop leaves the name");
             // macOS: a shut-down listener still takes connections while a copy is held, so the
-            // end shows once that copy's process reaches its exec (5 s at most)
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            // end shows once that copy's process reaches its exec. The wait is for that end; its
+            // deadline is a hang guard only: a loaded machine took a child past 5 s to its exec
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
             let mut seen = endpoint_liveness(&path).await;
             while seen == Liveness::Live && std::time::Instant::now() < until {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;

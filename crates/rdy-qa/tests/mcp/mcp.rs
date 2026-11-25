@@ -106,15 +106,16 @@ fn mcp2_write_ops_and_max_tokens_are_limited() {
     let op = |i: usize| json!({"op": "create", "type": "claim", "parent": s, "body": format!("claim {i}")});
     let over: Vec<_> = (0..5_001).map(op).collect();
     assert_eq!(
-        c.call_within("rdy_write", json!({"ops": over}), Duration::from_secs(30))
+        c.call_within("rdy_write", json!({"ops": over}), rdy_qa::mcp::DEADLINE)
             .code(),
         Some("E_LIMIT")
     );
     // the largest allowed write succeeds (how fast: the perf tier's `mcp_stdio_write_max_ops`,
-    // < 5 s); 30 s is a deadline for a hung server, not a speed claim
+    // < 5 s); the deadline is the hang guard for a hung server, not a speed claim (a loaded
+    // machine took a 5,000-op write past 30 s)
     let max: Vec<_> = (0..5_000).map(op).collect();
     assert!(matches!(
-        c.call_within("rdy_write", json!({"ops": max}), Duration::from_secs(30)),
+        c.call_within("rdy_write", json!({"ops": max}), rdy_qa::mcp::DEADLINE),
         Reply::Ok(_)
     ));
     assert_eq!(

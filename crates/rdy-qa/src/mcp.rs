@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 /// How long a request waits for its reply before the server counts as hung: a deadline, not a
 /// speed claim (the perf tier measures speed), so it is generous for a loaded machine.
-pub const DEADLINE: Duration = Duration::from_secs(30);
+pub const DEADLINE: Duration = Duration::from_secs(60);
 /// The `protocolVersion` the client sends in its `initialize`.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 

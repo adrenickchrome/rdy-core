@@ -44,6 +44,7 @@ pub mod snapshot_delta_fixture;
 pub mod soak;
 pub mod swarm;
 pub mod tensions;
+pub mod test_hygiene;
 pub mod wc;
 pub mod wc_check;
 
