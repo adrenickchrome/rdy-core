@@ -1229,6 +1229,19 @@ pub fn probe_envs_of(
 /// How many test binaries run at once. Each binary already runs its tests on every thread.
 pub const BINARY_JOBS: usize = 6;
 
+/// How many heavy test binaries (an rdy-qa area, a real-disk binary) of the pool run at once.
+/// On Windows it is 4: with six heavy binaries at once (each runs its tests on all 16 threads of
+/// the gate machine, and most of them start rdy processes), every one of them took 2.5 to 3.5
+/// times as long, and the daemons they started missed their 30 s start; with five or fewer, the
+/// times held. Elsewhere it is [`BINARY_JOBS`]: no cap.
+pub const HEAVY_JOBS: usize = if cfg!(windows) { 4 } else { BINARY_JOBS };
+
+/// Whether the test binary `name` of `package` is heavy for [`HEAVY_JOBS`]: an rdy-qa area
+/// binary or a real-disk binary.
+pub fn is_heavy(package: &str, kind: &str, name: &str) -> bool {
+    (package == "rdy-qa" && kind == "test") || on_real_disk(package, name)
+}
+
 /// Runs `run` on every item. The items for which `alone` is false share up to `jobs` workers;
 /// after them, each item for which `alone` is true runs by itself, so it never overlaps another.
 /// The results come back in the order of `items`.
@@ -1238,17 +1251,68 @@ pub fn run_areas<T: Sync, R: Send>(
     jobs: usize,
     run: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    run_areas_capped(items, alone, jobs, |_| false, jobs, run)
+}
+
+/// [`run_areas`], with at most `cap` of the items for which `heavy` is true running at once.
+/// A free worker takes the first item not yet started, in the order of `items`, that is light or
+/// fits under the cap; when only heavy items are left and the cap is full, it waits for one to
+/// end.
+pub fn run_areas_capped<T: Sync, R: Send>(
+    items: &[T],
+    alone: impl Fn(&T) -> bool,
+    jobs: usize,
+    heavy: impl Fn(&T) -> bool + Sync,
+    cap: usize,
+    run: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    use std::sync::{Condvar, Mutex};
+    struct Queue {
+        waiting: Vec<usize>,
+        heavy_running: usize,
+    }
     let shared: Vec<usize> = (0..items.len()).filter(|&i| !alone(&items[i])).collect();
-    let next = AtomicUsize::new(0);
+    let workers = jobs.max(1).min(shared.len());
+    let cap = cap.max(1);
+    let queue = Mutex::new(Queue {
+        waiting: shared,
+        heavy_running: 0,
+    });
+    let ended = Condvar::new();
     let done: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(items.len()));
     std::thread::scope(|s| {
-        for _ in 0..jobs.max(1).min(shared.len()) {
+        for _ in 0..workers {
             s.spawn(|| {
-                while let Some(&i) = shared.get(next.fetch_add(1, Ordering::SeqCst)) {
+                loop {
+                    let (i, is_heavy) = {
+                        let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
+                        loop {
+                            if q.waiting.is_empty() {
+                                return;
+                            }
+                            let room = q.heavy_running < cap;
+                            if let Some(at) =
+                                q.waiting.iter().position(|&i| room || !heavy(&items[i]))
+                            {
+                                let i = q.waiting.remove(at);
+                                let h = heavy(&items[i]);
+                                if h {
+                                    q.heavy_running += 1;
+                                }
+                                break (i, h);
+                            }
+                            q = ended.wait(q).unwrap_or_else(|p| p.into_inner());
+                        }
+                    };
                     let r = run(&items[i]);
                     done.lock().unwrap_or_else(|p| p.into_inner()).push((i, r));
+                    if is_heavy {
+                        queue
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .heavy_running -= 1;
+                        ended.notify_all();
+                    }
                 }
             });
         }
@@ -1765,6 +1829,39 @@ mod tests {
         ] {
             assert!(!is_run_package_var(v), "{v}");
         }
+    }
+
+    #[test]
+    fn tier9_at_most_cap_heavy_items_run_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // items 0..8 are heavy, 8..14 light: four workers, at most two heavy at a time
+        let items: Vec<usize> = (0..14).collect();
+        let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let out = run_areas_capped(
+            &items,
+            |_| false,
+            4,
+            |i| *i < 8,
+            2,
+            |i| {
+                if *i < 8 {
+                    let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(n, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                    now.fetch_sub(1, Ordering::SeqCst);
+                }
+                *i * 10
+            },
+        );
+        assert_eq!(out, (0..14).map(|i| i * 10).collect::<Vec<_>>());
+        assert!(most.load(Ordering::SeqCst) <= 2, "never more than the cap");
+        // with no cap it is run_areas
+        assert_eq!(run_areas(&items, |_| false, 3, |i| *i), items);
+        assert!(is_heavy("rdy-qa", "test", "cli"));
+        assert!(is_heavy("rdy-store", "test", "durability"));
+        assert!(!is_heavy("rdy-qa", "lib", "rdy_qa"));
+        assert!(!is_heavy("rdy-store", "test", "format"));
+        const { assert!(HEAVY_JOBS <= BINARY_JOBS) };
     }
 
     #[test]
