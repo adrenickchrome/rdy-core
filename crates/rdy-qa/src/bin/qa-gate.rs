@@ -1,14 +1,15 @@
 //! `cargo qa`: the full regression and hardening gate, with a report in `target/qa/`.
 use clap::Parser;
 use rdy_qa::gate_steps::{
-    Allowances, AreaEnv, BINARY_JOBS, BUILD_STEP, ChildOutput, Clock, GateStep, SERIAL_AREAS,
-    Stages, TestBinary, TestExe, UNBOUNDED, budget_row, build_steps, cargo, discover_command,
-    fail_tail, fmt_step, gate_exit, launch_area, list_guarded, not_started, on_real_disk,
-    parse_test_binaries, probe_envs, run_areas, run_bounded, run_stage, stale_units,
+    Allowances, AreaEnv, BINARY_JOBS, BUILD_STEP, CEILING_FACTOR, ChildOutput, Clock, GateStep,
+    SERIAL_AREAS, Stages, TestBinary, TestExe, UNBOUNDED, budget_row, build_steps, cargo,
+    discover_command, fail_tail, fmt_step, gate_exit, launch_area, list_guarded, not_started,
+    on_real_disk, over_target_row, parse_test_binaries, probe_envs, run_areas, run_bounded,
+    run_stage, stale_units,
 };
 use rdy_qa::perf::{self, Baseline, Measure};
 use rdy_qa::report::{self, Area, Gate, Report, StageRecord, Timing};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -53,21 +54,62 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     tmp_root: Option<PathBuf>,
     /// The test tier. `release`: the run a release reads; fmt, clippy and the Python CI tests
-    /// run on Linux only, and each test binary's time is checked against its allowance in
-    /// `gate-allowances.json`.
+    /// run on Linux only, each test binary's time is checked against its allowance in
+    /// `gate-allowances.json`, the tests of the nightly tier are not built, and the perf tier
+    /// does not run (except for `--only perf`). `nightly`: every test of both tiers
+    /// (`--features nightly-tests`) and the perf tier, and each binary's nightly-only count is
+    /// checked against `gate-allowances.json`.
     #[arg(long, value_enum)]
     tier: Option<Tier>,
-    /// The seconds the whole run may take, the builds included; required with `--tier release`.
-    /// Each child's deadline is the time left. When it is spent the gate stops the running
-    /// children, adds a failed `BUDGET` row that names the stage and exits 30.
+    /// The run's time target in seconds, the builds included; required with `--tier release`.
+    /// A run past it finishes: the report adds a warning row `OVER TARGET: <n> s, target <t> s`
+    /// with the slowest binaries, and the verdict stays as it is.
     #[arg(long, value_name = "SECONDS", required_if_eq("tier", "release"))]
     budget_secs: Option<u64>,
+    /// The hard stop in seconds; by default twice `--budget-secs`. Each child's deadline is the
+    /// time left before it. When it is reached the gate stops the running children, adds a failed
+    /// `BUDGET` row that names the stage and exits 30.
+    #[arg(long, value_name = "SECONDS", requires = "budget_secs")]
+    ceiling_secs: Option<u64>,
+    /// Run only the test binaries of one platform's tier: the binaries that the `<platform>`
+    /// list of `gate-allowances.json` names. `windows`: the seams, store, daemon, CLI, working
+    /// copy, io and release binaries. The report names every binary it left out.
+    #[arg(long, value_enum, value_name = "PLATFORM")]
+    platform_tier: Option<PlatformTier>,
+    /// Run the failed test binaries of this report once more, one at a time, inside the time the
+    /// first run left of `--budget-secs`. It refuses when more than three binaries failed, when
+    /// a build stage failed or when any other row failed. The report keeps both results; after a
+    /// good retry the run is `PASS (retried: <names>)`. Give it the run's `--tmp-root` and
+    /// `--require-all`.
+    #[arg(long, value_name = "REPORT", requires = "budget_secs", conflicts_with_all = ["focus", "only", "rebaseline"])]
+    retry_failed: Option<PathBuf>,
 }
 
 /// The test tiers of `--tier`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum Tier {
     Release,
+    Nightly,
+}
+
+/// Whether the perf tier stays out of this run: the release tier runs it only for `--only perf`.
+fn release_skips_perf(tier: Option<Tier>, only: Option<&str>) -> bool {
+    tier == Some(Tier::Release) && only != Some(report::PERF_AREA)
+}
+
+/// The platform tiers of `--platform-tier`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum PlatformTier {
+    Windows,
+}
+
+impl PlatformTier {
+    /// The tier's list name in `gate-allowances.json`.
+    fn name(self) -> &'static str {
+        match self {
+            PlatformTier::Windows => "windows",
+        }
+    }
 }
 
 /// The checked `--tmp-root`, set once in `main`.
@@ -360,6 +402,132 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// `--retry-failed`: runs the failed test binaries of the first run's report once more, one at
+/// a time, on the clock's time left, and writes the report with both results: the first run's
+/// files are kept beside it as `report.first.json` and `report.first.md`. Returns the exit code.
+fn retry(args: &Args, path: &Path, first: &serde_json::Value, tmp_root: Option<&Path>) -> i32 {
+    use rdy_qa::retry::{Retried, apply, markdown, targets};
+    let spent = || CLOCK.get().is_some_and(Clock::spent);
+    let targets = match targets(first) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("--retry-failed: {e}");
+            return 2;
+        }
+    };
+    eprintln!("==> retry: {}", targets.join(", "));
+    let mut stages = Stages::new(false);
+    let (gates, out) = build_steps(&mut stages, |l, c, _| step(l, c, left()));
+    if let Some(g) = gates.iter().find(|g| !g.pass) {
+        eprintln!("--retry-failed: {} failed: {}", g.name, g.detail);
+        return gate_exit(false, spent());
+    }
+    let binaries = parse_test_binaries(&out);
+    let envs: BTreeMap<PathBuf, AreaEnv> = match probe_envs(|c| step_out("env probe", c, left())) {
+        Ok(found) => found
+            .into_iter()
+            .map(|(exe, env)| (canonical(&exe), env))
+            .collect(),
+        Err(e) => {
+            eprintln!("--retry-failed: {e}");
+            return gate_exit(false, spent());
+        }
+    };
+    let launch = Launch {
+        args,
+        envs: &envs,
+        tmp_root,
+    };
+    let mut rows: Vec<Retried> = vec![];
+    for key in &targets {
+        let row = match binaries.iter().find(|b| &b.key() == key) {
+            Some(b) => {
+                let (out, elapsed) = launch.run(b, &format!("retry {key}"));
+                let run = report::parse_cargo_test(&out.combined());
+                if !out.ok {
+                    eprintln!("{}", report::tail(&out.combined(), 40));
+                }
+                Retried {
+                    binary: key.clone(),
+                    ok: out.ok && run.failed == 0,
+                    exit: out.status_text(),
+                    passed: run.passed,
+                    failed: run.failed,
+                    secs: elapsed.as_secs_f64(),
+                }
+            }
+            None => Retried {
+                binary: key.clone(),
+                ok: false,
+                exit: "not built".into(),
+                passed: 0,
+                failed: 0,
+                secs: 0.0,
+            },
+        };
+        eprintln!(
+            "==> retry {key}: {} ({:.1} s)",
+            if row.ok { "PASS" } else { "FAIL" },
+            row.secs
+        );
+        rows.push(row);
+    }
+    let mut rep = first.clone();
+    let pass = apply(&mut rep, &rows);
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let md = dir.join("report.md");
+    let first_md = std::fs::read_to_string(&md).unwrap_or_default();
+    let written = std::fs::copy(path, dir.join("report.first.json"))
+        .and_then(|_| std::fs::write(dir.join("report.first.md"), &first_md))
+        .and_then(|_| {
+            std::fs::write(
+                path,
+                serde_json::to_string_pretty(&rep).expect("report serializes"),
+            )
+        })
+        .and_then(|_| std::fs::write(&md, markdown(&first_md, &rows, pass)));
+    if let Err(e) = written {
+        eprintln!("--retry-failed: could not write the report: {e}");
+        return 2;
+    }
+    println!("{}", md.display());
+    println!("{}", rdy_qa::retry::verdict(pass, &rows));
+    gate_exit(pass, spent())
+}
+
+/// Each test binary's count of nightly-tier tests (`mod nightly`), from its `--list`, by key;
+/// and one line for each listing that failed.
+fn nightly_counts(binaries: &[TestBinary]) -> (BTreeMap<String, usize>, Vec<String>) {
+    let outs = run_areas(
+        binaries,
+        |_| false,
+        BINARY_JOBS,
+        |b| {
+            budget_spent("list nightly tests").unwrap_or_else(|| {
+                run_stage(
+                    "list nightly tests",
+                    rdy_qa::gate_steps::list_command(&b.path, &root()),
+                    left(),
+                )
+            })
+        },
+    );
+    let mut counts = BTreeMap::new();
+    let mut problems = vec![];
+    for (b, out) in binaries.iter().zip(outs) {
+        if out.ok {
+            counts.insert(b.key(), rdy_qa::gate_steps::nightly_count(&out.stdout));
+        } else {
+            problems.push(format!(
+                "nightly listing of {} failed: {}",
+                b.key(),
+                out.status_text()
+            ));
+        }
+    }
+    (counts, problems)
+}
+
 fn main() {
     // one clock for the whole run, the builds included: under `cargo qa` it starts with the
     // Cargo that built this gate
@@ -368,8 +536,40 @@ fn main() {
         .and_then(|e| now.checked_sub(e))
         .unwrap_or(now);
     let args = Args::parse();
-    let clock =
-        *CLOCK.get_or_init(|| Clock::started(start, args.budget_secs.map(Duration::from_secs)));
+    // a retry has the time that the first run left of the budget
+    let first = args.retry_failed.as_deref().map(|path| {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("--retry-failed {}: {e}", path.display()))
+            .and_then(|t| {
+                serde_json::from_str::<serde_json::Value>(&t)
+                    .map_err(|e| format!("--retry-failed {}: {e}", path.display()))
+            });
+        text.unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2);
+        })
+    });
+    let ceiling = args
+        .ceiling_secs
+        .or_else(|| args.budget_secs.map(|b| b * u64::from(CEILING_FACTOR)));
+    let (target, ceiling) = match &first {
+        Some(report) => (
+            args.budget_secs
+                .map(|b| rdy_qa::retry::time_left(b, report)),
+            ceiling.map(|c| rdy_qa::retry::time_left(c, report)),
+        ),
+        None => (args.budget_secs, ceiling),
+    };
+    let clock = *CLOCK.get_or_init(|| {
+        Clock::started(
+            start,
+            target.map(Duration::from_secs),
+            ceiling.map(Duration::from_secs),
+        )
+    });
+    if args.tier == Some(Tier::Nightly) {
+        rdy_qa::gate_steps::set_nightly_tier();
+    }
     if cfg!(windows)
         && let Err(e) = rdy_qa::gate_steps::step_aside()
     {
@@ -416,6 +616,20 @@ fn main() {
     let allowance_error = allowances.as_ref().err().cloned();
     ALLOWANCES.get_or_init(|| allowances.unwrap_or_default());
     GATE_START.get_or_init(|| start);
+    let tier_keys: Option<BTreeSet<String>> = match args.platform_tier {
+        None => None,
+        Some(p) => match ALLOWANCES.get().map(|a| a.platform_tier(p.name())) {
+            Some(Ok(keys)) => Some(keys),
+            Some(Err(e)) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+            None => None,
+        },
+    };
+    if let (Some(path), Some(report)) = (&args.retry_failed, &first) {
+        std::process::exit(retry(&args, path, report, tmp_root.as_deref()));
+    }
     if now > start {
         record("qa-gate build", (now - start).as_secs_f64(), true);
     }
@@ -424,10 +638,12 @@ fn main() {
         let _ = std::fs::remove_file(root().join("target/qa").join(f));
     }
     let mut notes: Vec<String> = vec![];
+    // The release tier leaves the perf tier to the nightly run, unless `--only perf` asks for it.
+    let release_skips_perf = release_skips_perf(args.tier, args.only.as_deref());
     let plan = match report::plan(
         args.only.as_deref(),
         &report::test_areas(&tests_dir()),
-        args.skip_perf,
+        args.skip_perf || release_skips_perf,
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -570,48 +786,25 @@ fn main() {
         envs: &envs,
         tmp_root: tmp_root.as_deref(),
     };
+    // A platform tier runs only the binaries its list names; the nightly run runs the rest.
+    let in_tier = |key: &str| tier_keys.as_ref().is_none_or(|k| k.contains(key));
+    let mut outside_tier: Vec<String> = vec![];
 
+    // the workspace's test binaries, every crate's but rdy-qa's
+    let mut ws_bins: Vec<&TestBinary> = vec![];
+    let mut ws_ran = false;
     if plan.checks {
         match stages.blocked(&workspace) {
             Some(root) => gates.push(stages.skip(&workspace, root)),
             None => {
-                // every crate's test binaries but rdy-qa's, four at a time
-                eprintln!("==> workspace tests");
-                let t = Instant::now();
-                // the largest allowances start first; with none, the real-disk binaries,
-                // which are the slowest
-                let mut mine: Vec<&TestBinary> =
-                    binaries.iter().filter(|b| b.package != "rdy-qa").collect();
-                mine.sort_by_key(|b| !on_real_disk(&b.package, &b.name));
-                mine.sort_by(|a, b| allowance(&b.key()).total_cmp(&allowance(&a.key())));
-                let outputs = run_areas(
-                    &mine,
-                    |_| false,
-                    BINARY_JOBS,
-                    |b| launch.run(b, &format!("workspace {}", b.key())).0,
-                );
-                let mut text = String::new();
-                let mut failed_binaries = vec![];
-                for (b, out) in mine.iter().zip(&outputs) {
-                    text.push_str(&out.combined());
-                    if !out.ok {
-                        failed_binaries.push(format!("{} ({})", b.key(), out.status_text()));
-                    }
-                    if out.timed_out {
-                        notes.push(report::tail(&out.stderr, 1));
+                ws_ran = true;
+                for b in binaries.iter().filter(|b| b.package != "rdy-qa") {
+                    if in_tier(&b.key()) {
+                        ws_bins.push(b);
+                    } else {
+                        outside_tier.push(b.key());
                     }
                 }
-                let ok = failed_binaries.is_empty() && !mine.is_empty();
-                record("workspace tests", t.elapsed().as_secs_f64(), ok);
-                let run = report::parse_cargo_test(&text);
-                seeds.extend(report::failing_seeds(&text));
-                let mut detail = report::workspace_test_detail(ok, &run, &text);
-                if !failed_binaries.is_empty() {
-                    detail += &format!("\nfailed binaries: {}", failed_binaries.join(", "));
-                }
-                let empty = report::ran_nothing(&run);
-                stages.record(&workspace, ok && !empty);
-                gates.push(Gate::ran(&workspace.id, ok && !empty, detail));
             }
         }
     }
@@ -701,40 +894,136 @@ fn main() {
         pending.push(Pending::Run(pre));
     }
 
-    // Every binary outside SERIAL_AREAS shares the workers; each one in it runs alone after them.
-    let alone = |b: &String| SERIAL_AREAS.contains(&b.as_str());
-    // the slowest binaries start first, so the last one to start is a short one; the results
-    // come back in the plan's order
-    let mut order: Vec<usize> = (0..to_run.len()).collect();
-    order.sort_by(|&a, &b| {
-        let key = |i: usize| format!("rdy-qa/test/{}", to_run[i]);
-        allowance(&key(b)).total_cmp(&allowance(&key(a)))
+    // the rdy-qa unit tests
+    let mut lib_ran = false;
+    let lib_bin = binaries
+        .iter()
+        .find(|b| b.package == "rdy-qa" && b.kind == "lib");
+    if plan.lib {
+        if let Some(root) = stages.blocked(&lib) {
+            gates.push(stages.skip(&lib, root));
+        } else if lib_bin.is_none_or(|b| in_tier(&b.key())) {
+            lib_ran = true;
+        } else {
+            outside_tier.push("rdy-qa/lib/rdy_qa".into());
+        }
+    }
+
+    // Every test binary of the run shares one pool: the workspace's, the rdy-qa areas' and the
+    // rdy-qa unit tests. The largest allowances start first, so the last one to start is a short
+    // one; with none, the real-disk binaries, which are slow. A binary in SERIAL_AREAS runs alone
+    // after the pool. The results come back in the order of the jobs.
+    enum Job<'a> {
+        Workspace(&'a TestBinary),
+        Area(&'a str),
+        Lib,
+    }
+    let job_key = |j: &Job| match j {
+        Job::Workspace(b) => b.key(),
+        Job::Area(a) => format!("rdy-qa/test/{a}"),
+        Job::Lib => "rdy-qa/lib/rdy_qa".into(),
+    };
+    let mut jobs: Vec<Job> = ws_bins.iter().map(|b| Job::Workspace(b)).collect();
+    jobs.extend(to_run.iter().map(|a| Job::Area(a)));
+    if lib_ran {
+        jobs.push(Job::Lib);
+    }
+    jobs.sort_by_key(|j| match j {
+        Job::Workspace(b) => !on_real_disk(&b.package, &b.name),
+        Job::Area(a) => !on_real_disk("rdy-qa", a),
+        Job::Lib => true,
     });
-    let ordered: Vec<String> = order.iter().map(|&i| to_run[i].clone()).collect();
+    jobs.sort_by(|a, b| allowance(&job_key(b)).total_cmp(&allowance(&job_key(a))));
+    let alone = |j: &Job| matches!(j, Job::Area(a) if SERIAL_AREAS.contains(a));
     let t = Instant::now();
-    let ran = run_areas(&ordered, alone, BINARY_JOBS, |binary| {
-        let id = area_step(binary).id;
-        let exe = qa_exes
-            .iter()
-            .find(|e| &e.name == binary)
-            .expect("only found binaries run");
-        eprintln!("==> {id}");
-        let (out, elapsed) = launch.run(exe, &id);
-        eprintln!("==> {id}: {:.1} s", elapsed.as_secs_f64());
-        out
+    if !jobs.is_empty() {
+        eprintln!(
+            "==> test pool: {} binaries, {BINARY_JOBS} at a time",
+            jobs.len()
+        );
+    }
+    let ran = run_areas(&jobs, alone, BINARY_JOBS, |j| match j {
+        Job::Workspace(b) => launch.run(b, &format!("workspace {}", b.key())).0,
+        Job::Area(binary) => {
+            let id = area_step(binary).id;
+            let exe = qa_exes
+                .iter()
+                .find(|e| e.name == *binary)
+                .expect("only found binaries run");
+            eprintln!("==> {id}");
+            let (out, elapsed) = launch.run(exe, &id);
+            eprintln!("==> {id}: {:.1} s", elapsed.as_secs_f64());
+            out
+        }
+        Job::Lib => {
+            eprintln!("==> {}", lib.id);
+            match lib_bin {
+                Some(exe) => launch.run(exe, &lib.id).0,
+                None => ChildOutput {
+                    stderr: "the build named no rdy-qa unit-test executable".into(),
+                    ..ChildOutput::default()
+                },
+            }
+        }
     });
-    let mut outputs: Vec<Option<ChildOutput>> = (0..to_run.len()).map(|_| None).collect();
-    for (&i, out) in order.iter().zip(ran) {
-        outputs[i] = Some(out);
+    let pool_secs = t.elapsed().as_secs_f64();
+    let jobs_empty = jobs.is_empty();
+    if !jobs.is_empty() {
+        record("test pool", pool_secs, ran.iter().all(|o| o.ok));
     }
-    let outputs: Vec<ChildOutput> = outputs
-        .into_iter()
-        .map(|o| o.expect("every binary ran"))
-        .collect();
-    if !to_run.is_empty() {
-        record("rdy-qa areas", t.elapsed().as_secs_f64(), true);
+    let mut failed_binaries: Vec<String> = vec![];
+    let mut ws_out: Vec<(&TestBinary, ChildOutput)> = vec![];
+    let mut area_out: BTreeMap<String, ChildOutput> = BTreeMap::new();
+    let mut lib_out: Option<ChildOutput> = None;
+    for (j, out) in jobs.iter().zip(ran) {
+        if !out.ok {
+            failed_binaries.push(job_key(j));
+        }
+        match j {
+            Job::Workspace(b) => ws_out.push((b, out)),
+            Job::Area(a) => {
+                area_out.insert(a.to_string(), out);
+            }
+            Job::Lib => lib_out = Some(out),
+        }
     }
-    let mut outputs = to_run.iter().zip(outputs);
+    failed_binaries.sort();
+    if !outside_tier.is_empty() {
+        outside_tier.sort();
+        notes.push(format!(
+            "{} test binaries are outside the {} tier and did not run (the nightly run runs them): {}",
+            outside_tier.len(),
+            args.platform_tier.map_or("platform", PlatformTier::name),
+            outside_tier.join(", ")
+        ));
+    }
+
+    if ws_ran {
+        // the report rows keep the binaries' key order
+        ws_out.sort_by_key(|a| a.0.key());
+        let mut text = String::new();
+        let mut failed = vec![];
+        for (b, out) in &ws_out {
+            text.push_str(&out.combined());
+            if !out.ok {
+                failed.push(format!("{} ({})", b.key(), out.status_text()));
+            }
+            if out.timed_out {
+                notes.push(report::tail(&out.stderr, 1));
+            }
+        }
+        let ok = failed.is_empty() && !ws_out.is_empty();
+        let run = report::parse_cargo_test(&text);
+        seeds.extend(report::failing_seeds(&text));
+        let mut detail = report::workspace_test_detail(ok, &run, &text);
+        if !failed.is_empty() {
+            detail += &format!("\nfailed binaries: {}", failed.join(", "));
+        }
+        let empty = report::ran_nothing(&run);
+        stages.record(&workspace, ok && !empty);
+        gates.push(Gate::ran(&workspace.id, ok && !empty, detail));
+    }
+
     for (binary, item) in plan.files.iter().zip(pending) {
         let out = match item {
             Pending::Skipped(g) => {
@@ -748,9 +1037,7 @@ fn main() {
             }
             Pending::Run(pre) => {
                 gates.extend(pre);
-                let (ran, out) = outputs.next().expect("one output per run");
-                debug_assert_eq!(ran, binary);
-                out
+                area_out.remove(binary).expect("one output per run")
             }
         };
         let text = out.combined();
@@ -783,32 +1070,17 @@ fn main() {
         }
     }
 
-    if plan.lib {
-        if let Some(root) = stages.blocked(&lib) {
-            gates.push(stages.skip(&lib, root));
-        } else {
-            eprintln!("==> {}", lib.id);
-            let out = match binaries
-                .iter()
-                .find(|b| b.package == "rdy-qa" && b.kind == "lib")
-            {
-                Some(exe) => launch.run(exe, &lib.id).0,
-                None => ChildOutput {
-                    stderr: "the build named no rdy-qa unit-test executable".into(),
-                    ..ChildOutput::default()
-                },
-            };
-            let text = out.combined();
-            let run = report::parse_cargo_test(&text);
-            seeds.extend(report::failing_seeds(&text));
-            if !out.ok && run.failures.is_empty() {
-                eprintln!("{text}");
-            }
-            if out.timed_out {
-                notes.push(report::tail(&out.stderr, 1));
-            }
-            report::add_run_with_exit(&mut areas, "lib", out.ok, &out.status_text(), run);
+    if let Some(out) = lib_out {
+        let text = out.combined();
+        let run = report::parse_cargo_test(&text);
+        seeds.extend(report::failing_seeds(&text));
+        if !out.ok && run.failures.is_empty() {
+            eprintln!("{text}");
         }
+        if out.timed_out {
+            notes.push(report::tail(&out.stderr, 1));
+        }
+        report::add_run_with_exit(&mut areas, "lib", out.ok, &out.status_text(), run);
     }
 
     // The tests must not have changed the build: a second build of the same command is fresh.
@@ -827,7 +1099,12 @@ fn main() {
     }
 
     let (perf_verdicts, perf_note, perf_ok) = if !plan.perf {
-        (vec![], "Skipped (`--skip-perf`).".to_string(), true)
+        let why = if release_skips_perf {
+            "Skipped: the release tier leaves perf to the nightly tier (`cargo qa --tier nightly`)."
+        } else {
+            "Skipped (`--skip-perf`)."
+        };
+        (vec![], why.to_string(), true)
     } else if let Some(root) = stages.blocked(&perf_step) {
         gates.push(stages.skip(&perf_step, root.clone()));
         (vec![], format!("SKIPPED (after {root} failed)"), false)
@@ -866,7 +1143,8 @@ fn main() {
     if args.all_stages {
         mode += ", all stages";
     }
-    // In the release tier each test binary's time is held to its allowance.
+    // In the release tier each test binary's time and each stage's time is held to its
+    // allowance, and the report says how many tests the nightly tier holds.
     if args.tier == Some(Tier::Release)
         && !args.deep
         && let Some(a) = ALLOWANCES.get()
@@ -874,6 +1152,35 @@ fn main() {
         let (rows, note) = a.check(std::env::consts::OS, &binary_times());
         gates.extend(rows);
         notes.extend(note);
+        let build: f64 = RECORDS
+            .lock()
+            .map(|r| {
+                r.iter()
+                    .filter(|r| r.label == "qa-gate build" || r.label == "build")
+                    .map(|r| r.secs)
+                    .sum()
+            })
+            .unwrap_or(0.0);
+        if build_ok && !jobs_empty {
+            gates.extend(a.check_stages(std::env::consts::OS, build, pool_secs));
+        }
+        notes.extend(a.nightly_note());
+    }
+    // In the nightly tier each binary's nightly-only count is the allowances file's.
+    if args.tier == Some(Tier::Nightly)
+        && build_ok
+        && let Some(a) = ALLOWANCES.get()
+    {
+        let (counts, problems) = nightly_counts(&binaries);
+        notes.extend(problems);
+        let rows = a.check_nightly(&counts);
+        let total: usize = counts.values().sum();
+        gates.push(Gate::ran(
+            "nightly-only counts",
+            rows.is_empty(),
+            format!("{total} nightly-only tests listed"),
+        ));
+        gates.extend(rows);
     }
     // A spent budget fails the run, whatever ran: the row names the stage it was spent in.
     let spent = SPENT_IN.get().cloned().or_else(|| {
@@ -887,6 +1194,8 @@ fn main() {
     });
     if let (Some(stage), Some(secs)) = (&spent, clock.budget_secs()) {
         gates.push(budget_row(secs, stage));
+    } else if let Some((secs, target)) = clock.over_target() {
+        gates.push(over_target_row(secs, target, &binary_times()));
     }
     let pass = report::overall(&gates, &areas, perf_ok);
     let rep = Report {
@@ -908,6 +1217,7 @@ fn main() {
         notes,
         guarded,
         os_excluded: report::os_excluded(),
+        failed_binaries,
         timing: Timing {
             binaries: binary_times(),
             ..Timing::from_records(
@@ -926,4 +1236,72 @@ fn main() {
     println!("{}", dir.join("report.md").display());
     println!("{}", if pass { "PASS" } else { "FAIL" });
     std::process::exit(gate_exit(pass, spent.is_some()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, clap::Error> {
+        Args::try_parse_from(std::iter::once("qa-gate").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn tier4_the_gate_takes_the_workflow_flags() {
+        let a = parse(&["--tier", "nightly"]).unwrap();
+        assert_eq!(a.tier, Some(Tier::Nightly));
+        assert_eq!(a.budget_secs, None, "the nightly tier needs no budget");
+        let a = parse(&[
+            "--tier",
+            "release",
+            "--budget-secs",
+            "630",
+            "--platform-tier",
+            "windows",
+        ])
+        .unwrap();
+        assert_eq!(a.platform_tier.map(PlatformTier::name), Some("windows"));
+        let a = parse(&[
+            "--tier",
+            "release",
+            "--budget-secs",
+            "630",
+            "--retry-failed",
+            "target/qa/report.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.retry_failed.as_deref(),
+            Some(Path::new("target/qa/report.json"))
+        );
+        // the release tier needs its budget, and a retry runs on the same budget clock
+        assert!(parse(&["--tier", "release"]).is_err());
+        assert!(parse(&["--retry-failed", "target/qa/report.json"]).is_err());
+        assert!(parse(&["--platform-tier", "plan9"]).is_err());
+        // the budget is the target; the ceiling is the hard stop, twice the target by default
+        let a = parse(&[
+            "--tier",
+            "release",
+            "--budget-secs",
+            "630",
+            "--ceiling-secs",
+            "900",
+        ])
+        .unwrap();
+        assert_eq!((a.budget_secs, a.ceiling_secs), (Some(630), Some(900)));
+        assert!(
+            parse(&["--ceiling-secs", "900"]).is_err(),
+            "a ceiling needs a target"
+        );
+        assert_eq!(CEILING_FACTOR, 2);
+    }
+
+    #[test]
+    fn tier5_the_release_tier_leaves_perf_to_the_nightly_tier() {
+        assert!(release_skips_perf(Some(Tier::Release), None));
+        assert!(release_skips_perf(Some(Tier::Release), Some("cli")));
+        assert!(!release_skips_perf(Some(Tier::Release), Some("perf")));
+        assert!(!release_skips_perf(Some(Tier::Nightly), None));
+        assert!(!release_skips_perf(None, None));
+    }
 }

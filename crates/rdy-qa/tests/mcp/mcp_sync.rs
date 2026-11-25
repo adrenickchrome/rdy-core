@@ -964,21 +964,6 @@ fn scc9_clone_pack_digest_mismatch_from_newer_rdy_refuses() {
     assert_eq!(fetches(&k), 0);
 }
 
-/// scc9: every settings refusal follows discovery, state and the `min_rdy` check, sends no
-/// fetch, and leaves the target as it was; the `min_rdy` stop comes before the settings read.
-#[test]
-fn scc9_clone_settings_refusal_fetches_nothing_and_leaves_dir() {
-    let n = refuse_each(|_, _, _| true);
-    assert_eq!(n, 32);
-    let (k, _copy, _store, mut c) = served_kit(&["a"]);
-    k.hub.min_rdy("99.0.0");
-    let (parent, dir) = target();
-    let e = mcp_err(&mut c, "rdy_clone", clone_args(&hub_url(&k), &dir));
-    assert_eq!(e["code"], "E_STORE_FORMAT", "{e}");
-    assert_eq!(k.hub.routes(), ["discovery", "state"]);
-    assert_eq!(entries(parent.path()), 0);
-}
-
 /// scc9: no refusal quotes a sentinel key or value of an unreadable pack or setting, or the
 /// parser's error, for a newer, older, equal or absent capturing rdy: each message and fix is
 /// the template filled with the member, the URL and the versions alone.
@@ -1211,4 +1196,25 @@ fn scc9_dump_reply_names_checked_file_and_next() {
         std::fs::metadata(&out).unwrap().len(),
         made["bytes"].as_u64().unwrap()
     );
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+
+    /// scc9: every settings refusal follows discovery, state and the `min_rdy` check, sends no
+    /// fetch, and leaves the target as it was; the `min_rdy` stop comes before the settings read.
+    #[test]
+    fn scc9_clone_settings_refusal_fetches_nothing_and_leaves_dir() {
+        let n = refuse_each(|_, _, _| true);
+        assert_eq!(n, 32);
+        let (k, _copy, _store, mut c) = served_kit(&["a"]);
+        k.hub.min_rdy("99.0.0");
+        let (parent, dir) = target();
+        let e = mcp_err(&mut c, "rdy_clone", clone_args(&hub_url(&k), &dir));
+        assert_eq!(e["code"], "E_STORE_FORMAT", "{e}");
+        assert_eq!(k.hub.routes(), ["discovery", "state"]);
+        assert_eq!(entries(parent.path()), 0);
+    }
 }

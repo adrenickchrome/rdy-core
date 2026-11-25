@@ -787,189 +787,6 @@ fn sdl7_recipe_arithmetic_is_fixed() {
     assert_eq!(fx::logical_entries(&fx::PERF_UPGRADE), 100_000_000);
 }
 
-// ---- the long history ----
-
-use rdy_store::closure::{self, END_OF_LOG, StoreSource};
-use rdy_store::object_refs::ObjectKey;
-use rdy_store::sync_stream::StreamHeader;
-
-/// The fixed repo id of the long-history project and its holders.
-fn long_repo() -> rdy_model::RepoId {
-    rdy_model::RepoId([7; 16])
-}
-
-/// The closure of TAG `tag` in `store`, less `known`, as one batch file's bytes, with its
-/// closure and the header it carries.
-fn export_batch(
-    store: &Store,
-    tag: Hash,
-    known: &BTreeSet<ObjectKey>,
-) -> (Vec<u8>, closure::Closure, StreamHeader) {
-    let reader = store.reader();
-    let c = closure::closure(&reader, tag, known).unwrap();
-    let header = StreamHeader::tag_history(
-        rdy_store::format::baseline_features(),
-        long_repo(),
-        tag,
-        c.prerequisites.clone(),
-    );
-    let mut source = StoreSource {
-        reader: &reader,
-        end: END_OF_LOG,
-    };
-    let bytes = closure::write_batch(&mut source, &header, &c.records, Vec::new())
-        .unwrap()
-        .0;
-    (bytes, c, header)
-}
-
-/// What a holder keeps of the long history, read back: every landing's full identity and map
-/// against the recipe's independent maps, with the holder's own check passing first.
-fn verify_long_holder(h: &Rdy, hist: &fx::History, upto: usize) {
-    h.store().check_holder().unwrap();
-    let r = h.store().reader();
-    // an independent running map: the recipe's rule, never the product's fold
-    let mut running = hist.recipe.expected_map(0);
-    for n in 0..=upto {
-        if n > 0 {
-            for i in hist.recipe.set_numbers(n) {
-                running.insert(fx::block_id(i), hist.recipe.version(i, n));
-            }
-        }
-        let l = hist.landings[n];
-        let rec = r.landing(&l).unwrap();
-        assert_eq!(rec.state, hist.states[n], "landing {n}: its full identity");
-        assert_eq!(
-            rec.state,
-            rdy_model::snapshot_map_id(&running),
-            "landing {n}"
-        );
-        let got = r.snapshot_at(&l).unwrap();
-        assert_eq!(got.id(), rec.state, "landing {n}: the read map's identity");
-        assert!(got.blocks == running, "landing {n}: the read map");
-        let (d, _) = r.snapshot_delta_of(&l).unwrap().unwrap();
-        assert_eq!(d, hist.deltas[n], "landing {n}: its delta");
-    }
-}
-
-/// D-7K4Z0 and the capacity bound: a history of 1,025 landings with 1,024 entries in every full
-/// map is 1,049,600 logical snapshot entries, over the million that a full-SNAPSHOT history would
-/// carry as links. As deltas it stays near twenty thousand objects, and a full upload with
-/// nothing known to the receiver is accepted; the holder check passes and every landing keeps its
-/// full identity. The incremental export keeps the export-walk fix: it emits only the new
-/// landing's records and carries the held base delta as a typed prerequisite. The history goes
-/// in as one assembled source batch and one take batch per holder; no durable full snapshot
-/// exists in it.
-#[test]
-fn sdl7_upload_past_one_million_snapshot_entries_is_accepted() {
-    let hist = fx::LONG.build();
-    assert_eq!(fx::logical_entries(&fx::LONG), 1_049_600);
-    assert!(hist.objects < 20_000, "{} objects", hist.objects);
-    assert_eq!(hist.deltas.len(), 1025);
-    assert!(
-        hist.items
-            .iter()
-            .all(|(k, _)| (*k & 0x7f) != kinds::SNAPSHOT),
-        "no durable full snapshot"
-    );
-    let last = fx::LONG.landings - 1;
-    let t = tempfile::tempdir().unwrap();
-    // one assembled source batch
-    let mut src = Store::create(&t.path().join("src")).unwrap();
-    let before = src.log_end();
-    assert_eq!(hist.write_into(&mut src).unwrap(), hist.objects);
-    assert!(src.log_end() > before);
-    let v1 = src.put_tag(&hist.tag("v1.0.0", last - 1)).unwrap();
-    let v2 = src.put_tag(&hist.tag("v2.0.0", last)).unwrap();
-
-    // a full upload, nothing known to the receiver: one take batch
-    let (bytes, c, header) = export_batch(&src, v2, &BTreeSet::new());
-    assert!(
-        header.prerequisites.is_empty(),
-        "a full upload needs nothing"
-    );
-    assert!(c.records.len() < 20_000, "{} records", c.records.len());
-    assert!(
-        c.records
-            .iter()
-            .filter(|k| k.kind == kinds::SNAPSHOT_DELTA)
-            .count()
-            == 1025
-    );
-    let file = t.path().join("full.rdysync");
-    std::fs::write(&file, &bytes).unwrap();
-    let mut full = Rdy::create_holder(&t.path().join("full-holder"), long_repo()).unwrap();
-    let outcome = take(
-        &mut full,
-        &[File::open(&file).unwrap()],
-        UploadTarget {
-            tag: "v2.0.0".into(),
-            landing: hist.landings[last],
-        },
-    )
-    .unwrap();
-    let _ = outcome;
-    verify_long_holder(&full, &hist, last);
-    assert_eq!(
-        full.store().reader().project_landings().unwrap().len(),
-        1025
-    );
-    // the final map is the recipe's
-    let tip = full
-        .store()
-        .reader()
-        .snapshot_at(&hist.landings[last])
-        .unwrap();
-    assert!(tip.blocks == hist.final_map);
-
-    // the incremental upload over v1.0.0's history: the export-walk fix still charges only what
-    // it emits, and the held base delta travels as a typed prerequisite
-    let (b1, c1, _) = export_batch(&src, v1, &BTreeSet::new());
-    let known: BTreeSet<ObjectKey> = c1.records.iter().copied().collect();
-    let (b2, c2, h2) = export_batch(&src, v2, &known);
-    assert!(
-        c2.records.len() < 12,
-        "{} records emitted",
-        c2.records.len()
-    );
-    assert!(c2.records.iter().all(|k| !known.contains(k)));
-    let base_delta = ObjectKey {
-        kind: kinds::SNAPSHOT_DELTA,
-        hash: hist.deltas[last - 1],
-    };
-    assert!(
-        h2.prerequisites.contains(&base_delta),
-        "the held base delta is a typed prerequisite: {:?}",
-        h2.prerequisites
-    );
-    let kept =
-        closure::closure_kept_links_for_tests(&src.reader(), v2, &known, END_OF_LOG).unwrap();
-    assert!(kept < 100, "{kept} links kept");
-    let (f1, f2) = (t.path().join("v1.rdysync"), t.path().join("v2-inc.rdysync"));
-    std::fs::write(&f1, &b1).unwrap();
-    std::fs::write(&f2, &b2).unwrap();
-    let mut inc = Rdy::create_holder(&t.path().join("inc-holder"), long_repo()).unwrap();
-    take(
-        &mut inc,
-        &[File::open(&f1).unwrap()],
-        UploadTarget {
-            tag: "v1.0.0".into(),
-            landing: hist.landings[last - 1],
-        },
-    )
-    .unwrap();
-    take(
-        &mut inc,
-        &[File::open(&f2).unwrap()],
-        UploadTarget {
-            tag: "v2.0.0".into(),
-            landing: hist.landings[last],
-        },
-    )
-    .unwrap();
-    verify_long_holder(&inc, &hist, last);
-}
-
 // ---- the frozen SD1 fixtures ----
 
 /// Each project landing with its delta id and its map: what a reader of the store sees.
@@ -1312,4 +1129,191 @@ fn sdl4_foreign_proof_landings_leave_local_removals_working() {
         "the report selects the local document: {:?}",
         report.versions
     );
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+    // ---- the long history ----
+    use rdy_store::closure::{self, END_OF_LOG, StoreSource};
+    use rdy_store::object_refs::ObjectKey;
+    use rdy_store::sync_stream::StreamHeader;
+
+    /// The fixed repo id of the long-history project and its holders.
+    fn long_repo() -> rdy_model::RepoId {
+        rdy_model::RepoId([7; 16])
+    }
+
+    /// The closure of TAG `tag` in `store`, less `known`, as one batch file's bytes, with its
+    /// closure and the header it carries.
+    fn export_batch(
+        store: &Store,
+        tag: Hash,
+        known: &BTreeSet<ObjectKey>,
+    ) -> (Vec<u8>, closure::Closure, StreamHeader) {
+        let reader = store.reader();
+        let c = closure::closure(&reader, tag, known).unwrap();
+        let header = StreamHeader::tag_history(
+            rdy_store::format::baseline_features(),
+            long_repo(),
+            tag,
+            c.prerequisites.clone(),
+        );
+        let mut source = StoreSource {
+            reader: &reader,
+            end: END_OF_LOG,
+        };
+        let bytes = closure::write_batch(&mut source, &header, &c.records, Vec::new())
+            .unwrap()
+            .0;
+        (bytes, c, header)
+    }
+
+    /// What a holder keeps of the long history, read back: every landing's full identity and map
+    /// against the recipe's independent maps, with the holder's own check passing first.
+    fn verify_long_holder(h: &Rdy, hist: &fx::History, upto: usize) {
+        h.store().check_holder().unwrap();
+        let r = h.store().reader();
+        // an independent running map: the recipe's rule, never the product's fold
+        let mut running = hist.recipe.expected_map(0);
+        for n in 0..=upto {
+            if n > 0 {
+                for i in hist.recipe.set_numbers(n) {
+                    running.insert(fx::block_id(i), hist.recipe.version(i, n));
+                }
+            }
+            let l = hist.landings[n];
+            let rec = r.landing(&l).unwrap();
+            assert_eq!(rec.state, hist.states[n], "landing {n}: its full identity");
+            assert_eq!(
+                rec.state,
+                rdy_model::snapshot_map_id(&running),
+                "landing {n}"
+            );
+            let got = r.snapshot_at(&l).unwrap();
+            assert_eq!(got.id(), rec.state, "landing {n}: the read map's identity");
+            assert!(got.blocks == running, "landing {n}: the read map");
+            let (d, _) = r.snapshot_delta_of(&l).unwrap().unwrap();
+            assert_eq!(d, hist.deltas[n], "landing {n}: its delta");
+        }
+    }
+
+    /// D-7K4Z0 and the capacity bound: a history of 1,025 landings with 1,024 entries in every full
+    /// map is 1,049,600 logical snapshot entries, over the million that a full-SNAPSHOT history would
+    /// carry as links. As deltas it stays near twenty thousand objects, and a full upload with
+    /// nothing known to the receiver is accepted; the holder check passes and every landing keeps its
+    /// full identity. The incremental export keeps the export-walk fix: it emits only the new
+    /// landing's records and carries the held base delta as a typed prerequisite. The history goes
+    /// in as one assembled source batch and one take batch per holder; no durable full snapshot
+    /// exists in it.
+    #[test]
+    fn sdl7_upload_past_one_million_snapshot_entries_is_accepted() {
+        let hist = fx::LONG.build();
+        assert_eq!(fx::logical_entries(&fx::LONG), 1_049_600);
+        assert!(hist.objects < 20_000, "{} objects", hist.objects);
+        assert_eq!(hist.deltas.len(), 1025);
+        assert!(
+            hist.items
+                .iter()
+                .all(|(k, _)| (*k & 0x7f) != kinds::SNAPSHOT),
+            "no durable full snapshot"
+        );
+        let last = fx::LONG.landings - 1;
+        let t = tempfile::tempdir().unwrap();
+        // one assembled source batch
+        let mut src = Store::create(&t.path().join("src")).unwrap();
+        let before = src.log_end();
+        assert_eq!(hist.write_into(&mut src).unwrap(), hist.objects);
+        assert!(src.log_end() > before);
+        let v1 = src.put_tag(&hist.tag("v1.0.0", last - 1)).unwrap();
+        let v2 = src.put_tag(&hist.tag("v2.0.0", last)).unwrap();
+
+        // a full upload, nothing known to the receiver: one take batch
+        let (bytes, c, header) = export_batch(&src, v2, &BTreeSet::new());
+        assert!(
+            header.prerequisites.is_empty(),
+            "a full upload needs nothing"
+        );
+        assert!(c.records.len() < 20_000, "{} records", c.records.len());
+        assert!(
+            c.records
+                .iter()
+                .filter(|k| k.kind == kinds::SNAPSHOT_DELTA)
+                .count()
+                == 1025
+        );
+        let file = t.path().join("full.rdysync");
+        std::fs::write(&file, &bytes).unwrap();
+        let mut full = Rdy::create_holder(&t.path().join("full-holder"), long_repo()).unwrap();
+        let outcome = take(
+            &mut full,
+            &[File::open(&file).unwrap()],
+            UploadTarget {
+                tag: "v2.0.0".into(),
+                landing: hist.landings[last],
+            },
+        )
+        .unwrap();
+        let _ = outcome;
+        verify_long_holder(&full, &hist, last);
+        assert_eq!(
+            full.store().reader().project_landings().unwrap().len(),
+            1025
+        );
+        // the final map is the recipe's
+        let tip = full
+            .store()
+            .reader()
+            .snapshot_at(&hist.landings[last])
+            .unwrap();
+        assert!(tip.blocks == hist.final_map);
+
+        // the incremental upload over v1.0.0's history: the export-walk fix still charges only what
+        // it emits, and the held base delta travels as a typed prerequisite
+        let (b1, c1, _) = export_batch(&src, v1, &BTreeSet::new());
+        let known: BTreeSet<ObjectKey> = c1.records.iter().copied().collect();
+        let (b2, c2, h2) = export_batch(&src, v2, &known);
+        assert!(
+            c2.records.len() < 12,
+            "{} records emitted",
+            c2.records.len()
+        );
+        assert!(c2.records.iter().all(|k| !known.contains(k)));
+        let base_delta = ObjectKey {
+            kind: kinds::SNAPSHOT_DELTA,
+            hash: hist.deltas[last - 1],
+        };
+        assert!(
+            h2.prerequisites.contains(&base_delta),
+            "the held base delta is a typed prerequisite: {:?}",
+            h2.prerequisites
+        );
+        let kept =
+            closure::closure_kept_links_for_tests(&src.reader(), v2, &known, END_OF_LOG).unwrap();
+        assert!(kept < 100, "{kept} links kept");
+        let (f1, f2) = (t.path().join("v1.rdysync"), t.path().join("v2-inc.rdysync"));
+        std::fs::write(&f1, &b1).unwrap();
+        std::fs::write(&f2, &b2).unwrap();
+        let mut inc = Rdy::create_holder(&t.path().join("inc-holder"), long_repo()).unwrap();
+        take(
+            &mut inc,
+            &[File::open(&f1).unwrap()],
+            UploadTarget {
+                tag: "v1.0.0".into(),
+                landing: hist.landings[last - 1],
+            },
+        )
+        .unwrap();
+        take(
+            &mut inc,
+            &[File::open(&f2).unwrap()],
+            UploadTarget {
+                tag: "v2.0.0".into(),
+                landing: hist.landings[last],
+            },
+        )
+        .unwrap();
+        verify_long_holder(&inc, &hist, last);
+    }
 }

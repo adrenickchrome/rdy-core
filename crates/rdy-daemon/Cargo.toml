@@ -51,3 +51,8 @@ harness = false
 
 [lints]
 workspace = true
+
+[features]
+# Tests of the nightly tier only (`cargo qa --tier nightly`): `mod nightly` in a test file. The
+# release tier builds without them.
+nightly-tests = []

@@ -18,7 +18,7 @@ use rdy_mcp::tools::{self, McpState};
 use rdy_model::Role;
 use rdy_qa::edit_loop::{Spec, spec_doc};
 use rdy_qa::fixtures::{land, write};
-use rdy_qa::instructions::{Set, World, author};
+use rdy_qa::instructions::World;
 use rdy_qa::mcp::{DEADLINE, McpClient, Reply, fixture_value, supply_kungfu};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1150,66 +1150,6 @@ async fn kfu4_receipt_follows_complete_rows() {
         .await;
     assert!(err, "{v}");
     assert_eq!(received(&bare, &key("agent:q", "q1")), 0);
-}
-
-/// Five required rulesets of 4 MiB each: every set passes its own bound, and the reply does not.
-fn big_sets() -> Vec<Set<'static>> {
-    let text: &'static str = Box::leak("x".repeat(4 * 1024 * 1024).into_boxed_str());
-    let rules: &'static [(&'static [&'static str], &'static str)] =
-        Box::leak(vec![(&["all"][..], text)].into_boxed_slice());
-    ["big0", "big1", "big2", "big3", "big4"]
-        .iter()
-        .map(|name| Set {
-            name,
-            title: name,
-            required: true,
-            lead: None,
-            rules,
-        })
-        .collect()
-}
-
-/// A reply past its bound: the check runs once the rows are assembled, so it marks nothing.
-#[test]
-fn kfu4_a_failed_bounded_reply_marks_nothing() {
-    // the project server
-    let w = World::new();
-    let pd = w.project();
-    author(pd.path(), "Large rules stay in one place", &big_sets());
-    let mut c = in_session(&w, pd.path(), "agent:b", "b1");
-    let r = c.call("rdy_instructions", json!({}));
-    assert_eq!(r.code(), Some("E_LIMIT"), "{r:?}");
-    let v = body(c.call("rdy_read", json!({"id": "x"})));
-    assert_eq!(v["reminder"], REMINDER, "the reminder stays owed: {v}");
-    let v = body(c.call("rdy_tags", json!({})));
-    assert_eq!(advisories(&v), [warning(NOT_LOADED, "rdy:read")], "{v}");
-
-    // the projectless server, with the same rules in the person's meta project
-    let home = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    let meta = home.path().join(".rdy").join("meta");
-    std::fs::create_dir_all(&meta).unwrap();
-    drop(Rdy::init(&meta, "rdy-standard").unwrap());
-    author(&meta, "Large rules stay in one place", &big_sets());
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(async {
-        let hub = NotifyHub::new();
-        let mut p = Wire::projectless(outside.path(), home.path(), &hub).await;
-        let (err, v) = p
-            .call("rdy_instructions", json!({}), claim("agent:p", "p1"))
-            .await;
-        assert!(err, "{v}");
-        assert_eq!(v["code"], "E_LIMIT", "{v}");
-        assert!(
-            hub.claims()
-                .get(&key("agent:p", "p1"))
-                .is_none_or(|s| s.kungfu_received == 0 && !s.instructions_read),
-            "nothing marked"
-        );
-    });
 }
 
 #[tokio::test]
@@ -2375,4 +2315,72 @@ fn kfu4_qa_values_are_explicitly_bypassable() {
     let mut c = in_session(&w, pd.path(), "agent:e", "e1");
     let v = body(c.call("rdy_tags", json!({})));
     assert_eq!(advisories(&v), [warning(NOT_LOADED, "rdy:read")], "{v}");
+}
+
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
+    use rdy_qa::instructions::Set;
+    use rdy_qa::instructions::author;
+
+    /// A reply past its bound: the check runs once the rows are assembled, so it marks nothing.
+    #[test]
+    fn kfu4_a_failed_bounded_reply_marks_nothing() {
+        // the project server
+        let w = World::new();
+        let pd = w.project();
+        author(pd.path(), "Large rules stay in one place", &big_sets());
+        let mut c = in_session(&w, pd.path(), "agent:b", "b1");
+        let r = c.call("rdy_instructions", json!({}));
+        assert_eq!(r.code(), Some("E_LIMIT"), "{r:?}");
+        let v = body(c.call("rdy_read", json!({"id": "x"})));
+        assert_eq!(v["reminder"], REMINDER, "the reminder stays owed: {v}");
+        let v = body(c.call("rdy_tags", json!({})));
+        assert_eq!(advisories(&v), [warning(NOT_LOADED, "rdy:read")], "{v}");
+
+        // the projectless server, with the same rules in the person's meta project
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let meta = home.path().join(".rdy").join("meta");
+        std::fs::create_dir_all(&meta).unwrap();
+        drop(Rdy::init(&meta, "rdy-standard").unwrap());
+        author(&meta, "Large rules stay in one place", &big_sets());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let hub = NotifyHub::new();
+            let mut p = Wire::projectless(outside.path(), home.path(), &hub).await;
+            let (err, v) = p
+                .call("rdy_instructions", json!({}), claim("agent:p", "p1"))
+                .await;
+            assert!(err, "{v}");
+            assert_eq!(v["code"], "E_LIMIT", "{v}");
+            assert!(
+                hub.claims()
+                    .get(&key("agent:p", "p1"))
+                    .is_none_or(|s| s.kungfu_received == 0 && !s.instructions_read),
+                "nothing marked"
+            );
+        });
+    }
+
+    /// Five required rulesets of 4 MiB each: every set passes its own bound, and the reply does not.
+    fn big_sets() -> Vec<Set<'static>> {
+        let text: &'static str = Box::leak("x".repeat(4 * 1024 * 1024).into_boxed_str());
+        let rules: &'static [(&'static [&'static str], &'static str)] =
+            Box::leak(vec![(&["all"][..], text)].into_boxed_slice());
+        ["big0", "big1", "big2", "big3", "big4"]
+            .iter()
+            .map(|name| Set {
+                name,
+                title: name,
+                required: true,
+                lead: None,
+                rules,
+            })
+            .collect()
+    }
 }

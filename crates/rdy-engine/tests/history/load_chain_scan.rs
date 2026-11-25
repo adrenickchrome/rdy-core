@@ -383,84 +383,90 @@ fn hc5_scan_creates_no_target_or_spool() {
     assert_eq!(with_secret, vec!["full.rdydump".to_string()]);
 }
 
-#[test]
-fn hc5_valid_source_with_too_many_carried_spans_refuses_before_target() {
-    const COPIES: usize = 100_001;
-    let _clock = pin_clock(1_000_000);
-    let d = tempfile::tempdir().unwrap();
-    let root = d.path().join("p");
-    let mut r = Rdy::init(&root, "rdy-standard").unwrap();
-    let target = add(&mut r, 0, SECRET);
-    land(&mut r);
-    drop(r);
-    // more physical copies of the selected version, appended while the store is closed: each is
-    // one span of the removal
-    let store = root.join(".rdy/store");
-    let s = rdy_store::Store::open(&store).unwrap();
-    let frames = rdy_store_frames(&s);
-    drop(s);
-    let raw = frames
-        .iter()
-        .find(|(kind, _, body)| {
-            *kind == rdy_store::kinds::BLOCK
-                && body.windows(SECRET.len()).any(|w| w == SECRET.as_bytes())
-        })
-        .map(|(_, _, body)| body.clone())
-        .expect("the secret's block frame");
-    let (mut log, q) = rdy_store::segment::SegmentLog::open_marked(
-        &store.join("segments"),
-        64 * 1024 * 1024,
-        None,
-    )
-    .unwrap();
-    assert!(q.is_empty());
-    log.append_batch(&vec![(rdy_store::kinds::BLOCK, raw); COPIES])
-        .unwrap();
-    log.sync().unwrap();
-    drop(log);
-    let mut r = Rdy::open(&root).unwrap();
-    let full = d.path().join("full.rdydump");
-    let f = r.read().dump(&full).unwrap();
-    remove(&mut r, &target);
-    let inc = d.path().join("inc.rdydump");
-    r.read().dump_after(&f.chain_end(), &inc).unwrap();
-    drop(r);
-    let files = vec![full, inc];
-    let before = tree(d.path());
-    // stopped before the removal: one carried record would name every copy
-    let e = err(inspect_facts(
-        &files,
-        Some(&format!("pos:{}.{}", f.end.segment, f.end.offset)),
-    ));
-    assert_eq!(e.code, E_REDACTION_LIMIT, "{e:?}");
-    assert_eq!(e.message, "The redaction exceeds 100000 carried spans.");
-    assert_eq!(
-        e.fix,
-        "Stop at another place, or load the whole chain with no stop."
-    );
-    assert_eq!(tree(d.path()), before);
-    // the whole chain still loads: its apply covers every copy
-    let whole = inspect_facts(&files, None).unwrap();
-    assert_eq!(whole.carried, 0);
-}
+/// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.
+#[cfg(feature = "nightly-tests")]
+mod nightly {
+    use super::*;
 
-/// Every data frame of the store `s`: kind, location and payload.
-fn rdy_store_frames(s: &rdy_store::Store) -> Vec<(u8, rdy_store::segment::Location, Vec<u8>)> {
-    let mut out = vec![];
-    s.reader()
-        .for_each_record_from(
-            rdy_store::segment::Location {
-                segment: 0,
-                offset: 0,
-            },
-            s.log_end(),
-            |loc, f, _| {
-                if let rdy_store::redaction::StoredFrame::Present { kind, payload, .. } = f {
-                    out.push((kind, loc, payload.to_vec()));
-                }
-                Ok(())
-            },
+    /// Every data frame of the store `s`: kind, location and payload.
+    fn rdy_store_frames(s: &rdy_store::Store) -> Vec<(u8, rdy_store::segment::Location, Vec<u8>)> {
+        let mut out = vec![];
+        s.reader()
+            .for_each_record_from(
+                rdy_store::segment::Location {
+                    segment: 0,
+                    offset: 0,
+                },
+                s.log_end(),
+                |loc, f, _| {
+                    if let rdy_store::redaction::StoredFrame::Present { kind, payload, .. } = f {
+                        out.push((kind, loc, payload.to_vec()));
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn hc5_valid_source_with_too_many_carried_spans_refuses_before_target() {
+        const COPIES: usize = 100_001;
+        let _clock = pin_clock(1_000_000);
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("p");
+        let mut r = Rdy::init(&root, "rdy-standard").unwrap();
+        let target = add(&mut r, 0, SECRET);
+        land(&mut r);
+        drop(r);
+        // more physical copies of the selected version, appended while the store is closed: each is
+        // one span of the removal
+        let store = root.join(".rdy/store");
+        let s = rdy_store::Store::open(&store).unwrap();
+        let frames = rdy_store_frames(&s);
+        drop(s);
+        let raw = frames
+            .iter()
+            .find(|(kind, _, body)| {
+                *kind == rdy_store::kinds::BLOCK
+                    && body.windows(SECRET.len()).any(|w| w == SECRET.as_bytes())
+            })
+            .map(|(_, _, body)| body.clone())
+            .expect("the secret's block frame");
+        let (mut log, q) = rdy_store::segment::SegmentLog::open_marked(
+            &store.join("segments"),
+            64 * 1024 * 1024,
+            None,
         )
         .unwrap();
-    out
+        assert!(q.is_empty());
+        log.append_batch(&vec![(rdy_store::kinds::BLOCK, raw); COPIES])
+            .unwrap();
+        log.sync().unwrap();
+        drop(log);
+        let mut r = Rdy::open(&root).unwrap();
+        let full = d.path().join("full.rdydump");
+        let f = r.read().dump(&full).unwrap();
+        remove(&mut r, &target);
+        let inc = d.path().join("inc.rdydump");
+        r.read().dump_after(&f.chain_end(), &inc).unwrap();
+        drop(r);
+        let files = vec![full, inc];
+        let before = tree(d.path());
+        // stopped before the removal: one carried record would name every copy
+        let e = err(inspect_facts(
+            &files,
+            Some(&format!("pos:{}.{}", f.end.segment, f.end.offset)),
+        ));
+        assert_eq!(e.code, E_REDACTION_LIMIT, "{e:?}");
+        assert_eq!(e.message, "The redaction exceeds 100000 carried spans.");
+        assert_eq!(
+            e.fix,
+            "Stop at another place, or load the whole chain with no stop."
+        );
+        assert_eq!(tree(d.path()), before);
+        // the whole chain still loads: its apply covers every copy
+        let whole = inspect_facts(&files, None).unwrap();
+        assert_eq!(whole.carried, 0);
+    }
 }

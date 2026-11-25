@@ -3,7 +3,7 @@
 //! runner records them), and the SERIAL_AREAS never run beside another binary.
 use rdy_qa::gate_steps::{
     AreaEnv, BINARY_JOBS, ENV_PROBE_BINARY, ENV_PROBE_TEST, ENV_PROBE_VAR, SERIAL_AREAS, cargo,
-    env_probe_args, launch_area, own_profile_args, parse_artifacts, parse_env_probe, probe_envs,
+    env_probe_args, launch_area, own_profile_args, parse_artifacts, parse_env_probe, probe_envs_of,
     run_areas, run_bounded,
 };
 use std::collections::BTreeMap;
@@ -103,7 +103,9 @@ fn direct_env_matches_cargo() {
 
     // the probe started directly, with the environment the gate's probe runner records; the
     // runner sits beside this test's `qa-gate`, in the same profile
-    let envs = probe_envs(|mut c| {
+    // only the probe's own target: a probe of every target, while the gate's other binaries
+    // run, would make Cargo link `rdy` again under them
+    let envs = probe_envs_of(&["--test", ENV_PROBE_BINARY], |mut c| {
         c.current_dir(root());
         run_bounded(c)
     })
@@ -270,5 +272,5 @@ fn direct_launch_starts_with_the_pilot() {
         !gate.contains("\"--test\", binary"),
         "an area runs through cargo test"
     );
-    assert_eq!(BINARY_JOBS, 4);
+    assert_eq!(BINARY_JOBS, 6);
 }

@@ -104,42 +104,90 @@ pub fn run_steps(
 /// How long a child past its deadline has, after TERM, before KILL.
 pub const KILL_GRACE: Duration = Duration::from_secs(10);
 
-/// The run's one clock: the budget of the whole run, the builds included, from one start. A
-/// child's deadline is the time left on it ([`Clock::left`]). With no budget, a child has no
-/// deadline.
+/// The run's one clock, from one start, the builds included, with two numbers: the target
+/// (`--budget-secs`) and the ceiling (`--ceiling-secs`, by default twice the target). A run past
+/// its target finishes and the report gets a warning row ([`over_target_row`]); the ceiling is
+/// the hard stop: a child's deadline is the time left before it ([`Clock::left`]), and a run that
+/// reaches it exits [`BUDGET_EXIT`]. With no ceiling, a child has no deadline.
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
     start: Instant,
-    budget: Option<Duration>,
+    target: Option<Duration>,
+    ceiling: Option<Duration>,
 }
 
+/// How many times the target the ceiling is, when the run names no ceiling.
+pub const CEILING_FACTOR: u32 = 2;
+
 impl Clock {
-    /// A clock that starts now, with `budget` for the whole run.
-    pub fn new(budget: Option<Duration>) -> Self {
-        Self::started(Instant::now(), budget)
+    /// A clock that starts now, with `target` and `ceiling` for the whole run.
+    pub fn new(target: Option<Duration>, ceiling: Option<Duration>) -> Self {
+        Self::started(Instant::now(), target, ceiling)
     }
 
-    /// A clock that started at `start`, with `budget` for the whole run.
-    pub fn started(start: Instant, budget: Option<Duration>) -> Self {
-        Self { start, budget }
+    /// A clock that started at `start`, with `target` and `ceiling` for the whole run. With a
+    /// target and no ceiling, the ceiling is [`CEILING_FACTOR`] times the target.
+    pub fn started(start: Instant, target: Option<Duration>, ceiling: Option<Duration>) -> Self {
+        let ceiling = ceiling.or_else(|| target.map(|t| t * CEILING_FACTOR));
+        Self {
+            start,
+            target,
+            ceiling,
+        }
     }
 
-    /// The time left: the budget less the time since the start, never below zero. With no
-    /// budget, [`UNBOUNDED`].
+    /// The time left before the ceiling, never below zero. With no ceiling, [`UNBOUNDED`].
     pub fn left(&self) -> Duration {
-        self.budget
+        self.ceiling
             .map_or(UNBOUNDED, |b| b.saturating_sub(self.start.elapsed()))
     }
 
-    /// Whether the budget is spent.
+    /// Whether the ceiling is reached: the run stops.
     pub fn spent(&self) -> bool {
-        self.budget.is_some() && self.left().is_zero()
+        self.ceiling.is_some() && self.left().is_zero()
     }
 
-    /// The budget in whole seconds, when there is one.
+    /// The ceiling in whole seconds, when there is one.
     pub fn budget_secs(&self) -> Option<u64> {
-        self.budget.map(|b| b.as_secs())
+        self.ceiling.map(|b| b.as_secs())
     }
+
+    /// The target in whole seconds, when there is one.
+    pub fn target_secs(&self) -> Option<u64> {
+        self.target.map(|t| t.as_secs())
+    }
+
+    /// The seconds since the start and the target, when the run is past its target.
+    pub fn over_target(&self) -> Option<(f64, u64)> {
+        let elapsed = self.start.elapsed();
+        self.target
+            .filter(|t| elapsed > *t)
+            .map(|t| (elapsed.as_secs_f64(), t.as_secs()))
+    }
+}
+
+/// The name of the warning row of a run past its time target.
+pub const OVER_TARGET_ROW: &str = "OVER TARGET";
+
+/// The warning row of a run that took `secs` seconds against a target of `target` seconds, with
+/// its five slowest binaries (`slowest`, slowest first). The verdict stays as it is.
+pub fn over_target_row(secs: f64, target: u64, slowest: &[(String, f64)]) -> Gate {
+    let names: Vec<String> = slowest
+        .iter()
+        .take(5)
+        .map(|(k, s)| format!("{k} {s:.1} s"))
+        .collect();
+    Gate::warn(
+        OVER_TARGET_ROW,
+        format!(
+            "OVER TARGET: {secs:.0} s, target {target} s; slowest binaries: {}",
+            if names.is_empty() {
+                "none ran".to_string()
+            } else {
+                names.join(", ")
+            }
+        ),
+    )
 }
 
 /// The time `ps` gives as a process's elapsed time, `[[dd-]hh:]mm:ss`.
@@ -222,10 +270,35 @@ pub fn not_started(stage: &str) -> ChildOutput {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Allowances {
     pub platforms: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Each platform's two stage allowances, in seconds: the builds and the test pool.
+    pub stages: BTreeMap<String, StageAllowance>,
+    /// The tests of each binary that run in the nightly tier only (`mod nightly`), by binary key.
+    pub nightly_only: BTreeMap<String, usize>,
 }
 
-/// How many times its allowance a binary may take before its row fails.
+/// One platform's stage allowances, in seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StageAllowance {
+    /// The builds: the gate's own build and the one test build.
+    pub build: f64,
+    /// The test pool: every test binary of the tier.
+    pub tests: f64,
+}
+
+/// How many times its allowance a stage may take before its row fails.
+pub const STAGE_FACTOR: f64 = 1.25;
+
+/// The gate line of one platform's gate job, in seconds (`release/gate-budget.json`, `gate`).
+pub const GATE_LINE_SECS: f64 = 660.0;
+
+/// The share of the gate line that a platform's two stage allowances may hold together.
+pub const STAGE_SHARE: f64 = 0.8;
+
+/// How many times its allowance a binary may take before it gets a warning row that names it.
 pub const ALLOWANCE_FACTOR: f64 = 2.0;
+
+/// How many times its allowance a binary may take before its row fails: past it, it is a hang.
+pub const HANG_FACTOR: f64 = 4.0;
 
 impl Allowances {
     /// Reads the allowances file text.
@@ -253,12 +326,141 @@ impl Allowances {
             }
             platforms.insert(os.clone(), secs);
         }
-        Ok(Allowances { platforms })
+        let mut stages = BTreeMap::new();
+        if let Some(list) = v.get("stages") {
+            for (os, s) in list
+                .as_object()
+                .ok_or("gate-allowances.json: stages is not a map")?
+            {
+                let secs = |name: &str| {
+                    s[name].as_f64().filter(|s| *s > 0.0).ok_or_else(|| {
+                        format!("gate-allowances.json: stages {os} {name} is not a time")
+                    })
+                };
+                stages.insert(
+                    os.clone(),
+                    StageAllowance {
+                        build: secs("build")?,
+                        tests: secs("tests")?,
+                    },
+                );
+            }
+        }
+        let mut nightly_only = BTreeMap::new();
+        if let Some(list) = v.get("nightly_only") {
+            for (key, n) in list
+                .as_object()
+                .ok_or("gate-allowances.json: nightly_only is not a map")?
+            {
+                let n = n.as_u64().filter(|n| *n > 0).ok_or_else(|| {
+                    format!("gate-allowances.json: nightly_only {key} is not a count")
+                })?;
+                nightly_only.insert(key.clone(), n as usize);
+            }
+        }
+        Ok(Allowances {
+            platforms,
+            stages,
+            nightly_only,
+        })
     }
 
-    /// The failed rows of the binaries in `times` (key, seconds) that ran more than
-    /// [`ALLOWANCE_FACTOR`] times their allowance on `os`, or have none; and a note when `os` has
-    /// no list, so nothing was checked.
+    /// The platforms whose two stage allowances hold more than [`STAGE_SHARE`] of the gate line,
+    /// each with its sum; and the platforms of `platforms` with no stage allowances.
+    pub fn stage_problems(&self) -> Vec<String> {
+        let mut problems = vec![];
+        for os in self.platforms.keys() {
+            match self.stages.get(os) {
+                None => problems.push(format!("{os} has no stage allowances")),
+                Some(s) if s.build + s.tests > STAGE_SHARE * GATE_LINE_SECS => problems.push(format!(
+                    "{os}: build {:.0} s and tests {:.0} s make {:.0} s, more than {:.0} s ({:.0} % of the {GATE_LINE_SECS:.0} s gate line)",
+                    s.build,
+                    s.tests,
+                    s.build + s.tests,
+                    STAGE_SHARE * GATE_LINE_SECS,
+                    STAGE_SHARE * 100.0
+                )),
+                Some(_) => {}
+            }
+        }
+        problems
+    }
+
+    /// The warning rows of the stages of `os` that ran more than [`STAGE_FACTOR`] times their
+    /// allowance: `build` and `tests` are the seconds each took. Nothing when `os` has none.
+    pub fn check_stages(&self, os: &str, build: f64, tests: f64) -> Vec<Gate> {
+        let Some(a) = self.stages.get(os) else {
+            return vec![];
+        };
+        [("build", build, a.build), ("tests", tests, a.tests)]
+            .into_iter()
+            .filter(|(_, secs, allowed)| *secs > STAGE_FACTOR * allowed)
+            .map(|(stage, secs, allowed)| {
+                Gate::warn(
+                    &format!("OVER ALLOWANCE: stage {stage}"),
+                    format!(
+                        "the {stage} stage ran {secs:.1} s, more than {STAGE_FACTOR} times its allowance of {allowed:.0} s on {os}"
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// The report line of the tests that run in the nightly tier only, and so did not run in
+    /// this release-tier run; none when there are none.
+    pub fn nightly_note(&self) -> Option<String> {
+        let total: usize = self.nightly_only.values().sum();
+        (total > 0).then(|| {
+            let each: Vec<String> = self
+                .nightly_only
+                .iter()
+                .map(|(k, n)| format!("{k} {n}"))
+                .collect();
+            format!(
+                "{total} tests run in the nightly tier only and did not run here (gate-allowances.json): {}",
+                each.join(", ")
+            )
+        })
+    }
+
+    /// The failed rows of the binaries whose nightly-only test count in `found` (binary key to
+    /// the count its `--list` gives) is not the count of the allowances file.
+    pub fn check_nightly(&self, found: &BTreeMap<String, usize>) -> Vec<Gate> {
+        let keys: BTreeSet<&String> = found
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, _)| k)
+            .chain(self.nightly_only.keys())
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| {
+                let listed = found.get(k).copied().unwrap_or(0);
+                let filed = self.nightly_only.get(k).copied().unwrap_or(0);
+                (listed != filed).then(|| {
+                    Gate::ran(
+                        &format!("NIGHTLY COUNT: {k}"),
+                        false,
+                        format!(
+                            "{k} lists {listed} nightly-only tests; gate-allowances.json says {filed}"
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// The binary keys of the platform tier `name` (the `<name>` list of `platforms`), or why
+    /// there is none.
+    pub fn platform_tier(&self, name: &str) -> Result<BTreeSet<String>, String> {
+        self.platforms
+            .get(name)
+            .map(|l| l.keys().cloned().collect())
+            .ok_or_else(|| format!("gate-allowances.json has no `{name}` list: no {name} tier"))
+    }
+
+    /// The rows of the binaries in `times` (key, seconds): a warning for one that ran more than
+    /// [`ALLOWANCE_FACTOR`] times its allowance on `os`, a failure for one past [`HANG_FACTOR`]
+    /// times it (a hang) or with none; and a note when `os` has no list, so nothing was checked.
     pub fn check(&self, os: &str, times: &[(String, f64)]) -> (Vec<Gate>, Option<String>) {
         let Some(list) = self.platforms.get(os) else {
             return (
@@ -276,11 +478,17 @@ impl Allowances {
                     false,
                     format!("{key} ran {secs:.1} s and has no allowance on {os}"),
                 )),
-                Some(a) if *secs > ALLOWANCE_FACTOR * a => rows.push(Gate::ran(
+                Some(a) if *secs > HANG_FACTOR * a => rows.push(Gate::ran(
                     &format!("OVER ALLOWANCE: {key}"),
                     false,
                     format!(
-                        "{key} ran {secs:.1} s, more than {ALLOWANCE_FACTOR} times its allowance of {a:.0} s on {os}"
+                        "{key} ran {secs:.1} s, more than {HANG_FACTOR} times its allowance of {a:.0} s on {os}: a hang"
+                    ),
+                )),
+                Some(a) if *secs > ALLOWANCE_FACTOR * a => rows.push(Gate::warn(
+                    &format!("OVER ALLOWANCE: {key}"),
+                    format!(
+                        "{key} ran {secs:.1} s, more than {ALLOWANCE_FACTOR} times its allowance of {a:.0} s on {os}: make it faster or move tests to the nightly tier"
                     ),
                 )),
                 Some(_) => {}
@@ -526,7 +734,52 @@ pub struct TestExe {
 /// The gate's one build ([`report::WORKSPACE_TEST_ARGS`]): it builds every test of the
 /// workspace, rdy-qa's included, and prints one JSON record per artifact.
 pub fn discover_command() -> Command {
-    cargo(&report::WORKSPACE_TEST_ARGS)
+    let mut c = cargo(&report::WORKSPACE_TEST_ARGS);
+    c.args(tier_feature_args());
+    c
+}
+
+/// The Cargo feature of the nightly tier's tests. A test moves to the nightly tier by moving into
+/// a module `nightly` of its file, behind `#[cfg(feature = "nightly-tests")]`; every workspace
+/// crate has the empty feature. The release tier builds without it, so it neither compiles nor
+/// runs those tests.
+pub const NIGHTLY_FEATURE: &str = "nightly-tests";
+
+/// Whether this run is the nightly tier ([`set_nightly_tier`]).
+static NIGHTLY_TIER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes every Cargo call of the gate's build (the build, the fresh check, the env probe) enable
+/// [`NIGHTLY_FEATURE`] on every workspace crate.
+pub fn set_nightly_tier() {
+    NIGHTLY_TIER.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The Cargo arguments of the run's tier: `--features nightly-tests` in the nightly tier, none
+/// in the release tier.
+pub fn tier_feature_args() -> Vec<&'static str> {
+    feature_args_for(NIGHTLY_TIER.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// The Cargo arguments of the nightly tier (`nightly`) or the release tier.
+pub fn feature_args_for(nightly: bool) -> Vec<&'static str> {
+    if nightly {
+        vec!["--features", NIGHTLY_FEATURE]
+    } else {
+        vec![]
+    }
+}
+
+/// Whether a `--list` line names a test of the nightly tier: a test under a module `nightly`.
+pub fn is_nightly_test(list_line: &str) -> bool {
+    list_line
+        .trim()
+        .strip_suffix(": test")
+        .is_some_and(|name| name.split("::").any(|seg| seg == "nightly"))
+}
+
+/// The count of nightly-tier tests in one binary's `--list` output.
+pub fn nightly_count(list_stdout: &str) -> usize {
+    list_stdout.lines().filter(|l| is_nightly_test(l)).count()
 }
 
 /// The integration-test executables in Cargo's `--message-format=json` output, by target name.
@@ -822,10 +1075,12 @@ pub fn runner_record(exe: &str) -> String {
 /// The command that runs every test target of the gate's build once through the probe runner
 /// `probe`, which writes each binary's record into `dir`. It builds nothing new: the selection is
 /// the build's, in the profile this process was built in (the gate profile under `cargo qa`).
-pub fn probe_command(probe: &Path, dir: &Path, triple: &str) -> Command {
+pub fn probe_command(probe: &Path, dir: &Path, triple: &str, targets: &[&str]) -> Command {
     let mut args: Vec<String> = ["test", "--workspace"].map(String::from).to_vec();
     args.extend(own_profile_args());
-    args.extend(["--locked", "--no-fail-fast", "--lib", "--bins", "--tests"].map(String::from));
+    args.extend(["--locked", "--no-fail-fast"].map(String::from));
+    args.extend(targets.iter().map(|t| t.to_string()));
+    args.extend(tier_feature_args().into_iter().map(String::from));
     let mut c = cargo(&args.iter().map(String::as_str).collect::<Vec<_>>());
     c.env(runner_var(triple), probe).env(RUNNER_PROBE_VAR, dir);
     c
@@ -861,6 +1116,20 @@ pub fn read_runner_records(dir: &Path, triple: &str) -> Result<BTreeMap<PathBuf,
 pub fn probe_envs(
     run: impl FnOnce(Command) -> ChildOutput,
 ) -> Result<BTreeMap<PathBuf, AreaEnv>, String> {
+    probe_envs_of(&PROBE_TARGETS, run)
+}
+
+/// The target filters of the gate's probe: every test binary.
+pub const PROBE_TARGETS: [&str; 3] = ["--lib", "--bins", "--tests"];
+
+/// [`probe_envs`] for the test targets that `targets` selects (Cargo's filters, such as
+/// `--test model`). A test that probes while other test binaries run probes only its own
+/// target: a probe of every target makes Cargo link each binary of the workspace again, `rdy`
+/// too, and a test that starts `rdy` at that moment finds no file.
+pub fn probe_envs_of(
+    targets: &[&str],
+    run: impl FnOnce(Command) -> ChildOutput,
+) -> Result<BTreeMap<PathBuf, AreaEnv>, String> {
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
     let vv = Command::new(rustc)
         .arg("-vV")
@@ -882,7 +1151,7 @@ pub fn probe_envs(
         return Err(format!("the probe runner {} is missing", probe.display()));
     }
     let dir = tempfile::tempdir().map_err(|e| format!("env probe: {e}"))?;
-    let out = run(probe_command(&probe, dir.path(), &triple));
+    let out = run(probe_command(&probe, dir.path(), &triple, targets));
     if !out.ok {
         return Err(format!(
             "the env probe exited with {}: {}",
@@ -894,7 +1163,7 @@ pub fn probe_envs(
 }
 
 /// How many test binaries run at once. Each binary already runs its tests on every thread.
-pub const BINARY_JOBS: usize = 4;
+pub const BINARY_JOBS: usize = 6;
 
 /// Runs `run` on every item. The items for which `alone` is false share up to `jobs` workers;
 /// after them, each item for which `alone` is true runs by itself, so it never overlaps another.
@@ -1038,6 +1307,7 @@ pub fn parse_env_probe(text: &str) -> Result<AreaEnv, String> {
 pub fn env_probe_args() -> Vec<String> {
     let mut args: Vec<String> = ["test", "--workspace"].map(String::from).to_vec();
     args.extend(own_profile_args());
+    args.extend(tier_feature_args().into_iter().map(String::from));
     args.extend(["--test", ENV_PROBE_BINARY, "--", ENV_PROBE_TEST, "--exact"].map(String::from));
     args
 }
@@ -1076,7 +1346,11 @@ pub fn build_steps(
             "fetch locked dependencies",
             cargo(&["fetch", "--locked"]),
         ),
-        (&build, "build", cargo(&report::WORKSPACE_TEST_ARGS)),
+        (&build, "build", {
+            let mut c = cargo(&report::WORKSPACE_TEST_ARGS);
+            c.args(tier_feature_args());
+            c
+        }),
     ] {
         if let Some(root) = stages.blocked(step) {
             gates.push(stages.skip(step, root));
@@ -1252,6 +1526,153 @@ mod tests {
     }
 
     #[test]
+    fn tgs5_a_run_past_its_target_finishes_and_only_the_ceiling_stops_it() {
+        // the ceiling is twice the target unless the run names one
+        let start = Instant::now() - Duration::from_secs(30);
+        let c = Clock::started(start, Some(Duration::from_secs(20)), None);
+        assert_eq!(c.budget_secs(), Some(40));
+        assert_eq!(c.target_secs(), Some(20));
+        // past the target: the run goes on, with time left before the ceiling
+        assert!(!c.spent());
+        assert!(c.left() > Duration::from_secs(9) && c.left() <= Duration::from_secs(10));
+        let (secs, target) = c.over_target().expect("past the target");
+        assert!(secs >= 30.0 && target == 20);
+        let slowest = vec![
+            ("rdy-qa/test/cli".to_string(), 12.34),
+            ("rdy-qa/test/gate".to_string(), 9.0),
+        ];
+        let row = over_target_row(31.2, 20, &slowest);
+        assert_eq!(row.name, OVER_TARGET_ROW);
+        assert!(row.pass, "the verdict stays as it is");
+        assert_eq!(row.state, report::RowState::Warning);
+        assert_eq!(
+            row.detail,
+            "OVER TARGET: 31 s, target 20 s; slowest binaries: rdy-qa/test/cli 12.3 s, rdy-qa/test/gate 9.0 s"
+        );
+        assert!(report::overall(&[row], &[], true));
+        // an explicit ceiling wins; past it the run is spent and exits 30
+        let c = Clock::started(
+            start,
+            Some(Duration::from_secs(20)),
+            Some(Duration::from_secs(25)),
+        );
+        assert!(c.spent());
+        assert_eq!(gate_exit(true, c.spent()), BUDGET_EXIT);
+        // inside the target there is no warning
+        assert_eq!(
+            Clock::new(Some(Duration::from_secs(60)), None).over_target(),
+            None
+        );
+    }
+
+    #[test]
+    fn tier1_allowances_hold_stages_and_nightly_counts() {
+        let text = r#"{"schema": 1,
+            "stages": {"macos": {"build": 250, "tests": 270}, "linux": {"build": 300, "tests": 260}},
+            "nightly_only": {"rdy-qa/test/cli": 2},
+            "platforms": {"macos": {"rdy-qa/test/cli": 60}, "linux": {"rdy-qa/test/cli": 60},
+                          "windows": {"rdy-store/test/durability": 90, "rdy-qa/test/wc": 20}}}"#;
+        let a = Allowances::parse(text).unwrap();
+        assert_eq!(
+            a.stages["macos"],
+            StageAllowance {
+                build: 250.0,
+                tests: 270.0
+            }
+        );
+        // 80 % of the 660 s gate line is 528 s: linux's 560 s is over, and windows has none
+        let problems = a.stage_problems();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].starts_with("linux: build 300 s and tests 260 s make 560 s"));
+        assert_eq!(problems[1], "windows has no stage allowances");
+        // a stage fails past 1.25 times its allowance
+        assert!(a.check_stages("macos", 312.0, 337.0).is_empty());
+        let rows = a.check_stages("macos", 313.0, 338.0);
+        let names: Vec<&str> = rows.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["OVER ALLOWANCE: stage build", "OVER ALLOWANCE: stage tests"]
+        );
+        assert!(
+            rows.iter().all(|g| g.pass),
+            "a stage over its allowance is a warning"
+        );
+        assert!(a.check_stages("freebsd", 9e9, 9e9).is_empty());
+        // the release report names what the nightly tier holds
+        assert_eq!(
+            a.nightly_note().unwrap(),
+            "2 tests run in the nightly tier only and did not run here (gate-allowances.json): rdy-qa/test/cli 2"
+        );
+        // the nightly run checks the count each listing gives
+        let mut found = BTreeMap::from([("rdy-qa/test/cli".to_string(), 2)]);
+        assert!(a.check_nightly(&found).is_empty());
+        found.insert("rdy-qa/test/gate".into(), 1);
+        found.insert("rdy-qa/test/cli".into(), 1);
+        let names: Vec<String> = a
+            .check_nightly(&found)
+            .into_iter()
+            .map(|g| g.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "NIGHTLY COUNT: rdy-qa/test/cli",
+                "NIGHTLY COUNT: rdy-qa/test/gate"
+            ]
+        );
+        // a bad count or stage is an error, not a default
+        for bad in [
+            r#"{"schema": 1, "platforms": {}, "nightly_only": {"k": 0}}"#,
+            r#"{"schema": 1, "platforms": {}, "stages": {"macos": {"build": 1}}}"#,
+        ] {
+            assert!(Allowances::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn tier2_the_nightly_tier_builds_its_tests_and_the_release_tier_does_not() {
+        assert_eq!(feature_args_for(false), Vec::<&str>::new());
+        assert_eq!(feature_args_for(true), ["--features", NIGHTLY_FEATURE]);
+        assert_eq!(NIGHTLY_FEATURE, "nightly-tests");
+        // every workspace crate declares the feature, so `--features` reaches each one
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let manifest = entry.unwrap().path().join("Cargo.toml");
+            if manifest.is_file() {
+                let text = std::fs::read_to_string(&manifest).unwrap();
+                assert!(
+                    text.contains("\nnightly-tests = []\n"),
+                    "{} lacks the nightly-tests feature",
+                    manifest.display()
+                );
+            }
+        }
+        // a test under a module `nightly` is a nightly-tier test
+        let list = "a::nightly::cp11_slow: test\na::cp11_fast: test\nnightly::x: test\nnightly_ish::y: test\nnightly::bench: bench\n";
+        assert!(is_nightly_test("cli_plan::nightly::cp11_slow: test"));
+        assert!(!is_nightly_test("cli_plan::nightly_ish::y: test"));
+        assert_eq!(nightly_count(list), 2);
+    }
+
+    #[test]
+    fn tier3_a_platform_tier_is_the_list_of_its_name() {
+        let a = Allowances::parse(
+            r#"{"schema": 1, "platforms": {"windows": {"rdy-qa/test/wc": 20, "rdy-store/lib/rdy_store": 5}}}"#,
+        )
+        .unwrap();
+        let keys = a.platform_tier("windows").unwrap();
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            ["rdy-qa/test/wc", "rdy-store/lib/rdy_store"]
+        );
+        assert!(
+            a.platform_tier("plan9")
+                .unwrap_err()
+                .contains("no `plan9` list")
+        );
+    }
+
+    #[test]
     fn plz3_fetch_precedes_build() {
         let mut seen: Vec<(String, Vec<String>)> = vec![];
         let (gates, out) = build_steps(&mut Stages::new(false), |label, cmd, _| {
@@ -1379,10 +1800,10 @@ mod tests {
     fn tgs2_default_deadlines_are_twice_the_median_with_a_floor() {
         // No median sets a deadline any more: a child's deadline is the time left on the run's
         // one clock, and a run with no budget has no deadline.
-        assert_eq!(Clock::new(None).left(), UNBOUNDED);
-        assert!(!Clock::new(None).spent());
-        // a child that sleeps past the clock is stopped, and the run exits 30 with the row
-        let clock = Clock::new(Some(Duration::from_secs(1)));
+        assert_eq!(Clock::new(None, None).left(), UNBOUNDED);
+        assert!(!Clock::new(None, None).spent());
+        // a child that sleeps past the ceiling is stopped, and the run exits 30 with the row
+        let clock = Clock::new(None, Some(Duration::from_secs(1)));
         let t = Instant::now();
         let out = run_stage(
             "rdy-qa swarm",
@@ -1430,12 +1851,13 @@ mod tests {
     }
 
     #[test]
-    fn tgs3_a_binary_past_twice_its_allowance_fails_its_row() {
+    fn tgs3_a_binary_past_twice_its_allowance_warns_and_past_four_times_fails() {
         let file = r#"{"schema": 1, "platforms": {"macos": {
-            "rdy-qa/test/cli": 100, "rdy-store/test/durability": 50}}}"#;
+            "rdy-qa/test/cli": 100, "rdy-qa/test/hung": 100, "rdy-store/test/durability": 50}}}"#;
         let allowances = Allowances::parse(file).expect("parse");
         let times = vec![
             ("rdy-qa/test/cli".to_string(), 210.0),
+            ("rdy-qa/test/hung".to_string(), 401.0),
             ("rdy-store/test/durability".to_string(), 99.0),
             ("rdy-qa/test/new".to_string(), 1.0),
         ];
@@ -1446,11 +1868,25 @@ mod tests {
             names,
             [
                 "OVER ALLOWANCE: rdy-qa/test/cli",
+                "OVER ALLOWANCE: rdy-qa/test/hung",
                 "NO ALLOWANCE: rdy-qa/test/new"
             ]
         );
-        assert!(rows.iter().all(|r| !r.pass));
+        // past twice its allowance a binary is a warning that names it; past four times, a hang
+        // that fails
+        assert!(rows[0].pass && rows[0].state == report::RowState::Warning);
+        assert_eq!(report::gate_result(&rows[0]), "WARN");
         assert!(rows[0].detail.contains("210.0 s"), "{}", rows[0].detail);
+        assert!(
+            !rows[1].pass && rows[1].detail.ends_with(": a hang"),
+            "{}",
+            rows[1].detail
+        );
+        assert!(!rows[2].pass);
+        assert!(
+            report::overall(&rows[..1], &[], true),
+            "a warning keeps the verdict"
+        );
         // a platform with no list checks nothing and says so
         let (rows, note) = allowances.check("linux", &times);
         assert!(rows.is_empty());

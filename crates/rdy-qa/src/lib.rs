@@ -34,6 +34,7 @@ pub mod release_preflight;
 pub mod release_readme;
 pub mod release_sample;
 pub mod report;
+pub mod retry;
 pub mod seams;
 pub mod signing;
 pub mod site;

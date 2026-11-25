@@ -572,6 +572,9 @@ pub enum RowState {
     Ran,
     /// Not run: `after`, a step it needs, failed (the gate runs without `--all-stages`).
     Skipped { after: crate::gate_steps::StepId },
+    /// A warning: it names what to fix and leaves the verdict as it is (a run over its time
+    /// target, a binary or stage over its allowance).
+    Warning,
 }
 
 impl Gate {
@@ -582,6 +585,16 @@ impl Gate {
             pass,
             detail,
             state: RowState::Ran,
+        }
+    }
+
+    /// A warning row: it passes, so the verdict stays, and its result cell is `WARN`.
+    pub fn warn(name: &str, detail: String) -> Gate {
+        Gate {
+            name: name.into(),
+            pass: true,
+            detail,
+            state: RowState::Warning,
         }
     }
 
@@ -600,6 +613,7 @@ impl Gate {
 pub fn gate_result(g: &Gate) -> String {
     match &g.state {
         RowState::Ran => mark(g.pass).to_string(),
+        RowState::Warning => "WARN".to_string(),
         RowState::Skipped { after } => format!("SKIPPED (after {after} failed)"),
     }
 }
@@ -932,6 +946,9 @@ pub struct Report {
     pub os_excluded: Vec<String>,
     /// Where the time went, per stage; empty when nothing was timed.
     pub timing: Timing,
+    /// The keys (`<package>/<kind>/<name>`) of the test binaries that ran and failed: what
+    /// `--retry-failed` runs again.
+    pub failed_binaries: Vec<String>,
 }
 
 /// The M3 gate's required witnesses that another area proves, not the swarm (rulings task-8
@@ -1271,6 +1288,8 @@ struct AreaProven {
 struct JsonReport<'a> {
     #[serde(flatten)]
     report: &'a Report,
+    /// `PASS` or `FAIL`; a retry (`--retry-failed`) writes `PASS (retried: <names>)`.
+    verdict: &'static str,
     area_proven: Vec<AreaProven>,
 }
 
@@ -1286,6 +1305,7 @@ pub fn json(r: &Report) -> String {
         .collect();
     serde_json::to_string_pretty(&JsonReport {
         report: r,
+        verdict: mark(r.pass),
         area_proven,
     })
     .expect("report serializes")
@@ -1659,6 +1679,7 @@ mod tests {
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
             timing: Timing::default(),
+            failed_binaries: vec![],
         };
         assert!(
             markdown(&r).contains(
@@ -1730,6 +1751,7 @@ mod tests {
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
             timing: Timing::default(),
+            failed_binaries: vec![],
         }
     }
 
@@ -1913,8 +1935,8 @@ mod tests {
             include_str!("bin/qa-gate.rs")
                 .split_whitespace()
                 .collect::<String>()
-                .contains("run_areas(&mine,|_|false,BINARY_JOBS"),
-            "every workspace binary shares the workers and runs"
+                .contains("run_areas(&jobs,alone,BINARY_JOBS"),
+            "every test binary shares the one pool and runs"
         );
         let out = "\
      Running tests/a.rs (target/debug/deps/a-1)
@@ -2040,6 +2062,7 @@ error: 2 targets failed:
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
             timing: Timing::default(),
+            failed_binaries: vec![],
         };
         let md = markdown(&r);
         assert!(
@@ -2103,6 +2126,7 @@ error: 2 targets failed:
             guarded: BTreeMap::new(),
             os_excluded: Vec::new(),
             timing: Timing::default(),
+            failed_binaries: vec![],
         };
         let md = markdown(&r);
         assert!(
