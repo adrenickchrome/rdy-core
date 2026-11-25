@@ -21,6 +21,12 @@ pub fn seed_ids_for_tests(seed: u64) {
     SEEDED_BYTES.with(|s| s.set(Some(seed ^ BYTES_SEED_SALT)));
 }
 
+/// Tests only: whether this thread's `BlockId::new` draws from a seeded generator.
+#[doc(hidden)]
+pub fn ids_seeded_for_tests() -> bool {
+    SEEDED.with(|s| s.get().is_some())
+}
+
 /// Tests only: return this thread's `BlockId::new` to random ids.
 #[doc(hidden)]
 pub fn unseed_ids_for_tests() {

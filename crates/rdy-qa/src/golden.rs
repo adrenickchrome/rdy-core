@@ -216,20 +216,27 @@ pub fn fixture_clock() -> rdy_engine::PinnedClock {
 /// The id seed of [`project`]'s own writes.
 const PROJECT_ID_SEED: u64 = 0x474f_4c44_454e_3031;
 
-/// Seeds this thread's new block ids while it lives (`rdy_model::seed_ids_for_tests`); its drop
-/// returns the thread to random ids, also when the build panics.
-struct SeededIds;
+/// Seeds this thread's new block ids while it lives (`rdy_model::seed_ids_for_tests`), unless
+/// the caller seeded them already: then the caller's stream goes on untouched, and its frozen
+/// bytes stay the same. Its drop returns the thread to random ids only when it seeded, also
+/// when the build panics.
+struct SeededIds(bool);
 
 impl SeededIds {
     fn new(seed: u64) -> SeededIds {
+        if rdy_model::ids_seeded_for_tests() {
+            return SeededIds(false);
+        }
         rdy_model::seed_ids_for_tests(seed);
-        SeededIds
+        SeededIds(true)
     }
 }
 
 impl Drop for SeededIds {
     fn drop(&mut self) {
-        rdy_model::unseed_ids_for_tests();
+        if self.0 {
+            rdy_model::unseed_ids_for_tests();
+        }
     }
 }
 
