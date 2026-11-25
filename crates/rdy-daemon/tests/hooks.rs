@@ -740,7 +740,11 @@ impl Handler for Held {
                     count.clone(),
                 )
             }
-            None => run.clone(),
+            // an unheld run checks with Git: 60 s in place of the daemon's 2 s, which Git passed
+            // on a loaded Windows gate machine; the held runs keep the daemon's own deadline
+            None => run
+                .clone()
+                .with_deadline(Instant::now() + Duration::from_secs(60)),
         };
         let value = self.inner.ctl_run(s, r, agent, &ctx);
         let _ = self.ended.send(Ended {
