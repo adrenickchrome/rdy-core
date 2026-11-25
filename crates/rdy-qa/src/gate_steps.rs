@@ -494,6 +494,45 @@ pub fn list_guarded(
     (guarded, problems)
 }
 
+/// The variables that point a test child's temporary files at `root`: `TMPDIR` (Unix) or `TEMP`
+/// and `TMP` (Windows), and [`crate::platform::SHORT_TMP_VAR`], which moves the short root of the
+/// daemon and swarm tests too.
+pub fn tmp_root_vars(root: &Path) -> Vec<(&'static str, PathBuf)> {
+    let names: &[&str] = if cfg!(windows) {
+        &["TEMP", "TMP"]
+    } else {
+        &["TMPDIR"]
+    };
+    names
+        .iter()
+        .chain([&crate::platform::SHORT_TMP_VAR])
+        .map(|n| (*n, root.to_path_buf()))
+        .collect()
+}
+
+/// The checked `--tmp-root` of the gate: the directory itself, or why the gate refuses it.
+pub fn check_tmp_root(dir: &Path) -> Result<PathBuf, String> {
+    if !dir.is_dir() {
+        return Err(format!(
+            "--tmp-root {}: the directory does not exist",
+            dir.display()
+        ));
+    }
+    dir.canonicalize()
+        .map_err(|e| format!("--tmp-root {}: {e}", dir.display()))
+}
+
+/// The test binaries that keep the real temp directory whatever `--tmp-root` names, as
+/// (package, test target): one real-disk pass over the flush path in every run.
+pub const REAL_DISK_BINARIES: &[(&str, &str)] = &[("rdy-store", "durability"), ("rdy-qa", "store")];
+
+/// Whether the test target `name` of `package` keeps the real temp directory.
+pub fn on_real_disk(package: &str, name: &str) -> bool {
+    REAL_DISK_BINARIES
+        .iter()
+        .any(|(p, n)| *p == package && *n == name)
+}
+
 pub fn cargo(args: &[&str]) -> Command {
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.args(args);

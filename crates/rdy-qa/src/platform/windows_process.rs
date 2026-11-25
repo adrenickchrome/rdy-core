@@ -59,11 +59,12 @@ use windows_sys::Win32::System::Threading::{
 
 pub use rdy_store::pio::{ProgramInDir, StartPin, program_in_dir, start_in_dir};
 
-/// A directory for a project's temporary home: the system's temp directory. A pipe name does not
-/// depend on a path's length, so this needs no short root.
+/// A directory for a project's temporary home: `RDY_QA_SHORT_TMP` when it is set (the gate's
+/// `--tmp-root`), else the system's temp directory. A pipe name does not depend on a path's
+/// length, so this needs no short root.
 pub fn short_tmp_root() -> &'static Path {
     static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    ROOT.get_or_init(std::env::temp_dir)
+    ROOT.get_or_init(|| super::super::short_tmp_override().unwrap_or_else(std::env::temp_dir))
 }
 
 /// Opens the log at `path` to append, private to this account, as the product opens its own.

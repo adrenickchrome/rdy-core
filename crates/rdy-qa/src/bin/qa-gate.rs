@@ -46,6 +46,22 @@ struct Args {
     /// it (each shows `SKIPPED (after <step> failed)`), so a broken build does not run the tests.
     #[arg(long)]
     all_stages: bool,
+    /// Put every test child's temporary files in this directory (a RAM disk or tmpfs): it sets
+    /// `TMPDIR` (Unix) or `TEMP` and `TMP` (Windows), and `RDY_QA_SHORT_TMP`. The binaries in
+    /// `REAL_DISK_BINARIES` keep the real temp directory. The directory must exist.
+    #[arg(long, value_name = "DIR")]
+    tmp_root: Option<PathBuf>,
+}
+
+/// The checked `--tmp-root`, set once in `main`.
+static TMP_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// `c` with its temporary files under the gate's `--tmp-root`, when there is one.
+fn on_tmp_root(mut c: Command) -> Command {
+    if let Some(Some(root)) = TMP_ROOT.get() {
+        c.envs(rdy_qa::gate_steps::tmp_root_vars(root));
+    }
+    c
 }
 
 fn root() -> PathBuf {
@@ -89,11 +105,13 @@ fn deadline(kind: StageKind) -> Duration {
 }
 
 /// Sets `RDY_QA_REQUIRE_ALL=1` on a test command when the gate runs with `--require-all`.
+/// Every test command goes through it, so it also moves the command's temporary files to the
+/// gate's `--tmp-root` ([`on_tmp_root`]); a real-disk binary is built without it.
 fn with_require_all(mut c: Command, args: &Args) -> Command {
     if args.require_all {
         c.env(rdy_qa::skip::REQUIRE_ALL, "1");
     }
-    c
+    on_tmp_root(c)
 }
 
 fn git(args: &[&str]) -> Option<String> {
@@ -240,6 +258,19 @@ fn main() {
         }
         std::process::exit(rdy_qa::focus::main(f, &root(), &env, run_bounded));
     }
+    let tmp_root = match args
+        .tmp_root
+        .as_deref()
+        .map(rdy_qa::gate_steps::check_tmp_root)
+    {
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+        Some(Ok(dir)) => Some(dir),
+        None => None,
+    };
+    TMP_ROOT.get_or_init(|| tmp_root.clone());
     let start = *GATE_START.get_or_init(Instant::now);
     // A crashed run must not leave a stale verdict behind.
     for f in ["report.md", "report.json"] {
@@ -264,7 +295,9 @@ fn main() {
     // The Python CI tests need no build, so they run first, in the default fast gate and
     // `--only <area>` (the plan's checks), never in `--focus` or `--only perf`.
     let python = if plan.checks {
-        match rdy_qa::gate_steps::python_ci_step(std::env::consts::OS, step) {
+        match rdy_qa::gate_steps::python_ci_step(std::env::consts::OS, |l, c, d| {
+            step(l, on_tmp_root(c), d)
+        }) {
             Ok(g) => Some(g),
             Err(line) => {
                 eprintln!("{line}");
@@ -362,6 +395,23 @@ fn main() {
                 let empty = report::ran_nothing(&run);
                 stages.record(&workspace, ok && !empty);
                 gates.push(Gate::ran(&workspace.id, ok && !empty, detail));
+                if tmp_root.is_some() {
+                    // the workspace run above had every binary on the temp root; the real-disk
+                    // binary runs once more on the real temp directory
+                    let mut c = cargo(&["test", "-p", "rdy-store", "--test", "durability"]);
+                    if args.require_all {
+                        c.env(rdy_qa::skip::REQUIRE_ALL, "1");
+                    }
+                    let (ok, out) = step("rdy-store durability (real disk)", c, workspace.deadline);
+                    let run = report::parse_cargo_test(&out);
+                    let detail = report::workspace_test_detail(ok, &run, &out);
+                    let empty = report::ran_nothing(&run);
+                    gates.push(Gate::ran(
+                        "rdy-store durability (real disk)",
+                        ok && !empty,
+                        detail,
+                    ));
+                }
             }
         }
     }
@@ -513,6 +563,13 @@ fn main() {
                 if args.deep {
                     env.vars.insert("RDY_QA_DEEP".to_string(), "1".to_string());
                 }
+                if let Some(root) = tmp_root.as_deref()
+                    && !rdy_qa::gate_steps::on_real_disk("rdy-qa", binary)
+                {
+                    for (k, v) in rdy_qa::gate_steps::tmp_root_vars(root) {
+                        env.vars.insert(k.into(), v.to_string_lossy().into_owned());
+                    }
+                }
                 let run = launch_area(&exe.path, &env, &[], &step_def.id, step_def.deadline);
                 eprintln!(
                     "==> {}: {:.1} s (direct)",
@@ -522,10 +579,13 @@ fn main() {
                 run.out
             }
             _ => {
-                let mut c = with_require_all(
-                    cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]),
-                    &args,
-                );
+                let mut c = cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]);
+                if args.require_all {
+                    c.env(rdy_qa::skip::REQUIRE_ALL, "1");
+                }
+                if !rdy_qa::gate_steps::on_real_disk("rdy-qa", binary) {
+                    c = on_tmp_root(c);
+                }
                 if args.deep {
                     c.env("RDY_QA_DEEP", "1");
                 }
