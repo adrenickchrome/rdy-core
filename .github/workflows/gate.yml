@@ -251,7 +251,7 @@ jobs:
               exit 1
           }
       - name: Scratch home and kept target
-        # The tests get an empty HOME. Cargo and rustup keep the runner account's own homes, and the
+        # The tests get an empty HOME. Cargo and rustup use the machine's toolchain copy, and the
         # target directory stays beside the work folder, so the next run builds warm.
         if: ${{ !inputs.hosted }}
         shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
@@ -259,8 +259,14 @@ jobs:
           WORK_PARENT: ${{ runner.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
-          $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+          # The proven Windows setup: rdytest has no toolchain of its own; the toolchain, a venv with
+          # python3.exe, and the test temp and app-data roots live in C:\wx-defender, outside the
+          # Defender exclusions of the rdytest profile, so every test project is scanned as a user's is.
+          $root = 'C:\wx-defender'
+          $cargoHome = Join-Path $root 'tc\cargo'
+          $rustupHome = Join-Path $root 'tc\rustup'
+          Add-Content -Path $env:GITHUB_ENV -Value "APPDATA=$(Join-Path $root 'run-appdata')"
+          Add-Content -Path $env:GITHUB_ENV -Value "LOCALAPPDATA=$(Join-Path $root 'run-localappdata')"
           $home_ = Join-Path $env:RUNNER_TEMP 'home'
           New-Item -ItemType Directory -Force -Path $home_ | Out-Null
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$cargoHome"
@@ -268,6 +274,8 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$(Join-Path $env:WORK_PARENT 'gate-target')"
           Add-Content -Path $env:GITHUB_ENV -Value "HOME=$home_"
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $cargoHome 'bin')
+          # GITHUB_PATH puts the last line first: python3 comes before cargo, as in the proven setup.
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $root 'pyvenv\Scripts')
       - name: No line-ending conversion
         # A checkout with CRLF applied fails tests that compare bytes. This writes the scratch HOME's config.
         if: ${{ !inputs.hosted }}
@@ -295,7 +303,7 @@ jobs:
         if: ${{ !inputs.hosted }}
         shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'gate-tmp'
+          $dir = Join-Path 'C:\wx-defender\run-tmp' "gate-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Add-Content -Path $env:GITHUB_ENV -Value "GATE_TMP=$dir"
       - name: Release gate (Windows tier)
