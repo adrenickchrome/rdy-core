@@ -111,11 +111,10 @@ pub struct Added {
 /// Whether `path` (relative to the workspace root, `/`-separated) holds test code from line 1.
 fn all_test(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
-    match parts.as_slice() {
-        ["crates", "rdy-qa", "src", ..] => true,
-        ["crates", _, "tests", ..] => true,
-        _ => false,
-    }
+    matches!(
+        parts.as_slice(),
+        ["crates", "rdy-qa", "src", ..] | ["crates", _, "tests", ..]
+    )
 }
 
 /// The first line (1-based) of `all` from which a Rust `src` file holds test code, if any.
