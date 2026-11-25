@@ -360,7 +360,9 @@ struct Mask {
 /// ids, since a card line holds both (`D-XXXXX@<hash>`).
 fn masks() -> Vec<Mask> {
     [
-        ("tmp", r"(?i)[^\s\x22']*rdyd[0-9a-z]+", 0),
+        // the test's temp folder (`short_tempdir`: `rdyd` and exactly six letters or digits, any
+        // case on Windows): a generated id can hold `RDYD` (`D-RDYD5`), but never six after it
+        ("tmp", r"(?i)[^\s\x22']*rdyd[0-9a-z]{6}\b", 0),
         // a proposal ref: `P-<12 hex>@n`
         ("hex", r"\bP-([0-9a-f]{12})@\d+", 1),
         // a pinned block ref: `D-XXXXX@<hash>`
