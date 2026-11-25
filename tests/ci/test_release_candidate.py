@@ -575,13 +575,15 @@ class agi6_Candidate(Fixture):
         bin_dir.mkdir()
         guide_tests.write_executable(bin_dir / 'cargo', (
             '#!/usr/bin/env python3\n'
-            'import os, shutil, sys\n'
+            'import json, os, shutil, sys\n'
+            'open(%r, "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'
             'if sys.argv[1] == "build":\n'
             '    release = os.path.join(os.environ["CARGO_TARGET_DIR"], "release")\n'
             '    os.makedirs(release)\n'
             '    shutil.copy(%r, os.path.join(release, "rdy%s"))\n'
             '    for tool in ("qa-release-sources%s", "qa-release-package%s"):\n'
-            '        shutil.copy(os.path.join(%r, tool), release)\n' % (str(tools / 'built-rdy'), exe, exe, exe, str(tools))))
+            '        shutil.copy(os.path.join(%r, tool), release)\n'
+            % (str(self.tmp / 'cargo-calls.jsonl'), str(tools / 'built-rdy'), exe, exe, exe, str(tools))))
         gate = self.tmp / 'fast-gate.json'
         gate.write_bytes(plain_json(FAST_GATE))
         return bin_dir, gate, log
@@ -769,6 +771,20 @@ class agi6_Candidate(Fixture):
         self.assertEqual(git(repo, 'show', commit + ':release/agent-guide.sha256'), sha(raw))
         self.assertEqual(receipt['archive']['sha256'], sha((self.tmp / 'out' / name).read_bytes()))
         self.assertEqual(sorted(p.name for p in (self.tmp / 'out').iterdir()), sorted([name, 'build-' + LINUX + '.json']))
+
+    def test_relc2_the_build_compiles_rdy_and_the_two_release_tools_only(self):
+        # rdy-qa has nine binaries; the candidate build runs two of them, so it builds only those.
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        repo, commit = self.source_commit(raw)
+        bin_dir, gate, _ = self.toolchain(reply, reply)
+        self.build(repo, commit, bin_dir, gate)
+        calls = [json.loads(line) for line in (self.tmp / 'cargo-calls.jsonl').read_text().splitlines()]
+        self.assertEqual(calls, [
+            ['fetch', '--locked'],
+            ['build', '--release', '--locked', '-p', 'rdy-cli', '-p', 'rdy-qa', '--bin', 'rdy',
+             '--bin', 'qa-release-sources', '--bin', 'qa-release-package'],
+        ])
 
     def test_agi6_the_guide_at_the_commit_must_stand_on_its_own(self):
         raw = guide_tests.valid_bundle(V)
