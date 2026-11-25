@@ -8,8 +8,10 @@ arguments exit 2):
   check     the gate time of release V against its budget (the candidate's budget job). It reads
             every attempt of every gate.yml and security.yml run on rel/<V> and of every
             release-candidate.yml run on candidate/v<V>, this one included, takes the length of the
-            union of their intervals (GitHub's own start and update times; a running attempt ends
-            now), adds the signing and install-check lines, and compares the sum with the budget.
+            union of their jobs' run intervals (GitHub's own job start and end times; a running job
+            ends now), adds the signing and install-check lines, and compares the sum with the budget.
+            Time a job waits for a runner (a gate queued behind a nightly run) is not spent: the
+            table shows it as queue time, for information only.
             The budget is one number in three places that must agree: release/gate-budget.json, the
             literal in tests/ci/test_gate_budget.py and the repository variable
             RDY_GATE_BUDGET_SECONDS. Only the founder sets that variable, and only he sets
@@ -130,8 +132,37 @@ def utc_text(seconds):
     return datetime.fromtimestamp(seconds, timezone.utc).strftime(UTC_FORMAT)
 
 
+def job_intervals(job, now):
+    """(run interval or None, queue interval) of one job. A job counts from the second a runner
+    started it to the second it completed, or to now while it runs. Before that it waits in the
+    queue. A job that no runner took (skipped, or cancelled in the queue) has no run interval."""
+    queued = utc_seconds(job.created_at)
+    if job.runner_id is None or job.started_at is None or job.status not in ('in_progress', 'completed'):
+        end = utc_seconds(job.completed_at) if job.completed_at is not None else now
+        return None, (queued, max(queued, end))
+    start = utc_seconds(job.started_at)
+    if job.status == 'completed':
+        if job.completed_at is None:
+            raise ControllerError('job ' + str(job.job_id) + ' completed with no end time')
+        end = utc_seconds(job.completed_at)
+    else:
+        end = max(now, start)
+    if end < start or start < queued:
+        raise ControllerError('job ' + str(job.job_id) + ' has times out of order')
+    return (start, end), (queued, start)
+
+
+def attempt_result(jobs):
+    """One word for an attempt, from its jobs: running while a job has not completed."""
+    if any(job.status != 'completed' for job in jobs):
+        return 'running'
+    if all(job.conclusion in ('success', 'skipped') for job in jobs):
+        return 'success'
+    return 'failure'
+
+
 def release_attempts(client, version, now):
-    """Every attempt of every run that counts for `version`: (workflow, run id, attempt, start, end, result, URL)."""
+    """Every attempt of every run that counts for `version`, with the run and queue intervals of its jobs."""
     branch = gate_branch(version)
     rows = []
     for workflow, ref in ((GATE_WORKFLOW, branch), (SECURITY_WORKFLOW, branch),
@@ -142,14 +173,17 @@ def release_attempts(client, version, now):
             if run.run_attempt > ATTEMPTS_MAX:
                 raise ControllerError('run ' + str(run.run_id) + ' has more than ' + str(ATTEMPTS_MAX) + ' attempts')
             for attempt in range(1, run.run_attempt + 1):
-                fact = client.attempt_time(run.run_id, attempt)
-                start = utc_seconds(fact.started_at)
-                end = utc_seconds(fact.updated_at) if fact.status == 'completed' else max(now, start)
-                if end < start:
-                    raise ControllerError('run ' + str(run.run_id) + ' attempt ' + str(attempt) + ' ends before it starts')
-                result = fact.conclusion if fact.status == 'completed' else fact.status
-                rows.append((workflow, run.run_id, attempt, start, end, result or 'none', fact.html_url))
-    return sorted(rows, key=lambda row: (row[3], row[1], row[2]))
+                jobs = client.attempt_job_times(run.run_id, attempt)
+                ran, waited = [], []
+                for job in jobs:
+                    interval, queue = job_intervals(job, now)
+                    if interval is not None:
+                        ran.append(interval)
+                    waited.append(queue)
+                rows.append({'workflow': workflow, 'run_id': run.run_id, 'attempt': attempt, 'jobs': len(jobs),
+                             'ran': ran, 'waited': waited, 'result': attempt_result(jobs), 'url': run.html_url})
+    return sorted(rows, key=lambda row: (min([s for s, _ in row['ran'] + row['waited']] or [0]),
+                                         row['run_id'], row['attempt']))
 
 
 def union_seconds(intervals):
@@ -172,16 +206,24 @@ def check(client, version, budget, literal, variable, override, now):
     allowed = override_for(version, override)
     limit = seconds if allowed is None else allowed
     rows = release_attempts(client, version, now)
-    spent = union_seconds([(row[3], row[4]) for row in rows])
+    spent = union_seconds([interval for row in rows for interval in row['ran']])
+    queued = union_seconds([interval for row in rows for interval in row['waited']])
     following = sum(budget['lines'][name] for name in FOLLOWING)
     total = spent + following
+    runs = []
+    for row in rows:
+        times = row['ran'] or row['waited']
+        runs.append({'workflow': row['workflow'], 'run_id': row['run_id'], 'attempt': row['attempt'],
+                     'jobs': row['jobs'],
+                     'started_at': utc_text(min(s for s, _ in times)) if times else None,
+                     'ended_at': utc_text(max(e for _, e in times)) if times else None,
+                     'seconds': union_seconds(row['ran']), 'queue_seconds': union_seconds(row['waited']),
+                     'result': row['result'], 'url': row['url']})
     record = {
         'schema': 1, 'version': version, 'budget_seconds': seconds, 'limit_seconds': limit,
-        'override': allowed is not None, 'gate_seconds': spent, 'following_seconds': following,
-        'total_seconds': total, 'pass': total <= limit, 'checked_at': utc_text(now),
-        'runs': [{'workflow': row[0], 'run_id': row[1], 'attempt': row[2], 'started_at': utc_text(row[3]),
-                  'ended_at': utc_text(row[4]), 'seconds': row[4] - row[3], 'result': row[5], 'url': row[6]}
-                 for row in rows],
+        'override': allowed is not None, 'gate_seconds': spent, 'queue_seconds': queued,
+        'following_seconds': following, 'total_seconds': total, 'pass': total <= limit,
+        'checked_at': utc_text(now), 'runs': runs,
     }
     return record
 
@@ -189,13 +231,15 @@ def check(client, version, budget, literal, variable, override, now):
 def table(record):
     """The run summary: one row per attempt, then the sums."""
     lines = ['## Release gate budget: v' + record['version'], '',
-             '| Workflow | Run | Attempt | Started | Ended | Seconds | Result |',
-             '|---|---|---|---|---|---|---|']
+             '| Workflow | Run | Attempt | Jobs | Started | Ended | Job seconds | Queue seconds | Result |',
+             '|---|---|---|---|---|---|---|---|---|']
     for run in record['runs']:
         lines.append('| ' + ' | '.join([run['workflow'], '[' + str(run['run_id']) + '](' + run['url'] + ')',
-                                        str(run['attempt']), run['started_at'], run['ended_at'],
-                                        str(run['seconds']), run['result']]) + ' |')
-    lines += ['', 'Gate time (the union of the runs above): ' + str(record['gate_seconds']) + ' s.',
+                                        str(run['attempt']), str(run['jobs']), run['started_at'] or '-',
+                                        run['ended_at'] or '-', str(run['seconds']), str(run['queue_seconds']),
+                                        run['result']]) + ' |')
+    lines += ['', 'Gate time (the union of the job times above): ' + str(record['gate_seconds']) + ' s.',
+              'Queue time (jobs that waited for a runner; not counted): ' + str(record['queue_seconds']) + ' s.',
               'Signing and the install check: ' + str(record['following_seconds']) + ' s.',
               'Total: ' + str(record['total_seconds']) + ' s of ' + str(record['limit_seconds']) + ' s.']
     if record['override']:

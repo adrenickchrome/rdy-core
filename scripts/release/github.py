@@ -287,15 +287,19 @@ class ListedRunFact:
 
 
 @dataclass(frozen=True)
-class AttemptTimeFact:
-    """GitHub's own start and last update of one exact run attempt (UTC, whole seconds)."""
+class JobTimeFact:
+    """GitHub's own times of one job of one exact run attempt (UTC, whole seconds). `runner_id` is None for a
+    job that no runner took; `started_at` and `completed_at` are None until GitHub records them."""
+    job_id: int
     run_id: int
     run_attempt: int
+    name: str
     status: str
     conclusion: object
-    started_at: str
-    updated_at: str
-    html_url: str
+    runner_id: object
+    created_at: str
+    started_at: object
+    completed_at: object
 
 
 # ---------------------------------------------------------------------------------------------
@@ -527,23 +531,6 @@ class GitHub(object):
             runs.append(run)
         return runs
 
-    def attempt_time(self, run_id, attempt):
-        """The start and last update of one exact run attempt, as GitHub recorded them."""
-        operation = 'run attempt time'
-        need_id(run_id, 'run id')
-        need_id(attempt, 'run attempt')
-        value, _ = self._object(operation, self.root + '/actions/runs/' + str(run_id) + '/attempts/' + str(attempt))
-        if not (value.get('id') == run_id and value.get('run_attempt') == attempt
-                and type(value.get('id')) is int and type(value.get('run_attempt')) is int):
-            raise Malformed(operation, 'the answer is not run ' + str(run_id) + ' attempt ' + str(attempt))
-        started = field(value, 'run_started_at', str, operation, 'run start')
-        updated = field(value, 'updated_at', str, operation, 'run update')
-        if not (UTC_RE.fullmatch(started) and UTC_RE.fullmatch(updated)):
-            raise Malformed(operation, 'a run time is not UTC YYYY-MM-DDTHH:MM:SSZ')
-        return AttemptTimeFact(run_id, attempt, field(value, 'status', str, operation),
-                               field(value, 'conclusion', str, operation, nullable=True), started, updated,
-                               field(value, 'html_url', str, operation, 'run URL'))
-
     def run_attempt(self, run_id, attempt):
         """One exact run attempt: never the latest attempt, never a run found by name."""
         operation = 'run attempt'
@@ -597,6 +584,37 @@ class GitHub(object):
             if entry.run_id != run_id or entry.run_attempt != attempt:
                 raise Malformed(operation, 'a job is not from run ' + str(run_id) + ' attempt ' + str(attempt))
         return jobs
+
+    def attempt_job_times(self, run_id, attempt):
+        """The times of every job of one exact run attempt (at most 64): when GitHub queued it, when a runner
+        started it and when it completed."""
+        operation = 'job times'
+        need_id(run_id, 'run id')
+        need_id(attempt, 'run attempt')
+        rows = self._pages(operation, self.root + '/actions/runs/' + str(run_id) + '/attempts/' + str(attempt)
+                           + '/jobs', 'jobs', JOBS_MAX)
+        facts = []
+        for row in rows:
+            runner = row.get('runner_id') if isinstance(row, dict) else None
+            if not (runner is None or (cand.is_int(runner, 0))):
+                raise Malformed(operation, 'the job runner id is malformed')
+            times = [field(row, 'created_at', str, operation, 'job queue time')]
+            times += [field(row, key, str, operation, what, nullable=True)
+                      for key, what in (('started_at', 'job start'), ('completed_at', 'job end'))]
+            if not all(value is None or UTC_RE.fullmatch(value) for value in times):
+                raise Malformed(operation, 'a job time is not UTC YYYY-MM-DDTHH:MM:SSZ')
+            fact = JobTimeFact(
+                job_id=field(row, 'id', int, operation, 'job id'),
+                run_id=field(row, 'run_id', int, operation, 'job run id'),
+                run_attempt=field(row, 'run_attempt', int, operation, 'job run attempt'),
+                name=field(row, 'name', str, operation, 'job name'),
+                status=field(row, 'status', str, operation, 'job status'),
+                conclusion=field(row, 'conclusion', str, operation, 'job conclusion', nullable=True),
+                runner_id=runner or None, created_at=times[0], started_at=times[1], completed_at=times[2])
+            if fact.run_id != run_id or fact.run_attempt != attempt:
+                raise Malformed(operation, 'a job is not from run ' + str(run_id) + ' attempt ' + str(attempt))
+            facts.append(fact)
+        return facts
 
     def job(self, job_id):
         operation = 'job'

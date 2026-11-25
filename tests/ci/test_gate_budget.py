@@ -138,7 +138,6 @@ def run_row(run_id, **changes):
     row = {'id': run_id, 'run_attempt': 1, 'path': '.github/workflows/gate.yml', 'head_sha': S,
            'head_branch': 'rel/' + V, 'event': 'push', 'status': 'completed', 'conclusion': 'success',
            'html_url': 'https://github.com/' + REPO + '/actions/runs/' + str(run_id),
-           'run_started_at': '2026-11-25T10:00:00Z', 'updated_at': '2026-11-25T10:09:30Z',
            'repository': {'id': REPO_ID}, 'head_repository': {'id': REPO_ID}}
     row.update(changes)
     return row
@@ -180,19 +179,31 @@ class ClientReads(unittest.TestCase):
                 client.workflow_runs(name, **query)
         self.assertEqual(transport.calls, [])
 
-    def test_attempt_time_reads_github_start_and_update(self):
-        path = ROOT_PATH + '/actions/runs/11/attempts/2'
-        client, _ = self.client({path: Reply(200, run_row(11, run_attempt=2))})
-        fact = client.attempt_time(11, 2)
-        self.assertEqual((fact.started_at, fact.updated_at, fact.status), ('2026-11-25T10:00:00Z',
-                                                                           '2026-11-25T10:09:30Z', 'completed'))
-        for change, reason in (({'run_attempt': 1}, 'the answer is not run 11 attempt 2'),
-                               ({'run_started_at': '2026-11-25 10:00'}, 'a run time is not UTC YYYY-MM-DDTHH:MM:SSZ'),
-                               ({'updated_at': None}, 'the run update is malformed')):
-            client, _ = self.client({path: Reply(200, run_row(11, **dict({'run_attempt': 2}, **change)))})
+    def test_attempt_job_times_reads_each_job_queue_start_and_end(self):
+        page = ROOT_PATH + '/actions/runs/11/attempts/2/jobs?per_page=100&page=1'
+
+        def job_row(**changes):
+            row = {'id': 71, 'run_id': 11, 'run_attempt': 2, 'name': 'Release gate (x86_64-unknown-linux-gnu)',
+                   'status': 'completed', 'conclusion': 'success', 'runner_id': 9, 'created_at': at(0),
+                   'started_at': at(3), 'completed_at': at(12), 'html_url': 'u', 'head_sha': S}
+            row.update(changes)
+            return row
+
+        client, transport = self.client({page: Reply(200, {'total_count': 2, 'jobs': [
+            job_row(), job_row(id=72, status='queued', conclusion=None, runner_id=None, started_at=None,
+                               completed_at=None)]})})
+        facts = client.attempt_job_times(11, 2)
+        self.assertEqual([(f.job_id, f.runner_id, f.created_at, f.started_at, f.completed_at) for f in facts],
+                         [(71, 9, at(0), at(3), at(12)), (72, None, at(0), None, None)])
+        self.assertIn(page, transport.calls)
+        for change, reason in (({'run_attempt': 1}, 'a job is not from run 11 attempt 2'),
+                               ({'started_at': '2026-11-25 10:00'}, 'a job time is not UTC YYYY-MM-DDTHH:MM:SSZ'),
+                               ({'created_at': None}, 'the job queue time is malformed'),
+                               ({'runner_id': 'x'}, 'the job runner id is malformed')):
+            client, _ = self.client({page: Reply(200, {'total_count': 1, 'jobs': [job_row(**change)]})})
             with self.assertRaises(GITHUB.Malformed) as caught:
-                client.attempt_time(11, 2)
-            self.assertEqual(str(caught.exception), 'GitHub run attempt time: ' + reason)
+                client.attempt_job_times(11, 2)
+            self.assertEqual(str(caught.exception), 'GitHub job times: ' + reason)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -393,20 +404,22 @@ T0 = BUDGET.utc_seconds(at(0))
 
 
 class TimedClient(FakeClient):
-    """workflow_runs from a table, and attempt_time from (run id, attempt) -> (status, conclusion, start, end)."""
+    """workflow_runs from a table, and attempt_job_times from (run id, attempt) -> job tuples
+    (status, conclusion, queued at, started at, completed at, runner id)."""
 
     def __init__(self, runs, attempts):
         FakeClient.__init__(self, runs)
         self.attempts = attempts
 
-    def attempt_time(self, run_id, attempt):
-        status, conclusion, start, end = self.attempts[(run_id, attempt)]
-        return GITHUB.AttemptTimeFact(run_id, attempt, status, conclusion, start, end,
-                                      'https://github.com/' + REPO + '/actions/runs/' + str(run_id))
+    def attempt_job_times(self, run_id, attempt):
+        return [GITHUB.JobTimeFact(run_id * 100 + n, run_id, attempt, 'job ' + str(n), status, conclusion, runner,
+                                   created, started, completed)
+                for n, (status, conclusion, created, started, completed, runner)
+                in enumerate(self.attempts[(run_id, attempt)], 1)]
 
 
 def release(gate=(), security=(), candidate=()):
-    """Runs of one release; each entry is (run id, [attempt tuples])."""
+    """Runs of one release; each entry is (run id, [the job list of each attempt])."""
     runs, attempts = {}, {}
     for workflow_file, branch, entries in (('gate.yml', 'rel/' + V, gate), ('security.yml', 'rel/' + V, security),
                                            ('release-candidate.yml', 'candidate/v' + V, candidate)):
@@ -419,8 +432,14 @@ def release(gate=(), security=(), candidate=()):
     return TimedClient(runs, attempts)
 
 
-def done(start, end, conclusion='success'):
-    return ('completed', conclusion, at(*start), at(*end))
+def job(start, end, conclusion='success', queued=None):
+    """One job that a runner ran from `start` to `end` (minutes), queued at `queued` (default: `start`)."""
+    return ('completed', conclusion, at(*(queued or start)), at(*start), at(*end), 7)
+
+
+def done(start, end, conclusion='success', queued=None):
+    """An attempt of one job."""
+    return [job(start, end, conclusion, queued)]
 
 
 class GateTime(unittest.TestCase):
@@ -452,11 +471,34 @@ class GateTime(unittest.TestCase):
 
     def test_a_cancelled_run_counts_and_a_running_attempt_ends_now(self):
         client = release(gate=[(1, [done((0,), (5,), 'cancelled')]), (2, [done((6,), (15,))])],
-                         candidate=[(3, [('in_progress', None, at(16), at(16))])])
+                         candidate=[(3, [[('in_progress', None, at(16), at(16), None, 7)]])])
         record = self.check(client, now=T0 + 25 * 60)
         self.assertEqual(record['gate_seconds'], (5 + 9 + 9) * 60)
         self.assertEqual(record['runs'][-1]['ended_at'], at(25))
-        self.assertEqual(record['runs'][-1]['result'], 'in_progress')
+        self.assertEqual(record['runs'][-1]['result'], 'running')
+
+    def test_time_in_the_queue_is_shown_and_not_spent(self):
+        # The gate waits 0:00 to 0:20 behind a nightly run on our machine, then runs 0:20 to 0:29. A second job
+        # of the same attempt is still queued at "now" (0:31), and a third was skipped and never took a runner.
+        client = release(gate=[(1, [[job((20,), (29,), queued=(0,)),
+                                     ('queued', None, at(25), None, None, None),
+                                     ('completed', 'skipped', at(29), at(29), at(29), None)]])],
+                         candidate=[(3, [done((30,), (31,), queued=(29, 30))])])
+        record = self.check(client, now=T0 + 31 * 60)
+        self.assertEqual(record['gate_seconds'], (9 + 1) * 60)
+        self.assertEqual(record['queue_seconds'], (20 + 6) * 60)  # 0:00-0:20 and 0:25-0:31; 0:29:30-0:30 is inside
+        gate = record['runs'][0]
+        self.assertEqual((gate['jobs'], gate['seconds'], gate['queue_seconds'], gate['result']),
+                         (3, 9 * 60, 26 * 60, 'running'))
+        self.assertEqual((gate['started_at'], gate['ended_at']), (at(20), at(29)))
+        self.assertTrue(record['pass'])
+        self.assertIn('Queue time (jobs that waited for a runner; not counted): ' + str(record['queue_seconds']) + ' s.',
+                      BUDGET.table(record))
+
+    def test_a_job_cancelled_in_the_queue_spends_nothing(self):
+        client = release(gate=[(1, [[('completed', 'cancelled', at(0), at(0), at(40), None)]])])
+        record = self.check(client)
+        self.assertEqual((record['gate_seconds'], record['queue_seconds'], record['pass']), (0, 40 * 60, True))
 
     def test_the_union_of_nested_and_touching_intervals(self):
         self.assertEqual(BUDGET.union_seconds([(0, 100), (10, 20), (100, 150), (200, 210)]), 160)
@@ -481,7 +523,11 @@ class GateTime(unittest.TestCase):
         client = release(gate=[(1, [done((5,), (4,))])])
         with self.assertRaises(ControllerError) as caught:
             self.check(client)
-        self.assertEqual(str(caught.exception), 'run 1 attempt 1 ends before it starts')
+        self.assertEqual(str(caught.exception), 'job 101 has times out of order')
+        client = release(gate=[(1, [[('completed', 'success', at(0), at(1), None, 7)]])])
+        with self.assertRaises(ControllerError) as caught:
+            self.check(client)
+        self.assertEqual(str(caught.exception), 'job 101 completed with no end time')
         client = release(gate=[(1, [done((0,), (4,))])])
         client.runs['gate.yml'] = [listed(1, branch='main')]
         with self.assertRaises(ControllerError) as caught:

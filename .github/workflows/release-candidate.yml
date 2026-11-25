@@ -314,8 +314,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
   budget:
     # The release's hard stop (release/gate-budget.json): every gate.yml and security.yml run on rel/<V> and
-    # every run of this workflow on candidate/v<V>, every attempt, as GitHub timed them, plus the signing and
-    # install-check lines. Over the budget, or when the file, the control test and the repository variable
+    # every run of this workflow on candidate/v<V>, every attempt: the time their jobs ran, as GitHub timed them
+    # (time spent waiting for a runner is shown, not counted), plus the signing and install-check lines. Over the budget, or when the file, the control test and the repository variable
     # RDY_GATE_BUDGET_SECONDS differ, it fails and opens an issue for the founder; sign needs it, so nothing
     # is signed. It holds no key and no OIDC token.
     name: Release gate budget
