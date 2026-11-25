@@ -213,11 +213,41 @@ pub fn fixture_clock() -> rdy_engine::PinnedClock {
     rdy_engine::pin_clock(FIXTURE_MS)
 }
 
+/// The id seed of [`project`]'s own writes.
+const PROJECT_ID_SEED: u64 = 0x474f_4c44_454e_3031;
+
+/// Seeds this thread's new block ids while it lives (`rdy_model::seed_ids_for_tests`), unless
+/// the caller seeded them already: then the caller's stream goes on untouched, and its frozen
+/// bytes stay the same. Its drop returns the thread to random ids only when it seeded, also
+/// when the build panics.
+struct SeededIds(bool);
+
+impl SeededIds {
+    fn new(seed: u64) -> SeededIds {
+        if rdy_model::ids_seeded_for_tests() {
+            return SeededIds(false);
+        }
+        rdy_model::seed_ids_for_tests(seed);
+        SeededIds(true)
+    }
+}
+
+impl Drop for SeededIds {
+    fn drop(&mut self) {
+        if self.0 {
+            rdy_model::unseed_ids_for_tests();
+        }
+    }
+}
+
 /// The golden project: the pattern matching corpus, landed and tagged `v1.0.0`, two landings
 /// after it, and a view `editing` with two unlanded changes. Canon reads
 /// `v1.0.0 + 2 landings`, the view `+ 2 unlanded changes`.
 pub fn project() -> (tempfile::TempDir, Rdy, Ids) {
     let _clock = fixture_clock();
+    // seeded ids: a random id of a generated page could equal one of the fixed view ids that
+    // `raw_commit` writes at the end (`p-Y3BEZ`, ...), and the commit then fails
+    let _ids = SeededIds::new(PROJECT_ID_SEED);
     let dir = tempfile::tempdir().expect("tempdir");
     // the store is locked while a handle is open: close it before the config is rewritten
     drop(Rdy::init(dir.path(), "rdy-standard").expect("init"));

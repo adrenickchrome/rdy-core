@@ -1650,8 +1650,11 @@ class GateWorkflowPolicy(unittest.TestCase):
         self.assertEqual(sorted(self.jobs), sorted(GATE_TARGETS))
         for name, job in self.jobs.items():
             with self.subTest(job=name):
+                # Linux runs on a machine of its own; the build servers share one host with other gates.
+                group = 'rdy-core-gate' if name == 'linux' else 'rdy-gate'
+                labels = '\"' + group + '\",\"' + name + '\"'
                 self.assertEqual(job['runs-on'], "${{ inputs.hosted && '" + GATE_HOSTED[name]
-                                 + "' || fromJSON('[\"self-hosted\",\"rdy-gate\",\"" + name + "\"]') }}")
+                                 + "' || fromJSON('[\"self-hosted\"," + labels + "]') }}")
                 # A push (release evidence) gets a 45-minute hang guard and a gate clock with a 1080-second
                 # target and a 2400-second ceiling; the budget job, not these limits, checks the release
                 # time. Only a manual hosted proof run gets more; gate_budget.py never reads it as evidence.
@@ -1669,7 +1672,7 @@ class GateWorkflowPolicy(unittest.TestCase):
         for word in ('secrets.', 'id-token', 'github.token', 'pull_request'):
             self.assertNotIn(word, text)
         labels = yaml.safe_load((ROOT / 'scripts/ci/actionlint.yaml').read_text())['self-hosted-runner']['labels']
-        self.assertEqual(labels, ['ubuntu-26.04', 'rdy-gate', 'rdy-bench'])
+        self.assertEqual(labels, ['ubuntu-26.04', 'rdy-gate', 'rdy-bench', 'rdy-core-gate'])
 
     def test_hosted_proof_runs_are_never_release_evidence(self):
         spec = importlib.util.spec_from_file_location('gate_budget', ROOT / 'scripts/release/gate_budget.py')

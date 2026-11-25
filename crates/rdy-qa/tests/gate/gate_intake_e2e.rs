@@ -300,7 +300,11 @@ fn site_pages(url: &str) -> Vec<(String, String)> {
     let base = url.to_string();
     let get = |path: &str| {
         let got = http::get(&format!("{base}{path}"));
-        assert_eq!(got.status, 200, "{base}{path}");
+        assert_eq!(
+            got.status, 200,
+            "{base}{path} (transport: {})",
+            got.transport
+        );
         String::from_utf8_lossy(&got.body).into_owned()
     };
     let index = get("");

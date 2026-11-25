@@ -2496,7 +2496,11 @@ fn assert_no_ui(url: &str, what: &str) {
     let base = format!("http://{authority}");
     for path in ["/~ui/", "/~ui/item/P-abc@1"] {
         let r = http::get(&format!("{base}{path}"));
-        assert_eq!(r.status, 404, "{what}: GET {path}");
+        assert_eq!(
+            r.status, 404,
+            "{what}: GET {path} (transport: {})",
+            r.transport
+        );
         let page = String::from_utf8_lossy(&r.body);
         for needle in ["~ui", "approval", "ui-card", "<form"] {
             assert!(!page.contains(needle), "{what}: {path} names {needle:?}");
@@ -2504,7 +2508,11 @@ fn assert_no_ui(url: &str, what: &str) {
     }
     let addr: std::net::SocketAddr = authority.parse().unwrap();
     let post = http::raw(addr, &http::ui_answer_request(&authority, &[("ref", "r")]));
-    assert_eq!(post.status, 405, "{what}: POST {}", post.head);
+    assert_eq!(
+        post.status, 405,
+        "{what}: POST {} (transport: {})",
+        post.head, post.transport
+    );
 }
 
 #[test]
@@ -2672,7 +2680,7 @@ fn mg5_elicitation_fallback_and_local_ui_keep_their_boundaries() {
     let url = guide["url"].as_str().unwrap();
     assert!(url.contains("/~profile/guide/"), "{url}");
     let page = http::get(url);
-    assert_eq!(page.status, 200, "{url}");
+    assert_eq!(page.status, 200, "{url} (transport: {})", page.transport);
     let text = String::from_utf8_lossy(&page.body);
     for needle in ["/~ui/", "<form", "card_hash"] {
         assert!(!text.contains(needle), "the profile page names {needle:?}");
@@ -2945,7 +2953,7 @@ fn mg5_a_write_naming_the_removed_block_refuses_only_the_removal_card() {
         item_path(&redact.r#ref)
     ));
     let text = String::from_utf8_lossy(&page.body).into_owned();
-    assert_ne!(page.status, 200, "{text}");
+    assert_ne!(page.status, 200, "{text} (transport: {})", page.transport);
     assert_eq!(
         ui_code(&text).as_deref(),
         Some("E_REDACTION_STALE"),

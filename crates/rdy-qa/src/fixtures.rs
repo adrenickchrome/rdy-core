@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// `path` as one YAML single-quoted scalar: a native path (a Windows drive, backslashes, a space
@@ -438,8 +439,9 @@ pub fn output_within_stdin(
             let _ = pipe.write_all(&bytes);
         });
     }
-    let out = drain(child.stdout.take());
-    let err = drain(child.stderr.take());
+    let err_seen = Arc::new(Mutex::new(Vec::new()));
+    let out = drain(child.stdout.take(), None);
+    let err = drain(child.stderr.take(), Some(Arc::clone(&err_seen)));
     let deadline = Instant::now() + budget;
     let status = loop {
         match child.try_wait() {
@@ -448,8 +450,18 @@ pub fn output_within_stdin(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                // the drain threads are left behind: a grandchild may still hold the pipes open
-                return Err(format!("{cmd:?} still running after {budget:?}"));
+                // the drain threads are left behind: a grandchild may still hold the pipes open.
+                // What the command wrote to stderr so far names where it hung.
+                let seen = err_seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let text = String::from_utf8_lossy(&seen);
+                let tail: String = {
+                    let chars: Vec<char> = text.chars().collect();
+                    chars[chars.len().saturating_sub(4000)..].iter().collect()
+                };
+                return Err(format!(
+                    "{cmd:?} still running after {budget:?}; its stderr so far ({} bytes): {tail}",
+                    seen.len()
+                ));
             }
             Err(e) => {
                 let _ = child.kill();
@@ -465,12 +477,32 @@ pub fn output_within_stdin(
     })
 }
 
-/// Reads `pipe` to its end on a thread (nothing when there is no pipe).
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+/// Reads `pipe` to its end on a thread (nothing when there is no pipe). With `seen`, each read
+/// is also copied there as it arrives, so a caller that gives up on the command can still show
+/// what it wrote.
+fn drain<R: Read + Send + 'static>(
+    pipe: Option<R>,
+    seen: Option<Arc<Mutex<Vec<u8>>>>,
+) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut buf = vec![];
         if let Some(mut p) = pipe {
-            let _ = p.read_to_end(&mut buf);
+            let mut chunk = [0u8; 8192];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(s) = &seen {
+                            s.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .extend_from_slice(&chunk[..n]);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
         }
         buf
     })

@@ -1,5 +1,5 @@
 # The release gate: the release tier of `cargo qa` on release commit S, once per platform, three jobs at
-# once on our own three machines (GitHub self-hosted runners with the label rdy-gate). GitHub starts and
+# once on our own three machines (GitHub self-hosted runners: rdy-gate on the Mac and Windows, rdy-core-gate on Linux). GitHub starts and
 # times every run. The candidate reads the fast-gate counts of the run that passed on a push of S to
 # rel/<V> (scripts/release/gate_budget.py gate-run), and its budget job counts every run of this workflow
 # on rel/<V>. The gate line of release/gate-budget.json (660 s) is a target, not a limit: a slow but
@@ -29,7 +29,9 @@ concurrency:
 jobs:
   linux:
     name: Release gate (x86_64-unknown-linux-gnu)
-    runs-on: ${{ inputs.hosted && 'ubuntu-26.04' || fromJSON('["self-hosted","rdy-gate","linux"]') }}
+    # A machine of its own (label rdy-core-gate): the build servers share one physical host with
+    # other gates, so a release gate there competes for the same cores.
+    runs-on: ${{ inputs.hosted && 'ubuntu-26.04' || fromJSON('["self-hosted","rdy-core-gate","linux"]') }}
     timeout-minutes: ${{ inputs.hosted && 90 || 45 }}
     permissions:
       contents: read

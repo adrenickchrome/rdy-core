@@ -499,8 +499,9 @@ pub fn set_file_mode(file: &File, mode: u32) -> io::Result<()> {
 
 /// The output cap of a release tool's child process (the version probe, tar, `uname`).
 pub const RELEASE_CHILD_OUTPUT_MAX: usize = 1_048_576;
-/// The hang guard of a release tool's child process.
-pub const RELEASE_CHILD_DEADLINE: Duration = Duration::from_secs(30);
+/// The hang guard of a release tool's child process, never a measure: tar of an archive at
+/// the binary cap (over 512 MiB) can take more than 30 s on a loaded machine.
+pub const RELEASE_CHILD_DEADLINE: Duration = Duration::from_secs(300);
 
 /// SIGKILLs every process in the group `pid` leads: a group that [`own_process_group`] made.
 /// A group with no member left is already stopped, which is success. PID 0 (the caller's own

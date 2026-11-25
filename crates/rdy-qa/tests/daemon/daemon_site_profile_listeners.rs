@@ -35,8 +35,9 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
-/// The deadline of every wait for an event.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of every wait for an event: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 /// The caveat every profile-only site carries (its title in place of `{}`).
 const CAVEAT_FIX: &str = "give the full site's link from rdy site when the person needs everything";
 /// The fix of the removal warning.
@@ -444,7 +445,11 @@ fn text(r: &http::Response) -> String {
 #[track_caller]
 fn assert_refusal(r: &http::Response, f: Refusal, what: &str) {
     let want = refusal(f);
-    assert_eq!(r.status, want.status, "{what}: {}", r.head);
+    assert_eq!(
+        r.status, want.status,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(text(r), String::from_utf8(want.body).unwrap(), "{what}");
     assert!(
         r.header("content-type")
@@ -498,14 +503,24 @@ fn refused_events(port: u16, query: &str) -> http::Response {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let body = got.get(at + 4..).unwrap_or_default().to_vec();
-    http::Response { status, head, body }
+    let transport = format!("{} bytes read to the end", got.len());
+    http::Response {
+        status,
+        head,
+        body,
+        transport,
+    }
 }
 
 /// The page at `path` of the site on `port`, served 200.
 #[track_caller]
 fn page(port: u16, path: &str) -> String {
     let r = get(port, path);
-    assert_eq!(r.status, 200, "{path}: {}", r.head);
+    assert_eq!(
+        r.status, 200,
+        "{path}: {} (transport: {})",
+        r.head, r.transport
+    );
     text(&r)
 }
 
@@ -585,7 +600,11 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
         format!("[::1]:{only}"),
     ] {
         let r = get_as(only, "manual/intro.html", &host);
-        assert_eq!(r.status, 200, "{host}: {}", r.head);
+        assert_eq!(
+            r.status, 200,
+            "{host}: {} (transport: {})",
+            r.head, r.transport
+        );
         assert_eq!(text(&r), intro, "{host}");
     }
     let r = http::raw(
@@ -594,12 +613,20 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
             "GET /manual/intro.html HTTP/1.1\r\nHost: localhost:{only}\r\nOrigin: http://localhost:{only}\r\n\r\n"
         ),
     );
-    assert_eq!(r.status, 200, "own origin: {}", r.head);
+    assert_eq!(
+        r.status, 200,
+        "own origin: {} (transport: {})",
+        r.head, r.transport
+    );
     let home = page(only, "");
     selected_only(&home, "home");
     for asset in ["assets/site.css", "assets/app.js", "_rdy/live.js"] {
         let r = get(only, asset);
-        assert_eq!(r.status, 200, "{asset}: {}", r.head);
+        assert_eq!(
+            r.status, 200,
+            "{asset}: {} (transport: {})",
+            r.head, r.transport
+        );
         selected_only(&text(&r), asset);
     }
     // ordinary page queries are ignored
@@ -664,9 +691,17 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
     }
     // the same profile routes on the full listener still serve
     let full = get(source, "~profile/guide/manual/intro.html");
-    assert_eq!(full.status, 200, "{}", full.head);
+    assert_eq!(
+        full.status, 200,
+        "{} (transport: {})",
+        full.head, full.transport
+    );
     let other = get(source, "~profile/other/secret.html");
-    assert_eq!(other.status, 200, "{}", other.head);
+    assert_eq!(
+        other.status, 200,
+        "{} (transport: {})",
+        other.head, other.transport
+    );
     assert!(text(&other).contains("SECRET-WORDS"));
 
     // events: the page's own query opens its stream
@@ -744,7 +779,7 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
         sock(only),
         &format!("HEAD /_rdy/events?{q} HTTP/1.1\r\nHost: 127.0.0.1:{only}\r\n\r\n"),
     );
-    assert_eq!(r.status, 405, "{}", r.head);
+    assert_eq!(r.status, 405, "{} (transport: {})", r.head, r.transport);
 }
 
 /// A socket the probes of [`r5903_profile_site_window_is_bindable_first`] hold: it counts the
@@ -1256,7 +1291,7 @@ fn spv7_failed_open_allocates_no_profile_site() {
 
     // the source site stays usable
     let r = http::get(&format!("{}secret.html", w.url));
-    assert_eq!(r.status, 200, "{}", r.head);
+    assert_eq!(r.status, 200, "{} (transport: {})", r.head, r.transport);
 
     // a stopping daemon opens nothing
     let mut h = w.h;
@@ -1397,7 +1432,12 @@ fn spv7_removal_evicts_pages_assets_and_streams() {
     let only = port_of(&url_of(&info));
     let html = page(only, "manual/intro.html");
     for asset in ["assets/site.css", "_rdy/live.js"] {
-        assert_eq!(get(only, asset).status, 200, "{asset}");
+        assert_eq!(
+            get(only, asset).status,
+            200,
+            "{asset} (transport: {})",
+            rdy_qa::http::last_transport()
+        );
     }
     let q = events_query(&html);
     let events = format!("http://127.0.0.1:{only}/_rdy/events?{q}");
@@ -1431,7 +1471,11 @@ fn spv7_removal_evicts_pages_assets_and_streams() {
     }
     exact_plain(&refused_events(only, &q), "events");
     let h = head(only, "manual/intro.html");
-    assert_eq!(h.status, 404, "HEAD: {}", h.head);
+    assert_eq!(
+        h.status, 404,
+        "HEAD: {} (transport: {})",
+        h.head, h.transport
+    );
     assert_eq!(
         (h.header("content-type"), h.header("content-length")),
         (Some("text/plain; charset=utf-8"), Some("74")),
@@ -1793,7 +1837,7 @@ fn opts(dir: &Path) -> ServeOptions {
         project: dir.to_path_buf(),
         version: "t".into(),
         detach: false,
-        idle_timeout: Some(Duration::from_secs(60)),
+        idle_timeout: Some(rdy_qa::daemon::TEST_IDLE),
         human_actor: Some("human:qa".into()),
         site_lan_override: None,
     }

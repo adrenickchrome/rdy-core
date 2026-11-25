@@ -23,8 +23,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// The deadline of every wait for an event.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of every wait for an event: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 /// The content the first removal selects.
 const SECRET: &str = "ZEBRA-7731 is the launch code.";
 /// The content the second removal selects.
@@ -130,7 +131,11 @@ fn text(r: &http::Response) -> String {
 /// Asserts `r` is the existing `Busy` answer, with its unchanged text.
 fn assert_busy(r: &http::Response, what: &str) {
     let busy = refusal(Refusal::Busy);
-    assert_eq!(r.status, busy.status, "{what}: {}", r.head);
+    assert_eq!(
+        r.status, busy.status,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(r.body, busy.body, "{what}: the Busy text");
 }
 
@@ -153,6 +158,7 @@ fn get_or_head(url: &str) -> http::Response {
                     status: 200,
                     head,
                     body: got[end + 4..].to_vec(),
+                    transport: format!("an event stream's head after {} bytes", got.len()),
                 };
             }
         }
@@ -175,6 +181,7 @@ fn get_or_head(url: &str) -> http::Response {
         status,
         head,
         body: got.get(end + 4..).unwrap_or_default().to_vec(),
+        transport: format!("{} bytes read to the end", got.len()),
     }
 }
 
@@ -251,7 +258,11 @@ fn rdx14_delayed_live_builds_cannot_publish_an_old_epoch() {
         "the served build holds no removed content"
     );
     let page = http::get(&format!("{url}alpha.html"));
-    assert_eq!(page.status, 200, "{}", page.head);
+    assert_eq!(
+        page.status, 200,
+        "{} (transport: {})",
+        page.head, page.transport
+    );
     assert!(!text(&page).contains(SECRET) && text(&page).contains(STUB));
 
     // a menu build reads the state before the second removal and pauses at the check
@@ -286,9 +297,17 @@ fn rdx14_delayed_live_builds_cannot_publish_an_old_epoch() {
         "the served menu is of the current epoch"
     );
     let page = http::get(&format!("{url}~versions/"));
-    assert_eq!(page.status, 200, "{}", page.head);
+    assert_eq!(
+        page.status, 200,
+        "{} (transport: {})",
+        page.head, page.transport
+    );
     let page = http::get(&format!("{url}alpha.html"));
-    assert_eq!(page.status, 200, "{}", page.head);
+    assert_eq!(
+        page.status, 200,
+        "{} (transport: {})",
+        page.head, page.transport
+    );
     let body = text(&page);
     assert!(!body.contains(SECRET) && !body.contains(OTHER), "{body}");
 }
@@ -300,7 +319,11 @@ fn rdx14_stale_pages_assets_and_events_refuse_during_rebuild() {
     let url = url(&h);
     // the old build: served, cached, and holding the content
     let page = http::get(&format!("{url}alpha.html"));
-    assert_eq!(page.status, 200, "{}", page.head);
+    assert_eq!(
+        page.status, 200,
+        "{} (transport: {})",
+        page.head, page.transport
+    );
     assert!(text(&page).contains(SECRET));
     let events = http::events_url(&url, &text(&page));
     let full = http::get(&format!("{url}llms-full.txt"));
@@ -308,7 +331,12 @@ fn rdx14_stale_pages_assets_and_events_refuse_during_rebuild() {
         text(&full).contains(SECRET),
         "llms-full.txt holds the content"
     );
-    assert_eq!(http::get(&format!("{url}assets/site.css")).status, 200);
+    assert_eq!(
+        http::get(&format!("{url}assets/site.css")).status,
+        200,
+        "transport: {}",
+        rdy_qa::http::last_transport()
+    );
 
     // the removal is authorized and erased; the writer has not published its state yet
     let p = request(&sh, &ids.secret, "redact");
@@ -346,15 +374,28 @@ fn rdx14_stale_pages_assets_and_events_refuse_during_rebuild() {
     go_tx.send(()).unwrap();
     writer.join().unwrap();
     let page = http::get(&format!("{url}alpha.html"));
-    assert_eq!(page.status, 200, "{}", page.head);
+    assert_eq!(
+        page.status, 200,
+        "{} (transport: {})",
+        page.head, page.transport
+    );
     assert!(!text(&page).contains(SECRET) && text(&page).contains(STUB));
     let full = http::get(&format!("{url}llms-full.txt"));
-    assert_eq!(full.status, 200, "{}", full.head);
+    assert_eq!(
+        full.status, 200,
+        "{} (transport: {})",
+        full.head, full.transport
+    );
     assert!(
         !text(&full).contains(SECRET),
         "llms-full.txt holds no removed content"
     );
-    assert_eq!(http::get(&format!("{url}assets/site.css")).status, 200);
+    assert_eq!(
+        http::get(&format!("{url}assets/site.css")).status,
+        200,
+        "transport: {}",
+        rdy_qa::http::last_transport()
+    );
     drop(Sse::open(&http::events_url(&url, &text(&page))));
 }
 
@@ -388,7 +429,11 @@ fn rdx14_sse_refresh_has_no_removed_content() {
     // then current content only
     for path in ["alpha.html", "beta.html", "llms-full.txt", "index.html"] {
         let r = http::get(&format!("{url}{path}"));
-        assert_eq!(r.status, 200, "{path}: {}", r.head);
+        assert_eq!(
+            r.status, 200,
+            "{path}: {} (transport: {})",
+            r.head, r.transport
+        );
         assert!(!text(&r).contains(SECRET), "{path}");
     }
     assert!(text(&http::get(&format!("{url}alpha.html"))).contains(STUB));
@@ -431,10 +476,18 @@ fn rdx14_a_prior_response_does_not_delay_erasure() {
     );
     assert_busy(&first, "the request whose build predates the removal");
     let second = second.join().unwrap();
-    assert_eq!(second.status, 200, "{}", second.head);
+    assert_eq!(
+        second.status, 200,
+        "{} (transport: {})",
+        second.head, second.transport
+    );
     assert!(!text(&second).contains(SECRET) && text(&second).contains(STUB));
     let again = http::get(&tag);
-    assert_eq!(again.status, 200, "{}", again.head);
+    assert_eq!(
+        again.status, 200,
+        "{} (transport: {})",
+        again.head, again.transport
+    );
     assert!(!text(&again).contains(SECRET));
     drop(stream);
 }
@@ -592,7 +645,11 @@ fn rdx14_a_queued_event_waits_for_the_fresh_state() {
     );
     // the page the reload loads is the fresh one
     let page = http::get(&format!("{url}alpha.html"));
-    assert_eq!(page.status, 200, "{}", page.head);
+    assert_eq!(
+        page.status, 200,
+        "{} (transport: {})",
+        page.head, page.transport
+    );
     assert!(!text(&page).contains(SECRET) && text(&page).contains(STUB));
     let _ = stop_b.send(true);
 }

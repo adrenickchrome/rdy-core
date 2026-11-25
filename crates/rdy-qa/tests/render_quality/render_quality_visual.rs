@@ -11,8 +11,13 @@ use rdy_qa::golden;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+/// The fixed directory, or `RDY_QA_REVIEW_SET_DIR`: runs at once (a load proof) each write
+/// their own, as they would otherwise remove and fill one directory together.
 fn out_root() -> PathBuf {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/qa/site")).to_path_buf()
+    match std::env::var_os("RDY_QA_REVIEW_SET_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/qa/site")).to_path_buf(),
+    }
 }
 
 /// Replaces `dst` with a copy of the directory `src`.
