@@ -55,7 +55,7 @@ PERSON = 5001       # a coordinator who is a person
 APP = 5002          # a coordinator that is an App
 ATTACKER = 6666
 LANDING = 'f' * 64
-CAND_RUN, EVID_RUN, CI_RUN, SEC_RUN, DISPATCH_RUN = 777001, 888001, 880001, 880002, 990001
+CAND_RUN, EVID_RUN, CI_RUN, SEC_RUN, GATE_RUN, DISPATCH_RUN = 777001, 888001, 880001, 880002, 880003, 990001
 CAND_ART, EVID_ART = 55, 8901
 APPROVAL_WF = '.github/workflows/release-approval.yml'
 EVIDENCE_WF = '.github/workflows/release-evidence.yml'
@@ -64,7 +64,7 @@ LINEAGE = {'table_id': '01234567-89ab-4cde-8f01-23456789abcd', 'genesis_sha256':
 SOURCE_KINDS = ('artifact', 'implementation_source', 'job', 'protected_policy', 'repository', 'request_archive',
                 'review_history', 'run_attempt', 'workflow_source')
 SECURITY = {'CodeQL (actions)': SEC_RUN, 'CodeQL (rust)': SEC_RUN, 'Core CI': CI_RUN, 'Core security': SEC_RUN,
-            'Dependency, secret and workflow policy': SEC_RUN, 'Fast gate (Linux x86-64)': CI_RUN}
+            'Dependency, secret and workflow policy': SEC_RUN, 'Release gate (x86_64-unknown-linux-gnu)': GATE_RUN}
 CHECKS = ('signature', 'checksums', 'install', 'version', 'daemon', 'mcp')
 WINDOWS = 'x86_64-pc-windows-msvc'
 PREVIEW_SOURCE = 'crates/rdy-cli/src/main.rs'
@@ -320,6 +320,7 @@ class World(object):
         # The security and CI runs on S.
         self.run(CI_RUN, 1, '.github/workflows/ci.yml', 'push', 91, branch='main')
         self.run(SEC_RUN, 1, '.github/workflows/security.yml', 'push', 92, branch='main')
+        self.run(GATE_RUN, 1, '.github/workflows/gate.yml', 'push', 93, branch='rel/' + self.v)
         security = []
         for n, name in enumerate(sorted(SECURITY)):
             security.append({'name': name, 'job': self.job(SECURITY[name], 1, 9901 + n, name)})
@@ -1003,6 +1004,13 @@ class Eligibility(Base):
              lambda w: w.runs[(SEC_RUN, 1)].update(event='pull_request')),
             ('evidence mismatch: the Core CI job is not from its workflow on main',
              lambda w: w.runs[(CI_RUN, 1)].update(path='.github/workflows/security.yml')),
+            # The hosted proof run of gate.yml (a dispatch) is never evidence, and no other workflow stands in.
+            ('evidence mismatch: the Release gate (x86_64-unknown-linux-gnu) job is not from its workflow on a push of S',
+             lambda w: w.runs[(GATE_RUN, 1)].update(event='workflow_dispatch')),
+            ('evidence mismatch: the Release gate (x86_64-unknown-linux-gnu) job is not from its workflow on main',
+             lambda w: w.runs[(GATE_RUN, 1)].update(path='.github/workflows/ci.yml')),
+            ('eligibility incomplete: the Release gate (x86_64-unknown-linux-gnu) job did not conclude success',
+             lambda w: w.find_job(9906).update(conclusion='failure')),
             ('evidence mismatch: the CodeQL (rust) job is another job',
              lambda w: w.find_job(9902).update(name='CodeQL (actions)')),
             ('eligibility incomplete: 1 open high or critical code scanning alert',

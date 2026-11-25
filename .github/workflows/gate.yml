@@ -1,0 +1,367 @@
+# The release gate: the release tier of `cargo qa` on release commit S, once per platform, three jobs at
+# once on our own three machines (GitHub self-hosted runners with the label rdy-gate). GitHub starts and
+# times every run. The candidate reads the fast-gate counts of the run that passed on a push of S to
+# rel/<V> (scripts/release/gate_budget.py gate-run), and its budget job counts every run of this workflow
+# on rel/<V>. The gate line of release/gate-budget.json (660 s) is a target, not a limit: a slow but
+# healthy run finishes, and the budget job reports it. The 20-minute job limit and the gate's own clock
+# (--budget-secs 1080, which leaves 2 minutes for the steps around it) only stop a run that hangs.
+# A failed run may retry its failed test binaries once, inside the same clock.
+#
+# Before the founder registers the runners, a manual run with `hosted: true` proves the workflow on
+# GitHub-hosted runners. That run has a longer limit, because hosted runners are slower. It is never
+# release evidence (gate-run reads push runs only), and a run on rel/<V> still counts against the budget.
+name: gate
+on:
+  push:
+    branches: ["rel/**"]
+  workflow_dispatch:
+    inputs:
+      hosted:
+        description: Prove the workflow on GitHub-hosted runners (never release evidence)
+        type: boolean
+        default: false
+permissions: {}
+concurrency:
+  group: rdy-core-gate-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  linux:
+    name: Release gate (x86_64-unknown-linux-gnu)
+    runs-on: ${{ inputs.hosted && 'ubuntu-26.04' || fromJSON('["self-hosted","rdy-gate","linux"]') }}
+    timeout-minutes: ${{ inputs.hosted && 90 || 20 }}
+    permissions:
+      contents: read
+    env:
+      GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '1080' }}
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - name: Scratch home and kept target
+        # The tests get an empty home. Cargo and rustup keep the runner account's own homes, and the
+        # target directory stays beside the work folder, so the next run builds warm.
+        env:
+          WORK_PARENT: ${{ runner.workspace }}
+        run: |
+          set -eu
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          {
+            echo "CARGO_HOME=$cargo_home"
+            echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+            echo "CARGO_TARGET_DIR=$WORK_PARENT/gate-target"
+            echo "HOME=$RUNNER_TEMP/home"
+          } >> "$GITHUB_ENV"
+          echo "$cargo_home/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/home"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - name: Test parser
+        # The release tier runs the Python CI tests on Linux; they parse YAML with PyYAML, hash-pinned
+        # and test-only, in a fresh environment first on PATH.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-tests"
+          "$RUNNER_TEMP/ci-tests/bin/python" -m pip install --require-hashes -r tests/ci/requirements-release-producers.txt
+          echo "$RUNNER_TEMP/ci-tests/bin" >> "$GITHUB_PATH"
+      - name: Locked dependencies
+        run: cargo fetch --locked
+      - name: Temp root on tmpfs
+        run: |
+          set -eu
+          dir="/dev/shm/rdy-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$dir"
+          echo "GATE_TMP=$dir" >> "$GITHUB_ENV"
+      - name: Release gate
+        id: gate
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          echo "GATE_START=$(date +%s)" >> "$GITHUB_ENV"
+          status=0
+          cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --require-all --tmp-root "$GATE_TMP" || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      - name: Retry failed binaries once
+        # Only the failed binaries, one at a time, in the time left on the clock. The gate refuses a run
+        # with more than three failed binaries or a failed build. The report keeps both results.
+        if: steps.gate.outputs.status != '0'
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          left=$(( GATE_BUDGET_SECS - ($(date +%s) - GATE_START) ))
+          if [ "$left" -le 0 ]; then echo "No time is left on the gate clock for a retry"; exit 1; fi
+          cargo qa --tier release --budget-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json
+      - name: Failing tests
+        if: always() && steps.gate.outputs.status != '0'
+        run: |
+          test -f target/qa/report.md || { echo "No qa report at target/qa/report.md"; exit 0; }
+          grep -E '^\|.*\| FAIL \|' target/qa/report.md || true
+          sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
+      - name: No tracked file changed
+        run: git diff --exit-code
+      - name: Fast gate counts
+        run: >-
+          python3 -B scripts/release/candidate.py gate-counts --report target/qa/report.json
+          --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/fast-gate.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fast-gate-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/fast-gate.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Upload the qa report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-x86_64-unknown-linux-gnu-a${{ github.run_attempt }}
+          path: target/qa/report.*
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Remove the temp root
+        if: always()
+        run: if [ -n "${GATE_TMP:-}" ]; then rm -rf "$GATE_TMP"; fi
+  macos:
+    name: Release gate (aarch64-apple-darwin)
+    runs-on: ${{ inputs.hosted && 'macos-26' || fromJSON('["self-hosted","rdy-gate","macos"]') }}
+    timeout-minutes: ${{ inputs.hosted && 90 || 20 }}
+    permissions:
+      contents: read
+    env:
+      GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '1080' }}
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - name: Scratch home and kept target
+        # The tests get an empty home. Cargo and rustup keep the runner account's own homes, and the
+        # target directory stays beside the work folder, so the next run builds warm.
+        env:
+          WORK_PARENT: ${{ runner.workspace }}
+        run: |
+          set -eu
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          {
+            echo "CARGO_HOME=$cargo_home"
+            echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+            echo "CARGO_TARGET_DIR=$WORK_PARENT/gate-target"
+            echo "HOME=$RUNNER_TEMP/home"
+          } >> "$GITHUB_ENV"
+          echo "$cargo_home/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/home"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Locked dependencies
+        run: cargo fetch --locked
+      - name: Temp root on an APFS RAM disk
+        # APFS, never HFS+: on HFS+ the hole-punch tests fail and the umask test stalls.
+        run: |
+          set -eu
+          dev=$(hdiutil attach -nomount ram://16777216 | awk '{print $1}')
+          echo "GATE_RAMDISK=$dev" >> "$GITHUB_ENV"
+          name="rdygate$GITHUB_RUN_ID"
+          diskutil erasevolume APFS "$name" "$dev" > /dev/null
+          echo "GATE_TMP=/Volumes/$name" >> "$GITHUB_ENV"
+      - name: Release gate
+        id: gate
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          echo "GATE_START=$(date +%s)" >> "$GITHUB_ENV"
+          status=0
+          cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --require-all --tmp-root "$GATE_TMP" || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      - name: Retry failed binaries once
+        # Only the failed binaries, one at a time, in the time left on the clock. The gate refuses a run
+        # with more than three failed binaries or a failed build. The report keeps both results.
+        if: steps.gate.outputs.status != '0'
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          left=$(( GATE_BUDGET_SECS - ($(date +%s) - GATE_START) ))
+          if [ "$left" -le 0 ]; then echo "No time is left on the gate clock for a retry"; exit 1; fi
+          cargo qa --tier release --budget-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json
+      - name: Failing tests
+        if: always() && steps.gate.outputs.status != '0'
+        run: |
+          test -f target/qa/report.md || { echo "No qa report at target/qa/report.md"; exit 0; }
+          grep -E '^\|.*\| FAIL \|' target/qa/report.md || true
+          sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
+      - name: No tracked file changed
+        run: git diff --exit-code
+      - name: Fast gate counts
+        run: >-
+          python3 -B scripts/release/candidate.py gate-counts --report target/qa/report.json
+          --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/fast-gate.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fast-gate-aarch64-apple-darwin
+          path: ${{ runner.temp }}/fast-gate.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Upload the qa report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-aarch64-apple-darwin-a${{ github.run_attempt }}
+          path: target/qa/report.*
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Remove the RAM disk
+        if: always()
+        run: if [ -n "${GATE_RAMDISK:-}" ]; then hdiutil detach "$GATE_RAMDISK" -force; fi
+  windows:
+    name: Release gate (x86_64-pc-windows-msvc)
+    runs-on: ${{ inputs.hosted && 'windows-2025' || fromJSON('["self-hosted","rdy-gate","windows"]') }}
+    timeout-minutes: ${{ inputs.hosted && 90 || 20 }}
+    permissions:
+      contents: read
+    env:
+      GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '1080' }}
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Not an administrator
+        # Our machine's runner account is a standard account. The hosted runner is elevated, so the
+        # hosted proof runs the gate under a temporary standard account instead (windows_gate.ps1).
+        if: ${{ !inputs.hosted }}
+        shell: pwsh
+        run: |
+          $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+              Write-Output 'The release gate must not run as an administrator'
+              exit 1
+          }
+      - name: Scratch home and kept target
+        # The tests get an empty HOME. Cargo and rustup keep the runner account's own homes, and the
+        # target directory stays beside the work folder, so the next run builds warm.
+        if: ${{ !inputs.hosted }}
+        shell: pwsh
+        env:
+          WORK_PARENT: ${{ runner.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+          $home_ = Join-Path $env:RUNNER_TEMP 'home'
+          New-Item -ItemType Directory -Force -Path $home_ | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$cargoHome"
+          Add-Content -Path $env:GITHUB_ENV -Value "RUSTUP_HOME=$rustupHome"
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$(Join-Path $env:WORK_PARENT 'gate-target')"
+          Add-Content -Path $env:GITHUB_ENV -Value "HOME=$home_"
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $cargoHome 'bin')
+      - name: No line-ending conversion
+        # A checkout with CRLF applied fails tests that compare bytes. This writes the scratch HOME's config.
+        if: ${{ !inputs.hosted }}
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Locked dependencies
+        if: ${{ !inputs.hosted }}
+        shell: pwsh
+        run: cargo fetch --locked
+      - name: Temp root
+        if: ${{ !inputs.hosted }}
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'gate-tmp'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "GATE_TMP=$dir"
+      - name: Release gate (Windows tier)
+        if: ${{ !inputs.hosted }}
+        id: gate
+        shell: pwsh
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value "GATE_START=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+          cargo qa --tier release --platform-tier windows --budget-secs $env:GATE_BUDGET_SECS --require-all --tmp-root $env:GATE_TMP
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "status=$LASTEXITCODE"
+          Add-Content -Path $env:GITHUB_ENV -Value "GATE_REPORT=target\qa\report.json"
+          exit 0
+      - name: Retry failed binaries once
+        # Only the failed binaries, one at a time, in the time left on the clock. The gate refuses a run
+        # with more than three failed binaries or a failed build. The report keeps both results.
+        if: ${{ !inputs.hosted && steps.gate.outputs.status != '0' }}
+        shell: pwsh
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          $left = [int]$env:GATE_BUDGET_SECS - ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$env:GATE_START)
+          if ($left -le 0) { Write-Output 'No time is left on the gate clock for a retry'; exit 1 }
+          cargo qa --tier release --platform-tier windows --budget-secs $left --require-all --tmp-root $env:GATE_TMP --retry-failed target\qa\report.json
+          exit $LASTEXITCODE
+      - name: Hosted proof under a standard account (Windows tier)
+        # The hosted runner only: a temporary standard account, a private checkout and
+        # `cargo qa --tier release --platform-tier windows --budget-secs <n> --require-all`
+        # (scripts/ci/windows_gate_inner.ps1). The script exits with the gate's own status.
+        if: ${{ inputs.hosted }}
+        id: hosted
+        shell: pwsh
+        env:
+          RDY_QA_HOSTED_CI: "1"
+          RDY_GATE_MODE: release
+          RDY_GATE_BUDGET_SECS: ${{ env.GATE_BUDGET_SECS }}
+        run: |
+          ./scripts/ci/windows_gate.ps1
+          $status = $LASTEXITCODE
+          Add-Content -Path $env:GITHUB_ENV -Value "GATE_REPORT=$env:RDY_CI_ROOT\work\target\qa\report.json"
+          exit $status
+      - name: Failing tests
+        if: always() && (steps.gate.outputs.status != '0' || steps.hosted.outcome == 'failure')
+        shell: pwsh
+        run: |
+          if (-not $env:GATE_REPORT) { Write-Output 'No qa report'; exit 0 }
+          ./scripts/ci/windows_report.ps1 -Report ($env:GATE_REPORT -replace '\.json$', '.md')
+      - name: Fast gate counts
+        shell: pwsh
+        run: >-
+          python -B scripts/release/candidate.py gate-counts --report $env:GATE_REPORT
+          --commit $env:GITHUB_SHA --out "$env:RUNNER_TEMP\fast-gate.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fast-gate-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/fast-gate.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Upload the qa report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-x86_64-pc-windows-msvc-a${{ github.run_attempt }}
+          path: |
+            target/qa/report.*
+            ${{ env.RDY_CI_ROOT }}/work/target/qa/report.*
+            ${{ env.RDY_CI_ROOT }}/logs/gate.*
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Remove the temporary account
+        if: always() && inputs.hosted
+        shell: pwsh
+        run: ./scripts/ci/windows_gate_cleanup.ps1
+      - name: Remove the temp root
+        if: always() && !inputs.hosted
+        shell: pwsh
+        run: if ($env:GATE_TMP) { Remove-Item -LiteralPath $env:GATE_TMP -Recurse -Force -ErrorAction SilentlyContinue }
