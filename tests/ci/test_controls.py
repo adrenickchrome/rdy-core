@@ -957,8 +957,8 @@ exit 0
 
 
 def reports_step():
-    """The coverage job's Reports step, parsed from ci.yml."""
-    return step_named(workflow('ci.yml'), 'Reports')
+    """The coverage job's Reports step, parsed from nightly.yml."""
+    return step_named(workflow('nightly.yml'), 'Reports')
 
 
 def reports_commands():
@@ -1312,7 +1312,7 @@ class ReportsStepPolicy(unittest.TestCase):
         self.assertEqual(precheck, 'python3 scripts/ci/set_aside_profiles.py')
 
     def test_reports_are_uploaded_even_when_the_job_failed(self):
-        doc = workflow('ci.yml')
+        doc = workflow('nightly.yml')
         steps = steps_of(doc, 'coverage')
         upload = steps[steps.index(reports_step()) + 1]
         self.assertTrue(upload['uses'].startswith('actions/upload-artifact@'))
@@ -1324,7 +1324,7 @@ class ReportsStepPolicy(unittest.TestCase):
 @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0,
                  'root reads any file; the owner-read fix is for a standard account')
 class ReportsStepStandardAccount(unittest.TestCase):
-    """The real Reports step, from ci.yml, run in a bash under the current standard account.
+    """The real Reports step, from nightly.yml, run in a bash under the current standard account.
 
     Only llvm-profdata, rustc and cargo are stand-ins. Everything else runs for real: bash, find,
     chmod, python3 and scripts/ci/set_aside_profiles.py, on files with real modes.
@@ -1667,7 +1667,7 @@ class GateWorkflowPolicy(unittest.TestCase):
         for word in ('secrets.', 'id-token', 'github.token', 'pull_request'):
             self.assertNotIn(word, text)
         labels = yaml.safe_load((ROOT / 'scripts/ci/actionlint.yaml').read_text())['self-hosted-runner']['labels']
-        self.assertEqual(labels, ['ubuntu-26.04', 'rdy-gate'])
+        self.assertEqual(labels, ['ubuntu-26.04', 'rdy-gate', 'rdy-bench'])
 
     def test_hosted_proof_runs_are_never_release_evidence(self):
         spec = importlib.util.spec_from_file_location('gate_budget', ROOT / 'scripts/release/gate_budget.py')
@@ -1768,54 +1768,151 @@ def workflow_on(name):
     return doc, triggers(doc)
 
 
-def coverage_if(event_name, action=None, labels=(), label=None):
-    """Evaluate the coverage job's `if:` for one event, by translating its few operators to Python."""
-    doc, _ = workflow_on('ci.yml')
-    expr = ' '.join(str(doc['jobs']['coverage']['if']).split())
-    expr = expr.replace("contains(github.event.pull_request.labels.*.name, 'coverage')", "('coverage' in labels)")
-    expr = expr.replace('github.event_name', 'event_name').replace('github.event.action', 'action')
-    expr = expr.replace('github.event.label.name', 'label').replace('&&', ' and ').replace('||', ' or ')
-    assert not re.search(r'github\.|contains\(', expr), expr
-    return eval(expr, {}, dict(event_name=event_name, action=action, labels=list(labels), label=label))
-
-
 class CiSplit(unittest.TestCase):
-    def test_coverage_not_on_plain_pr(self):
-        self.assertFalse(coverage_if('pull_request', 'opened'))
-        self.assertFalse(coverage_if('pull_request', 'synchronize', labels=['other']))
-        self.assertFalse(coverage_if('pull_request', 'labeled', labels=['other'], label='other'))
-        self.assertTrue(coverage_if('pull_request', 'synchronize', labels=['coverage']))
-        self.assertTrue(coverage_if('pull_request', 'labeled', labels=['coverage'], label='coverage'))
-        self.assertFalse(coverage_if('pull_request', 'labeled', labels=['coverage', 'other'], label='other'))
-        for event in ('push', 'schedule', 'workflow_dispatch'):
-            self.assertTrue(coverage_if(event))
+    """ci.yml holds the cheap checks of a PR and of main; what runs at night is in nightly.yml."""
 
-    def test_coverage_runs_nightly_at_0300_utc(self):
+    def test_ci_runs_on_prs_and_main_only(self):
         doc, on = workflow_on('ci.yml')
-        self.assertEqual(on['schedule'], [{'cron': '0 3 * * *'}])
+        self.assertEqual(sorted(on), ['pull_request', 'push', 'workflow_dispatch'])
         self.assertEqual(on['push']['branches'], ['main'])
-        self.assertIn('labeled', on['pull_request']['types'])
+        self.assertEqual(on['pull_request'], {'branches': ['main']})
+        self.assertEqual(doc['concurrency']['group'], 'ci-${{ github.event.pull_request.number || github.ref }}')
 
-    def test_nightly_failure_opens_an_issue_with_the_job_token_only(self):
+    def test_ci_keeps_the_fast_gate_and_its_result_and_has_no_coverage(self):
+        # The release evidence still reads the ci.yml fast gate at S (`Fast gate (Linux x86-64)` and
+        # `Core CI`), so the fast job stays until the evidence reads gate.yml.
         doc, _ = workflow_on('ci.yml')
-        job = doc['jobs']['coverage']
-        self.assertIs(job['continue-on-error'], True)
-        self.assertEqual(job['permissions'], {'contents': 'read', 'issues': 'write'})
-        step = job['steps'][-1]
-        self.assertEqual(step['if'], "failure() && github.event_name == 'schedule'")
-        self.assertEqual(step['env']['GH_TOKEN'], '${{ github.token }}')
-        self.assertIn('nightly coverage failed $SHA', step['run'])
-        self.assertNotIn('secrets.', (ROOT / '.github/workflows/ci.yml').read_text())
-        for name, other in doc['jobs'].items():
-            if name != 'coverage':
-                self.assertNotIn('issues', other.get('permissions') or {}, name)
+        self.assertNotIn('coverage', doc['jobs'])
+        for name in ('fast', 'policy-tests', 'required'):
+            self.assertIn(name, doc['jobs'])
+        self.assertEqual(doc['jobs']['fast']['name'], 'Fast gate (Linux x86-64)')
+        self.assertEqual(doc['jobs']['required']['name'], 'Core CI')
+        self.assertEqual(doc['jobs']['required']['if'], 'always()')
+        text = (WORKFLOWS / 'ci.yml').read_text()
+        for word in ('schedule', 'labeled', 'issues: write'):
+            self.assertNotIn(word, text)
         self.assertEqual(doc['permissions'], {})
 
-    def test_label_and_nightly_events_skip_the_pr_jobs(self):
-        doc, _ = workflow_on('ci.yml')
-        for name in ('fast', 'policy-tests', 'required'):
-            self.assertIn("github.event_name != 'schedule'", doc['jobs'][name]['if'], name)
-            self.assertIn("github.event.action != 'labeled'", doc['jobs'][name]['if'], name)
+
+NIGHTLY_JOBS = {
+    'own': (120, None),
+    'own-windows': (240, ['self-hosted', 'rdy-gate', 'windows']),
+    'hosted-macos': (180, 'macos-26'),
+    'hosted-windows': (300, 'windows-2025'),
+    'bench': (240, ['self-hosted', 'rdy-bench']),
+    'coverage': (180, 'ubuntu-24.04'),
+    'report': (5, 'ubuntu-24.04'),
+}
+
+
+class NightlyPolicy(unittest.TestCase):
+    """The nightly run: what no release reads, once a day on main, with one issue for a red night."""
+
+    def setUp(self):
+        self.doc, self.on = workflow_on('nightly.yml')
+        self.text = (WORKFLOWS / 'nightly.yml').read_text()
+
+    def test_triggers_and_concurrency(self):
+        self.assertEqual(self.on, {'schedule': [{'cron': '0 3 * * *'}], 'workflow_dispatch': None})
+        self.assertEqual(self.doc['concurrency'], {'group': 'rdy-core-nightly', 'cancel-in-progress': True})
+        self.assertEqual(self.doc['permissions'], {})
+
+    def test_jobs_runners_and_limits(self):
+        jobs = self.doc['jobs']
+        self.assertEqual(sorted(jobs), sorted(NIGHTLY_JOBS))
+        for name, (minutes, runs_on) in NIGHTLY_JOBS.items():
+            self.assertEqual(jobs[name]['timeout-minutes'], minutes, name)
+            if runs_on is not None:
+                self.assertEqual(jobs[name]['runs-on'], runs_on, name)
+        own = jobs['own']
+        self.assertEqual(own['runs-on'], ['self-hosted', 'rdy-gate', '${{ matrix.os }}'])
+        self.assertEqual(own['strategy'], {'fail-fast': False, 'matrix': {'os': ['linux', 'macos']}})
+
+    def test_only_the_report_job_writes_and_no_job_holds_a_secret(self):
+        for name, job in self.doc['jobs'].items():
+            expected = {'issues': 'write'} if name == 'report' else {'contents': 'read'}
+            self.assertEqual(job['permissions'], expected, name)
+            self.assertNotIn('environment', job, name)
+        for word in ('secrets.', 'id-token', 'vars.'):
+            self.assertNotIn(word, self.text)
+
+    def test_whole_suite_lines(self):
+        lines = [line.strip() for line in self.text.splitlines() if 'cargo qa' in line]
+        suite = 'run: cargo qa --tier nightly --skip-perf --require-all'
+        self.assertEqual(lines, [suite, suite, suite, 'run: cargo qa --deep --require-all'])
+        # The nightly run meets the real disk: no RAM disk and no budget.
+        code = '\n'.join(line for line in self.text.splitlines() if not line.lstrip().startswith('#'))
+        for word in ('--tmp-root', '--budget-secs', '/dev/shm', 'hdiutil', 'RDY_GATE_BUDGET_SECS'):
+            self.assertNotIn(word, code)
+        hosted = step_named({'jobs': {'w': self.doc['jobs']['hosted-windows']}},
+                            'Whole suite under a standard account')
+        self.assertEqual(hosted['run'], './scripts/ci/windows_gate.ps1')
+        self.assertEqual(hosted['env'], {'RDY_QA_HOSTED_CI': '1', 'RDY_GATE_MODE': 'nightly'})
+        cleanup = self.doc['jobs']['hosted-windows']['steps'][-1]
+        self.assertEqual((cleanup['if'], cleanup['run']), ('always()', './scripts/ci/windows_gate_cleanup.ps1'))
+
+    def test_own_machines_keep_their_own_target_and_a_scratch_home(self):
+        for name in ('own', 'own-windows'):
+            text = json.dumps(self.doc['jobs'][name])
+            self.assertIn('nightly-target', text, name)
+            self.assertNotIn('gate-target', text, name)
+            self.assertIn('home', text, name)
+
+    def test_every_suite_job_uploads_its_report_under_one_prefix(self):
+        for name, job in self.doc['jobs'].items():
+            if name in ('coverage', 'report'):
+                continue
+            uploads = [s for s in job['steps'] if str(s.get('uses', '')).startswith('actions/upload-artifact@')]
+            self.assertEqual(len(uploads), 1, name)
+            self.assertEqual(uploads[0]['if'], 'always()', name)
+            self.assertTrue(uploads[0]['with']['name'].startswith('qa-report-nightly-'), name)
+
+    def test_one_report_job_opens_one_issue_for_a_red_night(self):
+        report = self.doc['jobs']['report']
+        self.assertEqual(report['needs'], sorted(set(NIGHTLY_JOBS) - {'report'}, key=list(NIGHTLY_JOBS).index))
+        self.assertEqual(report['if'], 'always()')
+        download, issue = report['steps']
+        self.assertEqual(download['with']['pattern'], 'qa-report-nightly-*')
+        self.assertEqual(issue['env']['GH_TOKEN'], '${{ github.token }}')
+        self.assertEqual(issue['env']['RESULTS'], '${{ toJSON(needs) }}')
+        self.assertIn("'gh', 'issue', 'create'", issue['run'])
+        self.assertEqual(self.text.count('gh issue create') + self.text.count("'gh', 'issue', 'create'"), 1)
+
+    def test_coverage_moved_whole_from_ci(self):
+        job = self.doc['jobs']['coverage']
+        self.assertNotIn('if', job)
+        names = [s.get('name') for s in job['steps']]
+        self.assertIn('Reports', names)
+        self.assertIn('Pinned coverage tool', names)
+        self.assertNotIn('Open an issue for a failed nightly run', names)
+
+    def test_report_script_lists_failed_jobs_and_fail_rows(self):
+        issue = self.doc['jobs']['report']['steps'][1]
+        script = issue['run'].split("<<'PY'\n", 1)[1].rsplit('PY', 1)[0]
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        (root / 'reports/qa-report-nightly-bench').mkdir(parents=True)
+        (root / 'reports/qa-report-nightly-bench/report.md').write_text(
+            '| a | PASS |\n| perf_x | REGRESSED |\n| b | FAIL |\n')
+        bin_ = root / 'bin'
+        bin_.mkdir()
+        (bin_ / 'gh').write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$GH_ARGS"\n')
+        (bin_ / 'gh').chmod(0o755)
+        results = {'own': {'result': 'success'}, 'bench': {'result': 'failure'}, 'coverage': {'result': 'skipped'}}
+        env = dict(os.environ, RUNNER_TEMP=str(root), RESULTS=json.dumps(results), SHA='a' * 40,
+                   RUN_URL='https://example.invalid/run', GITHUB_REPOSITORY='o/r', GH_ARGS=str(root / 'args'),
+                   PATH=f'{bin_}{os.pathsep}{os.environ["PATH"]}')
+        subprocess.run([sys.executable, '-c', script], env=env, check=True, capture_output=True)
+        args = (root / 'args').read_text()
+        self.assertIn('nightly failed aaaaaaaaaaaa: bench', args)
+        self.assertIn('| perf_x | REGRESSED |', args)
+        self.assertIn('| b | FAIL |', args)
+        self.assertNotIn('| a | PASS |', args)
+        (root / 'args').unlink()
+        env['RESULTS'] = json.dumps({'own': {'result': 'success'}})
+        subprocess.run([sys.executable, '-c', script], env=env, check=True, capture_output=True)
+        self.assertFalse((root / 'args').exists())
 
 
 if __name__ == '__main__':

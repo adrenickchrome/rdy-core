@@ -1,0 +1,386 @@
+# The nightly run, 03:00 UTC on main: what no release reads. The whole suite (`--tier nightly`) on our
+# three machines with no --tmp-root, so every test meets the real disk once a day; the whole suite on
+# GitHub's hosted macOS and Windows Server images (the old platforms run); the deep gate with perf and
+# the memory soak on the bench; and coverage. Each job may fail alone. The last job opens one issue that
+# lists the failed jobs and their failing tests. Nothing here is a required check, and no release step
+# reads it. A red night is a task for the orchestrator that day, not a wait.
+name: nightly
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: rdy-core-nightly
+  cancel-in-progress: true
+jobs:
+  own:
+    name: Whole suite on our machine (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, macos]
+    runs-on: [self-hosted, rdy-gate, "${{ matrix.os }}"]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - name: Scratch home and kept target
+        # The tests get an empty home; Cargo and rustup keep the runner account's own homes. The nightly
+        # target is its own: the nightly features would make the gate's warm target build again.
+        env:
+          WORK_PARENT: ${{ runner.workspace }}
+        run: |
+          set -eu
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          {
+            echo "CARGO_HOME=$cargo_home"
+            echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+            echo "CARGO_TARGET_DIR=$WORK_PARENT/nightly-target"
+            echo "HOME=$RUNNER_TEMP/home"
+          } >> "$GITHUB_ENV"
+          echo "$cargo_home/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/home"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - name: Test parser
+        # The Python CI tests parse YAML with PyYAML, hash-pinned and test-only, in a fresh environment.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-tests"
+          "$RUNNER_TEMP/ci-tests/bin/python" -m pip install --require-hashes -r tests/ci/requirements-release-producers.txt
+          echo "$RUNNER_TEMP/ci-tests/bin" >> "$GITHUB_PATH"
+      - name: Locked dependencies
+        run: cargo fetch --locked
+      - name: Whole suite on the real disk
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo qa --tier nightly --skip-perf --require-all
+      - name: Failing tests
+        if: failure()
+        run: |
+          test -f target/qa/report.md || { echo "No qa report at target/qa/report.md"; exit 0; }
+          grep -E '^\|.*\| FAIL \|' target/qa/report.md || true
+          sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
+      - name: Upload the qa report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-nightly-own-${{ matrix.os }}
+          path: target/qa/report.*
+          if-no-files-found: warn
+          retention-days: 14
+  own-windows:
+    name: Whole suite on our machine (windows)
+    runs-on: [self-hosted, rdy-gate, windows]
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Not an administrator
+        shell: pwsh
+        run: |
+          $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+              Write-Output 'The nightly run must not run as an administrator'
+              exit 1
+          }
+      - name: Scratch home and kept target
+        # The tests get an empty HOME; Cargo and rustup keep the runner account's own homes. TEMP stays the
+        # runner's own, so Defender scans every test file, as a user's machine would.
+        shell: pwsh
+        env:
+          WORK_PARENT: ${{ runner.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+          $home_ = Join-Path $env:RUNNER_TEMP 'home'
+          New-Item -ItemType Directory -Force -Path $home_ | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$cargoHome"
+          Add-Content -Path $env:GITHUB_ENV -Value "RUSTUP_HOME=$rustupHome"
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$(Join-Path $env:WORK_PARENT 'nightly-target')"
+          Add-Content -Path $env:GITHUB_ENV -Value "HOME=$home_"
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $cargoHome 'bin')
+      - name: No line-ending conversion
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - name: Locked dependencies
+        shell: pwsh
+        run: cargo fetch --locked
+      - name: Whole suite on the real disk
+        shell: pwsh
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo qa --tier nightly --skip-perf --require-all
+      - name: Failing tests
+        if: failure()
+        shell: pwsh
+        run: ./scripts/ci/windows_report.ps1 -Report target\qa\report.md
+      - name: Upload the qa report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-nightly-own-windows
+          path: target/qa/report.*
+          if-no-files-found: warn
+          retention-days: 14
+  hosted-macos:
+    # GitHub's macOS image is another OS build than our Mac; an image difference shows here.
+    name: Whole suite on hosted macOS ARM64
+    runs-on: macos-26
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - name: Test parser
+        # Hosted macOS images no longer ship PyYAML. Hash-pinned and test-only, in a fresh environment.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-tests"
+          "$RUNNER_TEMP/ci-tests/bin/python" -m pip install --require-hashes -r tests/ci/requirements-release-producers.txt
+          echo "$RUNNER_TEMP/ci-tests/bin" >> "$GITHUB_PATH"
+      - name: Locked dependencies
+        run: cargo fetch --locked
+      - name: Whole suite
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo qa --tier nightly --skip-perf --require-all
+      - name: Failing tests
+        if: failure()
+        run: |
+          test -f target/qa/report.md || { echo "No qa report at target/qa/report.md"; exit 0; }
+          grep -E '^\|.*\| FAIL \|' target/qa/report.md || true
+          sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
+      - name: Upload the qa report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-nightly-hosted-macos
+          path: target/qa/report.*
+          if-no-files-found: warn
+          retention-days: 14
+  hosted-windows:
+    # Windows Server 2025 is another OS build than our Windows 11 machine. The hosted runner is elevated,
+    # so the suite runs under a temporary standard account (scripts/ci/windows_gate.ps1, mode nightly).
+    name: Whole suite on hosted Windows Server 2025
+    runs-on: windows-2025
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Whole suite under a standard account
+        shell: pwsh
+        env:
+          RDY_QA_HOSTED_CI: "1"
+          RDY_GATE_MODE: nightly
+        run: ./scripts/ci/windows_gate.ps1
+      - name: Qa report, failing tests and counts
+        if: always()
+        shell: pwsh
+        run: ./scripts/ci/windows_report.ps1 -Report "$env:RDY_CI_ROOT\work\target\qa\report.md"
+      - name: Upload the qa report and gate logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-nightly-hosted-windows
+          path: |
+            ${{ env.RDY_CI_ROOT }}/work/target/qa/report.*
+            ${{ env.RDY_CI_ROOT }}/logs/gate.*
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove the temporary account
+        if: always()
+        shell: pwsh
+        run: ./scripts/ci/windows_gate_cleanup.ps1
+  bench:
+    # The deep gate on the bench: --deep with the perf tier and the memory soak, against main.
+    name: Deep gate, perf and soak on the bench
+    runs-on: [self-hosted, rdy-bench]
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - name: Locked dependencies
+        run: cargo fetch --locked
+      - name: Deep gate with perf
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo qa --deep --require-all
+      - name: Failing tests
+        if: failure()
+        run: |
+          test -f target/qa/report.md || { echo "No qa report at target/qa/report.md"; exit 0; }
+          grep -E '^\|.*\| (FAIL|REGRESSED) \|' target/qa/report.md || true
+          sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
+      - name: Upload the qa report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-nightly-bench
+          path: target/qa/report.*
+          if-no-files-found: warn
+          retention-days: 14
+  coverage:
+    # Line and branch coverage of the workspace test suite (cargo-llvm-cov). Reported only. The summary goes
+    # to the run page; the HTML report is an artifact.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      # The instrumented build and its raw profiles fill the runner's disk: no debug info (coverage maps
+      # do not need it), and the preinstalled toolchains we never use are removed first.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component llvm-tools-preview
+      - name: Pinned coverage tool
+        # The archive digest is checked before the tool runs (scripts/ci/tools.json).
+        run: |
+          python3 scripts/ci/install_tools.py --out "$RUNNER_TEMP/coverage-tools" cargo-llvm-cov
+          echo "$RUNNER_TEMP/coverage-tools" >> "$GITHUB_PATH"
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - name: Locked dependencies
+        run: cargo fetch --locked
+      - name: Tests with coverage
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          cargo llvm-cov --locked --workspace --no-fail-fast --no-report
+          df -h /
+      - name: Reports
+        if: always()
+        run: |
+          set -euo pipefail
+          # The config_edit test hsa2_new_directories_are_0700_or_not_made_at_all runs its own
+          # instrumented binary under umasks 477 and 700 on purpose. The profile runtime makes each
+          # .profraw 0666 less the umask, so those profiles are whole but 0200 or 0066, and
+          # llvm-profdata crashes (SIGILL) on a file it cannot open. Give the owner read back: the
+          # data is kept, and any other merge error still fails this step.
+          find target/llvm-cov-target -name '*.profraw' ! -perm -u=r -print -exec chmod u+r {} +
+          python3 scripts/ci/set_aside_profiles.py
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          cargo llvm-cov report --html --output-dir coverage-html
+          cargo llvm-cov report --json --summary-only --output-path coverage-summary.json
+          { echo '## Coverage'; echo '```'; cat coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage
+          path: |
+            coverage-html
+            coverage-summary.txt
+            coverage-summary.json
+          retention-days: 7
+  report:
+    # One issue for the night: the failed jobs and the failing rows of their qa reports. The workflow's own
+    # token, and this job only holds issues: write.
+    name: Nightly report
+    needs: [own, own-windows, hosted-macos, hosted-windows, bench, coverage]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Qa reports of the night
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          pattern: qa-report-nightly-*
+          path: ${{ runner.temp }}/reports
+      - name: One issue for the failed jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: ${{ toJSON(needs) }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          results = json.loads(os.environ['RESULTS'])
+          failed = sorted(name for name, value in results.items() if value['result'] in ('failure', 'cancelled'))
+          if not failed:
+              print('Every nightly job passed.')
+              raise SystemExit(0)
+          lines = ['The nightly run on ' + os.environ['SHA'] + ' failed: ' + ', '.join(failed) + '.',
+                   'Run: ' + os.environ['RUN_URL'], '']
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'reports'
+          for report in sorted(root.glob('*/report.md')) if root.is_dir() else []:
+              rows = [line for line in report.read_text(errors='replace').splitlines()
+                      if re.match(r'^\|.*\| (FAIL|REGRESSED) \|', line)]
+              if rows:
+                  lines += ['## ' + report.parent.name, ''] + rows[:40] + ['']
+          body = '\n'.join(lines)[:60000]
+          title = 'nightly failed ' + os.environ['SHA'][:12] + ': ' + ', '.join(failed)
+          subprocess.run(['gh', 'issue', 'create', '--repo', os.environ['GITHUB_REPOSITORY'], '--title', title,
+                          '--body', body], check=True)
+          PY
