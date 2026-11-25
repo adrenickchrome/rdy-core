@@ -1778,20 +1778,35 @@ class CiSplit(unittest.TestCase):
         self.assertEqual(on['pull_request'], {'branches': ['main']})
         self.assertEqual(doc['concurrency']['group'], 'ci-${{ github.event.pull_request.number || github.ref }}')
 
-    def test_ci_keeps_the_fast_gate_and_its_result_and_has_no_coverage(self):
-        # The release evidence still reads the ci.yml fast gate at S (`Fast gate (Linux x86-64)` and
-        # `Core CI`), so the fast job stays until the evidence reads gate.yml.
+    def test_ci_runs_the_control_tests_and_core_ci_only(self):
+        # The test suite runs in gate.yml and nightly.yml. The release evidence reads `Core CI` here and the
+        # release gate's Linux job in gate.yml (scripts/release/evidence.py SECURITY_JOBS).
         doc, _ = workflow_on('ci.yml')
-        self.assertNotIn('coverage', doc['jobs'])
-        for name in ('fast', 'policy-tests', 'required'):
-            self.assertIn(name, doc['jobs'])
-        self.assertEqual(doc['jobs']['fast']['name'], 'Fast gate (Linux x86-64)')
-        self.assertEqual(doc['jobs']['required']['name'], 'Core CI')
-        self.assertEqual(doc['jobs']['required']['if'], 'always()')
+        self.assertEqual(sorted(doc['jobs']), ['policy-tests', 'required'])
+        required = doc['jobs']['required']
+        self.assertEqual((required['name'], required['if'], required['needs']), ('Core CI', 'always()', ['policy-tests']))
+        self.assertIn("assert set(results) == {'policy-tests'}", required['steps'][0]['run'])
         text = (WORKFLOWS / 'ci.yml').read_text()
-        for word in ('schedule', 'labeled', 'issues: write'):
+        for word in ('schedule', 'labeled', 'issues: write', 'cargo qa'):
             self.assertNotIn(word, text)
         self.assertEqual(doc['permissions'], {})
+
+    def test_the_evidence_reads_the_gate_linux_job_by_its_name(self):
+        spec = importlib.util.spec_from_file_location('eligibility', ROOT / 'scripts/release/eligibility.py')
+        sys.path.insert(0, str(ROOT / 'scripts/release'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'scripts/release'))
+        elig = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(elig)
+        gate = workflow('gate.yml')['jobs']['linux']['name']
+        self.assertEqual(elig.SECURITY_WORKFLOWS[gate], '.github/workflows/gate.yml')
+        self.assertEqual(elig.security_events('.github/workflows/gate.yml'), ('push',))
+        self.assertEqual(workflow('ci.yml')['jobs']['required']['name'], 'Core CI')
+        self.assertEqual(elig.SECURITY_WORKFLOWS['Core CI'], '.github/workflows/ci.yml')
+        # Every required job outside the CodeQL matrix is a job name of its own workflow.
+        for name, path in elig.SECURITY_WORKFLOWS.items():
+            if not name.startswith('CodeQL ('):
+                names = [job.get('name') for job in workflow(Path(path).name)['jobs'].values()]
+                self.assertIn(name, names)
 
 
 NIGHTLY_JOBS = {

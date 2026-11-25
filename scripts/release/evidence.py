@@ -46,8 +46,9 @@ TEXT_MAX = 256
 URL_MAX = 512
 NAME_MAX = 128
 
+# The release gate's Linux job (gate.yml) runs fmt, clippy and the release tier on S; it replaced ci.yml's fast gate.
 SECURITY_JOBS = ('CodeQL (actions)', 'CodeQL (rust)', 'Core CI', 'Core security',
-                 'Dependency, secret and workflow policy', 'Fast gate (Linux x86-64)')
+                 'Dependency, secret and workflow policy', 'Release gate (x86_64-unknown-linux-gnu)')
 CARD_KINDS = ('release_1', 'key_change', 'revocation', 'new_platform')
 SOURCE_KINDS = ('artifact', 'implementation_source', 'job', 'protected_policy', 'repository', 'request_archive',
                 'review_history', 'run_attempt', 'workflow_source')

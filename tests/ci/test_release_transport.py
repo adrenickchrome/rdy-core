@@ -79,7 +79,7 @@ ARCHIVES = [archive(MAC), archive(LINUX)]
 MANIFEST = manifest_sha(ARCHIVES)
 CHECKS = [{'name': n, 'passed': True} for n in ('signature', 'checksums', 'install', 'version', 'daemon', 'mcp')]
 SECURITY = sorted(['CodeQL (actions)', 'CodeQL (rust)', 'Core CI', 'Core security',
-                   'Dependency, secret and workflow policy', 'Fast gate (Linux x86-64)'])
+                   'Dependency, secret and workflow policy', 'Release gate (x86_64-unknown-linux-gnu)'])
 LANDING = 'f' * 64
 
 
