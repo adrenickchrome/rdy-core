@@ -1665,7 +1665,8 @@ fn canary_body(n: usize) -> String {
     out
 }
 
-/// Whether any file under `dir` holds the canary.
+/// The files under `dir` that hold the canary. Windows locks an open store's lock and index
+/// files, so a scan of an open store reads its `segments` folder and `SPANMAP` only.
 fn holds_canary(dir: &Path) -> Vec<String> {
     fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         for e in std::fs::read_dir(dir).unwrap() {
@@ -1681,11 +1682,11 @@ fn holds_canary(dir: &Path) -> Vec<String> {
     walk(dir, &mut files);
     files
         .into_iter()
-        .filter(|p| match std::fs::read(p) {
-            Ok(bytes) => bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()),
-            // an open store's lock file is locked on Windows; it holds no payload byte
-            Err(_) if p.file_name().is_some_and(|n| n == "lock") => false,
-            Err(e) => panic!("{}: {e}", p.display()),
+        .filter(|p| {
+            std::fs::read(p)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+                .windows(CANARY.len())
+                .any(|w| w == CANARY.as_bytes())
         })
         .map(|p| p.display().to_string())
         .collect()
@@ -1984,7 +1985,15 @@ fn removal_live_with_the_platform_punch() {
         captured.check_redaction_epoch(),
         Err(StoreError::RedactedState)
     ));
-    assert_eq!(holds_canary(&path), Vec::<String>::new(), "live");
+    assert_eq!(
+        holds_canary(&path.join("segments")),
+        Vec::<String>::new(),
+        "live"
+    );
+    assert!(!contains(
+        &std::fs::read(path.join(SPANMAP_FILE)).unwrap(),
+        CANARY.as_bytes()
+    ));
     assert!(s.get_block(&secret.version_hash()).unwrap().is_redacted());
     assert_eq!(s.change(&kept).unwrap(), want);
     s.check_objects().unwrap();
@@ -2074,9 +2083,11 @@ fn removal_erases_the_upgrade_backup() {
     upgrade::publish_checked(&mut s).unwrap();
     assert!(!s.refresh_upgrade_pending().unwrap());
     let want = s.change(&kept).unwrap();
-    let backups: Vec<String> = holds_canary(dir.path())
-        .into_iter()
-        .filter(|p| p.contains(upgrade::BACKUP_PREFIX))
+    let backups: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().contains(upgrade::BACKUP_PREFIX))
+        .flat_map(|p| holds_canary(&p))
         .collect();
     assert!(!backups.is_empty(), "the backup holds the text");
     remove_live(&mut s, &secret).unwrap();

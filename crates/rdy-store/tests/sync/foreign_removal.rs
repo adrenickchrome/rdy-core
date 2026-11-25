@@ -859,7 +859,8 @@ fn long_text(n: usize, seed: u64) -> String {
 
 const CANARY: &[u8] = b"CANARYQX";
 
-/// The files under `dir` that hold the canary.
+/// The files under `dir` that hold the canary. Windows locks an open store's lock and index
+/// files, so a scan of an open store reads its `segments` folder only.
 fn canary_files(dir: &Path) -> Vec<String> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in std::fs::read_dir(dir).unwrap() {
@@ -875,11 +876,11 @@ fn canary_files(dir: &Path) -> Vec<String> {
     walk(dir, &mut files);
     files
         .into_iter()
-        .filter(|p| match std::fs::read(p) {
-            Ok(bytes) => bytes.windows(CANARY.len()).any(|w| w == CANARY),
-            // an open store's lock file is locked on Windows; it holds no payload byte
-            Err(_) if p.file_name().is_some_and(|n| n == "lock") => false,
-            Err(e) => panic!("{}: {e}", p.display()),
+        .filter(|p| {
+            std::fs::read(p)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+                .windows(CANARY.len())
+                .any(|w| w == CANARY)
         })
         .map(|p| p.display().to_string())
         .collect()
@@ -913,14 +914,14 @@ fn r5902_removal_erases_all_mapped_copies() {
         "the local copy of v5 maps to the delivery's frame"
     );
     assert!(
-        !canary_files(&x.path).is_empty(),
+        !canary_files(&x.path.join("segments")).is_empty(),
         "the text is on disk before"
     );
     let taken = take(&mut x.store, c.repo, c.repo, c.apply, &mut c.source()).unwrap();
     assert_eq!(taken.erased, vec![pair(&c.v1), pair(&c.v2)]);
     assert_eq!(taken.kept_local, vec![pair(&c.v5)]);
     assert!(erased(&x.path, &c.v1));
-    assert_eq!(canary_files(&x.path), Vec::<String>::new());
+    assert_eq!(canary_files(&x.path.join("segments")), Vec::<String>::new());
     assert_eq!(x.store.get_block(&version_of(&c.v5)).unwrap(), c.v5);
     clean(&mut x.store, 4);
     x.store.close().unwrap();
