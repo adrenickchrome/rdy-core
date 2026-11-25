@@ -174,6 +174,10 @@ fn descriptive(path: &str) -> bool {
         && parts.len() == 4
 }
 
+/// The shape leaves later tasks of the release add to the agent subtrees: span maps' byte count
+/// in the compact report. Nothing else may move.
+const ADDED_LEAVES: &[&str] = &["member /mcp/result_fields/rdy_compact/ok/deduplicated_bytes"];
+
 /// Every difference between `was` and `now` below `path`: a changed string leaf, or a change of
 /// shape (a missing member, another type, another list length, a changed non-string leaf).
 fn compare(was: &Value, now: &Value, path: &str, text: &mut Vec<String>, shape: &mut Vec<String>) {
@@ -236,7 +240,10 @@ fn r5901_agent_delta_is_descriptive_only() {
             &mut shape,
         );
     }
-    assert_eq!(shape, Vec::<String>::new(), "only words differ");
+    assert_eq!(
+        shape, ADDED_LEAVES,
+        "only words and the added leaves differ"
+    );
     // the words that differ are listed, so a failure names them
     for leaf in &text {
         assert!(descriptive(leaf), "{leaf} is words");

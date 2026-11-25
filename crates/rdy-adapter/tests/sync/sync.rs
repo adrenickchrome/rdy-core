@@ -544,14 +544,15 @@ fn scc6_minimum_before_after_and_preview_agree() {
     let c1 = check(&s0, &[&w.e1]).unwrap();
     let hub_canon = RdyVersion::parse(rdy_store::format::HUB_CANON_REQUIRED_RDY).unwrap();
     assert_eq!(c1.facts().min_rdy_before, s0.min_rdy());
-    assert!(s0.min_rdy() < Some(hub_canon), "{:?}", s0.min_rdy());
-    assert_eq!(c1.facts().min_rdy_after, Some(hub_canon));
+    // the after minimum is the larger of the two: a new holder's baseline names dedup_spans
+    // (0.59.0), above hub_canon's minimum
+    assert_eq!(c1.facts().min_rdy_after, s0.min_rdy().max(Some(hub_canon)));
     assert_eq!(
         h.move_canon(&c1, CanonMove::Seed, None).unwrap(),
         moved(w.p1)
     );
     // the snapshot taken before keeps its own minimum; a new one reads the preview
-    assert!(s0.min_rdy() < Some(hub_canon));
+    assert_eq!(s0.min_rdy(), c1.facts().min_rdy_before);
     let s1 = h.snapshot().unwrap();
     assert_eq!(s1.min_rdy(), c1.facts().min_rdy_after);
     // a later push raises nothing more

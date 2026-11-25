@@ -19,12 +19,13 @@ fn format_error(e: StoreError) -> (String, String) {
 fn ok1_the_format_text_is_the_feature_manifest() {
     assert_eq!(LAST_SCALAR_STORE_FORMAT, 18);
     // ok4: the baseline names content-2 identity and object encodings; SD1: and snapshot
-    // deltas, which a new store lists from its first batch
+    // deltas and span maps, which a new store lists from its first batch
     assert_eq!(
         baseline_features().to_text(),
         concat!(
             "rdy store features 1\n{\"manifest_version\":1,\"features\":[",
             "{\"name\":\"content_hash_v2\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},",
+            "{\"name\":\"dedup_spans\",\"class\":\"incompatible\",\"required_rdy\":\"0.59.0\"},",
             "{\"name\":\"object_encoding\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},",
             "{\"name\":\"snapshot_delta\",\"class\":\"incompatible\",\"required_rdy\":\"0.52.0\"}",
             "]}\n"

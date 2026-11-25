@@ -439,9 +439,17 @@ fn tree_digest(dir: &Path) -> (usize, String) {
     }
     let mut files = vec![];
     walk(dir, "", &mut files);
-    // the first-use fixtures of `ported_change` (hub ports) came after this plan's release
+    // the first-use fixtures of `ported_change` (hub ports) and `dedup_spans` (span maps) came
+    // after this plan's release
     files.retain(|(path, _)| {
-        !path.starts_with("v4-f1-e1-ported-change") && !path.starts_with("ported-change-1")
+        ![
+            "v4-f1-e1-ported-change",
+            "ported-change-1",
+            "v4-f1-dedup-spans",
+            "dedup-spans-1",
+        ]
+        .iter()
+        .any(|later| path.starts_with(later))
     });
     files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let lines: String = files
@@ -515,22 +523,22 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
     );
 
     // the store registry and the formats: no feature, store format or dump format is new, but
-    // the one a later plan registered (hub ports, `ported_change`): the registry less it is what
-    // this fixture lists, and it is the only addition
+    // the ones later plans registered (hub ports, `ported_change`; span maps, `dedup_spans`):
+    // the registry less them is what this fixture lists, and they are the only additions
     let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
         .iter()
         .copied()
-        .filter(|n| *n != "ported_change")
+        .filter(|n| *n != "ported_change" && *n != "dedup_spans")
         .collect();
     assert_eq!(
         now["store"]["registered_names"],
         serde_json::json!(live),
-        "the store registers what the contract lists, and ported_change"
+        "the store registers what the contract lists, and the later additions"
     );
     assert_eq!(
-        live.len() + 1,
+        live.len() + 2,
         rdy_store::format::REGISTERED_FEATURES.len(),
-        "ported_change is the only addition"
+        "ported_change and dedup_spans are the only additions"
     );
     assert_eq!(
         now["dump_load"]["dump_format"],

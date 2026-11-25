@@ -563,7 +563,7 @@ fn scc2_upload_features_are_needed_features_only() {
     assert_eq!(again.features, header.features);
     // the upload's minimum is its needs', not the store's
     assert_eq!(header.features.min_rdy(), Some(RdyVersion(0, 52, 0)));
-    assert_eq!(store.min_rdy(), Some(RdyVersion(0, 53, 0)));
+    assert_eq!(store.min_rdy(), Some(RdyVersion(0, 59, 0)));
     // a tag history still names the source store's whole manifest
     drop(reader);
     let t = s
@@ -619,10 +619,10 @@ fn scc2_minimum_ignores_compatible_and_compares_numeric_versions() {
     assert_eq!(RdyVersion::parse("0.53.0"), Some(RdyVersion(0, 53, 0)));
     assert_eq!(RdyVersion::parse("0.53"), None);
     assert_eq!(RdyVersion::parse("v0.53.0"), None);
-    // a new store's own minimum: its baseline features
+    // a new store's own minimum: its baseline features, span maps' dedup_spans the newest
     let d = tempfile::tempdir().unwrap();
     let s = Store::create(&d.path().join("p")).unwrap();
-    assert_eq!(s.features().min_rdy(), Some(RdyVersion(0, 52, 0)));
+    assert_eq!(s.features().min_rdy(), Some(RdyVersion(0, 59, 0)));
 }
 
 /// `bytes` as one batch file.
