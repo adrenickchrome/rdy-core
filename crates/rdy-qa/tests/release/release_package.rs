@@ -69,14 +69,26 @@ pub(crate) fn flags(binary: &OsStr, version: &str, target: &str, out: &OsStr) ->
     ]
 }
 
-/// Asserts a refusal: exit `code`, stderr exactly `message` and LF, and no stdout.
+/// Asserts a refusal: exit `code`, stderr exactly `message` and LF, and no stdout. The
+/// file-operation text is one line: `message`, `: ` and what failed, which names `names`.
 fn refused(out: &Output, code: i32, message: &str, what: &str) {
+    refused_naming(out, code, message, "", what);
+}
+
+/// [`refused`], where a file-operation failure's detail must name `names`.
+fn refused_naming(out: &Output, code: i32, message: &str, names: &str, what: &str) {
     assert_eq!(out.status.code(), Some(code), "{what}: {out:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        format!("{message}\n"),
-        "{what}"
-    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if message == MSG_FILE_OPERATION {
+        let detail = stderr
+            .strip_prefix(&format!("{message}: "))
+            .and_then(|rest| rest.strip_suffix('\n'))
+            .unwrap_or_else(|| panic!("{what}: {stderr:?}"));
+        assert!(!detail.is_empty() && !detail.contains('\n'), "{what}: {stderr:?}");
+        assert!(detail.contains(names), "{what}: names {names:?}: {stderr:?}");
+    } else {
+        assert_eq!(stderr, format!("{message}\n"), "{what}");
+    }
     assert!(out.stdout.is_empty(), "{what}: no stdout on failure");
 }
 
@@ -316,10 +328,12 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     );
     // OUT's parent must be a directory.
     for parent in [missing.join("out"), file_out.join("out")] {
-        refused(
+        let named = parent.parent().expect("a parent").display().to_string();
+        refused_naming(
             &run(&flags(b, "0.14.0", target, parent.as_os_str())),
             1,
             MSG_FILE_OPERATION,
+            &named,
             "OUT's parent is not a directory",
         );
     }
