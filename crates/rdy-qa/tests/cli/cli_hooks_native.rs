@@ -428,6 +428,26 @@ fn m4a5_installed_git_hook_warns_and_commit_succeeds() {
     );
 }
 
+/// Runs `op` on the binary the hook just ran. On Windows the image of a process that just
+/// exited, or a scanner reading the binary, can hold it for a moment (sharing violation, or
+/// access denied), so `op` runs again until it succeeds, for 10 s at most.
+fn on_released_binary(what: &str, mut op: impl FnMut() -> std::io::Result<()>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match op() {
+            Ok(()) => return,
+            Err(e)
+                if cfg!(windows)
+                    && matches!(e.raw_os_error(), Some(5 | 32))
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("{what}: {e:?}"),
+        }
+    }
+}
+
 #[test]
 fn m4a5_git_hook_survives_missing_binary_and_project() {
     let n = Native::new(Names::Plain);
@@ -444,12 +464,14 @@ fn m4a5_git_hook_survives_missing_binary_and_project() {
     );
 
     // the binary is no program: the launcher cannot fail the commit
-    std::fs::write(&n.exe, b"not a program").unwrap();
+    on_released_binary("write the binary", || {
+        std::fs::write(&n.exe, b"not a program")
+    });
     n.touch("src/anchored.rs", "garbage");
     n.commit("feat: garbage binary\n", true);
 
     // the binary is gone
-    std::fs::remove_file(&n.exe).unwrap();
+    on_released_binary("remove the binary", || std::fs::remove_file(&n.exe));
     n.touch("src/anchored.rs", "gone");
     n.commit("feat: no binary\n", true);
     assert_eq!(
