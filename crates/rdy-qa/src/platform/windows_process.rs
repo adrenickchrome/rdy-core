@@ -502,8 +502,9 @@ fn for_each_thread(
 
 /// The output cap of a release tool's child process.
 pub const RELEASE_CHILD_OUTPUT_MAX: usize = 1_048_576;
-/// The hang guard of a release tool's child process.
-pub const RELEASE_CHILD_DEADLINE: Duration = Duration::from_secs(30);
+/// The hang guard of a release tool's child process, never a measure: tar of an archive at
+/// the binary cap (over 512 MiB) can take more than 30 s on a loaded machine.
+pub const RELEASE_CHILD_DEADLINE: Duration = Duration::from_secs(300);
 
 /// What the bounded runner's workers report to it.
 enum RunEvent {

@@ -200,7 +200,7 @@ fn ab5_live_scopes_refresh_after_built_only_landings() {
     let url = info.url.clone().expect("the profile site listens");
     let served = |url: &str| {
         let r = http::get(&format!("{url}guide.html"));
-        assert_eq!(r.status, 200, "{}", r.head);
+        assert_eq!(r.status, 200, "{} (transport: {})", r.head, r.transport);
         String::from_utf8_lossy(&r.body).into_owned()
     };
     assert!(!served(&url).contains(PLAN));

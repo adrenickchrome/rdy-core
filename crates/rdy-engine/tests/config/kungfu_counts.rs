@@ -800,7 +800,9 @@ fn kfu2_worker_flush_and_stop_are_bounded() {
     lock.lock().unwrap();
     let Rig { rec, rx, .. } = r;
     rec.record(ALICE, None, "write", Case::Lost);
-    assert_eq!(rx.recv_timeout(WAIT).unwrap(), Cycle::Contended);
+    // the settle above can return before the worker reports its last flush: that report is
+    // skipped, and the next one must be the contended try
+    wait_for(&rx, Cycle::Contended);
     drop(rec);
     let mut tail = Vec::new();
     loop {

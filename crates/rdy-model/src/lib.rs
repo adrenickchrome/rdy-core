@@ -41,7 +41,7 @@ pub use coord::{AltMember, AltSet, AltStatus, Intent, IntentStatus};
 pub use hash::Hash;
 pub use id::{BlockId, CROCKFORD, IdError};
 #[doc(hidden)]
-pub use id::{seed_ids_for_tests, unseed_ids_for_tests};
+pub use id::{ids_seeded_for_tests, seed_ids_for_tests, unseed_ids_for_tests};
 pub use order::{
     MAX_ORDER_KEY_LEN, OrderError, order_between, order_run, rebalance_keys, valid_order_key,
 };

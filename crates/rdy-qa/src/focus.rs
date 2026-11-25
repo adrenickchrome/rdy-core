@@ -1,6 +1,8 @@
 //! `cargo qa --focus <crate|area>[::<filter>]`: one crate's tests or one rdy-qa area, with only
 //! the builds they need. No fmt, no clippy, no workspace tests, no perf and no report file. A
-//! run that matches no test fails, and the last line is the command that replays the run.
+//! run that matches no test fails, and the last line is the command that replays the run. Before
+//! any build, the test hygiene check (`crate::test_hygiene`) reads the lines the branch adds to
+//! test code, and a new fixed wait or chosen port fails the run.
 use crate::gate_steps::{ChildOutput, cargo};
 use crate::report::{self, TestRun};
 use std::path::Path;
@@ -297,6 +299,24 @@ pub fn main(
             return 2;
         }
     };
+    // first, and with no build: a new fixed wait or chosen port in changed test code fails the
+    // run (crate::test_hygiene says why)
+    match crate::test_hygiene::run(root) {
+        Ok(true) => {}
+        Ok(false) => {
+            println!("FAIL");
+            println!("replay: {}", replay_command(&f));
+            return 1;
+        }
+        Err(e) => {
+            println!(
+                "test hygiene: could not read the changes ({e}); set {} to a base commit",
+                crate::test_hygiene::BASE_VAR
+            );
+            println!("FAIL");
+            return 1;
+        }
+    }
     let out = run(&f, |label, mut c| {
         eprintln!("==> {label}");
         c.current_dir(root);

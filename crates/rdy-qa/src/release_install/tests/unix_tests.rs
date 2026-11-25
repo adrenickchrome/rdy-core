@@ -20,6 +20,7 @@ fn pre1_package_classifies_real_shell_probe_children() {
                 std::time::Duration::from_secs(600),
             ),
             V,
+            Path::new("rdy"),
         )
     };
     assert_eq!(probe("printf 'rdy 0.14.0 (preview)\\n'"), Ok(true));
@@ -46,7 +47,10 @@ fn pre1_package_classifies_real_shell_probe_children() {
         None,
         Expiry::expire,
     );
-    assert_eq!(classify_probe(run.result, V), Err(Failure::FileOperation));
+    assert_eq!(
+        classify_probe(run.result, V, Path::new("rdy")),
+        Err(Failure::FileOperation)
+    );
 }
 
 #[test]
