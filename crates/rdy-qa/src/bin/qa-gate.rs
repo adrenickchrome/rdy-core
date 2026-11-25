@@ -640,7 +640,7 @@ fn main() {
     let mut notes: Vec<String> = vec![];
     // The release tier leaves the perf tier to the nightly run, unless `--only perf` asks for it.
     let release_skips_perf = release_skips_perf(args.tier, args.only.as_deref());
-    let plan = match report::plan(
+    let mut plan = match report::plan(
         args.only.as_deref(),
         &report::test_areas(&tests_dir()),
         args.skip_perf || release_skips_perf,
@@ -651,6 +651,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // A platform tier runs only the rdy-qa areas its list names; the nightly run runs the rest.
+    let (tier_files, mut outside_tier) =
+        Allowances::split_tier_areas(&plan.files, tier_keys.as_ref());
+    plan.files = tier_files;
 
     let machine = perf::machine_class();
     // a failed step skips the steps that need it, unless --all-stages
@@ -788,7 +792,6 @@ fn main() {
     };
     // A platform tier runs only the binaries its list names; the nightly run runs the rest.
     let in_tier = |key: &str| tier_keys.as_ref().is_none_or(|k| k.contains(key));
-    let mut outside_tier: Vec<String> = vec![];
 
     // the workspace's test binaries, every crate's but rdy-qa's
     let mut ws_bins: Vec<&TestBinary> = vec![];

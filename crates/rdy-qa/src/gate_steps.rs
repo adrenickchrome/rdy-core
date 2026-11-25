@@ -467,6 +467,25 @@ impl Allowances {
             .ok_or_else(|| format!("gate-allowances.json has no `{name}` list: no {name} tier"))
     }
 
+    /// The rdy-qa area binaries of `files` that the tier of `keys` runs, and the keys of the
+    /// ones it leaves to the nightly run. With no tier, every area runs.
+    pub fn split_tier_areas(
+        files: &[String],
+        keys: Option<&BTreeSet<String>>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut kept = vec![];
+        let mut outside = vec![];
+        for f in files {
+            let key = format!("rdy-qa/test/{f}");
+            if keys.is_none_or(|k| k.contains(&key)) {
+                kept.push(f.clone());
+            } else {
+                outside.push(key);
+            }
+        }
+        (kept, outside)
+    }
+
     /// The rows of the binaries in `times` (key, seconds): a warning for one that ran more than
     /// [`ALLOWANCE_FACTOR`] times its allowance on `os`, a failure for one past [`HANG_FACTOR`]
     /// times it (a hang) or with none; and a note when `os` has no list, so nothing was checked.
@@ -888,8 +907,17 @@ pub fn check_tmp_root(dir: &Path) -> Result<PathBuf, String> {
             dir.display()
         ));
     }
-    dir.canonicalize()
-        .map_err(|e| format!("--tmp-root {}: {e}", dir.display()))
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| format!("--tmp-root {}: {e}", dir.display()))?;
+    Ok(PathBuf::from(plain_tmp_root(&canonical.to_string_lossy())))
+}
+
+/// The temp root as the tests get it: on Windows without the `\\?\` prefix that `canonicalize`
+/// adds to a plain drive path. Git for Windows cannot read a configuration file named by a `\\?\`
+/// path, and a test that compares a path it built with one rdy shows gets two spellings.
+fn plain_tmp_root(text: &str) -> &str {
+    rdy_store::pio::plain_drive_path(text)
 }
 
 /// The test binaries that keep the real temp directory whatever `--tmp-root` names, as
@@ -906,7 +934,34 @@ pub fn on_real_disk(package: &str, name: &str) -> bool {
 pub fn cargo(args: &[&str]) -> Command {
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.args(args);
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str()
+            && is_run_package_var(name)
+        {
+            c.env_remove(name);
+        }
+    }
     c
+}
+
+/// Whether `name` is a variable that `cargo run` sets for qa-gate's own package (rdy-qa), and
+/// that a Cargo call of the gate must not inherit. Build scripts read some of them, ring's
+/// `CARGO_PKG_NAME` and `CARGO_MANIFEST_DIR` among them, and Cargo reruns a build script, and
+/// rebuilds everything that depends on it, when such a variable differs from the last build:
+/// `cargo qa` from the shell and the gate's own build then rebuilt each other's ring, rustls,
+/// ureq and rdy-engine on every run.
+pub fn is_run_package_var(name: &str) -> bool {
+    name.starts_with("CARGO_PKG_")
+        || matches!(
+            name,
+            "CARGO_MANIFEST_DIR"
+                | "CARGO_MANIFEST_PATH"
+                | "CARGO_MANIFEST_LINKS"
+                | "CARGO_CRATE_NAME"
+                | "CARGO_BIN_NAME"
+                | "CARGO_PRIMARY_PACKAGE"
+                | "OUT_DIR"
+        )
 }
 
 /// The area binaries that run alone: no other binary runs while one of them runs. The list is
@@ -1679,6 +1734,53 @@ mod tests {
                 .unwrap_err()
                 .contains("no `plan9` list")
         );
+    }
+
+    #[test]
+    fn tier7_the_temp_root_is_a_plain_drive_path() {
+        assert_eq!(plain_tmp_root(r"\\?\C:\wx\run-tmp"), r"C:\wx\run-tmp");
+        assert_eq!(plain_tmp_root(r"\\?\UNC\host\share"), r"\\?\UNC\host\share");
+        assert_eq!(plain_tmp_root("/tmp/x"), "/tmp/x");
+    }
+
+    #[test]
+    fn tier8_a_gate_cargo_call_drops_the_run_package_vars() {
+        for v in [
+            "CARGO_PKG_NAME",
+            "CARGO_PKG_VERSION_MAJOR",
+            "CARGO_MANIFEST_DIR",
+            "CARGO_MANIFEST_PATH",
+            "CARGO_CRATE_NAME",
+            "OUT_DIR",
+        ] {
+            assert!(is_run_package_var(v), "{v}");
+        }
+        for v in [
+            "CARGO",
+            "CARGO_HOME",
+            "CARGO_TARGET_DIR",
+            "CARGO_NET_OFFLINE",
+            "CARGO_INCREMENTAL",
+            "PATH",
+        ] {
+            assert!(!is_run_package_var(v), "{v}");
+        }
+    }
+
+    #[test]
+    fn tier6_a_platform_tier_runs_only_its_listed_areas() {
+        let files: Vec<String> = ["cli", "engine", "engine_read", "wc"]
+            .map(String::from)
+            .to_vec();
+        let keys: BTreeSet<String> = ["rdy-qa/test/wc", "rdy-qa/test/cli", "rdy-store/lib/x"]
+            .map(String::from)
+            .into();
+        let (kept, outside) = Allowances::split_tier_areas(&files, Some(&keys));
+        assert_eq!(kept, ["cli", "wc"]);
+        assert_eq!(outside, ["rdy-qa/test/engine", "rdy-qa/test/engine_read"]);
+        let (kept, outside) = Allowances::split_tier_areas(&files, None);
+        assert_eq!(kept, files);
+        assert!(outside.is_empty());
     }
 
     #[test]
