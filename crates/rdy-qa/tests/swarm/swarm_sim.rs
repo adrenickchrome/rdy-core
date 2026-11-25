@@ -1888,7 +1888,8 @@ fn sg5_the_checker_and_reindex_pass_at_the_end() {
 }
 
 /// mh7 (D-4YRQ4): writer 0's one `compact` runs through the real MCP link on every seed, and the
-/// journal keeps the whole report: six fields, rows that add up to the log bytes. The act adds
+/// journal keeps the whole report: the six fields D-4YRQ4 froze, and `deduplicated_bytes`, which
+/// the span maps of D-1ER84 (0.59.0) add; rows that add up to the log bytes. The act adds
 /// no frame: the log the frozen copy holds is at least as long as the report counted, and its
 /// `rdy fsck` (the final oracle) reports a byte total and removed bytes of its own. Only the
 /// seeded kill may cut the call; no refusal is allowed.
@@ -1915,6 +1916,8 @@ fn mh7_swarm_runs_compact_through_mcp() {
             keys,
             [
                 "by_kind",
+                // the span maps of D-1ER84 (0.59.0)
+                "deduplicated_bytes",
                 "log_bytes",
                 "notes",
                 "on_disk_bytes",
