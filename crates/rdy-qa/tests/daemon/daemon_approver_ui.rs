@@ -103,7 +103,11 @@ impl Site {
     /// The form of item `r` on its item page: the page, and what its form submits.
     fn form(&self, r: &str) -> (http::Response, UiForm) {
         let page = self.get(&item_path(r));
-        assert_eq!(page.status, 200, "{r}: {}", page.head);
+        assert_eq!(
+            page.status, 200,
+            "{r}: {} (transport: {})",
+            page.head, page.transport
+        );
         let forms = http::ui_forms(&body(&page));
         assert_eq!(forms.len(), 1, "{r}: one form");
         (page, forms[0].clone())
@@ -171,7 +175,12 @@ fn ui9_an_answered_question_says_so_below_its_unmoved_card() {
     let (page, form) = s.form(&it);
     assert!(!body(&page).contains("You answered this"));
     assert!(!body(&s.get("/~ui/")).contains("You answered this"));
-    assert_eq!(s.answer(&form, "o1").status, 303);
+    assert_eq!(
+        s.answer(&form, "o1").status,
+        303,
+        "transport: {}",
+        rdy_qa::http::last_transport()
+    );
 
     let st = s.engine().read();
     let answer = answers_of(&st).remove(0);
@@ -271,7 +280,11 @@ fn assert_refused(r: &http::Response, status: u16, code: &str, what: &str) {
 /// The listener's themed 404, which names no UI.
 #[track_caller]
 fn assert_themed_404(r: &http::Response, what: &str) {
-    assert_eq!(r.status, 404, "{what}: {}", r.head);
+    assert_eq!(
+        r.status, 404,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(r.header("content-type"), Some(HTML), "{what}");
     assert_eq!(
         r.header("content-security-policy"),
@@ -288,7 +301,11 @@ fn assert_themed_404(r: &http::Response, what: &str) {
 #[track_caller]
 fn assert_plain(r: &http::Response, f: Refusal, what: &str) {
     let want = refusal(f);
-    assert_eq!(r.status, want.status, "{what}: {}", r.head);
+    assert_eq!(
+        r.status, want.status,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(r.body, want.body, "{what}");
     assert_eq!(r.header("content-type"), Some(PLAIN), "{what}");
 }
@@ -576,7 +593,7 @@ fn ui9_ui_and_pending_share_items_roles_and_hashes() {
     assert_ui_page(&page, 200, "pending");
     let text = body(&page);
     let head = s.head("/~ui/");
-    assert_eq!(head.status, 200);
+    assert_eq!(head.status, 200, "transport: {}", head.transport);
     assert!(head.body.is_empty());
     assert_eq!(
         head.header("content-length"),
@@ -601,7 +618,7 @@ fn ui9_ui_and_pending_share_items_roles_and_hashes() {
         assert!(t.contains(&i.card_hash), "{}", i.r#ref);
         assert!(t.contains(&esc(&i.card)), "{}", i.r#ref);
         let h = s.head(&item_path(&i.r#ref));
-        assert_eq!(h.status, 200);
+        assert_eq!(h.status, 200, "transport: {}", h.transport);
         assert!(h.body.is_empty());
         assert_eq!(h.header("content-length"), one.header("content-length"));
     }
@@ -610,7 +627,7 @@ fn ui9_ui_and_pending_share_items_roles_and_hashes() {
     for forged in ["P-AAAAAAAAAAAA@1", "garbage", "q-ZZZZZ@abcdef012345"] {
         assert_themed_404(&s.get(&item_path(forged)), forged);
         let h = s.head(&item_path(forged));
-        assert_eq!(h.status, 404, "{forged}");
+        assert_eq!(h.status, 404, "{forged} (transport: {})", h.transport);
         assert!(h.body.is_empty(), "{forged}");
     }
     drop(s);
@@ -705,7 +722,11 @@ fn ui9_a_page_with_a_form_lets_a_browser_send_its_origin() {
     assert!(body(&page).contains(SAME), "the item page");
     proposal(&s, &section, "a");
     let moved = s.answer(&form, "approve");
-    assert_eq!(moved.status, 409, "{}", moved.head);
+    assert_eq!(
+        moved.status, 409,
+        "{} (transport: {})",
+        moved.head, moved.transport
+    );
     assert_eq!(http::ui_forms(&body(&moved)).len(), 1, "the fresh form");
     assert!(body(&moved).contains(SAME), "the page of a fresh form");
     let later = s.answer(&http::ui_forms(&body(&moved)).remove(0), "later");
@@ -731,7 +752,14 @@ fn ui9_post_records_a_local_card_through_the_gate() {
     let (_, form) = s.form(&p.r#ref);
     assert_eq!(form.card_hash, shown.card_hash);
     let done = s.answer(&form, "approve");
-    assert_eq!(done.status, 303, "{}\n{}", done.head, body(&done));
+    assert_eq!(
+        done.status,
+        303,
+        "{}\n{} (transport: {})",
+        done.head,
+        body(&done),
+        done.transport
+    );
     assert_eq!(done.header("location"), Some("/~ui/"));
     assert!(done.body.is_empty());
     assert_eq!(done.header("content-security-policy"), Some(UI_CSP));
@@ -807,7 +835,13 @@ fn ui9_post_records_a_local_card_through_the_gate() {
     let fresh = form.brief.clone().expect("a fresh token");
     assert_ne!(fresh, token);
     let done = s.answer(&form, "o1");
-    assert_eq!(done.status, 303, "{}", body(&done));
+    assert_eq!(
+        done.status,
+        303,
+        "{} (transport: {})",
+        body(&done),
+        done.transport
+    );
     let st = s.engine().read();
     let all = answers_of(&st);
     assert_eq!(all.len(), 1, "{all:#?}");
@@ -849,7 +883,13 @@ fn ui9_moved_and_held_cards_cannot_land() {
     assert_eq!(s.chain().len(), chain, "no landing");
     // only the fresh form lands
     let done = s.answer(&fresh, "approve");
-    assert_eq!(done.status, 303, "{}", body(&done));
+    assert_eq!(
+        done.status,
+        303,
+        "{} (transport: {})",
+        body(&done),
+        done.transport
+    );
     assert_eq!(s.chain().len(), chain + 1);
     drop(s);
 
@@ -885,7 +925,13 @@ fn ui9_moved_and_held_cards_cannot_land() {
     local(s.h.dir.path(), &actor("human:founder"));
     let (_, a) = s.form(&advice);
     let done = s.answer(&a, "accept");
-    assert_eq!(done.status, 303, "{}", body(&done));
+    assert_eq!(
+        done.status,
+        303,
+        "{} (transport: {})",
+        body(&done),
+        done.transport
+    );
     local(s.h.dir.path(), &actor(PERSON));
     let r = s.answer(&form, "approve");
     assert_refused(&r, 422, "E_PROPOSAL_NOT_READY", "an accepted tension");
@@ -960,7 +1006,13 @@ fn ui9_moved_and_held_cards_cannot_land() {
     let (p, review) = verdict_version(&s, &x, "fail");
     let (_, form) = s.form(&p.r#ref);
     let done = s.answer(&form, &format!("accept_verdict:{review}:{}", p.id));
-    assert_eq!(done.status, 303, "{}", body(&done));
+    assert_eq!(
+        done.status,
+        303,
+        "{} (transport: {})",
+        body(&done),
+        done.transport
+    );
     let chain = s.chain().len();
     let r = s.answer(&form, "approve");
     assert_eq!(s.chain().len(), chain, "held: {}", body(&r));
@@ -1095,7 +1147,13 @@ fn ui9_ui_signing_and_later_follow_the_ruled_table() {
         let shown = s.card(&p.r#ref);
         let (_, form) = s.form(&p.r#ref);
         let done = s.answer(&form, "approve");
-        assert_eq!(done.status, 303, "{mode}: {}", body(&done));
+        assert_eq!(
+            done.status,
+            303,
+            "{mode}: {} (transport: {})",
+            body(&done),
+            done.transport
+        );
         let (landing, rec) = s.chain().remove(0);
         check_landing(&rec, &shown, "approve");
         let st = s.engine().read();
@@ -1131,7 +1189,13 @@ fn ui9_ui_signing_and_later_follow_the_ruled_table() {
     // reject lands nothing: it needs no signature
     let shown = s.card(&p.r#ref);
     let done = s.answer(&form, "reject");
-    assert_eq!(done.status, 303, "{}", body(&done));
+    assert_eq!(
+        done.status,
+        303,
+        "{} (transport: {})",
+        body(&done),
+        done.transport
+    );
     let all = answers_of(&s.engine().read());
     let a = all
         .iter()
@@ -1191,7 +1255,11 @@ fn ui9_lan_profile_and_disabled_ui_are_plain_404() {
             let get = http::raw(at, &format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n"));
             assert_themed_404(&get, &format!("{what}: GET {path}"));
             let head = http::raw(at, &format!("HEAD {path} HTTP/1.1\r\nHost: {host}\r\n\r\n"));
-            assert_eq!(head.status, 404, "{what}: HEAD {path}");
+            assert_eq!(
+                head.status, 404,
+                "{what}: HEAD {path} (transport: {})",
+                head.transport
+            );
             assert!(head.body.is_empty(), "{what}: HEAD {path}");
             assert_eq!(
                 head.header("content-length"),
@@ -1503,7 +1571,11 @@ fn ui9_ui_http_goldens_have_exact_headers_and_lengths() {
         item_path(&p.r#ref),
         t.port
     ));
-    assert_eq!(permission.status, 403, "{}", permission.head);
+    assert_eq!(
+        permission.status, 403,
+        "{} (transport: {})",
+        permission.head, permission.transport
+    );
     assert_eq!(permission.header("content-security-policy"), Some(UI_CSP));
     check("ui_permission", &http::normalize(&permission.head, t.port));
     drop(t);

@@ -57,7 +57,8 @@ pub const ARCHIVE_MAX: u64 = BINARY_MAX + NOTICES_MAX + 1_048_576;
 pub const PATH_MAX: usize = 4096;
 
 /// `qa-release-package`'s refusal texts (stderr, with an LF). Invalid arguments exit 2; the
-/// others exit 1.
+/// others exit 1. The file-operation text is followed by `: ` and what failed: each failed
+/// operation with its path and error, joined by `; then ` (a failed cleanup after it).
 pub const MSG_INVALID_ARGUMENTS: &str = "release package: invalid arguments";
 pub const MSG_INVALID_INPUT: &str = "release package: invalid input file";
 pub const MSG_OUTPUT_EXISTS: &str = "release package: output exists";
@@ -98,6 +99,34 @@ impl Failure {
             Failure::SizeLimit => MSG_SIZE_LIMIT,
             Failure::FileOperation => MSG_FILE_OPERATION,
             Failure::Notices => MSG_NOTICES,
+        }
+    }
+}
+
+thread_local! {
+    /// What failed in this thread's packaging run, for the file-operation text: each failed
+    /// operation, its path and its error, first failure first.
+    static FAILED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Records `why` a file operation failed and gives the file-operation failure.
+fn file_failure(why: String) -> Failure {
+    FAILED.with(|f| f.borrow_mut().push(why));
+    Failure::FileOperation
+}
+
+/// The map from an I/O error of the operation `op` on `path` to the file-operation failure.
+fn failed(op: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Failure {
+    move |e| file_failure(format!("{op} {}: {e}", path.display()))
+}
+
+/// Records a failed cleanup step; gives whether it succeeded.
+fn cleaned_up(done: io::Result<()>, op: &'static str, path: &Path) -> bool {
+    match done {
+        Ok(()) => true,
+        Err(e) => {
+            file_failure(format!("{op} {}: {e}", path.display()));
+            false
         }
     }
 }
@@ -232,8 +261,15 @@ pub fn tar_available() -> bool {
 /// moves `out` away, nothing is done in what then stands at that path; the run fails, as the
 /// archive's path would no longer name its archive.
 pub fn package(binary: &Path, version: &str, target: &str, out: &Path) -> Result<PathBuf, String> {
-    package_with(binary, version, target, out, &Setup::release())
-        .map_err(|f| f.message().to_string())
+    FAILED.with(|f| f.borrow_mut().clear());
+    let made = package_with(binary, version, target, out, &Setup::release());
+    let failed = FAILED.with(|f| std::mem::take(&mut *f.borrow_mut()));
+    made.map_err(|f| match f {
+        Failure::FileOperation if !failed.is_empty() => {
+            format!("{}: {}", f.message(), failed.join("; then "))
+        }
+        f => f.message().to_string(),
+    })
 }
 
 /// The private staging directory's name in OUT.
@@ -270,17 +306,17 @@ fn package_with(
     match fs::symlink_metadata(out) {
         Ok(_) => return Err(Failure::OutputExists),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err(Failure::FileOperation),
+        Err(e) => return Err(failed("read", out)(e)),
     }
     let (Some(parent), Some(out_name)) = (out.parent(), out.file_name()) else {
-        return Err(Failure::FileOperation);
+        return Err(file_failure(format!("OUT {} has no parent", out.display())));
     };
-    let parent = platform::open_dir(parent).map_err(|_| Failure::FileOperation)?;
+    let parent = platform::open_dir(parent).map_err(failed("open the directory", parent))?;
     (setup.checked)();
     let out_dir = match platform::create_private_dir_at(&parent, out_name) {
         Ok(dir) => dir,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::OutputExists),
-        Err(_) => return Err(Failure::FileOperation),
+        Err(e) => return Err(failed("make the directory", out)(e)),
     };
     let mut work = Work {
         out,
@@ -317,9 +353,17 @@ struct Work<'a> {
     archive: Option<(String, File)>,
 }
 
+/// Why writing a staged file failed: an I/O error, or a refusal of what was read.
+enum WriteFailure {
+    Io(io::Error),
+    Refused(Failure),
+}
+
 /// The private stage in OUT: its name there (first [`STAGE_DIR`], then the stem), its handle,
 /// and the files this run made in it.
 struct Stage {
+    /// The stage's path, for the failure text only: every step goes through `dir`.
+    path: PathBuf,
     name: String,
     dir: File,
     files: Vec<&'static str>,
@@ -331,15 +375,19 @@ impl Stage {
         &mut self,
         name: &'static str,
         mode: u32,
-        write: impl FnOnce(&mut File) -> Result<(), Failure>,
+        write: impl FnOnce(&mut File) -> Result<(), WriteFailure>,
     ) -> Result<(), Failure> {
-        let mut file = platform::create_new_at(&self.dir, name.as_ref())
-            .map_err(|_| Failure::FileOperation)?;
+        let path = self.path.join(name);
+        let mut file =
+            platform::create_new_at(&self.dir, name.as_ref()).map_err(failed("create", &path))?;
         self.files.push(name);
-        write(&mut file)?;
-        file.sync_all().map_err(|_| Failure::FileOperation)?;
+        write(&mut file).map_err(|e| match e {
+            WriteFailure::Io(e) => failed("write", &path)(e),
+            WriteFailure::Refused(f) => f,
+        })?;
+        file.sync_all().map_err(failed("sync", &path))?;
         // the write handle closes when this returns, before any child runs the file
-        platform::set_file_mode(&file, mode).map_err(|_| Failure::FileOperation)
+        platform::set_file_mode(&file, mode).map_err(failed("set the mode of", &path))
     }
 }
 
@@ -353,9 +401,11 @@ impl Work<'_> {
         target: &str,
         setup: &Setup,
     ) -> Result<PathBuf, Failure> {
+        let path = self.out.join(STAGE_DIR);
         let dir = platform::create_private_dir_at(&self.out_dir, STAGE_DIR.as_ref())
-            .map_err(|_| Failure::FileOperation)?;
+            .map_err(failed("make the directory", &path))?;
         let stage = self.stage.insert(Stage {
+            path,
             name: STAGE_DIR.to_string(),
             dir,
             files: Vec::new(),
@@ -370,10 +420,9 @@ impl Work<'_> {
         })?;
         stage.add(NOTICES_FILE, 0o644, |to| {
             use std::io::Write;
-            to.write_all(&inputs.notices)
-                .map_err(|_| Failure::FileOperation)
+            to.write_all(&inputs.notices).map_err(WriteFailure::Io)
         })?;
-        let preview = probe_version(&stage.dir, exe, version, setup)?;
+        let preview = probe_version(&stage.dir, &stage.path, exe, version, setup)?;
         let stem = if preview {
             format!("rdy-{version}-preview-{target}")
         } else {
@@ -383,24 +432,29 @@ impl Work<'_> {
             stage.add(NOTE_FILE, 0o644, |to| {
                 use std::io::Write;
                 to.write_all(PREVIEW_NOTE.as_bytes())
-                    .map_err(|_| Failure::FileOperation)
+                    .map_err(WriteFailure::Io)
             })?;
         }
-        platform::set_file_mode(&stage.dir, 0o755).map_err(|_| Failure::FileOperation)?;
-        platform::rename_at(&self.out_dir, stage.name.as_ref(), stem.as_ref())
-            .map_err(|_| Failure::FileOperation)?;
+        platform::set_file_mode(&stage.dir, 0o755)
+            .map_err(failed("set the mode of", &stage.path))?;
+        rename_held(&self.out_dir, stage.name.as_ref(), stem.as_ref())
+            .map_err(failed("rename", &stage.path))?;
         stage.name.clone_from(&stem);
+        stage.path = self.out.join(&stem);
 
         // Reserve the archive's name, then let tar write into that file through its handle:
         // a file that someone else put at the name is refused and never touched.
         let name = format!("{stem}.tar.gz");
+        let path = self.out.join(&name);
         let reserved = platform::create_new_at(&self.out_dir, name.as_ref())
-            .map_err(|_| Failure::FileOperation)?;
+            .map_err(failed("create", &path))?;
         let (name, reserved) = self.archive.insert((name, reserved));
         let mut tar = (setup.tar)(&stem);
-        let start =
-            platform::start_in_dir(&mut tar, &self.out_dir).map_err(|_| Failure::FileOperation)?;
-        let into = reserved.try_clone().map_err(|_| Failure::FileOperation)?;
+        let start = platform::start_in_dir(&mut tar, &self.out_dir)
+            .map_err(failed("start tar in", self.out))?;
+        let into = reserved
+            .try_clone()
+            .map_err(failed("clone the handle of", &path))?;
         let tarred = platform::run_bounded_to(
             tar,
             None,
@@ -411,26 +465,39 @@ impl Work<'_> {
         drop(start);
         match tarred {
             Ok(o) if o.status.success() => {}
-            Ok(_) => return Err(Failure::FileOperation),
-            Err(e) => return Err(child_failure(&e)),
+            Ok(o) => {
+                return Err(file_failure(format!(
+                    "tar into {} exited with {}: {}",
+                    path.display(),
+                    o.status,
+                    tail(&o.stderr)
+                )));
+            }
+            Err(e) => return Err(child_failure(&e, "run tar into", &path)),
         }
         // the archive's name must still hold the file tar wrote
         if !platform::holds_file(&self.out_dir, name.as_ref(), reserved)
-            .map_err(|_| Failure::FileOperation)?
+            .map_err(failed("check", &path))?
         {
-            return Err(Failure::FileOperation);
+            return Err(file_failure(format!(
+                "{} no longer names the file tar wrote",
+                path.display()
+            )));
         }
         let len = reserved
             .metadata()
-            .map_err(|_| Failure::FileOperation)?
+            .map_err(failed("read the metadata of", &path))?
             .len();
         if len == 0 {
-            return Err(Failure::FileOperation);
+            return Err(file_failure(format!(
+                "tar wrote nothing to {}",
+                path.display()
+            )));
         }
         if len > setup.archive_max {
             return Err(Failure::SizeLimit);
         }
-        platform::set_file_mode(reserved, 0o644).map_err(|_| Failure::FileOperation)?;
+        platform::set_file_mode(reserved, 0o644).map_err(failed("set the mode of", &path))?;
         Ok(self.out.join(&*name))
     }
 
@@ -442,39 +509,96 @@ impl Work<'_> {
         let mut cleaned = true;
         if let Some(stage) = &self.stage {
             for name in &stage.files {
-                cleaned &= platform::remove_file_at(&stage.dir, name.as_ref()).is_ok();
+                cleaned &= cleaned_up(
+                    platform::remove_file_at(&stage.dir, name.as_ref()),
+                    "remove",
+                    &stage.path.join(name),
+                );
             }
-            cleaned &= platform::holds_file(&self.out_dir, stage.name.as_ref(), &stage.dir)
-                .unwrap_or(false)
-                && platform::remove_dir_at(&self.out_dir, stage.name.as_ref()).is_ok();
+            cleaned &= match platform::holds_file(&self.out_dir, stage.name.as_ref(), &stage.dir) {
+                Ok(true) => cleaned_up(
+                    platform::remove_dir_at(&self.out_dir, stage.name.as_ref()),
+                    "remove the directory",
+                    &stage.path,
+                ),
+                Ok(false) => {
+                    file_failure(format!(
+                        "{} no longer names the stage",
+                        stage.path.display()
+                    ));
+                    false
+                }
+                Err(e) => cleaned_up(Err(e), "check", &stage.path),
+            };
         }
         // someone who can write OUT's parent may have moved OUT away
-        let in_place =
-            platform::holds_file(&self.parent, &self.out_name, &self.out_dir).unwrap_or(false);
+        let in_place = match platform::holds_file(&self.parent, &self.out_name, &self.out_dir) {
+            Ok(held) => held,
+            Err(e) => cleaned_up(Err(e), "check", self.out),
+        };
         let made = match made {
             Ok(archive) if cleaned && in_place => Ok(archive),
+            Ok(_) if !in_place => Err(file_failure(format!(
+                "{} no longer names this run's OUT",
+                self.out.display()
+            ))),
             Ok(_) => Err(Failure::FileOperation),
             failed => failed,
         };
         if made.is_err() {
             if let Some((name, reserved)) = &self.archive {
+                let path = self.out.join(name);
                 cleaned &= match platform::holds_file(&self.out_dir, name.as_ref(), reserved) {
-                    Ok(true) => platform::remove_file_at(&self.out_dir, name.as_ref()).is_ok(),
+                    Ok(true) => cleaned_up(
+                        platform::remove_file_at(&self.out_dir, name.as_ref()),
+                        "remove",
+                        &path,
+                    ),
                     // gone, or another's: never removed
                     Ok(false) => true,
-                    Err(_) => false,
+                    Err(e) => cleaned_up(Err(e), "check", &path),
                 };
             }
             // OUT is empty again unless a removal failed or someone else put a file there; what
             // stands at OUT's path once OUT was moved away is never this run's to remove
             if in_place {
-                cleaned &= platform::remove_dir_at(&self.parent, &self.out_name).is_ok();
+                cleaned &= cleaned_up(
+                    platform::remove_dir_at(&self.parent, &self.out_name),
+                    "remove the directory",
+                    self.out,
+                );
             }
         }
         if cleaned {
             made
         } else {
             Err(Failure::FileOperation)
+        }
+    }
+}
+
+/// How long a rename of the stage is retried while another process holds a file in it.
+const HELD_RENAME_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Renames the stage `from` to `to` in `dir`. On Windows, a file just written or run in the
+/// stage can stay open in another process for a moment (a scanner reads the new binary, and a
+/// large one takes seconds), and the rename fails with `ERROR_ACCESS_DENIED` or
+/// `ERROR_SHARING_VIOLATION` until it closes; so it is retried for [`HELD_RENAME_FOR`]. Any
+/// other failure, and every failure elsewhere, is the result at once.
+fn rename_held(dir: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    const HELD: [i32; 2] = [5, 32];
+    let until = std::time::Instant::now() + HELD_RENAME_FOR;
+    loop {
+        match platform::rename_at(dir, from, to) {
+            Err(e)
+                if cfg!(windows)
+                    && e.raw_os_error().is_some_and(|c| HELD.contains(&c))
+                    && std::time::Instant::now() < until =>
+            {
+                // test-hygiene: allow wait a pause between tries of a held rename, not a wait for work
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            done => return done,
         }
     }
 }
@@ -487,9 +611,11 @@ fn open_input(path: &Path, max: u64) -> Result<File, Failure> {
         | io::ErrorKind::NotADirectory
         | io::ErrorKind::InvalidFilename
         | io::ErrorKind::InvalidInput => Failure::InputFile,
-        _ => Failure::FileOperation,
+        _ => failed("open", path)(e),
     })?;
-    let meta = file.metadata().map_err(|_| Failure::FileOperation)?;
+    let meta = file
+        .metadata()
+        .map_err(failed("read the metadata of", path))?;
     if !meta.is_file() || meta.len() == 0 {
         return Err(Failure::InputFile);
     }
@@ -501,13 +627,12 @@ fn open_input(path: &Path, max: u64) -> Result<File, Failure> {
 
 /// Copies the checked input `from` into the open file `to`, reading at most `max + 1` bytes: a
 /// file that grew past `max` since its check fails, and so does one that is now empty.
-fn copy_from(from: &File, to: &mut File, max: u64) -> Result<(), Failure> {
+fn copy_from(from: &File, to: &mut File, max: u64) -> Result<(), WriteFailure> {
     use std::io::Read;
-    let copied =
-        io::copy(&mut from.take(max.saturating_add(1)), to).map_err(|_| Failure::FileOperation)?;
+    let copied = io::copy(&mut from.take(max.saturating_add(1)), to).map_err(WriteFailure::Io)?;
     match copied {
-        0 => Err(Failure::InputFile),
-        n if n > max => Err(Failure::SizeLimit),
+        0 => Err(WriteFailure::Refused(Failure::InputFile)),
+        n if n > max => Err(WriteFailure::Refused(Failure::SizeLimit)),
         _ => Ok(()),
     }
 }
@@ -518,14 +643,21 @@ const PROBE_BUSY_TRIES: u32 = 50;
 
 /// Runs the staged binary's `--version` (the setup's probe), started in the open stage `stage`
 /// as `./<exe>` (`rdy`, or `rdy.exe` for Windows), and reads whether it is a preview.
-fn probe_version(stage: &File, exe: &str, version: &str, setup: &Setup) -> Result<bool, Failure> {
+fn probe_version(
+    stage: &File,
+    at: &Path,
+    exe: &str,
+    version: &str,
+    setup: &Setup,
+) -> Result<bool, Failure> {
+    let path = at.join(exe);
     let mut tries = 1;
     loop {
-        let program =
-            platform::program_in_dir(stage, exe.as_ref()).map_err(|_| Failure::FileOperation)?;
+        let program = platform::program_in_dir(stage, exe.as_ref())
+            .map_err(failed("reach the staged binary", &path))?;
         let mut probe = (setup.probe)(program.path());
-        let start =
-            platform::start_in_dir(&mut probe, stage).map_err(|_| Failure::FileOperation)?;
+        let start = platform::start_in_dir(&mut probe, stage)
+            .map_err(failed("start the version probe in", at))?;
         let run = platform::run_bounded(
             probe,
             None,
@@ -538,15 +670,15 @@ fn probe_version(stage: &File, exe: &str, version: &str, setup: &Setup) -> Resul
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            run => return classify_probe(run, version),
+            run => return classify_probe(run, version, &path),
         }
     }
 }
 
 /// The probe's result: the runner's own failures first (overflow is the size limit, any other
 /// the file-operation failure), then exit 0 with empty stderr, then the stdout text.
-fn classify_probe(run: io::Result<Output>, version: &str) -> Result<bool, Failure> {
-    let out = run.map_err(|e| child_failure(&e))?;
+fn classify_probe(run: io::Result<Output>, version: &str, exe: &Path) -> Result<bool, Failure> {
+    let out = run.map_err(|e| child_failure(&e, "run the version probe of", exe))?;
     if !out.status.success() || !out.stderr.is_empty() {
         return Err(Failure::BinaryVersion);
     }
@@ -555,11 +687,21 @@ fn classify_probe(run: io::Result<Output>, version: &str) -> Result<bool, Failur
 
 /// A runner failure's class: output overflow is the size limit, anything else (a deadline, a
 /// start or cleanup failure) a file operation.
-fn child_failure(e: &io::Error) -> Failure {
+fn child_failure(e: &io::Error, op: &'static str, path: &Path) -> Failure {
     if e.kind() == io::ErrorKind::InvalidData {
         Failure::SizeLimit
     } else {
-        Failure::FileOperation
+        file_failure(format!("{op} {}: {e}", path.display()))
+    }
+}
+
+/// The last 2000 characters of a child's stderr, for a failure text.
+fn tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim_end();
+    match text.char_indices().rev().nth(1999) {
+        Some((at, _)) => format!("...{}", &text[at..]),
+        None => text.to_string(),
     }
 }
 
@@ -2983,6 +3125,7 @@ mod tests {
                     std::time::Duration::from_secs(600),
                 ),
                 V,
+                Path::new("rdy"),
             )
         };
         assert_eq!(probe("exit:0"), Err(Failure::BinaryVersion));
@@ -3117,13 +3260,16 @@ mod tests {
         let f = Fixture::new();
         let mut to = File::create_new(f.dir.path().join("copy")).expect("create");
         let from = open_input(&f.binary, BINARY_MAX).expect("open the binary");
-        assert_eq!(
+        assert!(matches!(
             copy_from(&from, &mut to, BINARY.len() as u64 - 1),
-            Err(Failure::SizeLimit)
-        );
+            Err(WriteFailure::Refused(Failure::SizeLimit))
+        ));
         let mut to = File::create_new(f.dir.path().join("copy.b")).expect("create");
         let from = open_input(&f.binary, BINARY_MAX).expect("open the binary");
-        assert_eq!(copy_from(&from, &mut to, BINARY.len() as u64), Ok(()));
+        assert!(matches!(
+            copy_from(&from, &mut to, BINARY.len() as u64),
+            Ok(())
+        ));
     }
 
     #[test]

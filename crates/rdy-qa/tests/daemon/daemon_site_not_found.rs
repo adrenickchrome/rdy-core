@@ -26,8 +26,9 @@ use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
-/// The deadline of a read that must end.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of a read that must end: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 /// The generated page's marker on its html element.
 pub(crate) const MARKER: &str = "<html lang=\"en\" data-rdy-kind=\"not-found\">";
 /// The Page variant's sentence.
@@ -66,7 +67,11 @@ pub(crate) fn assert_themed(
     name: &str,
     what: &str,
 ) {
-    assert_eq!(r.status, 404, "{what}: {}", r.head);
+    assert_eq!(
+        r.status, 404,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(
         r.header("content-type"),
         Some("text/html; charset=utf-8"),
@@ -143,7 +148,11 @@ pub(crate) fn assert_inert(body: &str, what: &str) {
 #[track_caller]
 pub(crate) fn assert_plain(r: &http::Response, f: Refusal, what: &str) {
     let want = refusal(f);
-    assert_eq!(r.status, want.status, "{what}: {}", r.head);
+    assert_eq!(
+        r.status, want.status,
+        "{what}: {} (transport: {})",
+        r.head, r.transport
+    );
     assert_eq!(text(r), String::from_utf8(want.body).unwrap(), "{what}");
     assert_eq!(
         r.header("content-type"),
@@ -347,6 +356,7 @@ fn refused_events(port: u16, query: &str) -> http::Response {
         status,
         head,
         body: got[at + 4..].to_vec(),
+        transport: format!("{} bytes read to the end", got.len()),
     }
 }
 
@@ -424,7 +434,11 @@ fn dgm11_every_live_scope_gets_its_own_404() {
         let name = if profiled { profile } else { "Tiny" };
         // the scope serves its pages
         let home = get(port, &root[1..]);
-        assert_eq!(home.status, 200, "{root}: {}", home.head);
+        assert_eq!(
+            home.status, 200,
+            "{root}: {} (transport: {})",
+            home.head, home.transport
+        );
         assert!(
             text(&home).contains(doc),
             "{root}: the fixture's own revision"
@@ -538,7 +552,11 @@ fn dgm11_profile_only_never_falls_back_to_source() {
     let sh = shared(&w.h);
     let only = only_port(&sh, "guide");
     let intro = get(only, "manual/intro.html");
-    assert_eq!(intro.status, 200, "{}", intro.head);
+    assert_eq!(
+        intro.status, 200,
+        "{} (transport: {})",
+        intro.head, intro.transport
+    );
     let first = get(only, "nosuch.html");
     for path in [
         "nosuch.html",
@@ -616,8 +634,16 @@ fn dgm11_head_and_get_share_404_headers() {
     ] {
         let g = get(port, path);
         let h = ask(port, "HEAD", path);
-        assert_eq!(g.status, 404, "{path}: {}", g.head);
-        assert_eq!(h.status, g.status, "HEAD {path}");
+        assert_eq!(
+            g.status, 404,
+            "{path}: {} (transport: {})",
+            g.head, g.transport
+        );
+        assert_eq!(
+            h.status, g.status,
+            "HEAD {path} (transport: {})",
+            h.transport
+        );
         assert_eq!(headers(&h), headers(&g), "HEAD {path}");
         assert!(h.body.is_empty(), "HEAD {path}: no body");
         assert_eq!(
@@ -654,7 +680,7 @@ fn dgm11_404_never_subscribes_or_enters_indexes() {
     ] {
         for path in ["nosuch.html", "404.html"] {
             let r = get(port, &format!("{root}{path}"));
-            assert_eq!(r.status, 404, "{root}{path}");
+            assert_eq!(r.status, 404, "{root}{path} (transport: {})", r.transport);
             // the generated page itself is inert, not only a plain answer
             assert!(text(&r).contains(MARKER), "{root}{path}: {}", r.head);
             assert_inert(&text(&r), &format!("{root}{path}"));
@@ -772,7 +798,7 @@ fn dgm11_guards_and_redaction_precede_themed_output() {
         "HEAD /_rdy/events?scope=canon HTTP/1.1\r\n{own}\r\n\r\n"
     ));
     let want = refusal(Refusal::Method);
-    assert_eq!(r.status, 405, "{}", r.head);
+    assert_eq!(r.status, 405, "{} (transport: {})", r.head, r.transport);
     assert_eq!(r.header("content-type"), Some("text/plain; charset=utf-8"));
     assert_eq!(
         r.header("content-length"),
@@ -889,7 +915,7 @@ fn dgm11_explicit_404_and_authored_collision_follow_the_matrix() {
     }
     // an authored 404 doc is an ordinary page, with normal live behaviour
     let g = get(port, "~view/authored/404.html");
-    assert_eq!(g.status, 200, "{}", g.head);
+    assert_eq!(g.status, 200, "{} (transport: {})", g.head, g.transport);
     let body = text(&g);
     assert!(body.contains("AUTHORED-404-BODY"), "{body}");
     assert!(

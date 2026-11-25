@@ -429,8 +429,9 @@ fn m4a5_installed_git_hook_warns_and_commit_succeeds() {
 }
 
 /// Runs `op` on the binary the hook just ran. On Windows the image of a process that just
-/// exited, or a scanner reading the binary, can hold it for a moment (sharing violation, or
-/// access denied), so `op` runs again until it succeeds, for 10 s at most.
+/// exited, or a scanner reading or mapping the binary, can hold it for a moment (sharing
+/// violation, access denied, or a user-mapped section, 1224), so `op` runs again until it
+/// succeeds, for 10 s at most.
 fn on_released_binary(what: &str, mut op: impl FnMut() -> std::io::Result<()>) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -438,7 +439,7 @@ fn on_released_binary(what: &str, mut op: impl FnMut() -> std::io::Result<()>) {
             Ok(()) => return,
             Err(e)
                 if cfg!(windows)
-                    && matches!(e.raw_os_error(), Some(5 | 32))
+                    && matches!(e.raw_os_error(), Some(5 | 32 | 1224))
                     && std::time::Instant::now() < deadline =>
             {
                 std::thread::sleep(Duration::from_millis(50));

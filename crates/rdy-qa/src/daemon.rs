@@ -26,7 +26,7 @@ const ENV_IDLE_MS: &str = "RDY_DAEMON_IDLE_MS";
 /// A child daemon's idle timeout unless `RDY_DAEMON_IDLE_MS` sets one: far past any gate test's
 /// own run, so it never fires mid-test, but a test that fails before stopping its daemon leaves
 /// no process behind for long.
-const CHILD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const CHILD_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long the child reports `starting` before `ready`, in ms (default 0).
 const ENV_PROGRESS_MS: &str = "RDY_DAEMON_PROGRESS_MS";
 /// A file path: when set, the child stays `starting` until that file exists (then `ready`), so a
@@ -34,7 +34,7 @@ const ENV_PROGRESS_MS: &str = "RDY_DAEMON_PROGRESS_MS";
 const ENV_READY_FILE: &str = "RDY_DAEMON_READY_FILE";
 
 /// How long `client`'s `connect_or_start` waits for a daemon.
-const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(30);
+const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Moves `store` to `aside` while a daemon serves it. Windows refuses that move with error 5
 /// (access denied) while the daemon holds the store (D-6JZ5V); then nothing moved and this is
@@ -338,7 +338,14 @@ pub struct Hosted {
 }
 
 /// How long `Hosted`'s clients wait for `ready`.
-const HOSTED_READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// The idle timeout of a test's daemon: one no test reaches on the clock. A page request keeps
+/// no daemon up (only a socket client, a live page's stream or a hold does), so a test that
+/// talks to the site alone for longer than a short timeout saw its daemon idle out under load:
+/// the next request was refused or closed with no answer. A test of the idle exit ends the timer
+/// with `DaemonHandle::expire_idle`, or sets its own short timeout and waits for the exit.
+pub const TEST_IDLE: Duration = Duration::from_secs(3600);
+
+const HOSTED_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A connection for `hello` to the daemon at `run`, past `ready`: waits up to 30 s while the
 /// daemon answers `starting`. Panics if the daemon does not answer or does not become ready.
@@ -415,7 +422,7 @@ impl Hosted {
             project: dir.path().to_path_buf(),
             version: version.into(),
             detach: false,
-            idle_timeout: Some(Duration::from_secs(60)),
+            idle_timeout: Some(TEST_IDLE),
             human_actor: Some(human.into()),
             site_lan_override: lan_override,
         })
@@ -594,7 +601,7 @@ pub fn endpoint_gone(run: &RunDir) -> bool {
 }
 
 /// How long a test waits for a daemon's endpoint or process to end: a hang guard, never a measure.
-const STOP_WAIT: Duration = Duration::from_secs(30);
+const STOP_WAIT: Duration = Duration::from_secs(60);
 
 /// Waits until the project's endpoint is proved gone ([`endpoint_gone`]), or panics past
 /// [`STOP_WAIT`]. A missing run file proves nothing here: only the endpoint answers.
@@ -680,7 +687,7 @@ pub fn remove_dir_all_retrying(path: &Path) {
 }
 
 /// How long `Served::kill9` waits for the killed daemon to exit.
-const KILL_WAIT: Duration = Duration::from_secs(30);
+const KILL_WAIT: Duration = Duration::from_secs(60);
 
 /// Whether process `pid` has exited: `ps` lists no such process, or lists a zombie (killed, not
 /// yet reaped by its parent).

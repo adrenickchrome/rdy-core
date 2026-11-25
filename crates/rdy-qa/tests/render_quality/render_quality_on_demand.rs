@@ -231,7 +231,11 @@ fn sod3_on_request_page_matches_whole_build_byte_for_byte() {
         for path in paths {
             let want = page(&build, path, &target).unwrap();
             let got = w.get(&prefix, path);
-            assert_eq!(got.status, 200, "{what} {path}: {}", got.head);
+            assert_eq!(
+                got.status, 200,
+                "{what} {path}: {} (transport: {})",
+                got.head, got.transport
+            );
             assert!(
                 got.body == want,
                 "{what} {path}: the whole build's bytes ({} sent, {} built)",
@@ -266,7 +270,11 @@ fn sod3_on_request_page_matches_whole_build_byte_for_byte() {
             "llms-nosuch.txt",
         ] {
             let got = w.get(&prefix, path);
-            assert_eq!(got.status, 404, "{what} {path}: {}", got.head);
+            assert_eq!(
+                got.status, 404,
+                "{what} {path}: {} (transport: {})",
+                got.head, got.transport
+            );
             assert!(got.body == miss, "{what} {path}: the generated miss");
             let t = text(&got.body);
             assert!(t.contains(MISS), "{what} {path}: the themed sentence");
@@ -282,7 +290,11 @@ fn sod3_on_request_page_matches_whole_build_byte_for_byte() {
             assert!(text(authored).contains("AUTHORED-404-BODY"), "{what}");
             let want = page(&build, "404.html", &target).unwrap();
             let got = w.get(&prefix, "404.html");
-            assert_eq!(got.status, 200, "{what} 404.html: {}", got.head);
+            assert_eq!(
+                got.status, 200,
+                "{what} 404.html: {} (transport: {})",
+                got.head, got.transport
+            );
             assert!(got.body == want, "{what} 404.html: the authored page");
             assert!(got.body != miss, "{what}: authored 404 is not the miss");
         }
@@ -350,11 +362,19 @@ fn assert_collisions(w: &World, build: &LiveBuild, target: &SiteTarget) {
             let got = w.get(&prefix, path);
             match page(build, path, target) {
                 Some(want) => {
-                    assert_eq!(got.status, 200, "{what} {path}");
+                    assert_eq!(
+                        got.status, 200,
+                        "{what} {path} (transport: {})",
+                        got.transport
+                    );
                     assert!(got.body == want, "{what} {path}");
                 }
                 None => {
-                    assert_eq!(got.status, 404, "{what} {path}: {}", got.head);
+                    assert_eq!(
+                        got.status, 404,
+                        "{what} {path}: {} (transport: {})",
+                        got.head, got.transport
+                    );
                     let miss = build.not_found.get(NotFoundKind::Page).unwrap();
                     assert!(got.body == miss, "{what} {path}: the generated miss");
                 }
@@ -416,9 +436,19 @@ fn sod3_live_review_keeps_static_and_publication_outputs() {
         let build = whole(&st, &target);
         let prefix = target.root().trim_start_matches('/').to_string();
         for path in build.files.keys() {
-            assert_eq!(w.get(&prefix, path).status, 200, "{target:?} {path}");
+            assert_eq!(
+                w.get(&prefix, path).status,
+                200,
+                "{target:?} {path} (transport: {})",
+                rdy_qa::http::last_transport()
+            );
         }
-        assert_eq!(w.get(&prefix, "nosuch.html").status, 404);
+        assert_eq!(
+            w.get(&prefix, "nosuch.html").status,
+            404,
+            "transport: {}",
+            rdy_qa::http::last_transport()
+        );
         sh.site
             .review_facts(&sh, &target)
             .unwrap_or_else(|e| panic!("{target:?}: {e}"));
