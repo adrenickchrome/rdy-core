@@ -473,7 +473,7 @@ pub fn dispatch_with(
             parse(
                 op,
                 args,
-                "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, mentions?, suspect?, tension?, coverage_below?, sort?}",
+                "{query?, like?, like_text?, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, mentions?, suspect?, tension?, coverage_below?, sort?}",
             )?,
         ),
         "diff" => diff(cx, parse(op, args, "{from, to?, doc?, detail?}")?),

@@ -88,6 +88,7 @@ mod cli_techdocs;
 mod cli_tensions;
 mod cli_trace;
 mod cli_upgrade;
+mod cli_vector_search;
 mod cli_views;
 mod cli_wasm_checks;
 mod cli_writer_import;

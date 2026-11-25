@@ -147,7 +147,7 @@ fn bpag1_a_cut_briefing_carries_a_cursor_and_per_doc_counts() {
     let cursor = b.next.as_ref().unwrap();
     let offsets = cursor.split(':').nth(1).unwrap().split(',').count();
     assert_eq!(offsets, rdy_engine::brief::PAGE_SECTIONS.len());
-    assert_eq!(rdy_engine::brief::PAGE_SECTIONS.len(), 12);
+    assert_eq!(rdy_engine::brief::PAGE_SECTIONS.len(), 13);
     assert_eq!(b.neighbors_by_doc, full.neighbors_by_doc);
 }
 
@@ -385,6 +385,7 @@ fn shown(b: &Briefing) -> usize {
         + b.inflight.intents.len()
         + b.inflight.tensions.len()
         + b.neighbors.len()
+        + b.vector_neighbors.len()
         + b.base.blocks.len()
 }
 

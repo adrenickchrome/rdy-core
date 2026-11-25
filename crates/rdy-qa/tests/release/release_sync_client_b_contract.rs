@@ -25,7 +25,7 @@ const CURRENT_SHA: &str = "e65653b123aea1307a9e2ab9728f3b5d18e25b33b8f7ca8aa9fb2
 
 /// The successors of [`CURRENT`], in order. Each is frozen since its own successor, and each
 /// has the sha256 that its successor copied.
-const NEXT: [(&str, &str); 3] = [
+const NEXT: [(&str, &str); 4] = [
     (
         "m5b-v1.json",
         "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d26256d2fb41",
@@ -37,6 +37,10 @@ const NEXT: [(&str, &str); 3] = [
     (
         "hub-ports-v1.json",
         "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab",
+    ),
+    (
+        "m5a-v1.json",
+        "b18e1992465210f6af99eabafb0290fb9b12f2288db5d5ac83bfa4f1a44bc4ec",
     ),
 ];
 

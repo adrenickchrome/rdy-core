@@ -1,6 +1,7 @@
 //! sg7: golden MCP replies for every M2 tool (spec §15.2). One scripted session runs in-process
 //! on a project with seeded ids and a pinned clock, so every id, hash and time in a reply is
-//! fixed. Each reply is compared with `tests/golden/mcp/<tool>--<case>.json`. Bless with
+//! fixed. Each reply is compared with `tests/golden/mcp/<tool>--<case>.json`, or with its explicit
+//! successor in `tests/golden/mcp-m5a` ([`M5A_SUCCESSORS`]). Bless with
 //! `RDY_QA_BLESS=1 cargo test -p rdy-qa --release --test mcp sg7_`.
 use rdy_engine::engine::Local;
 use rdy_engine::{RdyError, Scope, pin_clock};
@@ -52,8 +53,32 @@ const M2_TOOLS: [&str; 15] = [
     "rdy_review",
 ];
 
+/// D-TXFHR: the replies whose golden is an explicit successor in `tests/golden/mcp-m5a`, since
+/// briefings carry vector advice (D-Y1WEY). The historical file of each name in
+/// `tests/golden/mcp` keeps its bytes: nothing reads it as the current golden, and blessing
+/// never rewrites or removes it.
+const M5A_SUCCESSORS: [&str; 2] = ["rdy_brief--doc", "rdy_write--refused-brief-required"];
+
+/// The members vector advice adds to a briefing: its rows and its skipped-source count.
+/// `omitted.vector_neighbors`, the rows a page cut leaves out, is the third addition.
+const VECTOR_ADDITIONS: [&str; 2] = ["vector_neighbors", "vector_neighbors_skipped"];
+
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/mcp")
+}
+
+fn successor_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/mcp-m5a")
+}
+
+/// Where the golden of the reply `name` is read and blessed: its successor when it has one.
+fn golden_path(name: &str) -> PathBuf {
+    let dir = if M5A_SUCCESSORS.contains(&name) {
+        successor_dir()
+    } else {
+        golden_dir()
+    };
+    dir.join(format!("{name}.json"))
 }
 
 fn pretty(v: &Value) -> String {
@@ -651,7 +676,11 @@ fn blessing() -> bool {
 }
 
 fn golden_names() -> BTreeSet<String> {
-    let Ok(rd) = std::fs::read_dir(golden_dir()) else {
+    names_in(&golden_dir())
+}
+
+fn names_in(dir: &Path) -> BTreeSet<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
         return BTreeSet::new();
     };
     rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -697,7 +726,7 @@ pub(crate) fn check_goldens(prefix: &str) {
     let all = run_session();
     let mut checked = 0;
     for (name, text) in all.iter().filter(|(n, _)| n.starts_with(prefix)) {
-        let want = std::fs::read_to_string(golden_dir().join(format!("{name}.json")))
+        let want = std::fs::read_to_string(golden_path(name))
             .unwrap_or_else(|_| panic!("{name}: no golden file"));
         assert_eq!(
             &want,
@@ -716,20 +745,20 @@ fn sg7_every_m2_tool_reply_matches_its_golden() {
     all.extend(static_lists());
     if blessing() {
         std::fs::create_dir_all(golden_dir()).unwrap();
-        for old in golden_names()
-            .into_iter()
-            .filter(|n| !PROTOCOL_GOLDENS.contains(&n.as_str()))
-        {
+        std::fs::create_dir_all(successor_dir()).unwrap();
+        for old in golden_names().into_iter().filter(|n| {
+            !PROTOCOL_GOLDENS.contains(&n.as_str()) && !M5A_SUCCESSORS.contains(&n.as_str())
+        }) {
             std::fs::remove_file(golden_dir().join(format!("{old}.json"))).unwrap();
         }
         for (name, text) in &all {
-            std::fs::write(golden_dir().join(format!("{name}.json")), text).unwrap();
+            std::fs::write(golden_path(name), text).unwrap();
         }
         return;
     }
     let mut bad = vec![];
     for (name, text) in &all {
-        match std::fs::read_to_string(golden_dir().join(format!("{name}.json"))) {
+        match std::fs::read_to_string(golden_path(name)) {
             Ok(want) if &want == text => {}
             Ok(want) => bad.push(format!(
                 "{name}: the reply changed from the golden\n{}",
@@ -742,6 +771,12 @@ fn sg7_every_m2_tool_reply_matches_its_golden() {
     made.extend(PROTOCOL_GOLDENS.map(str::to_string));
     for extra in golden_names().difference(&made) {
         bad.push(format!("{extra}: a golden no case makes"));
+    }
+    let successors: BTreeSet<String> = M5A_SUCCESSORS.map(str::to_string).into();
+    for extra in names_in(&successor_dir()).symmetric_difference(&successors) {
+        bad.push(format!(
+            "{extra}: mcp-m5a holds exactly the listed successors"
+        ));
     }
     assert!(
         bad.is_empty(),
@@ -777,6 +812,69 @@ fn sg7_the_golden_set_names_every_m2_tool() {
         assert!(
             golden_names().contains(name),
             "no golden for the list {name}"
+        );
+    }
+}
+
+/// `v` without the members vector advice adds to a briefing ([`VECTOR_ADDITIONS`] and
+/// `omitted.vector_neighbors`); an `omitted` left empty goes too.
+fn without_vector_additions(v: &mut Value) {
+    let Some(o) = v.as_object_mut() else {
+        return;
+    };
+    for k in VECTOR_ADDITIONS {
+        o.remove(k);
+    }
+    let empty = o
+        .get_mut("omitted")
+        .and_then(Value::as_object_mut)
+        .is_some_and(|m| {
+            m.remove("vector_neighbors");
+            m.is_empty()
+        });
+    if empty {
+        o.remove("omitted");
+    }
+}
+
+/// D-TXFHR: each M5a successor is its historical golden plus vector advice only. With the
+/// listed vector members removed from the successor (from the reply, or from the briefing a
+/// refusal carries), every other field equals the historical file, which keeps its bytes.
+#[test]
+fn vxs3_mcp_golden_successors_preserve_legacy_fields() {
+    let read = |path: PathBuf| -> (Vec<u8>, Value) {
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let v = serde_json::from_slice(&bytes).unwrap();
+        (bytes, v)
+    };
+    let frozen = [
+        (
+            "rdy_brief--doc",
+            "9b9c64f71ac2ef6df9468955df7c032fd7af633d6a4b9f1fabb4e2c15429a56a",
+        ),
+        (
+            "rdy_write--refused-brief-required",
+            "7e4a6896cad64f4cb2a67383f8f1ba4cd6ffcc9d05e536316f6949f36bf802bf",
+        ),
+    ];
+    assert_eq!(frozen.map(|(n, _)| n), M5A_SUCCESSORS);
+    for (name, digest) in frozen {
+        let (bytes, legacy) = read(golden_dir().join(format!("{name}.json")));
+        assert_eq!(
+            rdy_model::Hash::of(&bytes).to_string(),
+            digest,
+            "{name}: the historical golden keeps its bytes"
+        );
+        let (_, mut now) = read(golden_path(name));
+        assert!(golden_path(name).starts_with(successor_dir()), "{name}");
+        if now.get("briefing").is_some() {
+            without_vector_additions(&mut now["briefing"]);
+        } else {
+            without_vector_additions(&mut now);
+        }
+        assert_eq!(
+            now, legacy,
+            "{name}: a field other than vector advice changed"
         );
     }
 }

@@ -211,7 +211,8 @@ fn nb7_a_briefing_lists_every_neighbor_with_the_full_counts() {
         (&v["neighbors"], &v["neighbors_by_doc"]),
         (&json!([]), &json!([]))
     );
-    assert_eq!(PAGE_SECTIONS[PAGE_SECTIONS.len() - 2], "neighbors");
+    assert_eq!(PAGE_SECTIONS[PAGE_SECTIONS.len() - 3], "neighbors");
+    assert_eq!(PAGE_SECTIONS[PAGE_SECTIONS.len() - 2], "vector_neighbors");
     assert_eq!(PAGE_SECTIONS[PAGE_SECTIONS.len() - 1], "base.blocks");
 }
 

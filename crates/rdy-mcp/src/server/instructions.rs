@@ -2,8 +2,8 @@
 
 /// The server instructions, one element per entry, in reading order. They stay short: the rules
 /// for each kind of work live in the built-in rulesets, which `rdy_instructions` delivers. Do not
-/// add guidance here; add it to the guide. `INSTRUCTIONS` joins the elements with one space at
-/// compile time.
+/// add guidance here; add it to the guide. The one exception is the relevance sentence, which
+/// D-76Y9H asks for here. `INSTRUCTIONS` joins the elements with one space at compile time.
 pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.",
     "State rdy/actor and rdy/run in _meta, or call rdy_session.",
@@ -12,6 +12,7 @@ pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "Read and write through rdy's tools, not the working-copy files.",
     "Never approve, tag or answer on your own judgment. Relay the person's exact words.",
     "If rdy_instructions refuses, follow its fix and call again before you work.",
+    "For ranked text search, pass sort: \"relevance\" to rdy_search.",
 ];
 
 /// What the server tells a host about rdy: [`INSTRUCTION_SENTENCES`] joined with one space.
