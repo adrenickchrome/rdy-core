@@ -23,8 +23,9 @@ use std::sync::mpsc::channel;
 use std::time::Duration;
 use tokio::sync::mpsc::error::TryRecvError;
 
-/// The deadline of a wait for an event.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of a wait for an event: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 const PERSON: &str = "actor: human:qa\n";
 
 /// A landed seed doc and one open question-free version, served: the section and the stream's

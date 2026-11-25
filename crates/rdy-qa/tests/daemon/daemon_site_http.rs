@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The deadline of every wait for an event.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of every wait for an event: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 
 /// Two landed docs, Alpha and Beta, each with one section of two prose blocks (as ls5).
 fn two_docs() -> (tempfile::TempDir, Rdy) {

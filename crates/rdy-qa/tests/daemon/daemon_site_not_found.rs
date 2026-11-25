@@ -26,8 +26,9 @@ use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
-/// The deadline of a read that must end.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of a read that must end: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 /// The generated page's marker on its html element.
 pub(crate) const MARKER: &str = "<html lang=\"en\" data-rdy-kind=\"not-found\">";
 /// The Page variant's sentence.

@@ -28,8 +28,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::error::TryRecvError;
 
-/// The deadline of every wait for an event.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of every wait for an event: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 /// What a removed block shows.
 const STUB: &str = "Content removed.";
 /// The fix of a blocked public profile's live warning.

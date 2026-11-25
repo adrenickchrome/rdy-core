@@ -23,8 +23,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// The deadline of every wait for an event.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of every wait for an event: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 /// The content the first removal selects.
 const SECRET: &str = "ZEBRA-7731 is the launch code.";
 /// The content the second removal selects.

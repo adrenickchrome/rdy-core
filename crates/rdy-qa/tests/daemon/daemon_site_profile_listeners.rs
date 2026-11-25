@@ -33,8 +33,9 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
-/// The deadline of every wait for an event.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of every wait for an event: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 /// The caveat every profile-only site carries (its title in place of `{}`).
 const CAVEAT_FIX: &str = "give the full site's link from rdy site when the person needs everything";
 /// The fix of the removal warning.

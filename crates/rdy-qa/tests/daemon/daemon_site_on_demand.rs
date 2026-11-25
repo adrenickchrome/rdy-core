@@ -23,8 +23,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::error::TryRecvError;
 
-/// The deadline of every wait for an event or a barrier.
-const T: Duration = Duration::from_secs(10);
+/// The deadline of every wait for an event or a barrier: a hang guard, never a measure (a loaded
+/// machine took a wait past 10 s).
+const T: Duration = Duration::from_secs(60);
 /// The scope-collision warning of a top-level doc named `glossary` beside generated terms.
 const GLOSSARY: &str = "the top-level doc named glossary has no page: glossary.html is the site's generated glossary. Rename the doc to publish it.";
 /// What a removed block shows.
