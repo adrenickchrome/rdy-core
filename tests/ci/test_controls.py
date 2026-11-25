@@ -1733,7 +1733,10 @@ class GateWorkflowPolicy(unittest.TestCase):
                 self.assertEqual(len(checkouts), 1)
                 self.assertEqual(checkouts[0]['with'], {'persist-credentials': False})
                 home = step_named({'jobs': {name: job}}, 'Scratch home and kept target')
-                self.assertEqual(home['env'], {'WORK_PARENT': '${{ runner.workspace }}'})
+                # the work folder's parent, from github.workspace: actionlint knows no runner.workspace
+                self.assertNotIn('env', home)
+                self.assertIn('GITHUB_WORKSPACE', home['run'])
+                self.assertNotIn('runner.workspace', home['run'])
                 self.assertIn('gate-target', home['run'])
                 self.assertIn('HOME=', home['run'])
                 self.assertLess(job['steps'].index(home), job['steps'].index(checkouts[0]))

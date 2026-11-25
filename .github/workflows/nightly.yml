@@ -32,15 +32,13 @@ jobs:
       - name: Scratch home and kept target
         # The tests get an empty home; Cargo and rustup keep the runner account's own homes. The nightly
         # target is its own: the nightly features would make the gate's warm target build again.
-        env:
-          WORK_PARENT: ${{ runner.workspace }}
         run: |
           set -eu
           cargo_home="${CARGO_HOME:-$HOME/.cargo}"
           {
             echo "CARGO_HOME=$cargo_home"
             echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
-            echo "CARGO_TARGET_DIR=$WORK_PARENT/nightly-target"
+            echo "CARGO_TARGET_DIR=$(dirname "$GITHUB_WORKSPACE")/nightly-target"
             echo "HOME=$RUNNER_TEMP/home"
           } >> "$GITHUB_ENV"
           echo "$cargo_home/bin" >> "$GITHUB_PATH"
@@ -100,8 +98,6 @@ jobs:
         # The tests get an empty HOME; Cargo and rustup keep the runner account's own homes. TEMP stays the
         # runner's own, so Defender scans every test file, as a user's machine would.
         shell: pwsh
-        env:
-          WORK_PARENT: ${{ runner.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
@@ -110,7 +106,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $home_ | Out-Null
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$cargoHome"
           Add-Content -Path $env:GITHUB_ENV -Value "RUSTUP_HOME=$rustupHome"
-          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$(Join-Path $env:WORK_PARENT 'nightly-target')"
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$(Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'nightly-target')"
           Add-Content -Path $env:GITHUB_ENV -Value "HOME=$home_"
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $cargoHome 'bin')
       - name: No line-ending conversion

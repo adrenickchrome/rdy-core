@@ -43,15 +43,13 @@ jobs:
       - name: Scratch home and kept target
         # The tests get an empty home. Cargo and rustup keep the runner account's own homes, and the
         # target directory stays beside the work folder, so the next run builds warm.
-        env:
-          WORK_PARENT: ${{ runner.workspace }}
         run: |
           set -eu
           cargo_home="${CARGO_HOME:-$HOME/.cargo}"
           {
             echo "CARGO_HOME=$cargo_home"
             echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
-            echo "CARGO_TARGET_DIR=$WORK_PARENT/gate-target"
+            echo "CARGO_TARGET_DIR=$(dirname "$GITHUB_WORKSPACE")/gate-target"
             echo "HOME=$RUNNER_TEMP/home"
           } >> "$GITHUB_ENV"
           echo "$cargo_home/bin" >> "$GITHUB_PATH"
@@ -144,15 +142,13 @@ jobs:
       - name: Scratch home and kept target
         # The tests get an empty home. Cargo and rustup keep the runner account's own homes, and the
         # target directory stays beside the work folder, so the next run builds warm.
-        env:
-          WORK_PARENT: ${{ runner.workspace }}
         run: |
           set -eu
           cargo_home="${CARGO_HOME:-$HOME/.cargo}"
           {
             echo "CARGO_HOME=$cargo_home"
             echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
-            echo "CARGO_TARGET_DIR=$WORK_PARENT/gate-target"
+            echo "CARGO_TARGET_DIR=$(dirname "$GITHUB_WORKSPACE")/gate-target"
             echo "HOME=$RUNNER_TEMP/home"
           } >> "$GITHUB_ENV"
           echo "$cargo_home/bin" >> "$GITHUB_PATH"
@@ -255,8 +251,6 @@ jobs:
         # target directory stays beside the work folder, so the next run builds warm.
         if: ${{ !inputs.hosted }}
         shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
-        env:
-          WORK_PARENT: ${{ runner.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
           # The proven Windows setup: rdytest has no toolchain of its own; the toolchain, a venv with
@@ -271,7 +265,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $home_ | Out-Null
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$cargoHome"
           Add-Content -Path $env:GITHUB_ENV -Value "RUSTUP_HOME=$rustupHome"
-          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$(Join-Path $env:WORK_PARENT 'gate-target')"
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$(Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'gate-target')"
           Add-Content -Path $env:GITHUB_ENV -Value "HOME=$home_"
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $cargoHome 'bin')
           # GITHUB_PATH puts the last line first: python3 comes before cargo, as in the proven setup.
