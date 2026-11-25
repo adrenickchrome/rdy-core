@@ -36,26 +36,28 @@ use std::process::{Child, Command, Stdio};
 // the binary and the machines
 // ---------------------------------------------------------------------------------------------
 
-/// The `rdy` binary the tests name: `$RDY_BIN`, else the release `rdy` of this test's target
-/// directory (a test runs from `target/<profile>/deps`). None when no such file exists.
+/// The `rdy` binary the tests name: `$RDY_BIN`, else the `rdy` of this test's own profile (the
+/// gate builds one there), else the release `rdy` of this test's target directory (a test runs
+/// from `target/<profile>/deps`). None when no such file exists.
 fn find_bin() -> Option<PathBuf> {
-    let bin = match std::env::var("RDY_BIN") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => {
-            let exe = std::env::current_exe().ok()?;
-            let dir = exe.parent()?;
-            let profile = if dir.file_name().is_some_and(|n| n == "deps") {
-                dir.parent()?
-            } else {
-                dir
-            };
-            profile
-                .parent()?
-                .join("release")
-                .join(format!("rdy{}", std::env::consts::EXE_SUFFIX))
-        }
+    let name = format!("rdy{}", std::env::consts::EXE_SUFFIX);
+    if let Ok(p) = std::env::var("RDY_BIN") {
+        let bin = PathBuf::from(p);
+        return bin.exists().then_some(bin);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let profile = if dir.file_name().is_some_and(|n| n == "deps") {
+        dir.parent()?
+    } else {
+        dir
     };
-    bin.exists().then_some(bin)
+    [
+        profile.join(&name),
+        profile.parent()?.join("release").join(&name),
+    ]
+    .into_iter()
+    .find(|b| b.exists())
 }
 
 /// The `rdy` binary under test. A missing one fails the test: these tests never skip.

@@ -409,16 +409,10 @@ pub struct TestExe {
     pub path: PathBuf,
 }
 
-/// The command that builds every `rdy-qa` test and prints one JSON record per artifact.
+/// The gate's one build ([`report::WORKSPACE_TEST_ARGS`]): it builds every test of the
+/// workspace, rdy-qa's included, and prints one JSON record per artifact.
 pub fn discover_command() -> Command {
-    cargo(&[
-        "test",
-        "-p",
-        "rdy-qa",
-        "--release",
-        "--no-run",
-        "--message-format=json",
-    ])
+    cargo(&report::WORKSPACE_TEST_ARGS)
 }
 
 /// The integration-test executables in Cargo's `--message-format=json` output, by target name.
@@ -539,43 +533,254 @@ pub fn cargo(args: &[&str]) -> Command {
     c
 }
 
-/// The area binaries that run alone: no other area runs while one of them runs. Each one's tests
-/// load the machine in a way that slows a neighbour's timing-sensitive tests or is slowed by it:
-/// - `cli`: most files start the release `rdy` binary or a daemon, with waits on its endpoint;
-/// - `daemon`: nearly every file starts a daemon and times its endpoints, stops and restarts;
-/// - `io`: crash, fsync and reindex runs, and follower and migration child processes;
-/// - `mcp`: most files start a daemon or the HTTP MCP surface, with the largest payloads;
-/// - `release`: runs Cargo itself, packages and installs the release binary;
-/// - `store`: crash, reopen and fsync runs over many stores (disk-heavy);
-/// - `swarm`: many concurrent agents against one store, with kills and restarts.
-pub const SERIAL_AREAS: &[&str] = &["cli", "daemon", "io", "mcp", "release", "store", "swarm"];
+/// The area binaries that run alone: no other binary runs while one of them runs. The list is
+/// empty. It was written for a disk that took about 360 flushes a second. On a RAM disk, with
+/// `cli`, `daemon`, `mcp` and `swarm` in the pool of four, every test passed and the rdy-qa
+/// areas took 233 s on the Mac, against 455 s with those four alone. Put a binary back on the
+/// list only when a run with it in the pool fails or is slower.
+pub const SERIAL_AREAS: &[&str] = &[];
 
-/// The area binaries launched directly when [`DIRECT_AREAS_VAR`] is not set: the pilot.
-pub const PILOT_AREAS: &[&str] = &["model", "schema"];
+/// The Cargo profile of the gate's one build (`[profile.gate]` in the root `Cargo.toml`): the
+/// release profile at `opt-level = 1`, with debug assertions and overflow checks on.
+pub const GATE_PROFILE: &str = "gate";
 
-/// Names the area binaries the gate launches directly: `all`, `none`, or a comma list. Unset, it
-/// is [`PILOT_AREAS`]. Every other area runs through `cargo test`, alone, as before.
-pub const DIRECT_AREAS_VAR: &str = "RDY_QA_DIRECT_AREAS";
+/// The gate's one build step: the `rdy` binary, every crate's tests and every rdy-qa binary.
+pub const BUILD_STEP: &str = "cargo test --workspace --profile gate --no-run";
 
-/// The area binaries of `files` to launch directly, for the value of [`DIRECT_AREAS_VAR`].
-pub fn direct_areas(value: Option<&str>, files: &[String]) -> BTreeSet<String> {
-    let chosen: Vec<&str> = match value.map(str::trim) {
-        None => PILOT_AREAS.to_vec(),
-        Some("all") => files.iter().map(String::as_str).collect(),
-        Some(v) => v.split(',').map(str::trim).collect(),
-    };
-    files
-        .iter()
-        .filter(|f| chosen.contains(&f.as_str()))
-        .cloned()
+/// One test executable of the gate's build: its package, target kind (`lib`, `bin`, `test`) and
+/// target name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TestBinary {
+    pub package: String,
+    pub kind: String,
+    pub name: String,
+    pub path: PathBuf,
+}
+
+impl TestBinary {
+    /// `<package>/<kind>/<name>`: unique in a workspace, and the binary's name in the report.
+    pub fn key(&self) -> String {
+        format!("{}/{}/{}", self.package, self.kind, self.name)
+    }
+}
+
+/// The package name of a Cargo package id: `path+file:///w/crates/rdy-qa#0.58.0` (the name is
+/// the last path segment), `path+file:///w/x#rdy-qa@0.58.0`, or the old `rdy-qa 0.58.0 (...)`.
+pub fn package_name(id: &str) -> Option<&str> {
+    if !id.contains("://") || id.contains(" (") {
+        return id.split_whitespace().next();
+    }
+    let (path, frag) = id.rsplit_once('#')?;
+    match frag.split_once('@') {
+        Some((name, _)) => Some(name),
+        None => path.rsplit('/').next(),
+    }
+}
+
+/// Every test executable in Cargo's `--message-format=json` output, sorted by key: the test
+/// builds of libraries, binaries and test targets. A line that is not a record is skipped.
+pub fn parse_test_binaries(json_lines: &str) -> Vec<TestBinary> {
+    let mut found: BTreeSet<TestBinary> = BTreeSet::new();
+    for line in json_lines.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if v["reason"] != "compiler-artifact" || v["profile"]["test"] != true {
+            continue;
+        }
+        let (Some(id), Some(kind), Some(name), Some(path)) = (
+            v["package_id"].as_str(),
+            v["target"]["kind"][0].as_str(),
+            v["target"]["name"].as_str(),
+            v["executable"].as_str(),
+        ) else {
+            continue;
+        };
+        let Some(package) = package_name(id) else {
+            continue;
+        };
+        found.insert(TestBinary {
+            package: package.into(),
+            kind: kind.into(),
+            name: name.into(),
+            path: PathBuf::from(path),
+        });
+    }
+    found.into_iter().collect()
+}
+
+/// The units that a build compiled instead of finding fresh, from Cargo's JSON output, one
+/// `<package> <target>` line each.
+pub fn stale_units(json_lines: &str) -> Vec<String> {
+    json_lines
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter(|v| v["reason"] == "compiler-artifact" && v["fresh"] == false)
+        .map(|v| {
+            format!(
+                "{} {}",
+                v["package_id"]
+                    .as_str()
+                    .and_then(package_name)
+                    .unwrap_or("?"),
+                v["target"]["name"].as_str().unwrap_or("?")
+            )
+        })
         .collect()
 }
 
-/// How many area binaries run at once on a machine with `cpus` threads: a quarter of them, from
-/// 1 to 4. Each binary already runs its tests on every thread.
-pub fn area_jobs(cpus: usize) -> usize {
-    (cpus / 4).clamp(1, 4)
+/// The rendered compiler errors in Cargo's JSON output, then its last plain lines.
+pub fn build_errors(output: &str) -> String {
+    let mut errors: Vec<String> = output
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter(|v| v["reason"] == "compiler-message" && v["message"]["level"] == "error")
+        .filter_map(|v| v["message"]["rendered"].as_str().map(String::from))
+        .take(5)
+        .collect();
+    let plain: String = output
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('{'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    errors.push(report::tail(&plain, 10));
+    errors.join("\n")
 }
+
+/// The name of the profile directory of the executable `exe`: a test runs from
+/// `target/<profile>/deps/`, a binary from `target/<profile>/`.
+pub fn profile_dir_of(exe: &Path) -> Option<String> {
+    let dir = exe.parent()?;
+    let dir = if dir.file_name().is_some_and(|n| n == "deps") {
+        dir.parent()?
+    } else {
+        dir
+    };
+    Some(dir.file_name()?.to_string_lossy().into_owned())
+}
+
+/// The Cargo arguments that select the profile this process was built in: none for `debug`
+/// (Cargo's default), `--release`, or `--profile <name>`. A Cargo call of a test then builds in
+/// the profile, and the target directory, of the run that started it.
+pub fn own_profile_args() -> Vec<String> {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| profile_dir_of(&e))
+        .unwrap_or_else(|| "debug".into());
+    match dir.as_str() {
+        "debug" => vec![],
+        "release" => vec!["--release".into()],
+        other => vec!["--profile".into(), other.into()],
+    }
+}
+
+/// Names the directory where the probe runner writes one record per test binary.
+pub const RUNNER_PROBE_VAR: &str = "RDY_QA_RUNNER_PROBE";
+
+/// The name of the probe runner, built beside the gate.
+pub const RUNNER_PROBE_BIN: &str = "qa-env-probe";
+
+/// Cargo's runner variable for the target `triple`: `CARGO_TARGET_<TRIPLE>_RUNNER`.
+pub fn runner_var(triple: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_RUNNER",
+        triple.to_ascii_uppercase().replace(['-', '.'], "_")
+    )
+}
+
+/// The host triple in `rustc -vV` output.
+pub fn host_of(rustc_vv: &str) -> Option<&str> {
+    rustc_vv
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .map(str::trim)
+}
+
+/// The probe runner's record of one test binary: the binary, and [`env_probe_record`]'s
+/// working directory and variables.
+pub fn runner_record(exe: &str) -> String {
+    let mut v: serde_json::Value =
+        serde_json::from_str(&env_probe_record()).expect("the env probe record is JSON");
+    v["exe"] = exe.into();
+    v.to_string()
+}
+
+/// The command that runs every test target of the gate's build once through the probe runner
+/// `probe`, which writes each binary's record into `dir`. It builds nothing new: the selection is
+/// the build's, in the profile this process was built in (the gate profile under `cargo qa`).
+pub fn probe_command(probe: &Path, dir: &Path, triple: &str) -> Command {
+    let mut args: Vec<String> = ["test", "--workspace"].map(String::from).to_vec();
+    args.extend(own_profile_args());
+    args.extend(["--locked", "--no-fail-fast", "--lib", "--bins", "--tests"].map(String::from));
+    let mut c = cargo(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    c.env(runner_var(triple), probe).env(RUNNER_PROBE_VAR, dir);
+    c
+}
+
+/// The records in `dir`, by test binary, each without the probe's own two variables.
+pub fn read_runner_records(dir: &Path, triple: &str) -> Result<BTreeMap<PathBuf, AreaEnv>, String> {
+    let mut envs = BTreeMap::new();
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("env probe records: {e}"))?;
+    for entry in entries {
+        let path = entry.map_err(|e| format!("env probe records: {e}"))?.path();
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("env probe record {}: {e}", path.display()))?;
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("env probe record {}: {e}", path.display()))?;
+        let exe = v["exe"]
+            .as_str()
+            .ok_or_else(|| format!("env probe record {} names no binary", path.display()))?;
+        let mut env = parse_env_probe(&text)?;
+        env.vars.remove(RUNNER_PROBE_VAR);
+        env.vars.remove(&runner_var(triple));
+        envs.insert(PathBuf::from(exe), env);
+    }
+    if envs.is_empty() {
+        return Err("the env probe recorded no test binary".into());
+    }
+    Ok(envs)
+}
+
+/// Asks Cargo for the working directory and environment it gives each test binary of the gate's
+/// build: Cargo runs every test target through the probe runner (built beside this gate), which
+/// records them. `run` runs the command (the caller sets the working directory).
+pub fn probe_envs(
+    run: impl FnOnce(Command) -> ChildOutput,
+) -> Result<BTreeMap<PathBuf, AreaEnv>, String> {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let vv = Command::new(rustc)
+        .arg("-vV")
+        .output()
+        .map_err(|e| format!("rustc -vV: {e}"))?;
+    let vv = String::from_utf8_lossy(&vv.stdout).into_owned();
+    let triple = host_of(&vv).ok_or("rustc -vV names no host")?.to_string();
+    let exe = std::env::current_exe().map_err(|e| format!("the gate's own path: {e}"))?;
+    // the profile directory: the gate's own, or a test's (`target/<profile>/deps/`)
+    let mut dir = exe.parent().ok_or("the gate has no directory")?;
+    if dir.file_name().is_some_and(|n| n == "deps") {
+        dir = dir.parent().ok_or("the test has no profile directory")?;
+    }
+    let probe = dir.join(format!(
+        "{RUNNER_PROBE_BIN}{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    if !probe.is_file() {
+        return Err(format!("the probe runner {} is missing", probe.display()));
+    }
+    let dir = tempfile::tempdir().map_err(|e| format!("env probe: {e}"))?;
+    let out = run(probe_command(&probe, dir.path(), &triple));
+    if !out.ok {
+        return Err(format!(
+            "the env probe exited with {}: {}",
+            out.status_text(),
+            report::tail(&out.combined(), 5)
+        ));
+    }
+    read_runner_records(dir.path(), &triple)
+}
+
+/// How many test binaries run at once. Each binary already runs its tests on every thread.
+pub const BINARY_JOBS: usize = 4;
 
 /// Runs `run` on every item. The items for which `alone` is false share up to `jobs` workers;
 /// after them, each item for which `alone` is true runs by itself, so it never overlaps another.
@@ -713,38 +918,14 @@ pub fn parse_env_probe(text: &str) -> Result<AreaEnv, String> {
     })
 }
 
-/// The `cargo test` arguments that run the env probe test alone.
-pub const ENV_PROBE_ARGS: [&str; 9] = [
-    "test",
-    "-p",
-    "rdy-qa",
-    "--release",
-    "--test",
-    ENV_PROBE_BINARY,
-    "--",
-    ENV_PROBE_TEST,
-    "--exact",
-];
-
-/// Asks Cargo for the environment it gives an `rdy-qa` test binary: runs the env probe test
-/// through `run` (the command in, its output back; the caller sets the working directory) and
-/// reads its record.
-pub fn capture_area_env(run: impl FnOnce(Command) -> ChildOutput) -> Result<AreaEnv, String> {
-    let dir = tempfile::tempdir().map_err(|e| format!("env probe: {e}"))?;
-    let file = dir.path().join("env.json");
-    let mut c = cargo(&ENV_PROBE_ARGS);
-    c.env(ENV_PROBE_VAR, &file);
-    let out = run(c);
-    if !out.ok {
-        return Err(format!(
-            "env probe exited with {}: {}",
-            out.status_text(),
-            report::tail(&out.combined(), 5)
-        ));
-    }
-    let text = std::fs::read_to_string(&file)
-        .map_err(|e| format!("env probe wrote no record ({e}): no test matched?"))?;
-    parse_env_probe(&text)
+/// The `cargo test` arguments that run the env probe test alone, in the profile this process
+/// was built in ([`own_profile_args`]). The selection is `--workspace`, as in the gate's build: a
+/// selection of rdy-qa alone resolves other features and builds rdy-qa again.
+pub fn env_probe_args() -> Vec<String> {
+    let mut args: Vec<String> = ["test", "--workspace"].map(String::from).to_vec();
+    args.extend(own_profile_args());
+    args.extend(["--test", ENV_PROBE_BINARY, "--", ENV_PROBE_TEST, "--exact"].map(String::from));
+    args
 }
 
 pub fn fail_tail(ok: bool, out: &str) -> String {
@@ -755,51 +936,56 @@ pub fn fail_tail(ok: bool, out: &str) -> String {
     }
 }
 
-/// The prerequisite steps: the locked fetch of every target's crates, then the release build,
-/// which needs it.
-pub fn prerequisite_steps(os: &str) -> [GateStep; 2] {
+/// The prerequisite steps: the locked fetch of every target's crates, then the one build, which
+/// needs it.
+pub fn prerequisite_steps() -> [GateStep; 2] {
     [
-        GateStep::new(
-            "cargo fetch --locked",
-            &[],
-            default_deadline(StageKind::Fetch, os),
-        ),
-        GateStep::new(
-            "cargo build --release -p rdy-cli",
-            &["cargo fetch --locked"],
-            default_deadline(StageKind::Build, os),
-        ),
+        GateStep::new("cargo fetch --locked", &[], Duration::ZERO),
+        GateStep::new(BUILD_STEP, &["cargo fetch --locked"], Duration::ZERO),
     ]
 }
 
 /// Runs the prerequisite steps ([`prerequisite_steps`]) through `run` (label, command and
-/// deadline in, success and output back). A failed step is a failed gate row, and its output goes
-/// to stderr; a failed fetch skips the build unless `stages` runs every stage.
+/// deadline in, success and output back), and returns their rows and the build's output (Cargo's
+/// JSON artifact records). A failed step is a failed gate row, and its errors go to stderr; a
+/// failed fetch skips the build unless `stages` runs every stage.
 pub fn build_steps(
     stages: &mut Stages,
     mut run: impl FnMut(&str, Command, Duration) -> (bool, String),
-) -> Vec<Gate> {
-    let commands: [(&str, &[&str]); 2] = [
-        ("fetch locked dependencies", &["fetch", "--locked"]),
-        ("build rdy-cli", &["build", "--release", "-p", "rdy-cli"]),
-    ];
-    let mut gates = Vec::with_capacity(commands.len());
-    for (step, (label, args)) in prerequisite_steps(std::env::consts::OS)
-        .iter()
-        .zip(commands)
-    {
+) -> (Vec<Gate>, String) {
+    let [fetch, build] = prerequisite_steps();
+    let mut gates = Vec::with_capacity(2);
+    let mut build_out = String::new();
+    for (step, label, cmd) in [
+        (
+            &fetch,
+            "fetch locked dependencies",
+            cargo(&["fetch", "--locked"]),
+        ),
+        (&build, "build", cargo(&report::WORKSPACE_TEST_ARGS)),
+    ] {
         if let Some(root) = stages.blocked(step) {
             gates.push(stages.skip(step, root));
             continue;
         }
-        let (ok, out) = run(label, cargo(args), step.deadline);
+        let (ok, out) = run(label, cmd, step.deadline);
+        let detail = if ok {
+            String::new()
+        } else if step.id == BUILD_STEP {
+            build_errors(&out)
+        } else {
+            report::tail(&out, 20)
+        };
         if !ok {
-            eprintln!("{out}");
+            eprintln!("{detail}");
         }
         stages.record(step, ok);
-        gates.push(Gate::ran(&step.id, ok, fail_tail(ok, &out)));
+        gates.push(Gate::ran(&step.id, ok, detail));
+        if step.id == BUILD_STEP {
+            build_out = out;
+        }
     }
-    gates
+    (gates, build_out)
 }
 
 /// The gate row of the Python CI tests (`tests/ci`).
@@ -954,9 +1140,9 @@ mod tests {
     #[test]
     fn plz3_fetch_precedes_build() {
         let mut seen: Vec<(String, Vec<String>)> = vec![];
-        let gates = build_steps(&mut Stages::new(false), |label, cmd, _| {
+        let (gates, out) = build_steps(&mut Stages::new(false), |label, cmd, _| {
             seen.push((label.to_string(), args_of(&cmd)));
-            (true, String::new())
+            (true, format!("{label} output"))
         });
         let want: Vec<(String, Vec<String>)> = vec![
             (
@@ -964,26 +1150,23 @@ mod tests {
                 vec!["fetch".into(), "--locked".into()],
             ),
             (
-                "build rdy-cli".into(),
-                ["build", "--release", "-p", "rdy-cli"]
-                    .map(String::from)
-                    .to_vec(),
+                "build".into(),
+                report::WORKSPACE_TEST_ARGS.map(String::from).to_vec(),
             ),
         ];
         assert_eq!(seen, want);
         let names: Vec<&str> = gates.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["cargo fetch --locked", "cargo build --release -p rdy-cli"]
-        );
+        assert_eq!(names, ["cargo fetch --locked", BUILD_STEP]);
         assert!(gates.iter().all(|g| g.pass));
+        // the build's output comes back for its artifact records
+        assert_eq!(out, "build output");
     }
 
     #[test]
     fn plz3_fetch_failure_remains_a_failed_gate() {
         // a failed fetch skips the build, which needs it
         let mut labels: Vec<String> = vec![];
-        let gates = build_steps(&mut Stages::new(false), |label, _, _| {
+        let (gates, _) = build_steps(&mut Stages::new(false), |label, _, _| {
             labels.push(label.to_string());
             (false, "locked fetch failed".to_string())
         });
@@ -1001,7 +1184,7 @@ mod tests {
         assert!(!report::overall(&gates, &[], true));
         // with every stage, both run
         let mut labels: Vec<String> = vec![];
-        let gates = build_steps(&mut Stages::new(true), |label, _, _| {
+        let (gates, _) = build_steps(&mut Stages::new(true), |label, _, _| {
             labels.push(label.to_string());
             if label == "fetch locked dependencies" {
                 (false, "locked fetch failed".to_string())
@@ -1009,7 +1192,7 @@ mod tests {
                 (true, String::new())
             }
         });
-        assert_eq!(labels, ["fetch locked dependencies", "build rdy-cli"]);
+        assert_eq!(labels, ["fetch locked dependencies", "build"]);
         assert!(!gates[0].pass);
         assert!(gates[1].pass);
         assert!(!report::overall(&gates, &[], true));
@@ -1277,6 +1460,50 @@ not json at all
             "{e}"
         );
         assert_eq!(discovered(&done(true, 0, ARTIFACTS)).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn tgb1_the_gate_reads_every_test_binary_of_its_one_build() {
+        let json = r#"{"reason":"compiler-artifact","package_id":"path+file:///w/crates/rdy-store#0.58.0","profile":{"test":true},"target":{"kind":["test"],"name":"durability"},"executable":"/t/gate/deps/durability-1","fresh":true}
+{"reason":"compiler-artifact","package_id":"path+file:///w/crates/rdy-store#0.58.0","profile":{"test":true},"target":{"kind":["lib"],"name":"rdy_store"},"executable":"/t/gate/deps/rdy_store-2","fresh":false}
+{"reason":"compiler-artifact","package_id":"path+file:///w/x#rdy-qa@0.58.0","profile":{"test":true},"target":{"kind":["test"],"name":"cli"},"executable":"/t/gate/deps/cli-3","fresh":true}
+{"reason":"compiler-artifact","package_id":"path+file:///w/crates/rdy-cli#0.58.0","profile":{"test":false},"target":{"kind":["bin"],"name":"rdy"},"executable":"/t/gate/rdy","fresh":true}
+not json
+"#;
+        let found = parse_test_binaries(json);
+        let keys: Vec<String> = found.iter().map(TestBinary::key).collect();
+        assert_eq!(
+            keys,
+            [
+                "rdy-qa/test/cli",
+                "rdy-store/lib/rdy_store",
+                "rdy-store/test/durability"
+            ]
+        );
+        assert_eq!(stale_units(json), ["rdy-store rdy_store"]);
+        assert_eq!(
+            package_name("rdy-qa 0.58.0 (path+file:///w)"),
+            Some("rdy-qa")
+        );
+        assert_eq!(
+            runner_var("x86_64-pc-windows-msvc"),
+            "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER"
+        );
+        assert_eq!(
+            host_of("rustc 1.99.0\nhost: aarch64-apple-darwin\n"),
+            Some("aarch64-apple-darwin")
+        );
+        assert_eq!(
+            profile_dir_of(Path::new("/t/gate/deps/cli-3")).as_deref(),
+            Some("gate")
+        );
+        assert_eq!(
+            profile_dir_of(Path::new("/t/release/qa-gate")).as_deref(),
+            Some("release")
+        );
+        // the real-disk binaries keep one pass over the flush path
+        assert!(on_real_disk("rdy-store", "durability") && on_real_disk("rdy-qa", "store"));
+        assert!(!on_real_disk("rdy-qa", "durability"));
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! `cargo qa`: the full regression and hardening gate, with a report in `target/qa/`.
 use clap::Parser;
 use rdy_qa::gate_steps::{
-    ChildOutput, DIRECT_AREAS_VAR, GateStep, SERIAL_AREAS, StageKind, Stages, area_jobs,
-    build_steps, capture_area_env, cargo, default_deadline, discover_command, discovered,
-    fail_tail, fmt_step, launch_area, list_guarded, run_areas, run_bounded, run_stage,
+    AreaEnv, BINARY_JOBS, BUILD_STEP, ChildOutput, GateStep, SERIAL_AREAS, StageKind, Stages,
+    TestBinary, TestExe, build_steps, cargo, default_deadline, discover_command, fail_tail,
+    fmt_step, launch_area, list_guarded, on_real_disk, parse_test_binaries, probe_envs, run_areas,
+    run_bounded, run_stage, stale_units,
 };
 use rdy_qa::perf::{self, Baseline, Measure};
 use rdy_qa::report::{self, Area, Gate, Report, StageRecord, Timing};
@@ -51,6 +52,16 @@ struct Args {
     /// `REAL_DISK_BINARIES` keep the real temp directory. The directory must exist.
     #[arg(long, value_name = "DIR")]
     tmp_root: Option<PathBuf>,
+    /// The test tier. `release`: the run a release reads; fmt, clippy and the Python CI tests
+    /// run on Linux only.
+    #[arg(long, value_enum)]
+    tier: Option<Tier>,
+}
+
+/// The test tiers of `--tier`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Tier {
+    Release,
 }
 
 /// The checked `--tmp-root`, set once in `main`.
@@ -74,6 +85,8 @@ fn root() -> PathBuf {
 /// The gate's start, and every timed child so far, for the report's `## Timing` table.
 static GATE_START: OnceLock<Instant> = OnceLock::new();
 static RECORDS: Mutex<Vec<StageRecord>> = Mutex::new(Vec::new());
+/// Each test binary the gate started, and its seconds.
+static BINARY_TIMES: Mutex<Vec<(String, f64)>> = Mutex::new(Vec::new());
 
 /// Runs a command with bounded output under `deadline`, keeping the exit status and the two
 /// streams apart. Past the deadline the child is ended and its output names the stage.
@@ -82,15 +95,25 @@ fn step_out(name: &str, mut cmd: Command, deadline: Duration) -> ChildOutput {
     cmd.current_dir(root());
     let t = Instant::now();
     let out = run_stage(name, cmd, deadline);
+    record(name, t.elapsed().as_secs_f64(), out.ok);
+    out
+}
+
+/// Adds one timed child to the report's `## Timing` table.
+fn record(label: &str, secs: f64, ok: bool) {
     if let (Some(start), Ok(mut r)) = (GATE_START.get(), RECORDS.lock()) {
         r.push(StageRecord {
-            label: name.into(),
-            secs: t.elapsed().as_secs_f64(),
-            ok: out.ok,
+            label: label.into(),
+            secs,
+            ok,
             ended_at: start.elapsed().as_secs_f64(),
         });
     }
-    out
+}
+
+/// The deadline of the next child.
+fn left() -> Duration {
+    deadline(StageKind::WorkspaceTests)
 }
 
 /// Runs a command, returning (success, stdout + stderr combined).
@@ -102,16 +125,6 @@ fn step(name: &str, cmd: Command, deadline: Duration) -> (bool, String) {
 /// The default deadline of a child of `kind` on this OS.
 fn deadline(kind: StageKind) -> Duration {
     default_deadline(kind, std::env::consts::OS)
-}
-
-/// Sets `RDY_QA_REQUIRE_ALL=1` on a test command when the gate runs with `--require-all`.
-/// Every test command goes through it, so it also moves the command's temporary files to the
-/// gate's `--tmp-root` ([`on_tmp_root`]); a real-disk binary is built without it.
-fn with_require_all(mut c: Command, args: &Args) -> Command {
-    if args.require_all {
-        c.env(rdy_qa::skip::REQUIRE_ALL, "1");
-    }
-    on_tmp_root(c)
 }
 
 fn git(args: &[&str]) -> Option<String> {
@@ -164,7 +177,7 @@ fn perf_tier(
         // the large tier (about 50k blocks, the `_50k` ops)
         c.env("RDY_QA_DEEP", "1");
     }
-    let out = step_out("perf (qa-perf)", c, deadline(StageKind::Perf));
+    let out = step_out("perf (qa-perf)", c, left());
     eprint!("{}", out.stderr);
     if !out.ok {
         let why = if out.timed_out {
@@ -240,6 +253,80 @@ fn perf_tier(
     (verdicts, note, ok)
 }
 
+/// The test binaries of one run, by key, and the environment Cargo gives each one.
+struct Launch<'a> {
+    args: &'a Args,
+    envs: &'a BTreeMap<PathBuf, AreaEnv>,
+    tmp_root: Option<&'a Path>,
+}
+
+impl Launch<'_> {
+    /// Runs the test binary `bin` directly, as `cargo test` would, for the report row `label`:
+    /// Cargo's environment for it, `RDY_QA_REQUIRE_ALL` and `RDY_QA_DEEP` when the gate runs
+    /// with them, and the temp root unless the binary is a real-disk binary.
+    fn run(&self, bin: &TestBinary, label: &str) -> (ChildOutput, Duration) {
+        let Some(env) = self.envs.get(&canonical(&bin.path)) else {
+            let out = ChildOutput {
+                stderr: format!(
+                    "Cargo gave no environment for {} ({})",
+                    bin.key(),
+                    bin.path.display()
+                ),
+                ..ChildOutput::default()
+            };
+            return (out, Duration::ZERO);
+        };
+        let mut env = env.clone();
+        if self.args.require_all {
+            env.vars
+                .insert(rdy_qa::skip::REQUIRE_ALL.to_string(), "1".to_string());
+        }
+        if self.args.deep {
+            env.vars.insert("RDY_QA_DEEP".to_string(), "1".to_string());
+        }
+        if let Some(root) = self.tmp_root
+            && !on_real_disk(&bin.package, &bin.name)
+        {
+            for (k, v) in rdy_qa::gate_steps::tmp_root_vars(root) {
+                env.vars.insert(k.into(), v.to_string_lossy().into_owned());
+            }
+        }
+        let run = launch_area(&bin.path, &env, &[], label, left());
+        record(label, run.elapsed.as_secs_f64(), run.out.ok);
+        if let Ok(mut t) = BINARY_TIMES.lock() {
+            t.push((bin.key(), run.elapsed.as_secs_f64()));
+        }
+        (run.out, run.elapsed)
+    }
+}
+
+/// The rdy-qa binaries that start first, slowest first: on the Mac `cli` alone is about a
+/// third of the stage.
+const START_FIRST: &[&str] = &[
+    "cli",
+    "gate",
+    "views",
+    "rebase",
+    "render_quality",
+    "store",
+    "swarm",
+    "io",
+    "brief",
+    "authority",
+];
+
+/// Each test binary the gate started and its seconds, slowest first.
+fn binary_times() -> Vec<(String, f64)> {
+    let mut t = BINARY_TIMES.lock().map(|t| t.clone()).unwrap_or_default();
+    t.sort_by(|a, b| b.1.total_cmp(&a.1));
+    t
+}
+
+/// `path`, canonical when it can be.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn main() {
     let args = Args::parse();
     if cfg!(windows)
@@ -257,6 +344,17 @@ fn main() {
             env.push(("RDY_QA_DEEP", "1"));
         }
         std::process::exit(rdy_qa::focus::main(f, &root(), &env, run_bounded));
+    }
+    // the gate builds in the gate profile and finds its probe runner beside itself
+    let own = std::env::current_exe()
+        .ok()
+        .and_then(|e| rdy_qa::gate_steps::profile_dir_of(&e));
+    if own.as_deref() != Some(rdy_qa::gate_steps::GATE_PROFILE) {
+        eprintln!(
+            "qa-gate runs in the gate profile, not {}: start it with `cargo qa`",
+            own.as_deref().unwrap_or("an unknown profile")
+        );
+        std::process::exit(2);
     }
     let tmp_root = match args
         .tmp_root
@@ -292,11 +390,14 @@ fn main() {
     let machine = perf::machine_class();
     // a failed step skips the steps that need it, unless --all-stages
     let mut stages = Stages::new(args.all_stages);
+    // Lints and the Python CI tests do not depend on the machine (apart from `cfg(windows)`
+    // code, which a Windows run lints), so the release tier runs them on Linux only.
+    let lint_here = args.tier != Some(Tier::Release) || std::env::consts::OS == "linux";
     // The Python CI tests need no build, so they run first, in the default fast gate and
     // `--only <area>` (the plan's checks), never in `--focus` or `--only perf`.
-    let python = if plan.checks {
-        match rdy_qa::gate_steps::python_ci_step(std::env::consts::OS, |l, c, d| {
-            step(l, on_tmp_root(c), d)
+    let python = if plan.checks && lint_here {
+        match rdy_qa::gate_steps::python_ci_step(std::env::consts::OS, |l, c, _| {
+            step(l, on_tmp_root(c), left())
         }) {
             Ok(g) => Some(g),
             Err(line) => {
@@ -309,39 +410,41 @@ fn main() {
         None
     };
     let mut gates: Vec<Gate> = python.into_iter().collect();
-    gates.extend(build_steps(&mut stages, step));
+    // the one build: the `rdy` binary, every crate's tests and every rdy-qa binary, in the
+    // gate profile
+    let (prerequisites, build_out) = build_steps(&mut stages, |l, c, _| step(l, c, left()));
+    gates.extend(prerequisites);
+    let build_ok = !gates.iter().any(|g| g.name == BUILD_STEP && !g.pass);
+    let binaries = if build_ok {
+        parse_test_binaries(&build_out)
+    } else {
+        vec![]
+    };
     let mut areas: Vec<Area> = vec![];
     let mut seeds = vec![];
 
     // the stages after the prerequisites, and what each needs
     let fetch = "cargo fetch --locked";
-    let build = "cargo build --release -p rdy-cli";
-    let clippy = GateStep::new(
-        "cargo clippy -D warnings",
-        &[fetch],
-        deadline(StageKind::Clippy),
-    );
+    let build = BUILD_STEP;
+    let clippy = GateStep::new("cargo clippy -D warnings", &[fetch], Duration::ZERO);
+    let env_step = GateStep::new("test environment", &[build], Duration::ZERO);
     let workspace = GateStep::new(
         "cargo test --workspace --exclude rdy-qa",
-        &[build, &clippy.id],
-        deadline(StageKind::WorkspaceTests),
+        &[build, &clippy.id, &env_step.id],
+        Duration::ZERO,
     );
-    let discovery = GateStep::new(
-        "rdy-qa test binaries",
-        &[build, &clippy.id],
-        deadline(StageKind::Discover),
-    );
+    let discovery = GateStep::new("rdy-qa test binaries", &[build, &clippy.id], Duration::ZERO);
     let lib = GateStep::new(
         "rdy-qa unit tests",
-        &[build, &clippy.id],
-        deadline(StageKind::Lib),
+        &[build, &clippy.id, &env_step.id],
+        Duration::ZERO,
     );
-    let perf_step = GateStep::new("perf", &[build], deadline(StageKind::Perf));
+    let perf_step = GateStep::new("perf", &[build], Duration::ZERO);
     let area_step = |binary: &str| {
         GateStep::new(
             format!("rdy-qa {binary}"),
-            &[&discovery.id],
-            deadline(StageKind::Area),
+            &[&discovery.id, &env_step.id],
+            Duration::ZERO,
         )
     };
 
@@ -349,9 +452,9 @@ fn main() {
         gates.push(Gate::ran(name, ok, detail));
     };
 
-    if plan.checks {
+    if plan.checks && lint_here {
         // one check per workspace member: a single command line is too long for Windows
-        let fmt = fmt_step(step);
+        let fmt = fmt_step(|l, c, _| step(l, c, left()));
         gate(&fmt.name, fmt.pass, fmt.detail);
 
         match stages.blocked(&clippy) {
@@ -367,7 +470,7 @@ fn main() {
                         "-D",
                         "warnings",
                     ]),
-                    clippy.deadline,
+                    left(),
                 );
                 stages.record(&clippy, ok);
                 gates.push(Gate::ran(&clippy.id, ok, fail_tail(ok, &out)));
@@ -376,42 +479,85 @@ fn main() {
                 }
             }
         }
+    } else if plan.checks {
+        notes.push(format!(
+            "fmt, clippy and the Python CI tests: not run on {} in the release tier; the Linux job runs them",
+            std::env::consts::OS
+        ));
+    }
 
+    // Cargo's own environment for each test binary: Cargo runs every test target once through
+    // the probe runner, which records it.
+    let mut envs: BTreeMap<PathBuf, AreaEnv> = BTreeMap::new();
+    let needs_env = plan.checks || plan.lib || !plan.files.is_empty();
+    if needs_env {
+        match stages.blocked(&env_step) {
+            Some(root) => gates.push(stages.skip(&env_step, root)),
+            None => {
+                let probed = probe_envs(|c| step_out("env probe", c, left()));
+                let ok = probed.is_ok();
+                match probed {
+                    Ok(found) => {
+                        envs = found
+                            .into_iter()
+                            .map(|(exe, env)| (canonical(&exe), env))
+                            .collect();
+                        gates.push(Gate::ran(&env_step.id, true, String::new()));
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        gates.push(Gate::ran(&env_step.id, false, e));
+                    }
+                }
+                stages.record(&env_step, ok);
+            }
+        }
+    }
+    let launch = Launch {
+        args: &args,
+        envs: &envs,
+        tmp_root: tmp_root.as_deref(),
+    };
+
+    if plan.checks {
         match stages.blocked(&workspace) {
             Some(root) => gates.push(stages.skip(&workspace, root)),
             None => {
-                // compile first, so the run row is the tests alone; the timings HTML stays
-                let mut compile: Vec<&str> = report::WORKSPACE_TEST_ARGS.to_vec();
-                compile.extend(["--no-run", "--timings"]);
-                let _ = step("workspace compile", cargo(&compile), workspace.deadline);
-                let (ok, out) = step(
-                    "workspace tests",
-                    with_require_all(cargo(&report::WORKSPACE_TEST_ARGS), &args),
-                    workspace.deadline,
+                // every crate's test binaries but rdy-qa's, four at a time
+                eprintln!("==> workspace tests");
+                let t = Instant::now();
+                // the real-disk binaries are the slowest, so they start first
+                let mut mine: Vec<&TestBinary> =
+                    binaries.iter().filter(|b| b.package != "rdy-qa").collect();
+                mine.sort_by_key(|b| !on_real_disk(&b.package, &b.name));
+                let outputs = run_areas(
+                    &mine,
+                    |_| false,
+                    BINARY_JOBS,
+                    |b| launch.run(b, &format!("workspace {}", b.key())).0,
                 );
-                let run = report::parse_cargo_test(&out);
-                seeds.extend(report::failing_seeds(&out));
-                let detail = report::workspace_test_detail(ok, &run, &out);
+                let mut text = String::new();
+                let mut failed_binaries = vec![];
+                for (b, out) in mine.iter().zip(&outputs) {
+                    text.push_str(&out.combined());
+                    if !out.ok {
+                        failed_binaries.push(format!("{} ({})", b.key(), out.status_text()));
+                    }
+                    if out.timed_out {
+                        notes.push(report::tail(&out.stderr, 1));
+                    }
+                }
+                let ok = failed_binaries.is_empty() && !mine.is_empty();
+                record("workspace tests", t.elapsed().as_secs_f64(), ok);
+                let run = report::parse_cargo_test(&text);
+                seeds.extend(report::failing_seeds(&text));
+                let mut detail = report::workspace_test_detail(ok, &run, &text);
+                if !failed_binaries.is_empty() {
+                    detail += &format!("\nfailed binaries: {}", failed_binaries.join(", "));
+                }
                 let empty = report::ran_nothing(&run);
                 stages.record(&workspace, ok && !empty);
                 gates.push(Gate::ran(&workspace.id, ok && !empty, detail));
-                if tmp_root.is_some() {
-                    // the workspace run above had every binary on the temp root; the real-disk
-                    // binary runs once more on the real temp directory
-                    let mut c = cargo(&["test", "-p", "rdy-store", "--test", "durability"]);
-                    if args.require_all {
-                        c.env(rdy_qa::skip::REQUIRE_ALL, "1");
-                    }
-                    let (ok, out) = step("rdy-store durability (real disk)", c, workspace.deadline);
-                    let run = report::parse_cargo_test(&out);
-                    let detail = report::workspace_test_detail(ok, &run, &out);
-                    let empty = report::ran_nothing(&run);
-                    gates.push(Gate::ran(
-                        "rdy-store durability (real disk)",
-                        ok && !empty,
-                        detail,
-                    ));
-                }
             }
         }
     }
@@ -433,9 +579,12 @@ fn main() {
         gate("unix seams", problems.is_empty(), problems.join("\n"));
     }
 
-    // Cargo's artifact record names every test executable. A binary it does not name is missing,
-    // and its area fails.
-    let mut exes = vec![];
+    // Cargo's artifact record of the build names every test executable. A binary it does not
+    // name is missing, and its area fails.
+    let qa_exes: Vec<&TestBinary> = binaries
+        .iter()
+        .filter(|b| b.package == "rdy-qa" && b.kind == "test")
+        .collect();
     let mut discovery_ok = true;
     let mut discovery_ran = false;
     if plan.guarded || !plan.files.is_empty() {
@@ -444,58 +593,12 @@ fn main() {
             gates.push(stages.skip(&discovery, root));
         } else {
             discovery_ran = true;
-            let out = step_out(
-                "discover rdy-qa test binaries",
-                discover_command(),
-                discovery.deadline,
-            );
-            match discovered(&out) {
-                Ok(found) => {
-                    exes = found;
-                    let names: Vec<String> = exes.iter().map(|e| e.name.clone()).collect();
-                    let problems = report::missing_binaries(&plan.files, &names);
-                    discovery_ok = problems.is_empty();
-                    gates.push(Gate::ran(&discovery.id, discovery_ok, problems.join("\n")));
-                }
-                Err(e) => {
-                    discovery_ok = false;
-                    eprintln!("{e}");
-                    gates.push(Gate::ran(&discovery.id, false, e));
-                }
-            }
+            let names: Vec<String> = qa_exes.iter().map(|e| e.name.clone()).collect();
+            let problems = report::missing_binaries(&plan.files, &names);
+            discovery_ok = problems.is_empty();
+            gates.push(Gate::ran(&discovery.id, discovery_ok, problems.join("\n")));
             stages.record(&discovery, discovery_ok);
-            if out.dropped > 0 {
-                notes.push(format!(
-                    "discovery output cut: {} bytes dropped from the front",
-                    out.dropped
-                ));
-            }
         }
-    }
-
-    // The binaries launched directly, with the working directory and environment Cargo gives
-    // them (asked of Cargo once, through the env probe). Without that answer every binary runs
-    // through `cargo test`.
-    let mut direct = rdy_qa::gate_steps::direct_areas(
-        std::env::var(DIRECT_AREAS_VAR).ok().as_deref(),
-        &plan.files,
-    );
-    let area_env = if direct.is_empty() || !discovery_ran || !discovery_ok {
-        None
-    } else {
-        match capture_area_env(|c| step_out("area environment", c, deadline(StageKind::Listing))) {
-            Ok(env) => Some(env),
-            Err(e) => {
-                eprintln!("{e}");
-                notes.push(format!(
-                    "direct launch off, every area ran through cargo: {e}"
-                ));
-                None
-            }
-        }
-    };
-    if area_env.is_none() {
-        direct.clear();
     }
 
     // The hardening suite; each area reports as one row (an area of two binaries, `engine` and
@@ -515,8 +618,7 @@ fn main() {
             pending.push(Pending::Skipped(stages.skip(&step_def, root)));
             continue;
         }
-        if discovery_ok && !exes.iter().any(|e| &e.name == binary) {
-            // not reachable after the check above; kept so a binary is never silently skipped
+        if !qa_exes.iter().any(|e| &e.name == binary) {
             pending.push(Pending::Missing(None));
             continue;
         }
@@ -545,54 +647,41 @@ fn main() {
         pending.push(Pending::Run(pre));
     }
 
-    // Directly launched binaries outside SERIAL_AREAS share the workers; every other binary
-    // runs alone after them.
-    let jobs = area_jobs(std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let alone = |b: &String| !direct.contains(b) || SERIAL_AREAS.contains(&b.as_str());
-    let outputs = run_areas(&to_run, alone, jobs, |binary| {
-        let step_def = area_step(binary);
-        let exe = exes.iter().find(|e| &e.name == binary);
-        match (&area_env, exe) {
-            (Some(env), Some(exe)) if direct.contains(binary) => {
-                eprintln!("==> {} (direct)", step_def.id);
-                let mut env = env.clone();
-                if args.require_all {
-                    env.vars
-                        .insert(rdy_qa::skip::REQUIRE_ALL.to_string(), "1".to_string());
-                }
-                if args.deep {
-                    env.vars.insert("RDY_QA_DEEP".to_string(), "1".to_string());
-                }
-                if let Some(root) = tmp_root.as_deref()
-                    && !rdy_qa::gate_steps::on_real_disk("rdy-qa", binary)
-                {
-                    for (k, v) in rdy_qa::gate_steps::tmp_root_vars(root) {
-                        env.vars.insert(k.into(), v.to_string_lossy().into_owned());
-                    }
-                }
-                let run = launch_area(&exe.path, &env, &[], &step_def.id, step_def.deadline);
-                eprintln!(
-                    "==> {}: {:.1} s (direct)",
-                    step_def.id,
-                    run.elapsed.as_secs_f64()
-                );
-                run.out
-            }
-            _ => {
-                let mut c = cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]);
-                if args.require_all {
-                    c.env(rdy_qa::skip::REQUIRE_ALL, "1");
-                }
-                if !rdy_qa::gate_steps::on_real_disk("rdy-qa", binary) {
-                    c = on_tmp_root(c);
-                }
-                if args.deep {
-                    c.env("RDY_QA_DEEP", "1");
-                }
-                step_out(&step_def.id, c, step_def.deadline)
-            }
-        }
+    // Every binary outside SERIAL_AREAS shares the workers; each one in it runs alone after them.
+    let alone = |b: &String| SERIAL_AREAS.contains(&b.as_str());
+    // the slowest binaries start first, so the last one to start is a short one; the results
+    // come back in the plan's order
+    let mut order: Vec<usize> = (0..to_run.len()).collect();
+    order.sort_by_key(|&i| {
+        START_FIRST
+            .iter()
+            .position(|f| *f == to_run[i])
+            .unwrap_or(usize::MAX)
     });
+    let ordered: Vec<String> = order.iter().map(|&i| to_run[i].clone()).collect();
+    let t = Instant::now();
+    let ran = run_areas(&ordered, alone, BINARY_JOBS, |binary| {
+        let id = area_step(binary).id;
+        let exe = qa_exes
+            .iter()
+            .find(|e| &e.name == binary)
+            .expect("only found binaries run");
+        eprintln!("==> {id}");
+        let (out, elapsed) = launch.run(exe, &id);
+        eprintln!("==> {id}: {:.1} s", elapsed.as_secs_f64());
+        out
+    });
+    let mut outputs: Vec<Option<ChildOutput>> = (0..to_run.len()).map(|_| None).collect();
+    for (&i, out) in order.iter().zip(ran) {
+        outputs[i] = Some(out);
+    }
+    let outputs: Vec<ChildOutput> = outputs
+        .into_iter()
+        .map(|o| o.expect("every binary ran"))
+        .collect();
+    if !to_run.is_empty() {
+        record("rdy-qa areas", t.elapsed().as_secs_f64(), true);
+    }
     let mut outputs = to_run.iter().zip(outputs);
     for (binary, item) in plan.files.iter().zip(pending) {
         let out = match item {
@@ -646,14 +735,17 @@ fn main() {
         if let Some(root) = stages.blocked(&lib) {
             gates.push(stages.skip(&lib, root));
         } else {
-            let out = step_out(
-                &lib.id,
-                with_require_all(
-                    cargo(&["test", "-p", "rdy-qa", "--release", "--lib"]),
-                    &args,
-                ),
-                lib.deadline,
-            );
+            eprintln!("==> {}", lib.id);
+            let out = match binaries
+                .iter()
+                .find(|b| b.package == "rdy-qa" && b.kind == "lib")
+            {
+                Some(exe) => launch.run(exe, &lib.id).0,
+                None => ChildOutput {
+                    stderr: "the build named no rdy-qa unit-test executable".into(),
+                    ..ChildOutput::default()
+                },
+            };
             let text = out.combined();
             let run = report::parse_cargo_test(&text);
             seeds.extend(report::failing_seeds(&text));
@@ -665,6 +757,21 @@ fn main() {
             }
             report::add_run_with_exit(&mut areas, "lib", out.ok, &out.status_text(), run);
         }
+    }
+
+    // The tests must not have changed the build: a second build of the same command is fresh.
+    if build_ok && (plan.checks || !plan.files.is_empty()) {
+        let out = step_out("fresh check", discover_command(), left());
+        let stale = if out.ok {
+            stale_units(&out.stdout)
+        } else {
+            vec![format!("the build exited with {}", out.status_text())]
+        };
+        gates.push(Gate::ran(
+            "the gate build stays fresh",
+            stale.is_empty(),
+            stale.join("\n"),
+        ));
     }
 
     let (perf_verdicts, perf_note, perf_ok) = if !plan.perf {
@@ -680,9 +787,15 @@ fn main() {
     let guarded = if plan.guarded && discovery_ran {
         eprintln!("==> list guarded tests");
         let dir = root().join("crates/rdy-qa");
-        let (guarded, problems) = list_guarded(&exes, &dir, |c| {
-            run_stage("list guarded tests", c, deadline(StageKind::Listing))
-        });
+        let exes: Vec<TestExe> = qa_exes
+            .iter()
+            .map(|b| TestExe {
+                name: b.name.clone(),
+                path: b.path.clone(),
+            })
+            .collect();
+        let (guarded, problems) =
+            list_guarded(&exes, &dir, |c| run_stage("list guarded tests", c, left()));
         for p in problems {
             notes.push(format!("guarded-id listing failed: {p}"));
         }
@@ -719,12 +832,15 @@ fn main() {
         notes,
         guarded,
         os_excluded: report::os_excluded(),
-        timing: Timing::from_records(
-            &RECORDS.lock().map(|r| r.clone()).unwrap_or_default(),
-            std::env::var("RDY_QA_QUEUE_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok()),
-        ),
+        timing: Timing {
+            binaries: binary_times(),
+            ..Timing::from_records(
+                &RECORDS.lock().map(|r| r.clone()).unwrap_or_default(),
+                std::env::var("RDY_QA_QUEUE_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok()),
+            )
+        },
     };
 
     let dir = root().join("target/qa");

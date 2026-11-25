@@ -1,10 +1,10 @@
-//! The gate launches area binaries directly after its one `cargo test --no-run` build: each
-//! binary gets the working directory and environment `cargo test` would give it, and the
-//! SERIAL_AREAS never run beside another area.
+//! The gate launches every test binary directly after its one `cargo test --no-run` build: each
+//! binary gets the working directory and environment `cargo test` would give it (the probe
+//! runner records them), and the SERIAL_AREAS never run beside another binary.
 use rdy_qa::gate_steps::{
-    AreaEnv, ENV_PROBE_ARGS, ENV_PROBE_BINARY, ENV_PROBE_TEST, ENV_PROBE_VAR, PILOT_AREAS,
-    SERIAL_AREAS, area_jobs, capture_area_env, cargo, direct_areas, launch_area, parse_artifacts,
-    parse_env_probe, run_areas, run_bounded,
+    AreaEnv, BINARY_JOBS, ENV_PROBE_BINARY, ENV_PROBE_TEST, ENV_PROBE_VAR, SERIAL_AREAS, cargo,
+    env_probe_args, launch_area, own_profile_args, parse_artifacts, parse_env_probe, probe_envs,
+    run_areas, run_bounded,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,12 +32,49 @@ fn probe_record(file: &Path) -> AreaEnv {
     parse_env_probe(&text).expect("probe record")
 }
 
-/// The variables that differ between two environments, with both values.
-fn differences(a: &AreaEnv, b: &AreaEnv) -> Vec<String> {
-    let keys: std::collections::BTreeSet<&String> = a.vars.keys().chain(b.vars.keys()).collect();
+/// The library search paths that Cargo builds from the build scripts of the units it selected.
+/// The gate's probe selects every test target and this test selects one, so the entries come in
+/// another order; the set of directories is the same.
+const SEARCH_PATHS: &[&str] = &[
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
+    "PATH",
+    "Path",
+];
+
+/// A variable's value for the comparison: a search path as its sorted set of entries.
+fn compared(key: &str, value: Option<&String>) -> Option<Vec<String>> {
+    let value = value?;
+    if !SEARCH_PATHS.contains(&key) {
+        return Some(vec![value.clone()]);
+    }
+    let set: std::collections::BTreeSet<String> = std::env::split_paths(value)
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    Some(set.into_iter().collect())
+}
+
+/// The library search paths Cargo builds from the build-script output directories of the units
+/// it selects. The gate's probe selects every test target, so its paths name more of those
+/// directories than a one-target `cargo test` names. A direct launch needs every entry Cargo
+/// gives; an extra entry is harmless.
+const LIBRARY_PATHS: &[&str] = &["DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"];
+
+/// The variables that differ between a direct launch and Cargo's launch, with both values.
+fn differences(direct: &AreaEnv, by_cargo: &AreaEnv) -> Vec<String> {
+    let keys: std::collections::BTreeSet<&String> =
+        direct.vars.keys().chain(by_cargo.vars.keys()).collect();
     keys.into_iter()
-        .filter(|k| a.vars.get(*k) != b.vars.get(*k))
-        .map(|k| format!("{k}: {:?} / {:?}", a.vars.get(k), b.vars.get(k)))
+        .filter(|k| {
+            let d = compared(k, direct.vars.get(*k));
+            let c = compared(k, by_cargo.vars.get(*k));
+            if LIBRARY_PATHS.contains(&k.as_str()) {
+                let d = d.unwrap_or_default();
+                return !c.unwrap_or_default().iter().all(|e| d.contains(e));
+            }
+            d != c
+        })
+        .map(|k| format!("{k}: {:?} / {:?}", direct.vars.get(k), by_cargo.vars.get(k)))
         .collect()
 }
 
@@ -46,29 +83,37 @@ fn differences(a: &AreaEnv, b: &AreaEnv) -> Vec<String> {
 /// rebuilds once, with its dependents.
 #[test]
 fn direct_env_matches_cargo() {
-    // the env probe's binary, as the gate's discovery names it
-    let json = cargo_ok(cargo(&[
-        "test",
-        "-p",
-        "rdy-qa",
-        "--release",
+    // the env probe's binary, as the gate's discovery names it, in this test's own profile
+    let profile = own_profile_args();
+    let mut args: Vec<&str> = vec!["test", "--workspace"];
+    args.extend(profile.iter().map(String::as_str));
+    args.extend([
         "--test",
         ENV_PROBE_BINARY,
         "--no-run",
         "--message-format=json",
-    ]));
+    ]);
+    let json = cargo_ok(cargo(&args));
     let exe = parse_artifacts(&json)
         .into_iter()
         .find(|e| e.name == ENV_PROBE_BINARY)
         .expect("the model binary");
+    let exe_path = exe.path.clone();
     let tmp = tempfile::tempdir().expect("tempdir");
 
-    // the probe started directly, with the environment the gate asks of Cargo
-    let mut env = capture_area_env(|mut c| {
+    // the probe started directly, with the environment the gate's probe runner records; the
+    // runner sits beside this test's `qa-gate`, in the same profile
+    let envs = probe_envs(|mut c| {
         c.current_dir(root());
         run_bounded(c)
     })
-    .expect("capture the area environment");
+    .expect("probe the test environments");
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let mut env = envs
+        .iter()
+        .find(|(exe, _)| canonical(exe) == canonical(&exe_path))
+        .map(|(_, env)| env.clone())
+        .expect("the probe recorded the model binary");
     let direct_file = tmp.path().join("direct.json");
     env.vars.insert(
         ENV_PROBE_VAR.to_string(),
@@ -86,7 +131,8 @@ fn direct_env_matches_cargo() {
 
     // the probe started by `cargo test`
     let cargo_file = tmp.path().join("cargo.json");
-    let mut c = cargo(&ENV_PROBE_ARGS);
+    let args = env_probe_args();
+    let mut c = cargo(&args.iter().map(String::as_str).collect::<Vec<_>>());
     c.env(ENV_PROBE_VAR, &cargo_file);
     cargo_ok(c);
     let by_cargo = probe_record(&cargo_file);
@@ -157,8 +203,8 @@ struct Seen {
 #[test]
 fn serial_areas_never_overlap() {
     let areas = rdy_qa::report::test_areas(&root().join("crates/rdy-qa/tests"));
-    // every serial and pilot name is a real area binary
-    for name in SERIAL_AREAS.iter().chain(PILOT_AREAS) {
+    // every serial name is a real area binary
+    for name in SERIAL_AREAS {
         assert!(areas.iter().any(|a| a == name), "{name} is not an area");
     }
     let alone = |a: &String| SERIAL_AREAS.contains(&a.as_str());
@@ -210,19 +256,19 @@ fn serial_areas_never_overlap() {
     assert_eq!(results, want);
 }
 
+/// The pilot is over: direct launch is the only way, for every binary, with no variable to turn
+/// it off, and four binaries run at once.
 #[test]
 fn direct_launch_starts_with_the_pilot() {
-    let files: Vec<String> = ["daemon", "engine", "model", "schema", "swarm"]
-        .map(String::from)
-        .to_vec();
-    let names = |v: Option<&str>| direct_areas(v, &files).into_iter().collect::<Vec<_>>();
-    assert_eq!(names(None), ["model", "schema"]);
-    assert_eq!(names(Some("all")), files);
-    assert!(names(Some("none")).is_empty());
-    assert!(names(Some("")).is_empty());
-    assert_eq!(names(Some(" engine, nope ,swarm")), ["engine", "swarm"]);
-    // a quarter of the threads, from one to four
-    assert_eq!(area_jobs(1), 1);
-    assert_eq!(area_jobs(8), 2);
-    assert_eq!(area_jobs(24), 4);
+    let gate = std::fs::read_to_string(root().join("crates/rdy-qa/src/bin/qa-gate.rs"))
+        .expect("the gate's source");
+    assert!(
+        !gate.contains("RDY_QA_DIRECT_AREAS"),
+        "a switch for direct launch is back"
+    );
+    assert!(
+        !gate.contains("\"--test\", binary"),
+        "an area runs through cargo test"
+    );
+    assert_eq!(BINARY_JOBS, 4);
 }

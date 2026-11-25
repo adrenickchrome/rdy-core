@@ -245,14 +245,17 @@ pub fn failure_lines(failures: &[String], panics: &BTreeMap<String, String>) -> 
     s
 }
 
-/// The workspace-tests gate step's cargo arguments. Every binary runs: without `--no-fail-fast`
-/// cargo stops at the first failing binary, and the ones after it neither run nor count.
-pub const WORKSPACE_TEST_ARGS: [&str; 5] = [
+/// The cargo arguments of the gate's one build: every test of the workspace, rdy-qa's included,
+/// and the `rdy` binary, in the gate profile, with one JSON record per artifact. The gate then
+/// starts every test binary itself, so every binary runs whatever another one did.
+pub const WORKSPACE_TEST_ARGS: [&str; 7] = [
     "test",
     "--workspace",
-    "--exclude",
-    "rdy-qa",
-    "--no-fail-fast",
+    "--profile",
+    "gate",
+    "--no-run",
+    "--locked",
+    "--message-format=json",
 ];
 
 /// The detail of the workspace-tests gate step: the counts, then (when tests failed) the failing
@@ -809,6 +812,9 @@ pub struct Timing {
     pub stages: Vec<StageTime>,
     /// The first failed stage and the seconds from the gate start to its end.
     pub first_failure: Option<(String, f64)>,
+    /// Each test binary the gate started, `<package>/<kind>/<name>`, and its seconds, slowest
+    /// first.
+    pub binaries: Vec<(String, f64)>,
 }
 
 /// The table row name of a child label: the fetch, the CLI build, clippy, the workspace
@@ -817,12 +823,16 @@ fn stage_name(label: &str) -> String {
     match label {
         "fetch locked dependencies" => "fetch".into(),
         "build rdy-cli" => "CLI build".into(),
+        "build" => "build".into(),
+        "env probe" => "env probe".into(),
+        "fresh check" => "fresh check".into(),
         "workspace compile" => "workspace compile".into(),
         "workspace tests" => "workspace run".into(),
         "discover rdy-qa test binaries" => "QA discovery".into(),
         "workspace members" => "fmt".into(),
         l if l.starts_with("fmt ") => "fmt".into(),
         "rdy-qa unit tests" => "QA lib".into(),
+        l if l.starts_with("workspace ") => "workspace binaries".into(),
         l => l
             .strip_prefix("rdy-qa ")
             .map_or(l.to_string(), |a| format!("QA {a}")),
@@ -856,6 +866,7 @@ impl Timing {
             queue_secs,
             stages,
             first_failure,
+            binaries: vec![],
         }
     }
 
@@ -885,6 +896,12 @@ impl Timing {
             }
             None => {
                 let _ = writeln!(s, "| first failure at | - | - |");
+            }
+        }
+        if !self.binaries.is_empty() {
+            s.push_str("\n### Slowest test binaries\n\n| Binary | Seconds |\n|---|---|\n");
+            for (key, secs) in self.binaries.iter().take(20) {
+                let _ = writeln!(s, "| {key} | {secs:.1} |");
             }
         }
         s
@@ -1873,19 +1890,30 @@ mod tests {
     fn wx33h_the_workspace_step_runs_every_binary_and_counts_them() {
         // cargo stops at the first failing test binary without this flag, and the binaries after
         // it neither run nor count: Windows' `read_only` failures hid behind `client`'s
+        // the gate builds once and starts every binary itself, so no binary's failure stops
+        // another (cargo without `--no-fail-fast` stopped at the first failing one)
         assert_eq!(
             WORKSPACE_TEST_ARGS,
             [
                 "test",
                 "--workspace",
-                "--exclude",
-                "rdy-qa",
-                "--no-fail-fast"
+                "--profile",
+                "gate",
+                "--no-run",
+                "--locked",
+                "--message-format=json"
             ]
         );
         assert!(
-            include_str!("bin/qa-gate.rs").contains("cargo(&report::WORKSPACE_TEST_ARGS)"),
-            "the gate runs these arguments"
+            include_str!("gate_steps.rs").contains("cargo(&report::WORKSPACE_TEST_ARGS)"),
+            "the gate builds with these arguments"
+        );
+        assert!(
+            include_str!("bin/qa-gate.rs")
+                .split_whitespace()
+                .collect::<String>()
+                .contains("run_areas(&mine,|_|false,BINARY_JOBS"),
+            "every workspace binary shares the workers and runs"
         );
         let out = "\
      Running tests/a.rs (target/debug/deps/a-1)
