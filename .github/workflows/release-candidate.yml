@@ -4,9 +4,11 @@
 # workspace with path remaps, packages with qa-release-package and refuses a binary that holds a host
 # path. The assembly job downloads each build by artifact id, checks its artifact digest, rehashes
 # every file, reads the frozen sample from S when samples/tally/ exists (it is optional for now) and writes
-# SHA256SUMS over exactly the three archives and that sample. The sign job then signs that SHA256SUMS once
+# SHA256SUMS over exactly the three archives and that sample. The budget job adds up this release's gate time
+# and refuses a release over release/gate-budget.json. The sign job then signs that SHA256SUMS once
 # with the release key in AWS KMS through OIDC (environment release-sign-ci). Nothing here needs a secret or
-# writes to the repository. A reserved or released version never builds again.
+# writes code or a ref to the repository; only the budget job may open an issue. A reserved or released
+# version never builds again.
 name: release-candidate
 on:
   push:
@@ -310,12 +312,64 @@ jobs:
             echo "v$VERSION at $COMMIT: run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT,"
             echo "artifact rdy-candidate-a$GITHUB_RUN_ATTEMPT id $ARTIFACT_ID digest $ARTIFACT_DIGEST"
           } >> "$GITHUB_STEP_SUMMARY"
+  budget:
+    # The release's hard stop (release/gate-budget.json): every gate.yml and security.yml run on rel/<V> and
+    # every run of this workflow on candidate/v<V>, every attempt, as GitHub timed them, plus the signing and
+    # install-check lines. Over the budget, or when the file, the control test and the repository variable
+    # RDY_GATE_BUDGET_SECONDS differ, it fails and opens an issue for the founder; sign needs it, so nothing
+    # is signed. It holds no key and no OIDC token.
+    name: Release gate budget
+    needs: [check, assemble]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.commit }}
+          persist-credentials: false
+      - name: Gate time against the budget
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BUDGET_SECONDS: ${{ vars.RDY_GATE_BUDGET_SECONDS }}
+          BUDGET_OVERRIDE: ${{ vars.RDY_GATE_BUDGET_OVERRIDE }}
+        run: >-
+          python3 -B scripts/release/gate_budget.py check --version "$VERSION" --repo "$GITHUB_REPOSITORY"
+          --budget-file release/gate-budget.json --variable "$BUDGET_SECONDS" --override "$BUDGET_OVERRIDE"
+          --out "$RUNNER_TEMP/gate-budget/gate-budget.json" --summary "$GITHUB_STEP_SUMMARY"
+          --issue-body "$RUNNER_TEMP/gate-budget-issue.md"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: success() || failure()
+        with:
+          name: gate-budget-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gate-budget/gate-budget.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Open the breach issue for the founder
+        # Only the founder closes it; the driver starts no plan while one is open.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="$RUNNER_TEMP/gate-budget-issue.md"
+          if [ ! -s "$body" ]; then echo "The budget job of v$VERSION failed before it wrote its table." > "$body"; fi
+          echo "Run: $RUN_URL" >> "$body"
+          gh label create gate-budget-breach --repo "$GITHUB_REPOSITORY" --color B60205 \
+            --description "A release went over its gate budget" --force
+          gh issue create --repo "$GITHUB_REPOSITORY" --label gate-budget-breach \
+            --title "E_GATE_BUDGET: v$VERSION did not pass its gate budget" --body-file "$body"
   sign:
     # The one signature. This job builds nothing: it signs the SHA256SUMS that the assembly job wrote.
     # Its OIDC token (environment release-sign-ci, a candidate/v* tag) is the only way to the release
     # key in AWS KMS. The result is checked with ssh-keygen against the release key before upload.
     name: Sign SHA256SUMS
-    needs: [check, assemble]
+    needs: [check, assemble, budget]
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     environment: release-sign-ci

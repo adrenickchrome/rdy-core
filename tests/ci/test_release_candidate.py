@@ -366,7 +366,7 @@ class rsig4_Candidate(Fixture):
         self.assertEqual(str(caught.exception), "duplicate field 'pass'")
 
         jobs = workflow_jobs(WORKFLOW)
-        self.assertEqual(sorted(jobs), ['assemble', 'build-linux', 'build-mac', 'build-windows', 'check', 'sign'])
+        self.assertEqual(sorted(jobs), ['assemble', 'budget', 'build-linux', 'build-mac', 'build-windows', 'check', 'sign'])
         self.assertIn('\npermissions: {}\n', WORKFLOW)
         self.assertNotIn('continue-on-error', WORKFLOW)
         self.assertNotIn('secrets.', WORKFLOW)
