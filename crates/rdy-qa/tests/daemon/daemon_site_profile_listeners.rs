@@ -825,6 +825,7 @@ fn r5903_profile_site_window_is_bindable_first() {
     assert!(bound(&[], &[]));
     assert_eq!(
         asked.borrow().clone(),
+        // test-hygiene: allow port the injected bind records the ports it was asked; nothing binds
         [sock(5000), "[::1]:5000".parse().unwrap()]
     );
     assert_eq!(
@@ -837,6 +838,7 @@ fn r5903_profile_site_window_is_bindable_first() {
     assert!(bound(&[5000], &[5000]));
     assert_eq!(
         asked.borrow().clone(),
+        // test-hygiene: allow port the injected bind records the ports it was asked; nothing binds
         [sock(5000), sock(5001), "[::1]:5001".parse().unwrap()]
     );
     // its IPv6 refused: not usable, whatever a later port would do; nothing stays held
