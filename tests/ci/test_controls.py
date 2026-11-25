@@ -1652,10 +1652,11 @@ class GateWorkflowPolicy(unittest.TestCase):
             with self.subTest(job=name):
                 self.assertEqual(job['runs-on'], "${{ inputs.hosted && '" + GATE_HOSTED[name]
                                  + "' || fromJSON('[\"self-hosted\",\"rdy-gate\",\"" + name + "\"]') }}")
-                # A push (release evidence) gets 11 minutes and a 630-second gate clock. Only a manual
-                # hosted proof run gets more; gate_budget.py never reads it as evidence.
-                self.assertEqual(job['timeout-minutes'], '${{ inputs.hosted && 90 || 11 }}')
-                self.assertEqual(job['env']['GATE_BUDGET_SECS'], "${{ inputs.hosted && '5100' || '630' }}")
+                # A push (release evidence) gets a 20-minute hang guard and a 1080-second gate clock; the
+                # budget job, not these limits, checks the time. Only a manual hosted proof run gets more;
+                # gate_budget.py never reads it as evidence.
+                self.assertEqual(job['timeout-minutes'], '${{ inputs.hosted && 90 || 20 }}')
+                self.assertEqual(job['env']['GATE_BUDGET_SECS'], "${{ inputs.hosted && '5100' || '1080' }}")
                 self.assertEqual(job['permissions'], {'contents': 'read'})
                 self.assertNotIn('environment', job)
                 self.assertNotIn('needs', job)

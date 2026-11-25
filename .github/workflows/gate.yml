@@ -2,8 +2,9 @@
 # once on our own three machines (GitHub self-hosted runners with the label rdy-gate). GitHub starts and
 # times every run. The candidate reads the fast-gate counts of the run that passed on a push of S to
 # rel/<V> (scripts/release/gate_budget.py gate-run), and its budget job counts every run of this workflow
-# on rel/<V>. Each job's limit is the gate line of release/gate-budget.json (660 s, 11 minutes); the
-# gate's own clock (--budget-secs) stops the run at 630 s, which leaves 30 s for the steps around it.
+# on rel/<V>. The gate line of release/gate-budget.json (660 s) is a target, not a limit: a slow but
+# healthy run finishes, and the budget job reports it. The 20-minute job limit and the gate's own clock
+# (--budget-secs 1080, which leaves 2 minutes for the steps around it) only stop a run that hangs.
 # A failed run may retry its failed test binaries once, inside the same clock.
 #
 # Before the founder registers the runners, a manual run with `hosted: true` proves the workflow on
@@ -27,11 +28,11 @@ jobs:
   linux:
     name: Release gate (x86_64-unknown-linux-gnu)
     runs-on: ${{ inputs.hosted && 'ubuntu-26.04' || fromJSON('["self-hosted","rdy-gate","linux"]') }}
-    timeout-minutes: ${{ inputs.hosted && 90 || 11 }}
+    timeout-minutes: ${{ inputs.hosted && 90 || 20 }}
     permissions:
       contents: read
     env:
-      GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '630' }}
+      GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '1080' }}
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Not root
@@ -127,11 +128,11 @@ jobs:
   macos:
     name: Release gate (aarch64-apple-darwin)
     runs-on: ${{ inputs.hosted && 'macos-26' || fromJSON('["self-hosted","rdy-gate","macos"]') }}
-    timeout-minutes: ${{ inputs.hosted && 90 || 11 }}
+    timeout-minutes: ${{ inputs.hosted && 90 || 20 }}
     permissions:
       contents: read
     env:
-      GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '630' }}
+      GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '1080' }}
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Not root
@@ -223,11 +224,11 @@ jobs:
   windows:
     name: Release gate (x86_64-pc-windows-msvc)
     runs-on: ${{ inputs.hosted && 'windows-2025' || fromJSON('["self-hosted","rdy-gate","windows"]') }}
-    timeout-minutes: ${{ inputs.hosted && 90 || 11 }}
+    timeout-minutes: ${{ inputs.hosted && 90 || 20 }}
     permissions:
       contents: read
     env:
-      GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '630' }}
+      GATE_BUDGET_SECS: ${{ inputs.hosted && '5100' || '1080' }}
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Not an administrator

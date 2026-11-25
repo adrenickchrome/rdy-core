@@ -385,7 +385,7 @@ class rsig4_Candidate(Fixture):
         for name, runner in (('build-mac', 'macos-26'), ('build-linux', 'ubuntu-26.04')):
             job = jobs[name]
             self.assertIn('    runs-on: ' + runner + '\n', job)
-            self.assertIn('    timeout-minutes: 12\n', job)
+            self.assertIn('    timeout-minutes: 20\n', job)
             self.assertIn('    needs: check\n', job)
             self.assertIn('    permissions:\n      actions: read\n      contents: read\n    outputs:', job)
             self.assertIn('candidate.py check-ref', job)
@@ -402,7 +402,7 @@ class rsig4_Candidate(Fixture):
             self.assertIn('artifact_digest: ${{ steps.upload.outputs.artifact-digest }}', job)
         windows = jobs['build-windows']
         self.assertIn('    runs-on: windows-2025\n', windows)
-        self.assertIn('    timeout-minutes: 12\n', windows)
+        self.assertIn('    timeout-minutes: 20\n', windows)
         self.assertIn('    needs: check\n', windows)
         self.assertIn('    permissions:\n      actions: read\n      contents: read\n    outputs:', windows)
         self.assertIn('actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0', windows)

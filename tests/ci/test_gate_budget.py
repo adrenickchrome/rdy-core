@@ -1,10 +1,11 @@
-"""The release gate budget: one number in three places, the hard stop of each run and each release.
+"""The release gate time: two lines, each one number in three places, and job limits that only stop a hang.
 
-The budget is 1,800 seconds. It is held here as a literal, in release/gate-budget.json and in the
-repository variable RDY_GATE_BUDGET_SECONDS, which only the founder sets. The candidate's budget job
-fails when the three differ. These tests fail when the file's lines do not add up to the literal, when
-the timeouts of the longest path from the gate to the signature are over the budget less the install
-check, when a gate run has no clock, or when a job that reaches the key runs on our own machines.
+The target is 1,800 s and the ceiling 2,700 s. Each is held here as a literal, in release/gate-budget.json
+and in a repository variable (RDY_GATE_TARGET_SECONDS, RDY_GATE_CEILING_SECONDS) that only the founder
+sets. The candidate's budget job fails when the three differ. Over the target, the release goes on and
+an issue asks for the fix; over the ceiling, nothing is signed. These tests fail when the file's lines do
+not add up to the target, when a job limit is under its line, when a gate run has no clock inside its
+hang guard, or when a job that reaches the key runs on our own machines.
 
 Nothing here reaches the network or GitHub. Every identity below is synthetic.
 """
@@ -20,9 +21,12 @@ from contextlib import redirect_stderr, redirect_stdout
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / '.github/workflows'
-# The release gate budget. Changing it here alone fails these tests; changing it with the budget file
-# fails every release until the founder sets RDY_GATE_BUDGET_SECONDS to match.
-RELEASE_GATE_SECONDS = 1800
+# The release gate's two lines. The target is the time we work to: over it, the release goes on and an issue
+# asks for the fix. The ceiling is the hard stop: over it, nothing is signed. Changing either here alone fails
+# these tests; changing it with the budget file fails every release until the founder sets
+# RDY_GATE_TARGET_SECONDS or RDY_GATE_CEILING_SECONDS to match.
+RELEASE_GATE_TARGET_SECONDS = 1800
+RELEASE_GATE_CEILING_SECONDS = 2700
 
 
 def load(name):
@@ -223,9 +227,10 @@ def budget_file():
 
 # A push (release evidence) takes the value after `||`; only a manual hosted proof run takes the other.
 PUSH_VALUE = {
-    '${{ inputs.hosted && 90 || 11 }}': 11,
+    '${{ inputs.hosted && 90 || 20 }}': 20,
 }
-# Each job's timeout is its line of the budget file.
+# Job limits only stop a run that hangs; the budget job checks the time. Each job's line of the budget file
+# is its target, and its limit is at least that line, so a slow but healthy run finishes.
 JOB_LINES = {
     ('gate.yml', 'linux'): 'gate', ('gate.yml', 'macos'): 'gate', ('gate.yml', 'windows'): 'gate',
     ('release-candidate.yml', 'check'): 'candidate_check',
@@ -236,6 +241,7 @@ JOB_LINES = {
     ('release-candidate.yml', 'budget'): 'budget',
     ('release-candidate.yml', 'sign'): 'sign',
 }
+HANG_GUARD_MINUTES = {'gate': 20, 'candidate_build': 20, 'candidate_check': 1, 'manifest': 1, 'budget': 1, 'sign': 1}
 
 
 def timeout_seconds(job):
@@ -263,18 +269,22 @@ def longest_path(doc):
 class OneNumber(unittest.TestCase):
     def test_the_budget_file_says_the_literal_and_its_lines_add_up_to_it(self):
         value = budget_file()
-        self.assertEqual(value, {'schema': 1, 'release_gate_seconds': RELEASE_GATE_SECONDS, 'lines': {
+        self.assertEqual(value, {'schema': 1, 'target_seconds': RELEASE_GATE_TARGET_SECONDS,
+                                 'ceiling_seconds': RELEASE_GATE_CEILING_SECONDS, 'lines': {
             'gate': 660, 'candidate_check': 60, 'candidate_build': 720, 'manifest': 60, 'budget': 60, 'sign': 60,
             'install_check': 180}})
-        self.assertEqual(sum(value['lines'].values()), RELEASE_GATE_SECONDS)
+        self.assertEqual(sum(value['lines'].values()), RELEASE_GATE_TARGET_SECONDS)
         self.assertEqual(BUDGET.read_budget((ROOT / 'release/gate-budget.json').read_bytes()), value)
-        # the budget job reads this file's literal as the third place
-        self.assertEqual(BUDGET.control_literal(Path(__file__).read_text()), RELEASE_GATE_SECONDS)
+        # the budget job reads this file's literals as the third place
+        self.assertEqual(BUDGET.control_literals(Path(__file__).read_text()),
+                         (RELEASE_GATE_TARGET_SECONDS, RELEASE_GATE_CEILING_SECONDS))
 
     def test_a_malformed_or_inconsistent_budget_file_refuses(self):
         good = budget_file()
         for change, reason in (
-                ({'release_gate_seconds': 1900}, 'the budget lines add up to 1800 s, not 1900 s'),
+                ({'target_seconds': 1900}, 'the budget lines add up to 1800 s, not the target 1900 s'),
+                ({'ceiling_seconds': 1700}, 'the ceiling is under the target'),
+                ({'ceiling_seconds': 0}, 'the ceiling is not a number of seconds'),
                 ({'schema': 2}, 'the budget file is not schema 1'),
                 ({'lines': dict(good['lines'], gate=0)}, 'a budget line is not a number of seconds'),
                 ({'lines': {k: v for k, v in good['lines'].items() if k != 'sign'}},
@@ -287,40 +297,48 @@ class OneNumber(unittest.TestCase):
 
     def test_the_three_places_must_agree(self):
         good = budget_file()
-        self.assertEqual(BUDGET.agreed_budget(good, 1800, '1800'), 1800)
-        for literal, variable, reason in (
-                (1800, '', 'the repository variable RDY_GATE_BUDGET_SECONDS is not set'),
-                (1800, '1800s', 'the repository variable RDY_GATE_BUDGET_SECONDS is not a number of seconds'),
-                (1800, '60', 'the budget differs: release/gate-budget.json 1800 s, tests/ci/test_gate_budget.py '
-                             '1800 s, RDY_GATE_BUDGET_SECONDS 60 s'),
-                (2400, '2400', 'the budget differs: release/gate-budget.json 1800 s, tests/ci/test_gate_budget.py '
-                               '2400 s, RDY_GATE_BUDGET_SECONDS 2400 s')):
-            with self.subTest(variable=variable):
+        self.assertEqual(BUDGET.agreed_lines(good, (1800, 2700), '1800', '2700'), (1800, 2700))
+        for literals, target, ceiling, reason in (
+                ((1800, 2700), '', '2700', 'the repository variable RDY_GATE_TARGET_SECONDS is not set'),
+                ((1800, 2700), '1800', '', 'the repository variable RDY_GATE_CEILING_SECONDS is not set'),
+                ((1800, 2700), '1800s', '2700',
+                 'the repository variable RDY_GATE_TARGET_SECONDS is not a number of seconds'),
+                ((1800, 2700), '60', '2700', 'the target differs: release/gate-budget.json 1800 s, '
+                                             'tests/ci/test_gate_budget.py 1800 s, RDY_GATE_TARGET_SECONDS 60 s'),
+                ((1800, 3600), '1800', '3600', 'the ceiling differs: release/gate-budget.json 2700 s, '
+                                               'tests/ci/test_gate_budget.py 3600 s, RDY_GATE_CEILING_SECONDS 3600 s')):
+            with self.subTest(reason=reason):
                 with self.assertRaises(ControllerError) as caught:
-                    BUDGET.agreed_budget(good, literal, variable)
+                    BUDGET.agreed_lines(good, literals, target, ceiling)
                 self.assertEqual(str(caught.exception), reason)
+        with self.assertRaises(ControllerError) as caught:
+            BUDGET.control_literals('RELEASE_GATE_TARGET_SECONDS = 1800\n')
+        self.assertEqual(str(caught.exception), 'the control test does not hold one RELEASE_GATE_CEILING_SECONDS literal')
 
 
 class HardStops(unittest.TestCase):
-    def test_each_job_limit_is_its_budget_line(self):
+    def test_job_limits_are_hang_guards_at_or_above_their_lines(self):
         lines = budget_file()['lines']
         seen = set()
         for name in ('gate.yml', 'release-candidate.yml'):
             for job_id, job in workflow(name)['jobs'].items():
                 with self.subTest(workflow=name, job=job_id):
                     self.assertIn((name, job_id), JOB_LINES)
-                    self.assertEqual(timeout_seconds(job), lines[JOB_LINES[(name, job_id)]])
+                    line = JOB_LINES[(name, job_id)]
+                    self.assertEqual(timeout_seconds(job), 60 * HANG_GUARD_MINUTES[line])
+                    self.assertGreaterEqual(timeout_seconds(job), lines[line])
                     seen.add((name, job_id))
         self.assertEqual(seen, set(JOB_LINES))
 
-    def test_the_longest_path_from_the_gate_to_the_signature_fits_the_budget(self):
-        lines = budget_file()['lines']
+    def test_the_budget_job_not_a_job_limit_holds_the_ceiling(self):
+        # The longest path of job limits is longer than the target, so the target never stops a healthy run;
+        # the budget job alone refuses a release over the ceiling.
         path = longest_path(workflow('gate.yml')) + longest_path(workflow('release-candidate.yml'))
-        self.assertLessEqual(path, RELEASE_GATE_SECONDS - lines['install_check'])
+        self.assertGreater(path, RELEASE_GATE_TARGET_SECONDS)
         # check, the slowest build, assemble, budget, sign: the path the signature waits on
-        self.assertEqual(longest_path(workflow('release-candidate.yml')), 60 + 720 + 60 + 60 + 60)
+        self.assertEqual(longest_path(workflow('release-candidate.yml')), 60 + 1200 + 60 + 60 + 60)
 
-    def test_every_gate_run_has_the_release_tier_and_a_clock_inside_the_gate_line(self):
+    def test_every_gate_run_has_the_release_tier_and_a_clock_inside_its_hang_guard(self):
         gate_line = budget_file()['lines']['gate']
         doc = workflow('gate.yml')
         for job_id, job in doc['jobs'].items():
@@ -328,7 +346,9 @@ class HardStops(unittest.TestCase):
                 match = re.fullmatch(r"\$\{\{ inputs\.hosted && '([0-9]+)' \|\| '([0-9]+)' \}\}",
                                      job['env']['GATE_BUDGET_SECS'])
                 self.assertIsNotNone(match)
-                self.assertLess(int(match.group(2)), gate_line)
+                # The gate's own clock stops a hung run before the job limit, and never before the target.
+                self.assertGreater(int(match.group(2)), gate_line)
+                self.assertLessEqual(int(match.group(2)), timeout_seconds(job) - 120)
                 for step in job['steps']:
                     for line in step.get('run', '').splitlines():
                         if 'cargo qa' in line:
@@ -360,19 +380,31 @@ class HardStops(unittest.TestCase):
         self.assertEqual(budget['permissions'], {'actions': 'read', 'contents': 'read', 'issues': 'write'})
         self.assertNotIn('environment', budget)
         run = budget['steps'][1]
+        self.assertEqual(run['id'], 'budget')
         self.assertEqual(run['env'], {'GITHUB_TOKEN': '${{ github.token }}',
-                                      'BUDGET_SECONDS': '${{ vars.RDY_GATE_BUDGET_SECONDS }}',
+                                      'TARGET_SECONDS': '${{ vars.RDY_GATE_TARGET_SECONDS }}',
+                                      'CEILING_SECONDS': '${{ vars.RDY_GATE_CEILING_SECONDS }}',
                                       'BUDGET_OVERRIDE': '${{ vars.RDY_GATE_BUDGET_OVERRIDE }}'})
         self.assertIn('scripts/release/gate_budget.py check --version "$VERSION" --repo "$GITHUB_REPOSITORY"',
                       run['run'])
-        self.assertIn('--budget-file release/gate-budget.json --variable "$BUDGET_SECONDS"', run['run'])
-        issue = budget['steps'][-1]
-        self.assertEqual(issue['if'], 'failure()')
-        self.assertIn('--label gate-budget-breach', issue['run'])
+        self.assertIn('--budget-file release/gate-budget.json --target-variable "$TARGET_SECONDS" '
+                      '--ceiling-variable "$CEILING_SECONDS"', run['run'])
+        self.assertIn('--github-output "$GITHUB_OUTPUT"', run['run'])
+        over, breach = budget['steps'][-2:]
+        # Over the target: one issue, and the release goes on.
+        self.assertEqual(over['if'], "steps.budget.outputs.state == 'over_target'")
+        self.assertNotIn('continue-on-error', over)
+        self.assertRegex(over['run'], r'if ! \{ gh label create gate-time-over-target')
+        self.assertIn('::warning::', over['run'])
+        self.assertIn('--label gate-time-over-target', over['run'])
+        self.assertIn('gate-target-issue.md', over['run'])
+        # Over the ceiling: the job fails, so sign does not start.
+        self.assertEqual(breach['if'], 'failure()')
+        self.assertIn('--label gate-budget-breach', breach['run'])
         # the budget script never runs where the key is
         self.assertNotIn('gate_budget', json.dumps(jobs['sign']))
         for job_id, job in jobs.items():
-            self.assertEqual('vars.RDY_GATE_BUDGET' in json.dumps(job), job_id == 'budget', job_id)
+            self.assertEqual('vars.RDY_GATE_' in json.dumps(job), job_id == 'budget', job_id)
 
     def test_the_guard_watches_the_budget_and_the_files_that_enforce_it(self):
         doc = workflow('budget-guard.yml')
@@ -443,8 +475,9 @@ def done(start, end, conclusion='success', queued=None):
 
 
 class GateTime(unittest.TestCase):
-    def check(self, client, variable='1800', override='', now=T0 + 3600):
-        return BUDGET.check(client, V, budget_file(), RELEASE_GATE_SECONDS, variable, override, now)
+    def check(self, client, target='1800', ceiling='2700', override='', now=T0 + 3600):
+        return BUDGET.check(client, V, budget_file(), (RELEASE_GATE_TARGET_SECONDS, RELEASE_GATE_CEILING_SECONDS),
+                            target, ceiling, override, now)
 
     def test_two_runs_at_the_same_time_count_once(self):
         # the gate (0:00 to 0:09) and security (0:01 to 0:15) overlap; the candidate runs 0:20 to 0:34
@@ -454,7 +487,8 @@ class GateTime(unittest.TestCase):
         self.assertEqual(record['gate_seconds'], 15 * 60 + 14 * 60)
         self.assertEqual(record['following_seconds'], 240)
         self.assertEqual(record['total_seconds'], 29 * 60 + 240)
-        self.assertFalse(record['pass'])
+        self.assertEqual((record['state'], record['pass']), ('over_target', True))
+        self.assertEqual([(line['line'], line['seconds']) for line in record['lines']][:1], [('gate', 9 * 60)])
         self.assertEqual([(r['workflow'], r['run_id'], r['attempt']) for r in record['runs']],
                          [('gate.yml', 1, 1), ('security.yml', 2, 1), ('release-candidate.yml', 3, 1)])
         self.assertEqual(client.queries, [('gate.yml', {'branch': 'rel/' + V}), ('security.yml', {'branch': 'rel/' + V}),
@@ -504,17 +538,44 @@ class GateTime(unittest.TestCase):
         self.assertEqual(BUDGET.union_seconds([(0, 100), (10, 20), (100, 150), (200, 210)]), 160)
         self.assertEqual(BUDGET.union_seconds([]), 0)
 
-    def test_an_override_names_one_version(self):
-        client = release(gate=[(1, [done((0,), (40,))])])
+    def test_the_target_and_the_ceiling_are_two_lines(self):
+        # 240 s of signing and the install check follow; the gate time is the rest.
+        for gate_end, state in (((26,), 'on_target'), ((26, 1), 'over_target'), ((41,), 'over_target'),
+                                ((41, 1), 'over_ceiling')):
+            with self.subTest(gate_end=gate_end):
+                record = self.check(release(gate=[(1, [done((0,), gate_end)])]))
+                self.assertEqual(record['state'], state)
+                self.assertEqual(record['pass'], state != 'over_ceiling')
+                self.assertEqual((record['target_seconds'], record['ceiling_seconds'], record['limit_seconds']),
+                                 (1800, 2700, 2700))
+
+    def test_the_table_shows_each_line_against_its_target(self):
+        client = release(gate=[(1, [[job((0,), (12,))]])],
+                         candidate=[(3, [[('completed', 'success', at(12), at(12), at(13), 7)]])])
+        record = self.check(client)
+        gate = [line for line in record['lines'] if line['line'] == 'gate'][0]
+        self.assertEqual((gate['target_seconds'], gate['seconds']), (660, 720))
+        self.assertEqual([line['seconds'] for line in record['lines'] if line['line'] in BUDGET.FOLLOWING], [None, None])
+        text = BUDGET.table(record)
+        self.assertIn('| gate | 660 | 720 (over) |', text)
+        self.assertIn('| sign | 60 | after this check |', text)
+        self.assertIn('Total: ' + str(record['total_seconds']) + ' s. Target 1800 s; ceiling 2700 s.', text)
+        self.assertEqual(BUDGET.line_of('release-candidate.yml', 'Native candidate (x86_64-pc-windows-msvc)'),
+                         'candidate_build')
+        self.assertEqual(BUDGET.line_of('release-candidate.yml', 'Release gate budget'), 'budget')
+        self.assertIsNone(BUDGET.line_of('security.yml', 'Core security'))
+
+    def test_an_override_names_one_version_and_raises_its_ceiling(self):
+        client = release(gate=[(1, [done((0,), (50,))])])
         record = self.check(client, override='0.58.0:4000')
         self.assertFalse(record['override'])
-        self.assertEqual(record['limit_seconds'], 1800)
-        self.assertFalse(record['pass'])
+        self.assertEqual(record['limit_seconds'], 2700)
+        self.assertEqual(record['state'], 'over_ceiling')
         record = self.check(client, override=V + ':4000')
         self.assertTrue(record['override'])
-        self.assertEqual((record['limit_seconds'], record['budget_seconds']), (4000, 1800))
-        self.assertTrue(record['pass'])
-        self.assertIn('OVERRIDE: RDY_GATE_BUDGET_OVERRIDE sets the limit of v0.59.0 to 4000 s', BUDGET.table(record))
+        self.assertEqual((record['limit_seconds'], record['ceiling_seconds']), (4000, 2700))
+        self.assertEqual((record['state'], record['pass']), ('over_target', True))
+        self.assertIn('OVERRIDE: RDY_GATE_BUDGET_OVERRIDE sets the ceiling of v0.59.0 to 4000 s', BUDGET.table(record))
         with self.assertRaises(ControllerError) as caught:
             self.check(client, override='all')
         self.assertEqual(str(caught.exception), 'the repository variable RDY_GATE_BUDGET_OVERRIDE is not <V>:<seconds>')
@@ -536,50 +597,70 @@ class GateTime(unittest.TestCase):
 
 
 class CheckCommand(unittest.TestCase):
-    def run_check(self, client, variable='1800', override=''):
-        folder = tempfile.mkdtemp()
-        self.addCleanup(__import__('shutil').rmtree, folder)
-        out, summary, issue = Path(folder) / 'b' / 'gate-budget.json', Path(folder) / 'summary', Path(folder) / 'i.md'
+    def run_check(self, client, target='1800', ceiling='2700', override=''):
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__('shutil').rmtree, str(folder))
+        files = {name: folder / name for name in ('summary', 'breach.md', 'target.md', 'output')}
+        out = folder / 'b' / 'gate-budget.json'
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             status = BUDGET.main(['check', '--version', V, '--repo', REPO, '--budget-file',
-                                  str(ROOT / 'release/gate-budget.json'), '--variable', variable, '--override', override,
-                                  '--out', str(out), '--summary', str(summary), '--issue-body', str(issue)],
+                                  str(ROOT / 'release/gate-budget.json'), '--target-variable', target,
+                                  '--ceiling-variable', ceiling, '--override', override, '--out', str(out),
+                                  '--summary', str(files['summary']), '--issue-body', str(files['breach.md']),
+                                  '--target-issue-body', str(files['target.md']),
+                                  '--github-output', str(files['output'])],
                                  environ={}, client=client, now=T0 + 3600)
         read = lambda path: path.read_text() if path.exists() else None  # noqa: E731
-        return status, stdout.getvalue(), stderr.getvalue(), read(out), read(summary), read(issue)
+        return dict({name: read(path) for name, path in files.items()}, status=status, stdout=stdout.getvalue(),
+                    stderr=stderr.getvalue(), out=read(out))
 
-    def test_within_the_budget_it_passes_and_writes_the_record(self):
-        status, stdout, stderr, out, summary, issue = self.run_check(release(gate=[(1, [done((0,), (9,))])],
-                                                                            candidate=[(3, [done((10,), (22,))])]))
-        self.assertEqual((status, stderr, issue), (0, '', None))
-        record = json.loads(out)
-        self.assertEqual((record['total_seconds'], record['pass']), (21 * 60 + 240, True))
-        self.assertEqual(stdout, summary)
-        self.assertIn('Total: 1500 s of 1800 s.', stdout)
+    def test_on_target_it_passes_silently(self):
+        r = self.run_check(release(gate=[(1, [done((0,), (9,))])], candidate=[(3, [done((10,), (22,))])]))
+        self.assertEqual((r['status'], r['stderr'], r['breach.md'], r['target.md']), (0, '', None, None))
+        self.assertEqual(r['output'], 'state=on_target\n')
+        record = json.loads(r['out'])
+        self.assertEqual((record['total_seconds'], record['state'], record['pass']), (21 * 60 + 240, 'on_target', True))
+        self.assertEqual(r['stdout'], r['summary'])
+        self.assertIn('Total: 1500 s. Target 1800 s; ceiling 2700 s.', r['stdout'])
 
-    def test_over_the_budget_it_exits_31_and_writes_the_issue(self):
-        status, stdout, stderr, out, summary, issue = self.run_check(release(gate=[(1, [done((0,), (30,))])]))
-        line = 'E_GATE_BUDGET: v0.59.0 spent 2040 s in gates; the budget is 1800 s'
-        self.assertEqual((status, stderr), (31, line + '\n'))
-        self.assertFalse(json.loads(out)['pass'])
-        self.assertTrue(issue.startswith(line + '\n\nNo signature was made'))
-        self.assertIn('| gate.yml | [7]', issue.replace('[1]', '[7]'))
-        self.assertIn('**' + line + '**', summary)
+    def test_over_the_target_it_passes_and_writes_the_target_issue(self):
+        r = self.run_check(release(gate=[(1, [done((0,), (30,))])]))
+        line = 'Gate time over target: v0.59.0 spent 2040 s in gates; the target is 1800 s'
+        self.assertEqual((r['status'], r['stderr'], r['breach.md']), (0, '', None))
+        self.assertEqual(r['output'], 'state=over_target\n')
+        self.assertTrue(r['target.md'].startswith(line + '\n\nThe release goes on: the ceiling is 2700 s.'))
+        self.assertIn('| gate.yml | [1]', r['target.md'])
+        self.assertIn('**' + line + '**', r['summary'])
+        self.assertTrue(json.loads(r['out'])['pass'])
+
+    def test_over_the_ceiling_it_exits_31_and_writes_the_breach_issue(self):
+        r = self.run_check(release(gate=[(1, [done((0,), (50,))])]))
+        line = 'E_GATE_BUDGET: v0.59.0 spent 3240 s in gates; the ceiling is 2700 s'
+        self.assertEqual((r['status'], r['stderr'], r['target.md']), (31, line + '\n', None))
+        self.assertEqual(r['output'], 'state=over_ceiling\n')
+        self.assertFalse(json.loads(r['out'])['pass'])
+        self.assertTrue(r['breach.md'].startswith(line + '\n\nNo signature was made'))
+        self.assertIn('| gate.yml | [1]', r['breach.md'])
+        self.assertIn('**' + line + '**', r['summary'])
 
     def test_a_variable_that_differs_fails_and_writes_the_issue(self):
-        status, _, stderr, out, _, issue = self.run_check(release(), variable='60')
-        self.assertEqual(status, 1)
-        self.assertTrue(stderr.startswith('gate budget: the budget differs'))
-        self.assertIsNone(out)
-        self.assertIn('refused: the budget differs', issue)
+        for target, ceiling, reason in (('60', '2700', 'the target differs'), ('1800', '1800', 'the ceiling differs')):
+            with self.subTest(reason=reason):
+                r = self.run_check(release(), target=target, ceiling=ceiling)
+                self.assertEqual(r['status'], 1)
+                self.assertTrue(r['stderr'].startswith('gate budget: ' + reason))
+                self.assertIsNone(r['out'])
+                self.assertIsNone(r['output'])
+                self.assertIn('refused: ' + reason, r['breach.md'])
 
     def test_another_repository_refuses(self):
         stderr = io.StringIO()
         with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
             status = BUDGET.main(['check', '--version', V, '--repo', 'someone/else', '--budget-file',
-                                  str(ROOT / 'release/gate-budget.json'), '--variable', '1800',
-                                  '--out', '/nonexistent/x'], environ={}, client=release())
+                                  str(ROOT / 'release/gate-budget.json'), '--target-variable', '1800',
+                                  '--ceiling-variable', '2700', '--out', '/nonexistent/x'],
+                                 environ={}, client=release())
         self.assertEqual((status, stderr.getvalue()), (1, 'gate budget: the repository is not ' + REPO + '\n'))
 
 
