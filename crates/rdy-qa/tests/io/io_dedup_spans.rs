@@ -554,28 +554,39 @@ fn r5902_fixture_is_local_and_immutable() {
 // ---------------------------------------------------------------------------------------------
 // logical bytes and receivers
 
-/// A current project whose history holds a mapped CHANGE/BLOCK pair, tagged. With `blob`, a
-/// blob of that many distinct bytes too, so its log is past the threshold of unmapped bytes.
+/// A current project whose history holds a mapped CHANGE/BLOCK pair, tagged. With `blob`,
+/// figures of the tagged history also hold blobs of that many distinct bytes in all, so the log
+/// and the tag's history are past the threshold of unmapped bytes.
 fn source(blob: usize) -> (tempfile::TempDir, PathBuf, String) {
     let base = tempfile::tempdir().unwrap();
     let root = base.path().join("src");
     let mut r = Rdy::init(&root, "rdy-standard").unwrap();
-    let w = write(
-        &mut r,
-        "w0",
-        json!([
-            {"op": "create", "type": "doc", "id": "$d",
-             "fields": {"title": "Spans", "doc_type": "page"}},
-            {"op": "create", "type": "prose", "id": "$big", "parent": "$d",
-             "body": text(20_000, 3)}
-        ]),
-    )
-    .unwrap();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d",
+               "fields": {"title": "Spans", "doc_type": "page"}}),
+        json!({"op": "create", "type": "prose", "id": "$big", "parent": "$d",
+               "body": text(20_000, 3)}),
+    ];
+    if blob > 0 {
+        let section = json!({"op": "create", "type": "section", "id": "$s", "parent": "$d",
+                             "fields": {"title": "Figures"}});
+        ops.push(section);
+        // a publication blob holds at most 64 MiB, so the bytes go in blobs of 32 MiB at most
+        let mut left = blob;
+        let mut seed = 9;
+        while left > 0 {
+            let n = left.min(32 << 20);
+            let h = r.store_mut().put_blob(text(n, seed).as_bytes()).unwrap();
+            ops.push(json!({"op": "create", "type": "figure", "parent": "$s",
+                            "fields": {"blob": h.to_string(), "media_type": "image/png",
+                                       "alt": format!("fig {seed}")}}));
+            left -= n;
+            seed += 1;
+        }
+    }
+    let w = write(&mut r, "w0", json!(ops)).unwrap();
     land(&mut r, "w0").unwrap();
     r.tag(&approver(), TAG, None, None).unwrap();
-    if blob > 0 {
-        r.store_mut().put_blob(text(blob, 9).as_bytes()).unwrap();
-    }
     let big = ids(&w)["$big"].clone();
     r.close().unwrap();
     (base, root, big)
@@ -732,4 +743,26 @@ fn r5902_receivers_build_local_maps() {
     .unwrap();
     h.close().unwrap();
     assert!(spanmap_len(&holder).is_none_or(|n| n == 12), "holder");
+    // the take was past the threshold of unmapped bytes, and the holder's own compact then
+    // builds its local map, reads back every byte and keeps every original key
+    let store = holder.join(".rdy/store");
+    let log: u64 = std::fs::read_dir(store.join("segments"))
+        .unwrap()
+        .filter_map(|e| e.ok()?.metadata().ok())
+        .map(|m| m.len())
+        .sum();
+    assert!(log >= rdy_store::dedup::THRESHOLD_BYTES, "holder log {log}");
+    let h = Rdy::open_holder(&holder).unwrap();
+    let held = foreign_fixture::store_facts(&h)["object_keys"].clone();
+    let report = h.compact(false).unwrap();
+    assert!(report.deduplicated_bytes >= 4096, "holder: {report:?}");
+    h.fsck().unwrap();
+    h.close().unwrap();
+    let map = SpanMap::load(&store, MapOpen::ReadOnly).unwrap();
+    assert!(map.mappings().count() > 0, "holder: a local map");
+    let mut h = Rdy::open_holder(&holder).unwrap();
+    assert_eq!(foreign_fixture::store_facts(&h)["object_keys"], held);
+    h.fsck().unwrap();
+    h.reindex().unwrap();
+    h.close().unwrap();
 }

@@ -1373,6 +1373,41 @@ fn r5902_captured_read_cannot_observe_a_raw_hole() {
     if raw[range].iter().all(|&b| b == 0) {
         assert_eq!(captured.change(&id).unwrap(), want, "a hole reads whole");
     }
+
+    // a removal whose erasure is still pending refuses the readers captured before it, and a
+    // new reader too; the next open finishes it and nothing reads the text back
+    use rdy_store::redaction_io::{FailAction, Failpoint, arm_failpoint};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut s = Store::create(&path).unwrap();
+    let (secret, _, kept) = secret_and_kept(&mut s);
+    assert!(s.compact(false).unwrap().deduplicated_bytes >= 2 * 4096);
+    let want = s.change(&kept).unwrap();
+    let captured = s.reader();
+    assert_eq!(captured.change(&kept).unwrap(), want);
+    captured.check_redaction_epoch().unwrap();
+    arm_failpoint(Some((Failpoint::AfterApplySync, FailAction::Fail)));
+    let failed = remove_live(&mut s, &secret);
+    arm_failpoint(None);
+    assert!(
+        matches!(failed, Err(StoreError::RedactionPending)),
+        "{failed:?}"
+    );
+    let old = captured.check_redaction_epoch();
+    assert!(matches!(old, Err(StoreError::RedactionPending)), "{old:?}");
+    let new = s.reader().check_redaction_epoch();
+    assert!(matches!(new, Err(StoreError::RedactionPending)), "{new:?}");
+    drop(s);
+    let old = captured.check_redaction_epoch();
+    assert!(matches!(old, Err(StoreError::RedactionPending)), "{old:?}");
+    drop(captured);
+    let s = Store::open(&path).unwrap();
+    s.check_redaction_epoch().unwrap();
+    assert_eq!(s.change(&kept).unwrap(), want);
+    assert!(s.get_block(&secret.version_hash()).unwrap().is_redacted());
+    s.check_objects().unwrap();
+    drop(s);
+    assert_eq!(holds_canary(&path), Vec::<String>::new());
 }
 
 /// The journal bytes of `records` after the file header, chained from the zero digest.
@@ -1744,6 +1779,371 @@ fn r5902_removal_erases_all_mapped_copies() {
         drop(s);
         assert_eq!(holds_canary(&path), Vec::<String>::new(), "{unsupported}");
     }
+    removal_live_with_the_platform_punch();
+    removal_erases_the_upgrade_backup();
+    removal_carried_to_a_receiver();
+}
+
+fn change_in(view: &str, ops: Vec<Op>) -> Change {
+    Change {
+        view: view.into(),
+        ..change(ops)
+    }
+}
+
+fn writer() -> Provenance {
+    change(vec![]).provenance
+}
+
+/// A local person's landing of `proposal`.
+fn approve(proposal: Hash) -> rdy_store::LandRequest {
+    rdy_store::LandRequest {
+        proposal,
+        accept: None,
+        approver: Provenance {
+            actor: "human:alice".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: 50,
+        },
+        alt: None,
+        relay: None,
+        evidence: None,
+        assessment: None,
+    }
+}
+
+/// In view `src` of `s`: a change that creates the 40,000-byte canary block `secret`, then a
+/// change that creates a 40,000-byte block that stays. Returns the secret, its change and the
+/// kept change.
+fn secret_and_kept(s: &mut Store) -> (Block, Hash, Hash) {
+    let secret = block("b-00001", &canary_body(40_000));
+    let gone = s
+        .commit_to_view(
+            "src",
+            change_in(
+                "src",
+                vec![Op::Create {
+                    block: secret.clone(),
+                }],
+            ),
+        )
+        .unwrap();
+    let kept = s
+        .commit_to_view(
+            "src",
+            change_in(
+                "src",
+                vec![Op::Create {
+                    block: block("b-00002", &text(40_000, 62)),
+                }],
+            ),
+        )
+        .unwrap();
+    (secret, gone, kept)
+}
+
+/// The live removal of `secret`'s version: the request through the store's checked writer in
+/// view `work`, its proposal, and a person's landing, which seals the apply and erases before
+/// it returns.
+fn remove_live(s: &mut Store, secret: &Block) -> Result<(), StoreError> {
+    use crate::redaction_fixture::{RequestSpec, build_request};
+    use rdy_model::redaction::RedactTarget;
+    let spec = RequestSpec::new(
+        "work",
+        vec![RedactTarget::Version {
+            id: secret.id.clone(),
+            version: secret.version_hash(),
+        }],
+    );
+    let d = build_request(s, &spec);
+    let p = s
+        .prepare_redaction(&d.carrier, &d.request, &d.residues)
+        .unwrap();
+    s.commit_redaction(p).unwrap();
+    let proposal = s.propose("work", "Remove content", writer()).unwrap();
+    s.land_atomic(approve(proposal)).map(|_| ())
+}
+
+/// A full dump of `s` and its chain end (a follower's seed).
+fn full_dump(s: &Store) -> (Vec<u8>, rdy_store::dump_chain::ChainEnd) {
+    use rdy_store::dump::{DumpHeader, DumpWriter, RemovalTally};
+    use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpChainHeader};
+    let r = s.reader();
+    let end = s.log_end();
+    let repo = r.repo_id().unwrap().unwrap();
+    let end_batch = r.batch_marker_at(end).unwrap().unwrap_or(BatchMarker::ZERO);
+    let store = format::DumpStore::Features(r.store_features().unwrap());
+    let header = DumpHeader {
+        store: store.clone(),
+        log_end: end,
+        rdy: "test".into(),
+        chain: Some(DumpChainHeader::full(repo, end_batch)),
+    };
+    let mut w = DumpWriter::new(Vec::new(), &header).unwrap();
+    let mut tally = RemovalTally::default();
+    let origin = rdy_store::segment::Location {
+        segment: 0,
+        offset: 0,
+    };
+    r.for_each_batch_after(origin, end, &mut |b| {
+        tally.observe(&b)?;
+        w.batch(&b)
+    })
+    .unwrap();
+    let facts = tally.resolved(&r, end).unwrap();
+    let (bytes, totals) = w.finish(facts).unwrap();
+    (
+        bytes,
+        ChainEnd {
+            repo_id: repo,
+            store_format: store,
+            end,
+            end_batch,
+            digest: totals.digest,
+        },
+    )
+}
+
+/// Loads the dump `bytes` into a new store at `to`.
+fn load_dump(bytes: &[u8], to: &Path) {
+    use rdy_store::dump::{DumpItem, DumpReader};
+    let (mut reader, _, header) = DumpReader::open(bytes).unwrap();
+    let mut ingest = rdy_store::ingest::Ingest::create(to).unwrap();
+    let mut n = 0;
+    while let Some(item) = reader.next().unwrap() {
+        if let DumpItem::Batch(b) = item {
+            n += 1;
+            ingest.batch(n, &b).unwrap();
+        }
+    }
+    ingest.upgrade(&header.store).unwrap();
+    ingest.finish().unwrap();
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The ordinary live removal on a store the platform's own punch call compacted: the source
+/// BLOCK and its mapped CHANGE copy are both zeroed (a hole stays a hole); a reader captured
+/// before it refuses; no file of the store, no dump after it, no store loaded from that dump
+/// (before and after its own compact) and no follower that follows the removal batch holds the
+/// text.
+fn removal_live_with_the_platform_punch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut s = Store::create(&path).unwrap();
+    let (secret, gone, kept) = secret_and_kept(&mut s);
+    let r = s.compact(false).unwrap();
+    assert!(r.deduplicated_bytes >= 2 * 4096, "{r:?}");
+    let frames = crate::carried_fixture::framed(&s.reader(), s.log_end());
+    let target = find(&frames, kinds::CHANGE, gone).loc;
+    assert!(
+        map_of(&path).mappings().any(|m| m.target.place == target),
+        "the secret's CHANGE copy is mapped"
+    );
+    let unsupported = r.notes.iter().any(|n| n.starts_with(NOT_SUPPORTED));
+    let c = find(&frames, kinds::CHANGE, gone);
+    let holes = map_of(&path)
+        .mappings()
+        .filter(|m| m.target.place == target)
+        .all(|m| {
+            let raw = raw_payload(&path, &c);
+            raw[m.target.start as usize..(m.target.start + m.target.len) as usize]
+                .iter()
+                .all(|&x| x == 0)
+        });
+    assert!(
+        holes || unsupported,
+        "the platform punched or said it could not"
+    );
+    eprintln!("live removal over the platform punch: holes {holes}, unsupported {unsupported}");
+    let want = s.change(&kept).unwrap();
+    let captured = s.reader();
+    // a follower seeded now holds the text; the removal batch reaches it later
+    let (seed, chain) = full_dump(&s);
+    assert!(contains(&seed, CANARY.as_bytes()));
+    let fdir = dir.path().join("follower");
+    load_dump(&seed, &fdir);
+    {
+        let lock = rdy_store::StoreLock::take(&fdir).unwrap();
+        rdy_store::follower::write_seed_mark(
+            &fdir,
+            &lock,
+            &rdy_store::follower::FollowerMark {
+                chain: chain.clone(),
+                files: vec![],
+            },
+        )
+        .unwrap();
+    }
+
+    remove_live(&mut s, &secret).unwrap();
+    assert!(matches!(
+        captured.check_redaction_epoch(),
+        Err(StoreError::RedactedState)
+    ));
+    assert_eq!(holds_canary(&path), Vec::<String>::new(), "live");
+    assert!(s.get_block(&secret.version_hash()).unwrap().is_redacted());
+    assert_eq!(s.change(&kept).unwrap(), want);
+    s.check_objects().unwrap();
+    assert_eq!(
+        s.log_bytes().unwrap().deduplicated_bytes,
+        map_of(&path)
+            .mappings()
+            .filter(|m| m.target.place != target)
+            .map(|m| u64::from(m.target.len))
+            .sum::<u64>(),
+        "a removed target counts no deduplicated byte"
+    );
+
+    // a dump after the removal, and a store loaded from it, before and after its own compact
+    let (bytes, _) = full_dump(&s);
+    assert!(!contains(&bytes, CANARY.as_bytes()), "the dump");
+    let loaded = dir.path().join("loaded");
+    load_dump(&bytes, &loaded);
+    assert_eq!(holds_canary(&loaded), Vec::<String>::new(), "loaded");
+    let l = Store::open(&loaded).unwrap();
+    assert_eq!(l.change(&kept).unwrap(), want);
+    l.check_objects().unwrap();
+    assert!(l.compact(false).unwrap().deduplicated_bytes >= 4096);
+    assert!(
+        !map_of(&loaded)
+            .mappings()
+            .any(|m| m.target.place == target || m.source.place == target),
+        "a removed frame is never mapped at a receiver"
+    );
+    drop(l);
+    assert_eq!(holds_canary(&loaded), Vec::<String>::new(), "loaded");
+    let l = Store::open(&loaded).unwrap();
+    assert_eq!(l.change(&kept).unwrap(), want);
+    l.check_objects().unwrap();
+    drop(l);
+
+    // the follower gets the removal batch (a follow stopped after its sync); its open erases
+    let end = s.log_end();
+    assert_eq!(end.segment, chain.end.segment, "one segment");
+    let seg = seg_path(&path.join("segments"), end.segment);
+    let tail =
+        std::fs::read(&seg).unwrap()[chain.end.offset as usize..end.offset as usize].to_vec();
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(seg_path(&fdir.join("segments"), end.segment))
+            .unwrap();
+        f.write_all(&tail).unwrap();
+        f.sync_all().unwrap();
+    }
+    let f = Store::open_follower(&fdir).unwrap();
+    assert_eq!(f.change(&kept).unwrap(), want);
+    f.check_objects().unwrap();
+    drop(f);
+    assert_eq!(holds_canary(&fdir), Vec::<String>::new(), "follower");
+    assert!(!fdir.join(SPANMAP_FILE).exists(), "a follower never maps");
+
+    // reopen, a read-only open, fsck and a repeat compact bring nothing back
+    s.close().unwrap();
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.change(&kept).unwrap(), want);
+    s.check_objects().unwrap();
+    assert!(s.compact(false).is_ok());
+    drop(s);
+    let ro = Store::open_source_read_only(&path).unwrap();
+    assert_eq!(ro.change(&kept).unwrap(), want);
+    drop(ro);
+    assert_eq!(holds_canary(&path), Vec::<String>::new(), "after reopen");
+}
+
+/// D-CRXNA: the first writer open of an old store backs it up before it maps its history; a
+/// later removal of a mapped block erases that backup with the live copies.
+fn removal_erases_the_upgrade_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let (secret, kept) = {
+        let _legacy = format::legacy_writer_for_tests();
+        let mut s = Store::create_legacy_for_tests(&path).unwrap();
+        let (secret, _, kept) = secret_and_kept(&mut s);
+        s.close().unwrap();
+        (secret, kept)
+    };
+    let mut s = Store::open(&path).unwrap();
+    assert!(s.has_feature_now(FEATURE_DEDUP_SPANS));
+    assert!(map_of(&path).mappings().count() > 0, "the upgrade mapped");
+    upgrade::publish_checked(&mut s).unwrap();
+    assert!(!s.refresh_upgrade_pending().unwrap());
+    let want = s.change(&kept).unwrap();
+    let backups: Vec<String> = holds_canary(dir.path())
+        .into_iter()
+        .filter(|p| p.contains(upgrade::BACKUP_PREFIX))
+        .collect();
+    assert!(!backups.is_empty(), "the backup holds the text");
+    remove_live(&mut s, &secret).unwrap();
+    assert_eq!(s.change(&kept).unwrap(), want);
+    s.check_objects().unwrap();
+    drop(s);
+    assert_eq!(
+        holds_canary(dir.path()),
+        Vec::<String>::new(),
+        "no live, mapped or backup copy"
+    );
+}
+
+/// A carried removal: a receiver loads a mapped source whose secret block and its CHANGE copy
+/// a removal elsewhere dropped (`held: false`). The receiver holds zeros only, its compact maps
+/// the kept pair and neither dropped frame, and nothing reads the text back.
+fn removal_carried_to_a_receiver() {
+    use crate::carried_fixture::{block_residue, change_residue, load, record, span};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut s = Store::create(&path).unwrap();
+    let (secret, gone, kept) = secret_and_kept(&mut s);
+    assert!(s.compact(false).unwrap().deduplicated_bytes >= 2 * 4096);
+    let want = s.change(&kept).unwrap();
+    let gone_change = s.change(&gone).unwrap();
+    s.close().unwrap();
+    let frames = framed_at(&path);
+    let b = find(&frames, kinds::BLOCK, secret.version_hash());
+    let c = find(&frames, kinds::CHANGE, gone);
+    let residues = vec![block_residue(&secret), change_residue(&gone_change)];
+    let mut spans = vec![
+        span(&b, Some(&residues[0]), false),
+        span(&c, Some(&residues[1]), false),
+    ];
+    spans.sort_by_key(|x| x.place);
+    let rec = record(
+        vec![rdy_model::redaction::RedactTarget::Version {
+            id: secret.id.clone(),
+            version: secret.version_hash(),
+        }],
+        spans,
+    );
+    let to = dir.path().join("to");
+    load(&path, &to, &residues, &[rec]).unwrap();
+    assert_eq!(holds_canary(&to), Vec::<String>::new(), "loaded");
+    assert_eq!(map_of(&to).rows(), 0, "a load maps nothing");
+    let r = Store::open(&to).unwrap();
+    assert_eq!(r.change(&kept).unwrap(), want);
+    r.check_objects().unwrap();
+    assert!(r.compact(false).unwrap().deduplicated_bytes >= 4096);
+    drop(r);
+    let map = map_of(&to);
+    assert!(map.mappings().count() > 0, "a local map");
+    for m in map.mappings() {
+        for place in [m.target.place, m.source.place] {
+            assert!(
+                place != b.loc && place != c.loc,
+                "a dropped frame is mapped"
+            );
+        }
+    }
+    let r = Store::open(&to).unwrap();
+    assert_eq!(r.change(&kept).unwrap(), want);
+    assert!(r.get_block(&secret.version_hash()).unwrap().is_redacted());
+    r.check_objects().unwrap();
+    drop(r);
+    assert_eq!(holds_canary(&to), Vec::<String>::new(), "after compact");
 }
 
 /// r5902: with the platform's own punch call, a compact keeps each segment's length and every
