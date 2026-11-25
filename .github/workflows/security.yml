@@ -5,7 +5,8 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    # rel/**: the security run on release commit S starts with the release gate and ends before the signature.
+    branches: [main, "rel/**"]
   schedule:
     - cron: "23 8 * * 1"
   workflow_dispatch:

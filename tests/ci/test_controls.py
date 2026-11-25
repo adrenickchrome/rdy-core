@@ -1458,6 +1458,12 @@ class WindowsScriptPolicy(unittest.TestCase):
         gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
         inner = (ROOT / 'scripts/ci/windows_gate_inner.ps1').read_text()
         self.assertIn('cargo qa --skip-perf --require-all', inner)
+        self.assertIn('cargo qa --tier release --platform-tier windows --budget-secs $BudgetSecs --require-all', inner)
+        self.assertIn('cargo qa --tier nightly --skip-perf --require-all', inner)
+        self.assertIn("[ValidateSet('release', 'nightly')][string]$Mode = ''", inner)
+        # the mode and the clock reach the account as checked arguments, never as free text
+        self.assertIn("$env:RDY_GATE_MODE -notin @('release', 'nightly')", gate)
+        self.assertIn("$env:RDY_GATE_BUDGET_SECS -notmatch '^[1-9][0-9]{0,5}$'", gate)
         self.assertIn('cargo fetch --locked', inner)
         # an ordinary account, a private checkout, cache and profile; the credential is for this run only
         self.assertIn('New-LocalUser', gate)
@@ -1533,7 +1539,7 @@ class WindowsScriptPolicy(unittest.TestCase):
         self.assertIn('Sort-Object -Property FreeSpace -Descending', gate)
         self.assertIn('"RDY_CI_ROOT=$root"', gate)
         self.assertLess(gate.index('RDY_CI_ROOT=$root'), gate.index('New-LocalUser'))
-        for path in ('.github/workflows/platform.yml', '.github/workflows/release-candidate.yml',
+        for path in ('.github/workflows/gate.yml', '.github/workflows/release-candidate.yml',
                      'scripts/ci/windows_gate_inner.ps1', 'scripts/ci/windows_report.ps1',
                      'scripts/ci/windows_gate_cleanup.ps1', 'scripts/ci/windows_disk_report.ps1'):
             text = (ROOT / path).read_text()
@@ -1615,117 +1621,145 @@ class WindowsScriptPolicy(unittest.TestCase):
             self.assertIn(word, scripts[3])
 
 
-class PlatformWorkflowPolicy(unittest.TestCase):
-    """What .github/workflows/platform.yml must do, read from the parsed workflow."""
+GATE_TARGETS = {'linux': 'x86_64-unknown-linux-gnu', 'macos': 'aarch64-apple-darwin',
+                'windows': 'x86_64-pc-windows-msvc'}
+GATE_HOSTED = {'linux': 'ubuntu-26.04', 'macos': 'macos-26', 'windows': 'windows-2025'}
+
+
+class GateWorkflowPolicy(unittest.TestCase):
+    """What .github/workflows/gate.yml must do (the release gate, plan Task 6), read from the parsed workflow."""
 
     def setUp(self):
-        self.doc = workflow('platform.yml')
-        self.job = self.doc['jobs']['native']
-        self.steps = self.job['steps']
+        self.doc = workflow('gate.yml')
+        self.jobs = self.doc['jobs']
 
-    def on(self, os_name):
-        """The steps that run only on Windows (os_name 'Windows') or only elsewhere ('other')."""
-        mark = "runner.os == 'Windows'" if os_name == 'Windows' else "runner.os != 'Windows'"
-        return [step for step in self.steps if mark in str(step.get('if', ''))]
+    def runs(self, job):
+        return [step['run'] for step in self.jobs[job]['steps'] if 'run' in step]
 
-    def test_matrix_is_native_macos_and_windows_only_with_sufficient_limits(self):
-        # Run f17ab534: the Windows gate was still in the rdy-qa areas when the 90-minute limit
-        # cancelled it; macOS needs 70 to 80 minutes. Both jobs stay advisory.
-        include = self.job['strategy']['matrix']['include']
-        self.assertEqual({entry['runner'] for entry in include}, {'macos-26', 'windows-2025'})
-        self.assertEqual(self.job['runs-on'], '${{ matrix.runner }}')
-        self.assertIs(self.job['strategy']['fail-fast'], False)
-        self.assertEqual(self.job['timeout-minutes'], '${{ matrix.timeout }}')
-        self.assertIs(self.job['continue-on-error'], True)
-        limits = {entry['label']: entry['timeout'] for entry in include}
-        self.assertEqual(set(limits), {'macOS ARM64', 'Windows Server 2025'})
-        self.assertGreaterEqual(limits['macOS ARM64'], 120)
-        self.assertGreaterEqual(limits['Windows Server 2025'], 240)
-        self.assertLessEqual(max(limits.values()), 360)
+    def test_push_to_a_release_branch_or_a_manual_run_only(self):
+        on = triggers(self.doc)
+        self.assertEqual(sorted(on), ['push', 'workflow_dispatch'])
+        self.assertEqual(on['push'], {'branches': ['rel/**']})
+        self.assertEqual(on['workflow_dispatch'], {'inputs': {'hosted': {
+            'description': 'Prove the workflow on GitHub-hosted runners (never release evidence)',
+            'type': 'boolean', 'default': False}}})
+        self.assertEqual(self.doc['concurrency'], {'group': 'rdy-core-gate-${{ github.ref }}',
+                                                   'cancel-in-progress': False})
 
-    def test_no_arm64_linux_job_is_restored(self):
-        everything = json.dumps(self.doc)
-        for word in ('ubuntu-26.04-arm', 'Linux ARM64', 'aarch64', 'linux-arm'):
-            self.assertNotIn(word, everything)
-        labels = yaml.safe_load((ROOT / 'scripts/ci/actionlint.yaml').read_text())['self-hosted-runner']['labels']
-        self.assertEqual(labels, ['ubuntu-26.04'])
-        ci = workflow('ci.yml')
-        self.assertEqual(ci['jobs']['fast']['runs-on'], 'ubuntu-26.04')
-        gate = step_named(ci, 'Fast gate (fmt, clippy, tests; no perf)')
-        self.assertEqual(gate['run'].strip(), 'cargo qa --skip-perf --require-all')
-
-    def test_posix_runs_the_full_fast_gate_without_root(self):
-        gate = step_named(self.doc, 'Fast gate (fmt, clippy, tests; no perf)')
-        self.assertEqual(gate['run'].strip(), 'cargo qa --skip-perf --require-all')
-        self.assertIn(gate, self.on('other'))
-        self.assertIn(step_named(self.doc, 'Not root'), self.on('other'))
-        self.assertNotIn('windows-portable', json.dumps(self.doc))
-        for step in self.steps:
-            self.assertNotIn('-p rdy-model', step.get('run', ''))
-
-    def test_windows_steps_are_pwsh_and_call_the_gate_scripts(self):
-        windows = self.on('Windows')
-        self.assertTrue(windows)
-        for step in windows:
-            if 'run' in step:
-                self.assertEqual(step.get('shell'), 'pwsh', step)
-                self.assertNotRegex(step['run'], r'\b(sed|id -u|bash)\b')
-        runs = ' '.join(step.get('run', '') for step in windows)
-        for script in ('windows_gate.ps1', 'windows_report.ps1', 'windows_gate_cleanup.ps1'):
-            self.assertIn('./scripts/ci/' + script, runs)
-        cleanup = [step for step in windows if 'windows_gate_cleanup.ps1' in step.get('run', '')]
-        self.assertEqual([step['if'] for step in cleanup], ["always() && runner.os == 'Windows'"])
-        report = [step for step in windows if 'windows_report.ps1' in step.get('run', '')]
-        self.assertEqual([step['if'] for step in report], ["always() && runner.os == 'Windows'"])
-        # the root is read from RDY_CI_ROOT, never fixed to a drive
-        self.assertIn('-Report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.md"', report[0]['run'])
-        diff = [step for step in windows if 'diff --exit-code' in step.get('run', '')]
-        self.assertEqual(len(diff), 1)
-        self.assertIn("Join-Path $env:RDY_CI_ROOT 'work'", diff[0]['run'])
-        self.assertIn('exit $LASTEXITCODE', diff[0]['run'])
-        self.assertIn("$ErrorActionPreference = 'Stop'", diff[0]['run'])
-
-    def test_ci_root_is_never_a_fixed_drive_path(self):
-        for path in ('.github/workflows/platform.yml', '.github/workflows/release-candidate.yml'):
-            text = (ROOT / path).read_text()
-            self.assertNotIn('C:\\rdy-ci', text, path)
-            self.assertNotIn('C:/rdy-ci', text, path)
-
-    def test_both_platforms_upload_the_qa_report_even_after_a_failure(self):
-        uploads = uses_steps(self.doc, 'actions/upload-artifact')
-        self.assertEqual(len(uploads), 2)
-        paths = {os_name: [line for upload in uploads if upload in self.on(os_name)
-                           for line in upload['with']['path'].split('\n') if line]
-                 for os_name in ('Windows', 'other')}
-        self.assertEqual(paths['other'], ['target/qa/report.*'])
-        self.assertEqual(paths['Windows'], ['${{ env.RDY_CI_ROOT }}\\work\\target\\qa\\report.*',
-                                            '${{ env.RDY_CI_ROOT }}\\logs\\gate.*'])
-        for upload in uploads:
-            self.assertTrue(upload['if'].startswith('always()'))
-            self.assertEqual(upload['with']['name'], 'qa-report-${{ runner.os }}')
-        failing = step_named(self.doc, 'Failing tests')
-        self.assertIn('cat target/qa/report.md', failing['run'])
-        self.assertTrue(failing['if'].startswith('failure()'))
-
-    def test_failed_tracked_file_check_fails_the_job_and_nothing_else_is_hidden(self):
-        diffs = [step for step in self.steps if 'diff --exit-code' in step.get('run', '')]
-        self.assertEqual(len(diffs), 2)
-        posix = [step for step in diffs if step in self.on('other')]
-        self.assertEqual([step['run'].strip() for step in posix], ['git diff --exit-code'])
-        for step in diffs:
-            self.assertNotIn('continue-on-error', step)
-            self.assertNotIn('|| true', step['run'])
-
-    def test_permissions_credentials_and_pins(self):
+    def test_three_jobs_on_our_machines_with_the_gate_line_as_their_limit(self):
+        self.assertEqual(sorted(self.jobs), sorted(GATE_TARGETS))
+        for name, job in self.jobs.items():
+            with self.subTest(job=name):
+                self.assertEqual(job['runs-on'], "${{ inputs.hosted && '" + GATE_HOSTED[name]
+                                 + "' || fromJSON('[\"self-hosted\",\"rdy-gate\",\"" + name + "\"]') }}")
+                # A push (release evidence) gets 11 minutes and a 630-second gate clock. Only a manual
+                # hosted proof run gets more; gate_budget.py never reads it as evidence.
+                self.assertEqual(job['timeout-minutes'], '${{ inputs.hosted && 90 || 11 }}')
+                self.assertEqual(job['env']['GATE_BUDGET_SECS'], "${{ inputs.hosted && '5100' || '630' }}")
+                self.assertEqual(job['permissions'], {'contents': 'read'})
+                self.assertNotIn('environment', job)
+                self.assertNotIn('needs', job)
+                self.assertNotIn('continue-on-error', job)
+                for step in job['steps']:
+                    self.assertNotIn('continue-on-error', step)
         self.assertEqual(self.doc['permissions'], {})
-        self.assertEqual(self.job['permissions'], {'contents': 'read'})
-        checkouts = uses_steps(self.doc, 'actions/checkout')
-        self.assertTrue(checkouts)
-        for checkout in checkouts:
-            self.assertIs(checkout['with']['persist-credentials'], False)
-        for step in steps_of(self.doc):
-            if 'uses' in step:
-                self.assertRegex(step['uses'], r'@[0-9a-f]{40}$')
+        text = (WORKFLOWS / 'gate.yml').read_text()
+        for word in ('secrets.', 'id-token', 'github.token', 'pull_request'):
+            self.assertNotIn(word, text)
+        labels = yaml.safe_load((ROOT / 'scripts/ci/actionlint.yaml').read_text())['self-hosted-runner']['labels']
+        self.assertEqual(labels, ['ubuntu-26.04', 'rdy-gate'])
+
+    def test_hosted_proof_runs_are_never_release_evidence(self):
+        spec = importlib.util.spec_from_file_location('gate_budget', ROOT / 'scripts/release/gate_budget.py')
+        budget = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(budget)
+        self.assertEqual(budget.GATE_WORKFLOW, 'gate.yml')
+        self.assertEqual(budget.GATE_EVENT, 'push')
+
+    def test_every_gate_run_is_the_release_tier_on_the_gate_clock(self):
+        clock = {'linux': 'cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --require-all '
+                          '--tmp-root "$GATE_TMP"',
+                 'macos': 'cargo qa --tier release --budget-secs "$GATE_BUDGET_SECS" --require-all '
+                          '--tmp-root "$GATE_TMP"',
+                 'windows': 'cargo qa --tier release --platform-tier windows --budget-secs $env:GATE_BUDGET_SECS '
+                            '--require-all --tmp-root $env:GATE_TMP'}
+        for name in self.jobs:
+            with self.subTest(job=name):
+                gate = [step for step in self.jobs[name]['steps'] if step.get('id') == 'gate']
+                self.assertEqual(len(gate), 1)
+                self.assertIn(clock[name], gate[0]['run'])
+                self.assertEqual(gate[0]['env'], {'CARGO_NET_OFFLINE': 'true'})
+                lines = [line for run in self.runs(name) for line in run.splitlines() if 'cargo qa' in line]
+                self.assertEqual(len(lines), 2, lines)
+                for line in lines:
+                    self.assertIn('--tier release', line)
+                    self.assertIn('--budget-secs', line)
+                    self.assertIn('--require-all', line)
+                    self.assertIn('--tmp-root', line)
+                    for word in ('--local', '--skip-perf', '--deep', '--only', '--focus'):
+                        self.assertNotIn(word, line)
+                # One retry of the failed binaries, in the time left on the same clock.
+                retry = step_named({'jobs': {name: self.jobs[name]}}, 'Retry failed binaries once')
+                self.assertIn('--retry-failed target', retry['run'])
+                self.assertRegex(retry['run'], r'GATE_BUDGET_SECS.*GATE_START')
+                self.assertIn("steps.gate.outputs.status != '0'", retry['if'])
+        # The hosted Windows proof runs the same tier through the standard-account script.
+        hosted = step_named(self.doc, 'Hosted proof under a standard account (Windows tier)')
+        self.assertEqual(hosted['if'], '${{ inputs.hosted }}')
+        self.assertEqual(hosted['env'], {'RDY_QA_HOSTED_CI': '1', 'RDY_GATE_MODE': 'release',
+                                         'RDY_GATE_BUDGET_SECS': '${{ env.GATE_BUDGET_SECS }}'})
+        self.assertIn('./scripts/ci/windows_gate.ps1', hosted['run'])
+
+    def test_test_files_go_to_a_ram_disk_or_tmpfs_that_is_removed(self):
+        linux = ' '.join(self.runs('linux'))
+        self.assertIn('dir="/dev/shm/rdy-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', linux)
+        mac = ' '.join(self.runs('macos'))
+        self.assertIn('hdiutil attach -nomount ram://16777216', mac)
+        self.assertIn('diskutil erasevolume APFS', mac)
+        self.assertNotIn('HFS', mac.replace('never HFS+', ''))
+        for name, step in (('linux', 'Remove the temp root'), ('macos', 'Remove the RAM disk'),
+                           ('windows', 'Remove the temp root')):
+            removal = step_named({'jobs': {name: self.jobs[name]}}, step)
+            self.assertTrue(removal['if'].startswith('always()'), name)
+
+    def test_clean_checkout_scratch_home_and_kept_target(self):
+        for name, job in self.jobs.items():
+            with self.subTest(job=name):
+                checkouts = [step for step in job['steps'] if str(step.get('uses', '')).startswith('actions/checkout@')]
+                self.assertEqual(len(checkouts), 1)
+                self.assertEqual(checkouts[0]['with'], {'persist-credentials': False})
+                home = step_named({'jobs': {name: job}}, 'Scratch home and kept target')
+                self.assertEqual(home['env'], {'WORK_PARENT': '${{ runner.workspace }}'})
+                self.assertIn('gate-target', home['run'])
+                self.assertIn('HOME=', home['run'])
+                self.assertLess(job['steps'].index(home), job['steps'].index(checkouts[0]))
+                for step in job['steps']:
+                    if 'uses' in step:
+                        self.assertRegex(step['uses'], r'@[0-9a-f]{40}$')
+
+    def test_counts_and_reports_are_uploaded_for_the_candidate(self):
+        for name, job in self.jobs.items():
+            with self.subTest(job=name):
+                target = GATE_TARGETS[name]
+                steps = job['steps']
+                counts = step_named({'jobs': {name: job}}, 'Fast gate counts')
+                self.assertIn('scripts/release/candidate.py gate-counts --report', counts['run'])
+                self.assertRegex(counts['run'], r'--commit \$(env:)?GITHUB_SHA|--commit "\$GITHUB_SHA"')
+                self.assertNotIn('if', counts)
+                uploads = [step for step in steps if str(step.get('uses', '')).startswith('actions/upload-artifact@')]
+                self.assertEqual([u['with']['name'] for u in uploads],
+                                 ['fast-gate-' + target, 'qa-report-' + target + '-a${{ github.run_attempt }}'])
+                fast, report = uploads
+                self.assertLess(steps.index(counts), steps.index(fast))
+                self.assertNotIn('if', fast)
+                self.assertEqual(fast['with']['path'], '${{ runner.temp }}/fast-gate.json')
+                self.assertEqual(fast['with']['if-no-files-found'], 'error')
+                self.assertIs(fast['with']['overwrite'], True)
+                self.assertEqual(report['if'], 'always()')
+
+    def test_security_runs_on_the_release_branch_too(self):
+        on = triggers(workflow('security.yml'))
+        self.assertEqual(on['push']['branches'], ['main', 'rel/**'])
 
 
 def workflow_on(name):
@@ -1782,19 +1816,6 @@ class CiSplit(unittest.TestCase):
         for name in ('fast', 'policy-tests', 'required'):
             self.assertIn("github.event_name != 'schedule'", doc['jobs'][name]['if'], name)
             self.assertIn("github.event.action != 'labeled'", doc['jobs'][name]['if'], name)
-
-    def test_platform_pr_paths(self):
-        doc, on = workflow_on('platform.yml')
-        # `pio*` matches the file only; `pio/**` and `**/windows/**` cover the directories that exist.
-        self.assertEqual(on['pull_request']['paths'], [
-            'crates/rdy-store/src/pio*', 'crates/rdy-store/src/pio/**', 'crates/rdy-daemon/src/sys/**',
-            '**/windows*', '**/windows/**', '.github/workflows/platform.yml', 'scripts/release/**'])
-        self.assertNotIn('paths', on['push'])
-        self.assertNotIn('paths-ignore', on['push'])
-        self.assertEqual(on['push']['branches'], ['main'])
-        for path in ('crates/rdy-store/src/pio.rs', 'crates/rdy-store/src/pio', 'crates/rdy-daemon/src/sys',
-                     'scripts/release'):
-            self.assertTrue((ROOT / path).exists(), path)
 
 
 if __name__ == '__main__':
