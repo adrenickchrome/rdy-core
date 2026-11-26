@@ -7402,11 +7402,14 @@ fn sd1_land(out: &mut Vec<Measure>, parent: &std::path::Path, runs: usize) {
 
 /// `snapshot_delta_upgrade_large`: the writer's open of a legacy project of
 /// [`crate::snapshot_delta_fixture::PERF_UPGRADE`] (10,000 landings, each with a SNAPSHOT of
-/// 10,000 entries; one changed entry per later landing). The source is streamed once into a
-/// pristine project outside every timer (gigabytes of SNAPSHOTs, `write_legacy_streamed`); each
-/// run copies it, outside the timer, and times `maintenance::run`: the backup copy, the append of
-/// 10,000 deltas, the reindex, the full check and the mirrors. After each run, outside the
-/// timer, every landing's `state` and delta and the final map are verified.
+/// 10,000 entries; one changed entry per later landing). Each run streams the legacy project into
+/// a pristine directory of its own outside the timer (gigabytes of SNAPSHOTs,
+/// `write_legacy_streamed`), and times `maintenance::run`: the backup copy, the append of 10,000
+/// deltas, the reindex, the full check and the mirrors. No source copy is kept beside the run:
+/// the project and the upgrade's own backup copy are about 4 GB each, and a third copy would
+/// put this op alone over 12 GB of the nightly bench's 15 GB /tmp. After each run, outside the
+/// timer, every landing's `state` and delta and the final map are verified, and the run's
+/// directory is removed.
 fn sd1_upgrade_large(
     out: &mut Vec<Measure>,
     parent: &std::path::Path,
@@ -7414,12 +7417,10 @@ fn sd1_upgrade_large(
     recipe: crate::snapshot_delta_fixture::Recipe,
 ) {
     use crate::snapshot_delta_fixture as fx;
-    let source = parent.join("sdl-upgrade-source");
-    let facts = fx::legacy_project(&source, recipe, 50);
-    assert_eq!(facts.landings.len(), recipe.landings);
     out.push(measure_timed("snapshot_delta_upgrade_large", runs, |i| {
         let work = parent.join(format!("sdl-upgrade-run{i}"));
-        copy_project(&source, &work);
+        let facts = fx::legacy_project(&work, recipe, 50);
+        assert_eq!(facts.landings.len(), recipe.landings);
         let s = Instant::now();
         let report = rdy_engine::maintenance::run(&work, false).expect("the upgrade");
         let took = s.elapsed();
@@ -7445,10 +7446,9 @@ fn sd1_upgrade_large(
         assert!(tip.blocks == facts.final_map, "the final map");
         drop(reader);
         drop(r);
-        std::fs::remove_dir_all(&work).expect("remove the copy");
+        std::fs::remove_dir_all(&work).expect("remove the upgraded project");
         took
     }));
-    std::fs::remove_dir_all(&source).expect("remove the source");
 }
 
 /// The three SD1 rows of the typical workload ([`SD1_OPS`] but the upgrade): each on a project or
