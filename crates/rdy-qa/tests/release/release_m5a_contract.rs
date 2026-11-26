@@ -555,10 +555,12 @@ const KEPT_TREES: [(&str, usize, &str); 12] = [
         5,
         "dff9652a32b3d52da3938b82c223daefe888a59ff66bf02c03f2c3ed88b50e87",
     ),
+    // each page's cursor only: the span maps' manifest entries and the plan answer deltas
+    // (0.59.0) moved the log end; every entry is unchanged
     (
         "tests/golden/inbox",
         2,
-        "0bc12ada1f5609df7f1449c9592ec14054e5b495d3eda48e854fa5332f67d2b7",
+        "c2a0a6417df7aa76f544c94fba2452834be8f7792139fc1c30df10be5585b830",
     ),
     // less the four goldens that span maps (0.59.0) moved, [`LATER_OWNED`]
     (
