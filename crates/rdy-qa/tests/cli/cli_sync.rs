@@ -904,6 +904,211 @@ fn scc9_clone_checks_fsck_settings_and_sd1_before_install() {
     assert!(names(parent.path()).is_empty());
 }
 
+/// The session of an in-process clone.
+fn reader_session() -> rdy_engine::Session {
+    rdy_engine::classify("human:qa", None, None, rdy_model::Role::Reader).unwrap()
+}
+
+/// r59014: a URL clone opens its new project once and builds canon's tension set once, with and
+/// without tags: the handle that applied canon runs `fsck` and the origin completion. After the
+/// install, the complete `fsck` and origin match a fresh, independent check. The test counts
+/// work and times nothing.
+#[test]
+fn r59014_clone_reuses_one_handle_and_canon_set() {
+    for tagged in [false, true] {
+        let k = kit(&["a", "b"]);
+        if tagged {
+            let mut r = Rdy::open(k.proj.path()).unwrap();
+            r.tag(&rdy_qa::fixtures::approver(), "v1.0.0", None, None)
+                .unwrap();
+            r.close().unwrap();
+        }
+        let (_copy, _store) = serve_copy(&k, &[]);
+        let url = hub_url(&k);
+        let (_parent, dir) = target();
+        let (opens, runs) = (
+            rdy_engine::clone::clone_opens(),
+            rdy_engine::tensions::set::canon_part_runs(),
+        );
+        let got = rdy_engine::clone::clone_url_checked(
+            &reader_session(),
+            &url,
+            &dir,
+            &k.home.config(),
+            None,
+        )
+        .unwrap();
+        let (opened, built) = (
+            rdy_engine::clone::clone_opens() - opens,
+            rdy_engine::tensions::set::canon_part_runs() - runs,
+        );
+        // the clone's new store makes its empty canon's part when it is made (an init); the
+        // build of the canon the clone applies is the one more
+        let init_runs = {
+            let before = rdy_engine::tensions::set::canon_part_runs();
+            let fresh = tempfile::tempdir().unwrap();
+            Rdy::init(fresh.path(), "rdy-standard")
+                .unwrap()
+                .close()
+                .unwrap();
+            rdy_engine::tensions::set::canon_part_runs() - before
+        };
+        assert_eq!(
+            (opened, built - init_runs),
+            (1, 1),
+            "tagged {tagged}: one normal open and one canon tension-set build"
+        );
+        assert_eq!(got.tags, usize::from(tagged));
+        assert_eq!(got.landings, 2);
+        // a fresh, independent check of the installed project
+        let r = Rdy::open(&dir).unwrap();
+        let fresh = r.fsck().unwrap();
+        assert_eq!(
+            serde_json::to_value(&got.fsck).unwrap(),
+            serde_json::to_value(&fresh).unwrap(),
+            "tagged {tagged}"
+        );
+        let origin = r.read().origin().unwrap().expect("the origin");
+        assert_eq!(
+            serde_json::to_value(&got.origin).unwrap(),
+            serde_json::to_value(rdy_engine::clone::OriginReply::from(&origin)).unwrap()
+        );
+        assert_eq!(origin.tag.as_deref(), tagged.then_some("v1.0.0"));
+        r.close().unwrap();
+    }
+}
+
+/// r59014: the clone checks on the handle that applied canon, and each refusal it gave before
+/// stays the same: a corrupt record frame and a settings file the project cannot load (a step
+/// edits the new project, which then opens again, as a person's edit would), a hub that leaves
+/// out the snapshot deltas, a pack whose digest is not the clone's, and a user config with a
+/// share remote already. Each leaves the destination, absent or empty, as it was.
+#[test]
+fn r59014_clone_keeps_bad_record_and_settings_refusals() {
+    let k = kit(&["a", "b"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    let url = hub_url(&k);
+    let session = reader_session();
+    for existing in [false, true] {
+        let hooked =
+            |hook: &mut dyn FnMut(&std::path::Path) -> Result<(), rdy_engine::RdyError>| {
+                let (parent, dir) = target();
+                if existing {
+                    std::fs::create_dir(&dir).unwrap();
+                }
+                let before = tree(&dir);
+                let got = rdy_engine::clone::clone_url_checked(
+                    &session,
+                    &url,
+                    &dir,
+                    &k.home.config(),
+                    Some(hook),
+                );
+                assert_eq!(tree(&dir), before, "existing {existing}");
+                assert_eq!(names(parent.path()).len(), usize::from(existing));
+                got.map(|_| ()).unwrap_err()
+            };
+        // a corrupt frame: one byte in the middle of the largest log segment changed
+        let e = hooked(&mut |p| {
+            let mut files: Vec<_> = tree(&p.join(".rdy/store"))
+                .unwrap()
+                .into_iter()
+                .filter(|(n, b)| n.starts_with("segments/") && n.ends_with(".log") && b.len() > 64)
+                .collect();
+            files.sort_by_key(|(_, b)| std::cmp::Reverse(b.len()));
+            let (name, mut bytes) = files.remove(0);
+            let at = bytes.len() / 2;
+            bytes[at] ^= 0xff;
+            std::fs::write(p.join(".rdy/store").join(name), bytes).unwrap();
+            Ok(())
+        });
+        assert_eq!(e.code, "E_IO", "{}", e.message);
+        assert!(
+            e.message
+                .contains("damages acknowledged data; refusing to truncate"),
+            "{}",
+            e.message
+        );
+        // settings that do not load: a pack no file holds
+        let e = hooked(&mut |p| {
+            let cfg = p.join(".rdy.yaml");
+            let text = std::fs::read_to_string(&cfg).unwrap();
+            std::fs::write(
+                &cfg,
+                text.replace("pack: rdy-standard", "pack: no-such-pack"),
+            )
+            .unwrap();
+            Ok(())
+        });
+        assert_eq!(e.code, "E_CONFIG", "{}", e.message);
+    }
+    // the refusals a person's clone meets: the hub's, and the user config's
+    let refused = |k: &Kit, label: &str| {
+        for existing in [false, true] {
+            let (parent, dir) = target();
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+            }
+            let before = tree(&dir);
+            let (ok, v) = clone_at(k, k.proj.path(), &url, &dir);
+            assert!(!ok, "{label}: {v}");
+            assert_eq!(tree(&dir), before, "{label}");
+            assert_eq!(names(parent.path()).len(), usize::from(existing), "{label}");
+            if !existing {
+                return v;
+            }
+        }
+        unreachable!()
+    };
+    // a pack whose digest is not the clone's
+    let mut other = builtin_pack();
+    other["version"] = json!("0.0.1-other");
+    k.hub
+        .settings(pack_settings(other, Some(this_rdy().as_str())));
+    let v = refused(&k, "pack digest");
+    let (message, fix) = unfit_words("pack", &url, Some(this_rdy().as_str()));
+    assert_eq!(
+        words(&v),
+        ("E_BAD_INPUT", message.as_str(), fix.as_str()),
+        "pack digest"
+    );
+    k.hub.settings(settings_step(5));
+    // a hub that leaves out the snapshot deltas
+    k.hub.get_omits(rdy_store::kinds::SNAPSHOT_DELTA);
+    let v = refused(&k, "missing snapshot delta");
+    assert_eq!(v["code"], "E_BAD_RECORD", "{v}");
+    assert_eq!(
+        v["fix"],
+        "request this stream again; run rdy fsck at its source"
+    );
+    let message = v["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("stream record ") && message.contains("unlisted dependency"),
+        "{v}"
+    );
+    // a user config that already holds a share remote
+    let k2 = kit(&["a"]);
+    let (_copy2, _store2) = serve_copy(&k2, &[]);
+    let mut config = std::fs::read_to_string(k2.home.config()).unwrap();
+    config.push_str(&format!(
+        "remotes:\n  team:\n    url: {}\n    mode: share\n",
+        hub_url(&k2)
+    ));
+    std::fs::write(k2.home.config(), &config).unwrap();
+    let (parent, dir) = target();
+    let (ok, v) = clone_at(&k2, parent.path(), &hub_url(&k2), &dir);
+    assert!(!ok, "{v}");
+    assert_eq!(
+        words(&v),
+        (
+            "E_REMOTE_EXISTS",
+            rdy_engine::REMOTE_EXISTS_MESSAGE,
+            rdy_engine::REMOTE_EXISTS_FIX
+        )
+    );
+    assert!(names(parent.path()).is_empty());
+}
+
 /// scc9 (CLI part): each settings refusal comes after discovery, state and the `min_rdy` check
 /// and before any fetch, and leaves the target as it was.
 #[test]
