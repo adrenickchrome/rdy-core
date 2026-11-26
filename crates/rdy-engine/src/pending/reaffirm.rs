@@ -1,4 +1,4 @@
-//! Re-affirmation cards (D-CQMA4, D-EJBPD, D-GV465, D-KQ4CA; p-WQB0V, p-D3P76): the decisions a
+//! Re-affirmation cards (D-CQMA4, D-EJBPD, D-GV465, D-KQ4CA, D-ZY24B; p-WQB0V, p-D3P76): the decisions a
 //! changed, deleted or retired block made suspect, one card per cause, so the person can say that
 //! they still hold or keep them suspect.
 //!
@@ -14,7 +14,7 @@
 //! - a cause/member pair that an active accepted deferral covers (a sealed deferral or a
 //!   KeepSuspect answer the canon has not cleared) is not in that cause's group; the member's
 //!   other causes keep it;
-//! - a member whose own landing made the cause's state (the landing's own edits): the landing
+//! - a member whose own landing made the cause's state (the landing's own edits, D-ZY24B): the landing
 //!   that last changed, deleted or retired the cause also wrote the member's current version
 //!   (edit order inside the view does not matter), or the member's landing came first and every
 //!   landing that changed the cause after it came from the same view as the member's landing. A

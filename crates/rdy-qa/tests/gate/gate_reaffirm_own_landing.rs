@@ -1,4 +1,4 @@
-//! r59021 (p-WQB0V, D-CQMA4, D-EJBPD, D-GV465, D-KQ4CA): a landing's own edits open no
+//! r59021 (p-WQB0V, D-CQMA4, D-EJBPD, D-GV465, D-KQ4CA, D-ZY24B): a landing's own edits open no
 //! re-affirmation card for the decisions it confirmed. A decision that the landing wrote, or that
 //! an earlier landing of the same view wrote before the view changed the block it rests on, is
 //! left out of that block's card. The suspect rows stay readable. A change from another view
