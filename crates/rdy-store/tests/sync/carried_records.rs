@@ -1759,6 +1759,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "foreign_copy",
             "hub_canon",
             "object_encoding",
+            "partial_history",
             "plan_delta",
             "plan_tension",
             "ported_change",
@@ -1779,6 +1780,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "ported_change" => format::PORTED_CHANGE_REQUIRED_RDY,
             "dedup_spans" => format::DEDUP_SPANS_REQUIRED_RDY,
             "plan_delta" => format::PLAN_DELTA_REQUIRED_RDY,
+            "partial_history" => format::PARTIAL_HISTORY_REQUIRED_RDY,
             _ => FEATURE_REQUIRED_RDY,
         };
         assert_eq!(f.required_rdy, want, "{}", f.name);

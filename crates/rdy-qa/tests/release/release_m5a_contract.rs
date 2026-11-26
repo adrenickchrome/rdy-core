@@ -617,15 +617,18 @@ const KEPT_TREES: [(&str, usize, &str); 12] = [
 
 /// The paths under a kept tree that a later plan owns, by prefix: span maps' (0.59.0) first-use
 /// fixtures of `dedup_spans`, plan deltas' (0.59.0) first-use fixtures of `plan_delta` and the
-/// MCP goldens whose hashes, byte counts and cursors plan deltas moved, and the
+/// MCP goldens whose hashes, byte counts and cursors plan deltas moved, the
 /// four MCP goldens whose bytes span maps moved (the compact
-/// report's `ref_update` and `log_bytes`, and the inbox cursor).
-const LATER_OWNED: [&str; 22] = [
+/// report's `ref_update` and `log_bytes`, and the inbox cursor), and canon states' (0.59.0)
+/// state fixtures and wire fixture.
+const LATER_OWNED: [&str; 24] = [
     "v4-f1-dedup-spans",
     "dedup-spans-1",
     "v4-f1-reduction",
     "reduction-1",
     "sync4-reduction",
+    "sync5-canon-state",
+    "sync-client-wire-v6",
     "rdy_compact--dry-run.json",
     "rdy_compact--unsupported.json",
     "rdy_inbox--page.json",
@@ -766,17 +769,18 @@ fn vxs9_released_fixtures_and_stored_identities_keep_their_bytes() {
     // the store registry, the formats and the derived identities
     let (was, now) = (read(PREDECESSOR), read(CURRENT));
     assert_eq!(now["derived_identities"], was["derived_identities"]);
-    // the registry less span maps' `dedup_spans` and plan deltas' `plan_delta` (0.59.0), which
-    // came later, is what this fixture lists, and they are the only additions
+    // the registry less span maps' `dedup_spans`, plan deltas' `plan_delta` and canon states'
+    // `partial_history` (0.59.0), which came later, is what this fixture lists, and they are the
+    // only additions
     let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
         .iter()
         .copied()
-        .filter(|n| *n != "dedup_spans" && *n != "plan_delta")
+        .filter(|n| *n != "dedup_spans" && *n != "plan_delta" && *n != "partial_history")
         .collect();
     assert_eq!(
         now["store"]["registered_names"],
         serde_json::json!(live),
-        "the store registers what the contract lists, dedup_spans and plan_delta"
+        "the store registers what the contract lists, dedup_spans, plan_delta and partial_history"
     );
     assert_eq!(
         now["dump_load"]["dump_format"],
@@ -794,8 +798,8 @@ fn vxs9_released_fixtures_and_stored_identities_keep_their_bytes() {
     assert_eq!(live.len(), 13);
     assert_eq!(
         rdy_store::format::REGISTERED_FEATURES.len(),
-        live.len() + 2,
-        "dedup_spans and plan_delta are the only additions"
+        live.len() + 3,
+        "dedup_spans, plan_delta and partial_history are the only additions"
     );
 }
 

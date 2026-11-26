@@ -102,6 +102,26 @@
 //!   the same list in every batch of one upload, never the source store's whole manifest. Its
 //!   minimum (`StoreFeatures::min_rdy`) is then the minimum that the pushed records need.
 //! - **Order and limits:** as format 2's.
+//!
+//! # Stream format 5
+//!
+//! Format 5 (D-GGTYA, D-4PV25) keeps format 2's prelude, frames, header and trailer, and adds one
+//! download purpose, `canon_state` (byte 4): the state of one canon tip, which a hub sends to a
+//! receiver that has no history yet. Only format 5 knows it, and format 5 knows no other purpose:
+//! a canon state in an older format, and another purpose in format 5, are E_STREAM_PURPOSE.
+//!
+//! - **Root:** the header's root field holds the tip `LANDING`, a record of the batch or a
+//!   prerequisite (`root landing is not in the batch or its prerequisites`).
+//! - **Records:** the selection of `crate::canon_state`: the tip landing, its canonical SNAPSHOT
+//!   (made from the map for the stream: no store need hold it), every BLOCK that the map names
+//!   with its blobs, the tip's snapshot delta, and the tip's attachments. A link outside that
+//!   selection is a frontier edge, which the header lists as a prerequisite.
+//! - **Features:** the records' needs, as format 4 lists them, and `partial_history`: the
+//!   receiver must read the prerequisites as edges a later history fetch brings.
+//! - **Checks:** a canon state is no history: [`check_batch`] refuses it at its header, so no
+//!   holder push, publication, view or fork take admits it. [`check_canon_state_batch`] checks
+//!   one file with the same rules, and `crate::canon_state::StateUnion` checks the files of one
+//!   fetch against the state's link table.
 use crate::bounded::{CHUNK_BYTES, MAX_CHUNK_BYTES, MAX_RECORD_BYTES, RECORD_BYTES, RecordError};
 use crate::decoded_record::DecodedRecord;
 use crate::dump::{
@@ -139,8 +159,16 @@ pub const LINK_DELIVERY_FORMAT: u32 = 3;
 /// The stream format a canon or view history is written in: the first that knows the purposes
 /// `canon_history` and `view_history` (D-KE83X).
 pub const HISTORY_FORMAT: u32 = 4;
+/// The stream format a canon state is written in: the only one that knows the purpose
+/// `canon_state` (D-GGTYA).
+pub const CANON_STATE_FORMAT: u32 = 5;
 /// The stream formats this rdy reads: every format released from Release 1 on.
-pub const READ_FORMATS: [u32; 3] = [STREAM_FORMAT, LINK_DELIVERY_FORMAT, HISTORY_FORMAT];
+pub const READ_FORMATS: [u32; 4] = [
+    STREAM_FORMAT,
+    LINK_DELIVERY_FORMAT,
+    HISTORY_FORMAT,
+    CANON_STATE_FORMAT,
+];
 
 /// The frame kinds of the stream's own records. Object frames keep their store kinds.
 pub mod rec {
@@ -234,7 +262,8 @@ pub fn is_sync_kind(kind: u8) -> bool {
 /// What a stream carries: a tag's history, written `tag_history` and as the byte 0, a link
 /// delivery, written `link_delivery` and as the byte 1 (stream format 3 on), a canon history
 /// rooted at a landing, `canon_history` and the byte 2, or one view's history rooted at a view
-/// op, `view_history` and the byte 3 (stream format 4 on, D-KE83X).
+/// op, `view_history` and the byte 3 (stream format 4 on, D-KE83X), or the state of one canon
+/// tip, `canon_state` and the byte 4 (stream format 5 only, D-GGTYA).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamPurpose {
@@ -242,6 +271,7 @@ pub enum StreamPurpose {
     LinkDelivery,
     CanonHistory,
     ViewHistory,
+    CanonState,
 }
 
 impl StreamPurpose {
@@ -252,6 +282,7 @@ impl StreamPurpose {
             StreamPurpose::LinkDelivery => 1,
             StreamPurpose::CanonHistory => 2,
             StreamPurpose::ViewHistory => 3,
+            StreamPurpose::CanonState => 4,
         }
     }
 
@@ -262,6 +293,7 @@ impl StreamPurpose {
             1 => Some(StreamPurpose::LinkDelivery),
             2 => Some(StreamPurpose::CanonHistory),
             3 => Some(StreamPurpose::ViewHistory),
+            4 => Some(StreamPurpose::CanonState),
             _ => None,
         }
     }
@@ -273,6 +305,7 @@ impl StreamPurpose {
             StreamPurpose::LinkDelivery => "link_delivery",
             StreamPurpose::CanonHistory => "canon_history",
             StreamPurpose::ViewHistory => "view_history",
+            StreamPurpose::CanonState => "canon_state",
         }
     }
 
@@ -282,13 +315,28 @@ impl StreamPurpose {
             StreamPurpose::TagHistory => STREAM_FORMAT,
             StreamPurpose::LinkDelivery => LINK_DELIVERY_FORMAT,
             StreamPurpose::CanonHistory | StreamPurpose::ViewHistory => HISTORY_FORMAT,
+            StreamPurpose::CanonState => CANON_STATE_FORMAT,
         }
     }
 
     /// Whether the purpose carries a history of portable objects: a tag, canon or view history.
-    /// Only a link delivery does not.
+    /// A link delivery and a canon state do not: a canon state is a download only, so no take of
+    /// a history admits it.
     pub fn is_history(self) -> bool {
-        self != StreamPurpose::LinkDelivery
+        !matches!(
+            self,
+            StreamPurpose::LinkDelivery | StreamPurpose::CanonState
+        )
+    }
+
+    /// Whether a stream of format `format` may carry the purpose: format 5 carries only a canon
+    /// state, which no other format carries; formats 2 to 4 carry each purpose from its first
+    /// format on.
+    pub fn in_format(self, format: u32) -> bool {
+        if self == StreamPurpose::CanonState || format == CANON_STATE_FORMAT {
+            return self == StreamPurpose::CanonState && format == CANON_STATE_FORMAT;
+        }
+        format >= self.first_format()
     }
 
     /// The store kind of the purpose's root object: a `TAG`, a `LANDING` or a `VIEW_OP`. A link
@@ -296,7 +344,7 @@ impl StreamPurpose {
     pub fn root_kind(self) -> u8 {
         match self {
             StreamPurpose::TagHistory | StreamPurpose::LinkDelivery => kinds::TAG,
-            StreamPurpose::CanonHistory => kinds::LANDING,
+            StreamPurpose::CanonHistory | StreamPurpose::CanonState => kinds::LANDING,
             StreamPurpose::ViewHistory => kinds::VIEW_OP,
         }
     }
@@ -304,7 +352,7 @@ impl StreamPurpose {
     /// The refusal reason of a history batch whose root is neither a record nor a prerequisite.
     fn root_not_listed(self) -> Reason {
         match self {
-            StreamPurpose::CanonHistory => Reason::RootLandingNotListed,
+            StreamPurpose::CanonHistory | StreamPurpose::CanonState => Reason::RootLandingNotListed,
             StreamPurpose::ViewHistory => Reason::RootViewOpNotListed,
             StreamPurpose::TagHistory | StreamPurpose::LinkDelivery => Reason::RootTagNotListed,
         }
@@ -457,6 +505,25 @@ impl StreamHeader {
             repo_id,
             purpose: StreamPurpose::ViewHistory,
             tag: op,
+            prerequisites,
+        }
+    }
+
+    /// The header of a canon state (stream format 5, D-GGTYA) for `repo_id`, rooted at the tip
+    /// LANDING `landing`. `features` are the features that the state's records need, with
+    /// `partial_history`; `prerequisites` are the frontier edges the state omits.
+    pub fn canon_state(
+        features: StoreFeatures,
+        repo_id: RepoId,
+        landing: Hash,
+        prerequisites: Vec<ObjectKey>,
+    ) -> Self {
+        StreamHeader {
+            stream_format: CANON_STATE_FORMAT,
+            features,
+            repo_id,
+            purpose: StreamPurpose::CanonState,
+            tag: landing,
             prerequisites,
         }
     }
@@ -752,6 +819,7 @@ fn header_payload(h: &StreamHeader) -> Vec<u8> {
 /// Whether an object record of logical kind `kind` may stand in a stream of `purpose`: a sync
 /// kind in a tag, canon or view history, a `BLOCK` alone in a link delivery.
 fn purpose_kind(purpose: StreamPurpose, kind: u8) -> bool {
+    // a canon state carries sync kinds, as a history does
     match purpose {
         StreamPurpose::LinkDelivery => kind == kinds::BLOCK,
         _ => is_sync_kind(kind),
@@ -765,14 +833,15 @@ fn bad_header() -> StreamError {
 
 /// The rules of a header's fields, shared by the writer and the reader: a stream format this rdy
 /// reads, a purpose that format knows (E_STREAM_PURPOSE otherwise: format 2 knows only
-/// `tag_history`, format 3 adds `link_delivery`, format 4 `canon_history` and `view_history`), a manifest this rdy reads (E_STORE_FORMAT otherwise), at most
+/// `tag_history`, format 3 adds `link_delivery`, format 4 `canon_history` and `view_history`,
+/// format 5 knows `canon_state` alone), a manifest this rdy reads (E_STORE_FORMAT otherwise), at most
 /// [`MAX_PREREQUISITES`] prerequisites, each of a sync kind, strictly ascending, and none for a
 /// link delivery.
 fn check_header(h: &StreamHeader) -> Result<(), StreamError> {
     if !READ_FORMATS.contains(&h.stream_format) {
         return Err(bad_header());
     }
-    if h.stream_format < h.purpose.first_format() {
+    if !h.purpose.in_format(h.stream_format) {
         return Err(StreamError::purpose(Some(0), PRELUDE, h.purpose.byte()));
     }
     check_features(&h.features).map_err(|e| StreamError::store_format(Some(0), PRELUDE, &e))?;
@@ -957,13 +1026,13 @@ pub struct StreamWriter<W: Write> {
 }
 
 impl<W: Write> StreamWriter<W> {
-    /// Writes the prelude and `header`, a tag, canon or view history's, in its stream format.
-    /// Refuses a link delivery (E_STREAM_PURPOSE: it starts with [`StreamWriter::new_delivery`]), a
+    /// Writes the prelude and `header`, a tag, canon or view history's or a canon state's, in its
+    /// stream format. Refuses a link delivery (E_STREAM_PURPOSE: it starts with [`StreamWriter::new_delivery`]), a
     /// header of a stream or store format this rdy does not read, more than
     /// [`MAX_PREREQUISITES`] prerequisites, or prerequisites of a kind that is not a sync kind
     /// or not strictly ascending.
     pub fn new(w: W, header: &StreamHeader) -> Result<Self, StreamError> {
-        if !header.purpose.is_history() {
+        if !header.purpose.is_history() && header.purpose != StreamPurpose::CanonState {
             return Err(wrong_purpose(
                 header.purpose.byte(),
                 StreamPurpose::TagHistory,
@@ -1568,7 +1637,7 @@ thread_local! {
 }
 
 /// The bounds of this thread's batch reads and checks.
-fn caps() -> CheckCaps {
+pub(crate) fn caps() -> CheckCaps {
     CAPS.with(Cell::get)
 }
 
@@ -1797,7 +1866,7 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
     on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
     on_record: impl FnMut(u64, u64, &StreamRecord, &DecodedRecord) -> Result<(), E>,
 ) -> Result<BatchReport, E> {
-    check_inner(input, on_header, on_record, false).map(|(report, _)| report)
+    check_inner(input, on_header, on_record, false, false).map(|(report, _)| report)
 }
 
 /// [`check_batch_with`] that also keeps what the check found, for a later stage of the same
@@ -1808,7 +1877,29 @@ pub fn check_batch_prepared_with<R: Read, E: From<StreamError>>(
     on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
     on_record: impl FnMut(u64, u64, &StreamRecord, &DecodedRecord) -> Result<(), E>,
 ) -> Result<CheckedBatch, E> {
-    let (report, facts) = check_inner(input, on_header, on_record, true)?;
+    let (report, facts) = check_inner(input, on_header, on_record, true, false)?;
+    let facts = facts.expect("a prepared check keeps its facts");
+    Ok(CheckedBatch { report, facts })
+}
+
+/// Checks one complete canon state (stream format 5, D-GGTYA) as [`check_batch`] checks a
+/// history: the framing, each record's bounded typed decode and record rules, no repeated key,
+/// the edge bound and the dependency rules, the root landing among the records or the
+/// prerequisites, and no unneeded prerequisite. Another purpose is E_STREAM_PURPOSE naming
+/// `canon_state`, at its header. It says only that this file is valid: the files of one fetch
+/// are checked against the state's link table together (`crate::canon_state::StateUnion`).
+pub fn check_canon_state_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
+    check_inner(input, |_| Ok(()), |_, _, _, _| Ok(()), false, true).map(|(report, _)| report)
+}
+
+/// [`check_canon_state_batch`] with the caller's two checks of [`check_batch_with`], that also
+/// keeps what the check found ([`CheckedBatch`]), as [`check_batch_prepared_with`] keeps it.
+pub fn check_canon_state_prepared_with<R: Read, E: From<StreamError>>(
+    input: R,
+    on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
+    on_record: impl FnMut(u64, u64, &StreamRecord, &DecodedRecord) -> Result<(), E>,
+) -> Result<CheckedBatch, E> {
+    let (report, facts) = check_inner(input, on_header, on_record, true, true)?;
     let facts = facts.expect("a prepared check keeps its facts");
     Ok(CheckedBatch { report, facts })
 }
@@ -2076,16 +2167,22 @@ pub fn read_checked<R: Read, E: From<StreamError>>(
 }
 
 /// The check of [`check_batch_with`] and [`check_batch_prepared_with`], one loop for both; with
-/// `keep`, it also keeps the facts of a [`CheckedBatch`].
+/// `keep`, it also keeps the facts of a [`CheckedBatch`]. With `state` it reads a canon state
+/// (format 5) and refuses every other purpose; without it, a history, and refuses a canon state.
 fn check_inner<R: Read, E: From<StreamError>>(
     input: R,
     on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
     mut on_record: impl FnMut(u64, u64, &StreamRecord, &DecodedRecord) -> Result<(), E>,
     keep: bool,
+    state: bool,
 ) -> Result<(BatchReport, Option<Facts>), E> {
     let caps = caps();
     count_check();
-    let (mut reader, header) = StreamReader::open_history(input)?;
+    let (mut reader, header) = if state {
+        StreamReader::open_for(input, StreamPurpose::CanonState)?
+    } else {
+        StreamReader::open_history(input)?
+    };
     on_header(&header)?;
     let deltas = header.features.has(FEATURE_SNAPSHOT_DELTA);
     let mut keys: Vec<ObjectKey> = Vec::new();

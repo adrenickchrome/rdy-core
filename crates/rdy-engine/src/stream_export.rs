@@ -281,11 +281,11 @@ fn walk_history(
 }
 
 /// The frame header of a segment frame: a length, a kind and a hash.
-const FRAME_HEADER: u64 = 4 + 1 + 32;
+pub(crate) const FRAME_HEADER: u64 = 4 + 1 + 32;
 
 /// The size of a batch of `frames` frames that hold `payload` bytes in all, with `prereqs`
 /// prerequisites and a header whose features are `manifest` bytes of JSON.
-fn batch_bytes(manifest: usize, prereqs: usize, frames: u64, payload: u64) -> u64 {
+pub(crate) fn batch_bytes(manifest: usize, prereqs: usize, frames: u64, payload: u64) -> u64 {
     let header = (HEADER_FIXED + manifest + prereqs * KEY_LEN) as u64;
     MAGIC.len() as u64
         + 4
@@ -568,35 +568,45 @@ impl PreparedPull {
         keys: &[ObjectKey],
         accept_zstd: bool,
     ) -> Result<EncodedHistory, RdyError> {
-        let scratch = || {
-            RdyError::new(
-                E_IO,
-                "the upload scratch file could not be used",
-                "check the temporary directory and available disk space",
-            )
-        };
-        let file = tempfile::tempfile().map_err(|_| scratch())?;
-        let mut out = BufWriter::with_capacity(UPLOAD_BUFFER_BYTES, file);
-        let report = self.write_keys(keys, &mut out)?;
-        let mut file = out.into_inner().map_err(|_| scratch())?;
-        let len = file.stream_position().map_err(|_| scratch())?;
-        file.seek(SeekFrom::Start(0)).map_err(|_| scratch())?;
-        if accept_zstd {
-            let (body, wire_bytes, encoding) = zstd_frame(&mut file, len)?;
-            return Ok(EncodedHistory {
-                body,
-                wire_bytes,
-                encoding,
-                report,
-            });
-        }
-        Ok(EncodedHistory {
-            body: file,
-            wire_bytes: len,
-            encoding: BodyEncoding::Identity,
-            report,
-        })
+        encode_batch(|out| self.write_keys(keys, out), accept_zstd)
     }
+}
+
+/// A get reply's body: the batch `write` writes goes to an anonymous scratch file, then as one
+/// zstd frame (`accept_zstd`, [`zstd_frame`]; the identity bytes when the frame is not smaller)
+/// or as the batch's own bytes. No source or scratch error produces a reply.
+pub(crate) fn encode_batch(
+    write: impl FnOnce(&mut BufWriter<File>) -> Result<BatchReport, RdyError>,
+    accept_zstd: bool,
+) -> Result<EncodedHistory, RdyError> {
+    let scratch = || {
+        RdyError::new(
+            E_IO,
+            "the upload scratch file could not be used",
+            "check the temporary directory and available disk space",
+        )
+    };
+    let file = tempfile::tempfile().map_err(|_| scratch())?;
+    let mut out = BufWriter::with_capacity(UPLOAD_BUFFER_BYTES, file);
+    let report = write(&mut out)?;
+    let mut file = out.into_inner().map_err(|_| scratch())?;
+    let len = file.stream_position().map_err(|_| scratch())?;
+    file.seek(SeekFrom::Start(0)).map_err(|_| scratch())?;
+    if accept_zstd {
+        let (body, wire_bytes, encoding) = zstd_frame(&mut file, len)?;
+        return Ok(EncodedHistory {
+            body,
+            wire_bytes,
+            encoding,
+            report,
+        });
+    }
+    Ok(EncodedHistory {
+        body: file,
+        wire_bytes: len,
+        encoding: BodyEncoding::Identity,
+        report,
+    })
 }
 
 /// A get reply: the batch of a prepared pull's keys as it goes on the wire.
@@ -622,9 +632,9 @@ impl fmt::Debug for EncodedHistory {
 }
 
 /// A source that notes the features of every record it hands to the writer.
-struct Features<S> {
-    inner: S,
-    seen: RecordFeatures,
+pub(crate) struct Features<S> {
+    pub(crate) inner: S,
+    pub(crate) seen: RecordFeatures,
 }
 
 impl<S: ObjectSource> ObjectSource for Features<S> {
