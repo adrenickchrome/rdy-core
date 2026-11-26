@@ -94,7 +94,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Not an administrator
-        shell: pwsh
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
           $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
           if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -102,13 +102,18 @@ jobs:
               exit 1
           }
       - name: Scratch home and kept target
-        # The tests get an empty HOME; Cargo and rustup keep the runner account's own homes. TEMP stays the
-        # runner's own, so Defender scans every test file, as a user's machine would.
-        shell: pwsh
+        # The tests get an empty HOME. As in gate.yml's Windows job: rdytest has no toolchain of its
+        # own; the toolchain, a venv with python3.exe and the app-data roots live in C:\wx-defender,
+        # outside the Defender exclusions of the rdytest profile. TEMP stays the runner's own, so the
+        # whole suite meets the real disk and Defender scans every test file, as on a user's machine.
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
           $ErrorActionPreference = 'Stop'
-          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
-          $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+          $root = 'C:\wx-defender'
+          $cargoHome = Join-Path $root 'tc\cargo'
+          $rustupHome = Join-Path $root 'tc\rustup'
+          Add-Content -Path $env:GITHUB_ENV -Value "APPDATA=$(Join-Path $root 'run-appdata')"
+          Add-Content -Path $env:GITHUB_ENV -Value "LOCALAPPDATA=$(Join-Path $root 'run-localappdata')"
           $home_ = Join-Path $env:RUNNER_TEMP 'home'
           New-Item -ItemType Directory -Force -Path $home_ | Out-Null
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$cargoHome"
@@ -116,32 +121,32 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$(Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'nightly-target')"
           Add-Content -Path $env:GITHUB_ENV -Value "HOME=$home_"
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $cargoHome 'bin')
+          # GITHUB_PATH puts the last line first: python3 comes before cargo, as in gate.yml.
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $root 'pyvenv\Scripts')
       - name: No line-ending conversion
-        shell: pwsh
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.13"
+      # The machine has Python on PATH (the venv above); setup-python runs an install script its policy blocks.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - name: Toolchain
-        shell: pwsh
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
       - name: Locked dependencies
-        shell: pwsh
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: cargo fetch --locked
       - name: Whole suite on the real disk
-        shell: pwsh
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo qa --tier nightly --skip-perf --require-all
       - name: Failing tests
         if: failure()
-        shell: pwsh
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: ./scripts/ci/windows_report.ps1 -Report target\qa\report.md
       - name: Upload the qa report
         if: always()
@@ -250,6 +255,12 @@ jobs:
     steps:
       - name: Not root
         run: test "$(id -u)" -ne 0
+      - name: Rustup on PATH
+        # The runner service starts without a login shell, so the account's cargo bin is not on PATH.
+        run: |
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          test -x "$bin/rustup" || { echo "no rustup in $bin for $(id -un)"; exit 1; }
+          echo "$bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
