@@ -22,7 +22,7 @@ pub mod sys;
 
 pub use ctl::{CtlReply, CtlRequest, DaemonInfo, MAX_CTL_LINE_BYTES, serve_ctl};
 pub use daemon::{
-    DEFAULT_IDLE_TIMEOUT, Daemon, DaemonConfig, DaemonHandle, ExitReason, IdleHold,
+    DEFAULT_IDLE_TIMEOUT, Daemon, DaemonConfig, DaemonHandle, ExitReason, ExitingPause, IdleHold,
     PROGRESS_MIN_INTERVAL, Readiness, STOP_GRACE,
 };
 pub use error::{

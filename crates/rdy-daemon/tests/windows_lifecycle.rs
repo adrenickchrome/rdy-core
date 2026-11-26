@@ -75,10 +75,49 @@ mod native {
             .unwrap()
     }
 
+    /// The test that runs now, for failure messages: a failure names its test and what it waited
+    /// for, from any thread of that test.
+    static RUNNING: std::sync::Mutex<&str> = std::sync::Mutex::new("");
+
+    fn running() -> &'static str {
+        *RUNNING.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The running test's first panic, on any of its threads, as libtest prints one: the gate's
+    /// report reads a failure's panic from stdout in that shape.
+    static FIRST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    /// Keeps each test's first panic in [`FIRST_PANIC`]; the default hook still prints it.
+    fn keep_first_panics() {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let mut first = FIRST_PANIC.lock().unwrap_or_else(|e| e.into_inner());
+            if first.is_none() {
+                let at = info
+                    .location()
+                    .map_or_else(|| "an unknown place".to_string(), |l| l.to_string());
+                let payload = info.payload();
+                let why = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("a panic with no message");
+                *first = Some(format!("thread '{}' panicked at {at}:\n{why}", running()));
+            }
+            drop(first);
+            default(info);
+        }));
+    }
+
     fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
         let until = Instant::now() + BARRIER;
         while !f() {
-            assert!(Instant::now() < until, "never happened: {what}");
+            assert!(
+                Instant::now() < until,
+                "{}: waited {} s for {what}, which never happened",
+                running(),
+                BARRIER.as_secs()
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -152,7 +191,9 @@ mod native {
             while process_alive(pid) {
                 assert!(
                     Instant::now() < until,
-                    "process {pid} never ended: {:#?}",
+                    "{}: waited {} s for the stopped daemon's process {pid} to end, which never happened: {:#?}",
+                    running(),
+                    BARRIER.as_secs(),
                     rdy_daemon::log_tail(&self.run, 12)
                 );
                 std::thread::sleep(Duration::from_millis(5));
@@ -193,9 +234,10 @@ mod native {
     }
 
     fn pid_of(rt: &tokio::runtime::Runtime, c: &mut Client) -> u32 {
-        rt.block_on(c.ctl("ping", json!({}))).unwrap()["pid"]
-            .as_u64()
-            .unwrap() as u32
+        let pong = rt
+            .block_on(c.ctl("ping", json!({})))
+            .unwrap_or_else(|e| panic!("{}: the daemon's answer to a ping: {e:?}", running()));
+        pong["pid"].as_u64().unwrap() as u32
     }
 
     /// The error of a start that must fail.
@@ -489,20 +531,43 @@ mod native {
             daemon();
         }
         let filter = args.iter().find(|a| !a.starts_with('-'));
-        let mut failures = 0;
+        keep_first_panics();
+        let mut failed: Vec<(&str, String)> = vec![];
         let mut ran = 0;
         for (name, test) in TESTS {
             if filter.is_some_and(|f| !name.contains(f.as_str())) {
                 continue;
             }
             ran += 1;
+            *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = *name;
+            *FIRST_PANIC.lock().unwrap_or_else(|e| e.into_inner()) = None;
             if std::panic::catch_unwind(test).is_ok() {
                 println!("test {name} ... ok");
             } else {
                 println!("test {name} ... FAILED");
-                failures += 1;
+                let panic = FIRST_PANIC.lock().unwrap_or_else(|e| e.into_inner()).take();
+                failed.push((
+                    *name,
+                    panic.unwrap_or_else(|| {
+                        format!("thread '{name}' panicked at an unknown place:")
+                    }),
+                ));
             }
         }
+        // each failure's panic on stdout too, in libtest's shape, so a report that reads stdout
+        // says why
+        if !failed.is_empty() {
+            println!("\nfailures:\n");
+            for (name, panic) in &failed {
+                println!("---- {name} stdout ----\n{panic}\n");
+            }
+            println!("failures:");
+            for (name, _) in &failed {
+                println!("    {name}");
+            }
+            println!();
+        }
+        let failures = failed.len();
         println!("test result: {} passed; {failures} failed", ran - failures);
         std::process::exit(i32::from(failures > 0));
     }

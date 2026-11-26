@@ -334,6 +334,7 @@ fn start_checked(
         idle_timeout: opts.idle_timeout,
         expected_account: None,
         start_timeout: rdy_engine::serve_config(&opts.project).start_timeout,
+        exiting_pause: None,
     };
     let handler = ServeHandler::new(Arc::clone(&shared), opts.human_actor.clone());
     let mut daemon = Daemon::new(config, Arc::new(handler));

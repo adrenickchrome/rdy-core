@@ -310,6 +310,55 @@ async fn life1_a_version_replaced_daemon_removes_its_run_files_before_it_answers
     drop(successor);
 }
 
+/// A daemon that a client of another version replaces takes no session once it has decided to
+/// leave. A hello it reads before its stop hears `exiting`, and so does one that was waiting for
+/// `ready`: a session there would end with the daemon, and its client would hear the daemon gone
+/// instead of starting the successor. On Windows the pipe's name outlives the run files until the
+/// stop, so a client that hears `exiting` and starts again at once still reaches that daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn life1_a_daemon_replaced_by_another_version_takes_no_session_on_its_way_out() {
+    let pause = std::sync::Arc::new(ExitingPause::default());
+    let held = std::sync::Arc::clone(&pause);
+    let d = daemon("1", false, move |c| c.exiting_pause = Some(held)).await;
+    let line = hello("1", "ctl", d.dir.path());
+    // one client waits for `ready`, one is connected and has sent no hello yet
+    let (mut waiting, first) = connect_with(&d.run, &line).await;
+    assert!(first.contains("\"starting\""), "{first}");
+    let mut late =
+        tokio::io::BufReader::new(rdy_daemon::sys::connect(&d.run.socket()).await.unwrap());
+    let (run, other) = (d.run.clone(), hello("2", "ctl", d.dir.path()));
+    let replacing = tokio::spawn(async move { connect_with(&run, &other).await.1 });
+    pause.reached.notified().await;
+
+    // the daemon has decided to leave and has not stopped
+    late.get_mut().write_all(line.as_bytes()).await.unwrap();
+    let mut heard = String::new();
+    late.read_line(&mut heard).await.unwrap();
+    assert!(
+        heard.contains("\"exiting\""),
+        "a hello after the decision: {heard}"
+    );
+    d.readiness.ready();
+    let mut heard = String::new();
+    waiting.read_line(&mut heard).await.unwrap();
+    assert!(
+        heard.contains("\"exiting\""),
+        "a hello that waited for ready: {heard}"
+    );
+
+    pause.release.notify_one();
+    let replaced = replacing.await.unwrap();
+    assert!(replaced.contains("\"exiting\""), "{replaced}");
+    assert!(matches!(
+        d.task.await.unwrap().unwrap(),
+        ExitReason::VersionReplaced
+    ));
+    assert!(
+        d.echo.ended.lock().unwrap().is_empty(),
+        "no session was opened"
+    );
+}
+
 /// Runs this test binary's `test` alone in a child with `env` set, and returns its stdout and
 /// stderr. With `break_stderr`, the read end of the child's stderr is closed at once, so its
 /// writes there fail (EPIPE; Rust ignores SIGPIPE).
