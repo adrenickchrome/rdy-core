@@ -90,6 +90,7 @@
 //! what it removes (the later proof: a placeholder's apply is a reference, never an order). The
 //! order depends on the set of records only, never on the order they were found or stored.
 use crate::error::StoreError;
+use crate::index::IndexRead;
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef};
 use crate::segment::{HEADER as FRAME_HEADER, Location};
@@ -131,6 +132,35 @@ pub struct HistoryClosure {
     pub records: Vec<ObjectKey>,
     pub prerequisites: Vec<ObjectKey>,
     pub features: crate::format::StoreFeatures,
+}
+
+/// A canon or view history's closure ([`HistoryClosure`]) with what its walk already found of
+/// each record it emits, so a sender need not read the records again to plan its batches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedClosure {
+    pub history: HistoryClosure,
+    /// One per record of `history.records`, in that order.
+    pub records: Vec<ClosureRecord>,
+}
+
+/// What the walk found of one emitted record: its frame's bytes in a batch (the frame header
+/// and the payload), the keys it needs (its links after kind resolution, sorted, no repeats) and
+/// the removal proof a placeholder names (a reference that keeps no order).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosureRecord {
+    pub key: ObjectKey,
+    pub frame_len: u64,
+    pub refs: Vec<ObjectKey>,
+    pub proof: Option<ObjectKey>,
+}
+
+/// What [`batch_of`] returns: the records in dependency order, the prerequisites, the features
+/// the records need and the walk's facts of each record, in the records' order.
+struct Batch {
+    records: Vec<ObjectKey>,
+    prerequisites: Vec<ObjectKey>,
+    features: crate::format::StoreFeatures,
+    facts: Vec<ClosureRecord>,
 }
 
 /// The bounds the walk of a closure charges, as one upload holds them (p-VCW8D: "One batch, and
@@ -207,18 +237,11 @@ pub fn closure_within(
         kind: kinds::TAG,
         hash: tag,
     };
-    let (records, prerequisites, _) = batch_of(
-        reader,
-        StreamPurpose::TagHistory,
-        root,
-        &[],
-        known,
-        end,
-        bounds,
-    )?;
+    let source = WalkSource::new(reader, end)?;
+    let b = batch_of(source, StreamPurpose::TagHistory, root, &[], known, bounds)?;
     Ok(Closure {
-        records,
-        prerequisites,
+        records: b.records,
+        prerequisites: b.prerequisites,
     })
 }
 
@@ -238,6 +261,20 @@ pub fn history_closure_before(
     base: Option<Hash>,
     end: Location,
 ) -> Result<HistoryClosure, StreamError> {
+    prepared_history_closure_before(reader, purpose, root, known, base, end).map(|p| p.history)
+}
+
+/// [`history_closure_before`] with the walk's facts of each emitted record ([`ClosureRecord`]),
+/// from the same walk and with the same refusals. The walk reads the index in one read
+/// transaction, from the root's check to its return, base and attachments included.
+pub fn prepared_history_closure_before(
+    reader: &StoreReader,
+    purpose: StreamPurpose,
+    root: Hash,
+    known: &BTreeSet<ObjectKey>,
+    base: Option<Hash>,
+    end: Location,
+) -> Result<PreparedClosure, StreamError> {
     if !matches!(
         purpose,
         StreamPurpose::CanonHistory | StreamPurpose::ViewHistory
@@ -253,7 +290,7 @@ pub fn history_closure_before(
         kind: purpose.root_kind(),
         hash: root,
     };
-    let mut source = StoreSource { reader, end };
+    let mut source = WalkSource::new(reader, end)?;
     if !source.holds(root.kind, &root.hash)? {
         return Err(StreamError::unresolved(0, 0, root));
     }
@@ -265,12 +302,14 @@ pub fn history_closure_before(
         };
         link_closure(&mut source, base, &mut held)?;
     }
-    let (records, prerequisites, features) =
-        batch_of(reader, purpose, root, &[], &held, end, WalkBounds::UPLOAD)?;
-    Ok(HistoryClosure {
-        records,
-        prerequisites,
-        features,
+    let b = batch_of(source, purpose, root, &[], &held, WalkBounds::UPLOAD)?;
+    Ok(PreparedClosure {
+        history: HistoryClosure {
+            records: b.records,
+            prerequisites: b.prerequisites,
+            features: b.features,
+        },
+        records: b.facts,
     })
 }
 
@@ -303,23 +342,15 @@ pub fn history_closure_named_before(
         kind: purpose.root_kind(),
         hash: root,
     };
-    let source = StoreSource { reader, end };
+    let source = WalkSource::new(reader, end)?;
     if !source.holds(root.kind, &root.hash)? {
         return Err(StreamError::unresolved(0, 0, root));
     }
-    let (records, prerequisites, features) = batch_of(
-        reader,
-        purpose,
-        root,
-        deltas,
-        known,
-        end,
-        WalkBounds::UPLOAD,
-    )?;
+    let b = batch_of(source, purpose, root, deltas, known, WalkBounds::UPLOAD)?;
     Ok(HistoryClosure {
-        records,
-        prerequisites,
-        features,
+        records: b.records,
+        prerequisites: b.prerequisites,
+        features: b.features,
     })
 }
 
@@ -327,7 +358,7 @@ pub fn history_closure_named_before(
 /// to `held`. A link to a key the source does not hold ends there. At most [`MAX_RECORDS`] keys
 /// join, else E_LIMIT `1000000 object records`; a kind-None link resolves as the walk's do.
 fn link_closure(
-    source: &mut StoreSource,
+    source: &mut WalkSource,
     base: ObjectKey,
     held: &mut BTreeSet<ObjectKey>,
 ) -> Result<(), StreamError> {
@@ -336,7 +367,7 @@ fn link_closure(
     }
     let features = source
         .reader
-        .store_features()
+        .store_features_in(&source.read)
         .map_err(|e| store_error(e, Some(base)))?;
     let mut seen: HashSet<ObjectKey> = HashSet::new();
     let mut queue = vec![base];
@@ -400,32 +431,43 @@ fn link_closure(
 /// one batch is checked with the header the purpose writes: the source store's manifest in a tag
 /// history, the records' needs in a canon or view history.
 fn batch_of(
-    reader: &StoreReader,
+    source: WalkSource,
     purpose: StreamPurpose,
     root: ObjectKey,
     extra: &[ObjectKey],
     known: &BTreeSet<ObjectKey>,
-    end: Location,
     bounds: WalkBounds,
-) -> Result<(Vec<ObjectKey>, Vec<ObjectKey>, crate::format::StoreFeatures), StreamError> {
+) -> Result<Batch, StreamError> {
     let mut roots = vec![root];
     roots.extend_from_slice(extra);
-    let w = walk_from(reader, purpose, &roots, known, end, bounds, false)?;
-    // the batch: every record found that the receiver does not hold
-    let children: BTreeMap<ObjectKey, Vec<ObjectKey>> = w
-        .nodes
-        .iter()
-        .filter(|(k, _)| !known.contains(k))
-        .map(|(k, n)| (*k, n.children.clone()))
-        .collect();
+    let w = walk_from(source, purpose, &roots, known, bounds, false)?;
+    let needs = crate::format::StoreFeatures::of(w.needs);
+    // the header names the source store's features (sync format 2), or the records' needs
+    // (format 4)
+    let manifest = if purpose == StreamPurpose::TagHistory {
+        w.features.to_json().len()
+    } else {
+        needs.to_json().len()
+    };
+    // the batch: every record found that the receiver does not hold, its links moved out of
+    // the walk's nodes (each node's frame length and proof kept beside them)
+    let mut children: BTreeMap<ObjectKey, Vec<ObjectKey>> = BTreeMap::new();
+    let mut facts: BTreeMap<ObjectKey, (u64, Option<ObjectKey>)> = BTreeMap::new();
+    for (k, n) in w.nodes {
+        if known.contains(&k) {
+            continue;
+        }
+        facts.insert(k, (n.len, n.proof));
+        children.insert(k, n.children);
+    }
     let records = dependency_order(root, &children)?;
     // the prerequisites: what the batch's records need or name as a proof, and do not hold
     let mut prerequisites: BTreeSet<ObjectKey> = BTreeSet::new();
     let mut body = 0u64;
-    for k in children.keys() {
-        let n = &w.nodes[k];
-        body += FRAME_HEADER + n.len;
-        for c in n.children.iter().chain(&n.proof) {
+    for (k, kids) in &children {
+        let (len, proof) = &facts[k];
+        body += FRAME_HEADER + len;
+        for c in kids.iter().chain(proof) {
             if !children.contains_key(c) {
                 prerequisites.insert(*c);
                 if prerequisites.len() > MAX_PREREQUISITES {
@@ -440,25 +482,30 @@ fn batch_of(
     if prerequisites.len() > MAX_PREREQUISITES {
         return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
     }
-    let needs = crate::format::StoreFeatures::of(w.needs.clone());
-    // the header names the source store's features (sync format 2), or the records' needs
-    // (format 4)
-    let manifest = if purpose == StreamPurpose::TagHistory {
-        reader
-            .store_features()
-            .map_err(|e| store_error(e, Some(root)))?
-            .to_json()
-            .len()
-    } else {
-        needs.to_json().len()
-    };
     let header = (HEADER_FIXED + manifest + prerequisites.len() * KEY_LEN) as u64;
     let bytes =
         MAGIC.len() as u64 + 4 + FRAME_HEADER + header + body + FRAME_HEADER + TRAILER_LEN as u64;
     if bytes > MAX_STREAM_BYTES {
         return Err(StreamError::limit(None, 0, LIMIT_TOTAL_BYTES));
     }
-    Ok((records, prerequisites.into_iter().collect(), needs))
+    let mut out = Vec::new();
+    out.try_reserve_exact(records.len())
+        .map_err(|_| StreamError::allocation(None, 0))?;
+    for k in &records {
+        let (len, proof) = facts[k];
+        out.push(ClosureRecord {
+            key: *k,
+            frame_len: FRAME_HEADER + len,
+            refs: children.remove(k).unwrap_or_default(),
+            proof,
+        });
+    }
+    Ok(Batch {
+        records,
+        prerequisites: prerequisites.into_iter().collect(),
+        features: needs,
+        facts: out,
+    })
 }
 
 /// The landings of the canon histories that start at `roots`, as the walk of
@@ -508,11 +555,10 @@ pub(crate) fn history_keys_before(
         edges: u64::MAX,
     };
     let w = walk_from(
-        reader,
+        WalkSource::new(reader, end)?,
         StreamPurpose::CanonHistory,
         &roots,
         &known,
-        end,
         unbounded,
         true,
     )?;
@@ -538,11 +584,10 @@ pub fn closure_kept_links_for_tests(
         hash: tag,
     };
     let w = walk(
-        reader,
+        WalkSource::new(reader, end)?,
         StreamPurpose::TagHistory,
         root,
         known,
-        end,
         unbounded,
     )?;
     Ok(w.nodes
@@ -554,34 +599,38 @@ pub fn closure_kept_links_for_tests(
 /// The walk of the closure of `root` (a TAG, LANDING or VIEW_OP, by `purpose`) to its fixed
 /// point: every record found, known records included, within `bounds`.
 fn walk<'a>(
-    reader: &'a StoreReader,
+    source: WalkSource<'a>,
     purpose: StreamPurpose,
     root: ObjectKey,
     known: &'a BTreeSet<ObjectKey>,
-    end: Location,
     bounds: WalkBounds,
 ) -> Result<Walk<'a>, StreamError> {
-    walk_from(reader, purpose, &[root], known, end, bounds, false)
+    walk_from(source, purpose, &[root], known, bounds, false)
 }
 
 /// [`walk`] from every key of `roots` (one at least; the first is the walk's root). A `lenient`
 /// walk is [`history_landings_before`]'s: it leaves out what an export refuses and keeps no
 /// links.
 fn walk_from<'a>(
-    reader: &'a StoreReader,
+    source: WalkSource<'a>,
     purpose: StreamPurpose,
     roots: &[ObjectKey],
     known: &'a BTreeSet<ObjectKey>,
-    end: Location,
     bounds: WalkBounds,
     lenient: bool,
 ) -> Result<Walk<'a>, StreamError> {
     let root = roots[0];
-    let features = reader
-        .store_features()
+    let features = source
+        .reader
+        .store_features_in(&source.read)
         .map_err(|e| store_error(e, Some(root)))?;
+    let carried = if lenient {
+        BTreeMap::new()
+    } else {
+        uncovered_carried(&source)?
+    };
     let mut w = Walk {
-        source: StoreSource { reader, end },
+        source,
         deltas: features.has(crate::format::FEATURE_SNAPSHOT_DELTA),
         features,
         purpose,
@@ -597,11 +646,7 @@ fn walk_from<'a>(
         met: 0,
         edges: 0,
         asked: HashSet::new(),
-        carried: if lenient {
-            BTreeMap::new()
-        } else {
-            uncovered_carried(reader, end)?
-        },
+        carried,
         lenient,
     };
     for r in roots {
@@ -752,52 +797,13 @@ impl StoreSource<'_> {
 }
 
 impl ObjectSource for StoreSource<'_> {
+    /// A closure walk's read of one record, in a read transaction of its own.
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
-        let Some(loc) = self.at(key.kind, &key.hash)? else {
-            return Ok(None);
-        };
-        let err = |e| store_error(e, Some(key));
-        if let Some(s) = self.reader.index().redaction_span_at(&loc).map_err(err)? {
-            // the removed frame's encoding, from the raw kind its header keeps
-            let raw = match self.reader.segments().header(loc) {
-                Ok(Some((_, raw, _))) => raw,
-                Ok(None) => return Err(err(StoreError::corrupt_at(loc))),
-                Err(e) => return Err(err(StoreError::Io(e))),
-            };
-            let unknown = || {
-                StreamError::bad_record(0, 0, Reason::UnknownEncodingVersion).with_object(Some(key))
-            };
-            let mut encoding = crate::dump::dropped_encoding(raw).map_err(|_| unknown())?;
-            // a marked removed change has the encoding its residue records (a foreign change 2,
-            // a port 3 or 4): the header's marker alone does not tell them apart
-            if encoding != 0
-                && let Some(r) = s.span.residue
-            {
-                let residue: rdy_model::redaction::RedactionResidue = self
-                    .reader
-                    .get_typed(kinds::REDACTION_RESIDUE, &r)
-                    .map_err(err)?;
-                encoding = crate::redaction::source_encoding(&residue)
-                    .filter(|e| *e != 0)
-                    .ok_or_else(unknown)?;
-            }
-            return Ok(Some(StreamRecord::Dropped {
-                key,
-                encoding,
-                original_len: s.span.len,
-                apply: s.apply,
-                residue: s.span.residue,
-            }));
-        }
-        let (raw, payload) = self.reader.get_kind_raw(key.kind, &key.hash).map_err(err)?;
-        let encoding = crate::codec::split(raw, &payload)
-            .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?
-            .version;
-        Ok(Some(StreamRecord::Present {
-            key,
-            encoding,
-            payload,
-        }))
+        let read = self
+            .reader
+            .read_for_closure()
+            .map_err(|e| store_error(e, Some(key)))?;
+        record_in(self.reader, &read, self.end, key)
     }
 
     /// The index's delta of `landing`, when its frame lies before `end`.
@@ -815,15 +821,145 @@ impl ObjectSource for StoreSource<'_> {
     }
 }
 
-/// The objects that a carried span of a record before `end` names, while no validated apply of
-/// the store before `end` covers that span, each with the first carried record (in log order)
-/// that names it. A span covers when the active mask holds its frame with an apply as its proof:
-/// a held span, or one only a carried record explains, does not.
-fn uncovered_carried(
-    reader: &StoreReader,
+/// A closure walk's source: [`StoreSource`]'s records, read through the one index read
+/// transaction the walk owns from its root check to its return.
+struct WalkSource<'a> {
+    reader: &'a StoreReader,
     end: Location,
-) -> Result<BTreeMap<ObjectKey, Hash>, StreamError> {
-    let index = reader.index();
+    read: IndexRead,
+}
+
+impl<'a> WalkSource<'a> {
+    fn new(reader: &'a StoreReader, end: Location) -> Result<WalkSource<'a>, StreamError> {
+        let read = reader
+            .read_for_closure()
+            .map_err(|e| store_error(e, None))?;
+        Ok(WalkSource { reader, end, read })
+    }
+
+    /// Where the log holds the first frame of `kind` and `hash`, when it lies before `end`.
+    fn at(&self, kind: u8, hash: &Hash) -> Result<Option<Location>, StreamError> {
+        at_in(&self.read, self.end, kind, hash)
+    }
+
+    /// Whether the log holds `kind` and `hash` before `end`.
+    fn holds(&self, kind: u8, hash: &Hash) -> Result<bool, StreamError> {
+        Ok(self.at(kind, hash)?.is_some())
+    }
+
+    /// The stored payload of the object of `kind` and `hash` ([`StoreReader::get_kind_raw`]),
+    /// wherever its frame lies.
+    fn kind_raw(&self, kind: u8, hash: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
+        let loc = self
+            .read
+            .typed(kind, hash)?
+            .ok_or(StoreError::NotFound(*hash))?;
+        self.reader.get_kind_raw_in(&self.read, kind, hash, loc)
+    }
+}
+
+impl ObjectSource for WalkSource<'_> {
+    fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
+        record_in(self.reader, &self.read, self.end, key)
+    }
+
+    /// The index's delta of `landing`, when its frame lies before `end`.
+    fn snapshot_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        let key = ObjectKey {
+            kind: kinds::LANDING,
+            hash: *landing,
+        };
+        Ok(self
+            .read
+            .snapshot_delta(landing)
+            .map_err(|e| store_error(e, Some(key)))?
+            .filter(|(_, at)| *at < self.end)
+            .map(|(h, _)| h))
+    }
+}
+
+/// Where `read` places the first frame of `kind` and `hash`, when it lies before `end`.
+fn at_in(
+    read: &IndexRead,
+    end: Location,
+    kind: u8,
+    hash: &Hash,
+) -> Result<Option<Location>, StreamError> {
+    let key = ObjectKey { kind, hash: *hash };
+    Ok(read
+        .typed(kind, hash)
+        .map_err(|e| store_error(e, Some(key)))?
+        .filter(|l| *l < end))
+}
+
+/// The record of `key` before `end` (see [`StoreSource`]), every index query in `read`: its
+/// original bytes, read and hashed at the place the index gives, or its dropped identity.
+fn record_in(
+    reader: &StoreReader,
+    read: &IndexRead,
+    end: Location,
+    key: ObjectKey,
+) -> Result<Option<StreamRecord>, StreamError> {
+    let Some(loc) = at_in(read, end, key.kind, &key.hash)? else {
+        return Ok(None);
+    };
+    let err = |e| store_error(e, Some(key));
+    if let Some(s) = read.redaction_span_at(&loc).map_err(err)? {
+        // the removed frame's encoding, from the raw kind its header keeps
+        let raw = match reader.segments().header(loc) {
+            Ok(Some((_, raw, _))) => raw,
+            Ok(None) => return Err(err(StoreError::corrupt_at(loc))),
+            Err(e) => return Err(err(StoreError::Io(e))),
+        };
+        let unknown =
+            || StreamError::bad_record(0, 0, Reason::UnknownEncodingVersion).with_object(Some(key));
+        let mut encoding = crate::dump::dropped_encoding(raw).map_err(|_| unknown())?;
+        // a marked removed change has the encoding its residue records (a foreign change 2,
+        // a port 3 or 4): the header's marker alone does not tell them apart
+        if encoding != 0
+            && let Some(r) = s.span.residue
+        {
+            let at = read
+                .typed(kinds::REDACTION_RESIDUE, &r)
+                .map_err(err)?
+                .ok_or(StoreError::NotFound(r))
+                .map_err(err)?;
+            let (raw, payload) = reader
+                .get_kind_raw_in(read, kinds::REDACTION_RESIDUE, &r, at)
+                .map_err(err)?;
+            let residue: rdy_model::redaction::RedactionResidue =
+                crate::codec::decode_record(raw, &payload).map_err(err)?;
+            encoding = crate::redaction::source_encoding(&residue)
+                .filter(|e| *e != 0)
+                .ok_or_else(unknown)?;
+        }
+        return Ok(Some(StreamRecord::Dropped {
+            key,
+            encoding,
+            original_len: s.span.len,
+            apply: s.apply,
+            residue: s.span.residue,
+        }));
+    }
+    let (raw, payload) = reader
+        .get_kind_raw_in(read, key.kind, &key.hash, loc)
+        .map_err(err)?;
+    let encoding = crate::codec::split(raw, &payload)
+        .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?
+        .version;
+    Ok(Some(StreamRecord::Present {
+        key,
+        encoding,
+        payload,
+    }))
+}
+
+/// The objects that a carried span of a record before the source's end names, while no
+/// validated apply of the store before that end covers that span, each with the first carried
+/// record (in log order) that names it. A span covers when the active mask holds its frame with
+/// an apply as its proof: a held span, or one only a carried record explains, does not.
+fn uncovered_carried(source: &WalkSource) -> Result<BTreeMap<ObjectKey, Hash>, StreamError> {
+    let (read, end) = (&source.read, source.end);
     let mut out: BTreeMap<ObjectKey, Hash> = BTreeMap::new();
     let mut failed: Option<StreamError> = None;
     let mut visit = |c: crate::redaction_carried::CarriedAt| -> Result<(), StoreError> {
@@ -832,8 +968,8 @@ fn uncovered_carried(
                 segment: s.place.segment,
                 offset: s.place.offset,
             };
-            let covered = match index.redaction_span_at(&loc)? {
-                Some(row) => index
+            let covered = match read.redaction_span_at(&loc)? {
+                Some(row) => read
                     .redaction_applied(&row.request)?
                     .is_some_and(|(apply, at)| apply == row.apply && at < end),
                 None => false,
@@ -854,7 +990,7 @@ fn uncovered_carried(
         }
         Ok(())
     };
-    let walked = reader.visit_carried(end, &mut visit);
+    let walked = source.reader.visit_carried_in(read, end, &mut visit);
     if let Some(e) = failed {
         return Err(e);
     }
@@ -893,7 +1029,7 @@ fn outside_closure(k: ObjectKey) -> StreamError {
 
 /// The walk of one closure.
 struct Walk<'a> {
-    source: StoreSource<'a>,
+    source: WalkSource<'a>,
     /// The source store's features: the links a record names follow them.
     features: crate::format::StoreFeatures,
     /// Whether the features list `snapshot_delta`: each landing attaches its delta.
@@ -1096,23 +1232,24 @@ impl Walk<'_> {
     /// A canon or view history names its root object's hash in the tag's place.
     fn carried_refusal(&self, carried: Hash) -> StreamError {
         let reader = self.source.reader;
+        let read = &self.source.read;
         let err = |e| store_error(e, Some(self.root));
         if self.root.kind != kinds::TAG {
-            return match reader.mode() {
+            return match reader.mode_in(read) {
                 Ok(mode) => {
                     StreamError::carried_content(&self.root.hash.to_string(), carried, mode)
                 }
                 Err(e) => err(e),
             };
         }
-        let name = match reader.get_kind_raw(kinds::TAG, &self.root.hash) {
+        let name = match self.source.kind_raw(kinds::TAG, &self.root.hash) {
             Ok((raw, payload)) => match crate::codec::decode_bounded::<Tag>(raw, &payload) {
                 Ok(t) => t.name,
                 Err(e) => return StreamError::from_record(0, 0, &e).with_object(Some(self.root)),
             },
             Err(e) => return err(e),
         };
-        match reader.mode() {
+        match reader.mode_in(read) {
             Ok(mode) => StreamError::carried_content(&name, carried, mode),
             Err(e) => err(e),
         }
@@ -1153,7 +1290,7 @@ impl Walk<'_> {
     fn attachments(&mut self, k: ObjectKey) -> Result<Vec<ObjectKey>, StreamError> {
         let mut out = Vec::new();
         let err = |e| store_error(e, Some(k));
-        let reader = self.source.reader;
+        let read = &self.source.read;
         let end = self.source.end;
         match k.kind {
             kinds::LANDING | kinds::TAG => {
@@ -1163,7 +1300,10 @@ impl Walk<'_> {
                     || k == self.root
                     || self.purpose == StreamPurpose::CanonHistory
                 {
-                    for g in reader.signatures_before(&k.hash, end).map_err(err)? {
+                    let signatures = read
+                        .signatures_before(&k.hash, crate::signature::MAX_PER_SUBJECT, end)
+                        .map_err(err)?;
+                    for g in signatures {
                         out.push(ObjectKey {
                             kind: kinds::SIGNATURE,
                             hash: g,
@@ -1173,7 +1313,10 @@ impl Walk<'_> {
                 // a landing's sealed plan, which shares its batch: its chain and the answers it
                 // names follow through its own links
                 if k.kind == kinds::LANDING
-                    && let Some(seal) = reader.plan_of_landing(&k.hash, end).map_err(err)?
+                    && let Some((seal, _)) = read
+                        .plan_seal(&k.hash)
+                        .map_err(err)?
+                        .filter(|(_, at)| *at < end)
                 {
                     out.push(ObjectKey {
                         kind: kinds::PLAN,
@@ -1203,7 +1346,7 @@ impl Walk<'_> {
                 }
             }
             kinds::CHANGE => {
-                if let Some(r) = reader.redaction_for_carrier(&k.hash).map_err(err)?
+                if let Some(r) = read.redaction_carrier(&k.hash).map_err(err)?
                     && self.source.holds(kinds::REDACTION, &r)?
                 {
                     out.push(ObjectKey {
@@ -1218,12 +1361,12 @@ impl Walk<'_> {
             k.kind,
             kinds::BLOCK | kinds::CHANGE | kinds::BLOB_MANIFEST | kinds::BLOB_CHUNK
         ) {
-            let index = reader.index();
-            for request in index
+            let read = &self.source.read;
+            for request in read
                 .redaction_requests_naming(k.kind, &k.hash)
                 .map_err(err)?
             {
-                if let Some((apply, at)) = index.redaction_applied(&request).map_err(err)?
+                if let Some((apply, at)) = read.redaction_applied(&request).map_err(err)?
                     && at < end
                 {
                     out.push(ObjectKey {
@@ -1240,21 +1383,19 @@ impl Walk<'_> {
     /// `ask` joins the walk. Nothing else of an answer is kept, so an unrelated answer charges
     /// nothing to the closure's bounds.
     fn attach_answers(&mut self, ask: &HashSet<Hash>) -> Result<(), StreamError> {
-        let reader = self.source.reader;
-        let mut source = StoreSource {
-            reader,
-            end: self.source.end,
-        };
+        let (reader, read, end) = (self.source.reader, &self.source.read, self.source.end);
+        let seen = &self.seen;
+        let mut found: Vec<ObjectKey> = Vec::new();
         let mut failed: Option<StreamError> = None;
-        let mut visit = |h: Hash, w: &mut Self| -> Result<(), StreamError> {
+        let mut visit = |h: Hash| -> Result<(), StreamError> {
             let key = ObjectKey {
                 kind: kinds::ANSWER,
                 hash: h,
             };
-            if w.seen.contains(&key) {
+            if seen.contains(&key) {
                 return Ok(());
             }
-            let Some(r @ StreamRecord::Present { .. }) = source.record(key)? else {
+            let Some(r @ StreamRecord::Present { .. }) = record_in(reader, read, end, key)? else {
                 return Ok(());
             };
             let StreamRecord::Present { payload, .. } = &r else {
@@ -1263,12 +1404,16 @@ impl Walk<'_> {
             let a: Answer = crate::codec::decode_bounded(r.raw_kind(), payload)
                 .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?;
             if a.targets.iter().any(|t| ask.contains(t)) {
-                w.reach(key)?;
+                found
+                    .try_reserve(1)
+                    .map_err(|_| StreamError::allocation(None, 0))?;
+                found.push(key);
             }
             Ok(())
         };
-        let walked = reader.for_each_object_of(kinds::ANSWER, |h| {
-            visit(h, self).map_err(|e| {
+        reader.note_kind_walk();
+        let walked = read.for_each_object_of(kinds::ANSWER, |h| {
+            visit(h).map_err(|e| {
                 failed = Some(e);
                 StoreError::Refused("the closure's answer pass stopped".into())
             })
@@ -1276,7 +1421,11 @@ impl Walk<'_> {
         if let Some(e) = failed {
             return Err(e);
         }
-        walked.map_err(|e| store_error(e, None))
+        walked.map_err(|e| store_error(e, None))?;
+        for key in found {
+            self.reach(key)?;
+        }
+        Ok(())
     }
 
     /// One pass over the carried shapes before the end: each DISPUTE of a closure landing, each
@@ -1296,11 +1445,7 @@ impl Walk<'_> {
             if !triggers.iter().any(|t| has(self, *t)) {
                 continue;
             }
-            let reader = self.source.reader;
-            let mut source = StoreSource {
-                reader,
-                end: self.source.end,
-            };
+            let (reader, read, end) = (self.source.reader, &self.source.read, self.source.end);
             let mut found: Vec<ObjectKey> = vec![];
             let mut failed: Option<StreamError> = None;
             let nodes = &self.nodes;
@@ -1310,7 +1455,8 @@ impl Walk<'_> {
                 if seen.contains(&key) {
                     return Ok(());
                 }
-                let Some(r @ StreamRecord::Present { .. }) = source.record(key)? else {
+                let Some(r @ StreamRecord::Present { .. }) = record_in(reader, read, end, key)?
+                else {
                     return Ok(());
                 };
                 let StreamRecord::Present { payload, .. } = &r else {
@@ -1349,7 +1495,8 @@ impl Walk<'_> {
                 }
                 Ok(())
             };
-            let walked = reader.for_each_object_of(kind, |h| {
+            reader.note_kind_walk();
+            let walked = read.for_each_object_of(kind, |h| {
                 visit(h).map_err(|e| {
                     failed = Some(e);
                     StoreError::Refused("the closure's carried pass stopped".into())
@@ -1384,11 +1531,7 @@ impl Walk<'_> {
         if ask.is_empty() {
             return Ok(false);
         }
-        let reader = self.source.reader;
-        let mut source = StoreSource {
-            reader,
-            end: self.source.end,
-        };
+        let (reader, read, end) = (self.source.reader, &self.source.read, self.source.end);
         let mut found: Vec<ObjectKey> = Vec::new();
         let mut failed: Option<StreamError> = None;
         let seen = &self.seen;
@@ -1400,7 +1543,7 @@ impl Walk<'_> {
             if seen.contains(&key) {
                 return Ok(());
             }
-            let Some(r @ StreamRecord::Present { .. }) = source.record(key)? else {
+            let Some(r @ StreamRecord::Present { .. }) = record_in(reader, read, end, key)? else {
                 return Ok(());
             };
             let StreamRecord::Present { payload, .. } = &r else {
@@ -1413,7 +1556,8 @@ impl Walk<'_> {
             }
             Ok(())
         };
-        let walked = reader.for_each_object_of(kinds::TAG, |h| {
+        reader.note_kind_walk();
+        let walked = read.for_each_object_of(kinds::TAG, |h| {
             visit(h).map_err(|e| {
                 failed = Some(e);
                 StoreError::Refused("the closure's tag pass stopped".into())
@@ -1448,9 +1592,7 @@ impl Walk<'_> {
             .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(root)))?;
         let item = format!("tag:{}", tag.name);
         let Some((h, a)) = self
-            .source
-            .reader
-            .answer_of(&item)
+            .relay_answer_of(&item)
             .map_err(|e| store_error(e, Some(root)))?
         else {
             return Ok(None);
@@ -1462,5 +1604,16 @@ impl Walk<'_> {
             kind: kinds::ANSWER,
             hash: h,
         }))
+    }
+
+    /// [`StoreReader::answer_of`] in the walk's read: the answer the ref `answer/<item>` names.
+    fn relay_answer_of(&self, item: &str) -> Result<Option<(Hash, Answer)>, StoreError> {
+        let name = crate::answer::answer_ref(item);
+        let Some(v) = self.source.read.get_ref(&name)? else {
+            return Ok(None);
+        };
+        let h = crate::index::hash_from(&v, &format!("answer ref {name:?}"))?;
+        let (raw, payload) = self.source.kind_raw(kinds::ANSWER, &h)?;
+        Ok(Some((h, crate::codec::decode_record(raw, &payload)?)))
     }
 }

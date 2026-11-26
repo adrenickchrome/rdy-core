@@ -46,6 +46,7 @@ use crate::hub_http::{
     UploadHttpRequest, UploadMethod, api_error_entry, decode_bounded_json, reply_echoes,
     zstd_frame,
 };
+use crate::hub_publish_stream::PreparedObjectBody;
 use crate::hub_types::{
     HubFailure, LimitUnit, MAX_ID_BYTES, MAX_URL_BYTES, Origin, OriginFence, RemoteUrl,
     RequestClaim, Secret, check_count, hub_limit,
@@ -348,6 +349,17 @@ pub trait PublishWire: Send + Sync {
         body: &mut dyn Read,
         len: u64,
     ) -> Result<ObjectPut, RdyError>;
+    /// `POST <base>/objects/put?push=<push>`: one prepared batch. The default sends the batch's
+    /// own bytes through [`PublishWire::put_objects`].
+    fn put_objects_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        let (raw, len) = body.identity()?;
+        self.put_objects(cx, push, raw, len)
+    }
     /// `POST <base>/files/known`: the hashes of `files` the hub repo lacks.
     fn known_files(
         &self,
@@ -1902,6 +1914,40 @@ impl PublishWire for HttpPublishWire {
         check_push(push)?;
         let url = route(cx, &["objects", "put"], &[("push", push)])?;
         let reply_body = self.put(cx, &url, "application/octet-stream", body, len, REPLY_BYTES)?;
+        reply(
+            &reply_body,
+            limits(REPLY_BYTES, MAX_JSON_VALUES),
+            Effect::Write,
+            &cx.bearer,
+        )
+    }
+
+    /// The prepared batch as it is: its frame with `Content-Encoding: zstd` when the context
+    /// takes zstd and the batch was framed, else its own bytes. Nothing is compressed here; the
+    /// send's checks are [`HttpPublishWire::put_objects`]'s.
+    fn put_objects_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        check_push(push)?;
+        let url = route(cx, &["objects", "put"], &[("push", push)])?;
+        let (file, body_len, encoding) = body.wire(cx.zstd)?;
+        let reply_body = self.exchange(
+            cx,
+            Exchange {
+                effect: Effect::Write,
+                method: UploadMethod::Post,
+                url: &url,
+                content_type: "application/octet-stream",
+                body: Some(file),
+                body_len,
+                reply_limit: REPLY_BYTES,
+                success: &[200, 201],
+                encoding,
+            },
+        )?;
         reply(
             &reply_body,
             limits(REPLY_BYTES, MAX_JSON_VALUES),

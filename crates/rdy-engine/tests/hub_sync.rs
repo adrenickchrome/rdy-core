@@ -14,7 +14,14 @@ mod sync_env;
 
 use hub_tls::{Reply, Server};
 use rdy_engine::hub_http::HttpHubTransport;
+use rdy_engine::hub_publish::{PublishRenderer, RenderedUpload};
+use rdy_engine::hub_publish_stream::{
+    UploadProbe, with_upload_probe_for_tests, with_upload_worker_setup_for_tests,
+};
 use rdy_engine::hub_publish_wire::{SYNC_MEDIA_TYPE, UploadContext};
+use rdy_engine::hub_sync::{
+    CAPTURE_FAILED_FIX, CAPTURE_FAILED_MESSAGE, with_canon_walk_hook_for_tests,
+};
 use rdy_engine::hub_sync::{
     CanonPreview, PreviewKind, PullRequest, PushOutcome, PushRequest, SyncService, SyncWarning,
     WriteEnd, canon_preview,
@@ -26,6 +33,7 @@ use rdy_engine::hub_sync_wire::{
 use rdy_engine::hub_types::{Origin, OriginFence, RequestClaim, Secret};
 use rdy_engine::landing_check::CheckInputs;
 use rdy_engine::readiness::assessment::pack_digest;
+use rdy_engine::render_inputs::RenderInputs;
 use rdy_engine::sync_restore::{RestoreOutcome, RestoreRequest};
 use rdy_engine::*;
 use rdy_model::Hash;
@@ -38,8 +46,11 @@ use rdy_store::sync_state::{
 use rdy_store::sync_stream::StreamPurpose;
 use std::collections::BTreeSet;
 use std::net::TcpListener;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use sync_env::*;
 
 /// A loopback install origin on a port made at run time; nothing connects to it.
@@ -177,7 +188,8 @@ fn scc8_no_state_push_seeds_extends_or_diverges() {
     let out = push(&e, &hub, None).unwrap();
     let (id, base, pushed, tip, resumed, sent) = taken(&out);
     assert_eq!((base, pushed, tip, resumed), (None, head, head, false));
-    assert_eq!(hub.steps(), ["discovery", "state", "known", "put", "write"]);
+    // an empty hub holds nothing, so the seed skips the known step
+    assert_eq!(hub.steps(), ["discovery", "state", "put", "write"]);
     let sent_keys: BTreeSet<ObjectKey> = hub.sent_keys().into_iter().collect();
     assert_eq!(sent_keys, closure(&e, head, None));
     assert_eq!(sent.batches, 1);
@@ -383,7 +395,7 @@ fn scc8_sync_serializes_each_remote_and_keeps_pending_ownership() {
             seen.clone(),
         );
         *hub.hook.lock().unwrap() = Some((
-            "known",
+            "put",
             Box::new(move |_| {
                 let before = hub2.calls().len();
                 // the same remote: refused before any request
@@ -720,7 +732,12 @@ fn scc8_sign_in_credentials_and_tls_trust_stay_on_machine() {
         ca.display()
     );
     let e = env_with(install(), &config, Some("shared"), 2);
-    let hub = Hub::new().with_state(|s| s.batch_records = 2);
+    // a held repo id keeps the known step, so every step is checked
+    let repo = repo_of(&e);
+    let hub = Hub::new().with_state(|s| {
+        s.batch_records = 2;
+        s.repo_id = Some(repo);
+    });
     // a lost write reply leaves a pending write
     hub.plan_write(1, WritePlan::Lost { apply: true });
     let s = Sync::new(&e, &hub);
@@ -802,13 +819,13 @@ fn scc8_push_sends_canon_before_selected_views() {
             (WriteKind::View, Some("alpha".into())),
         ]
     );
-    // each upload's known, put and write come after the previous write
+    // each upload's known, put and write come after the previous write; the empty hub's canon
+    // seed skips known
     assert_eq!(
         hub.steps(),
         [
             "discovery",
             "state",
-            "known",
             "put",
             "write",
             "known",
@@ -1023,7 +1040,7 @@ fn scc8_each_write_owns_one_push_quarantine() {
     let mut current = None;
     for c in hub.calls() {
         match c.step {
-            "known" if current.is_none() => current = c.push.clone(),
+            "known" | "put" if current.is_none() => current = c.push.clone(),
             "known" | "put" => assert_eq!(c.push, current, "{}", c.step),
             "write" => {
                 assert_eq!(c.push, current);
@@ -1573,7 +1590,7 @@ fn scc8_pending_lookup_precedes_put_or_write_and_never_resends() {
     let out = push(&e, &hub, None).unwrap();
     assert_eq!(
         hub.steps(),
-        ["discovery", "state", "outcome", "known", "put", "write"]
+        ["discovery", "state", "outcome", "put", "write"]
     );
     let (id, ..) = taken(&out);
     assert_ne!(id, P1);
@@ -1646,7 +1663,7 @@ fn scc8_unknown_outcome_waits_for_quarantine_expiry() {
     assert_eq!(pending_of(&e, "shared"), None);
     assert_eq!(
         hub.steps(),
-        ["discovery", "state", "outcome", "known", "put", "write"]
+        ["discovery", "state", "outcome", "put", "write"]
     );
     assert_eq!(out.lookup.as_ref().unwrap().outcome, LookupOutcome::Unknown);
     assert_ne!(taken(&out).0, P1);
@@ -3111,4 +3128,454 @@ fn r59023_refusal_without_the_marker_ends_the_fetch() {
     assert!(!read.reader().has_kind(kinds::LANDING, &l.tip).unwrap());
     drop(read);
     assert_eq!(canon_of(e, "shared").and_then(|c| c.fetched), None);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The canon capture beside the walk, and the empty hub's seed
+// ---------------------------------------------------------------------------------------------
+
+/// How long a channel wait may take before the test fails instead of hanging. No assertion
+/// reads elapsed time.
+const STUCK: Duration = Duration::from_secs(120);
+
+/// The capture's side of a rendezvous with the walk: it signals, then waits for the walk.
+type Meet = (Mutex<mpsc::Sender<()>>, Mutex<mpsc::Receiver<()>>);
+
+/// A renderer for the canon capture: at its first capture it runs `before`, then meets the
+/// caller's walk at a rendezvous when `meet` is set, then returns `fail`, or `fixed`, or what
+/// [`Renderer`] captures. `done` is set when that first capture returns.
+#[derive(Default)]
+struct CanonRenderer<'a> {
+    inner: Renderer,
+    before: Option<Box<dyn Fn() + Send + std::marker::Sync + 'a>>,
+    meet: Option<Meet>,
+    fail: Option<RdyError>,
+    panic: bool,
+    fixed: Option<RenderInputs>,
+    first: AtomicBool,
+    done: Arc<AtomicBool>,
+}
+
+impl PublishRenderer for CanonRenderer<'_> {
+    fn capture(&self, read: &ReadState, scope: &Scope) -> Result<RenderInputs, RdyError> {
+        if self.first.swap(true, Ordering::SeqCst) {
+            return self.inner.capture(read, scope);
+        }
+        if let Some(f) = &self.before {
+            f();
+        }
+        if let Some((tx, rx)) = &self.meet {
+            tx.lock().unwrap().send(()).unwrap();
+            rx.lock()
+                .unwrap()
+                .recv_timeout(STUCK)
+                .expect("the walk starts while the capture runs");
+        }
+        if self.panic {
+            panic!("SENTINEL-PANIC {}", access());
+        }
+        let out = match (&self.fail, &self.fixed) {
+            (Some(e), _) => Err(e.clone()),
+            (None, Some(inputs)) => Ok(inputs.clone()),
+            (None, None) => self.inner.capture(read, scope),
+        };
+        self.done.store(true, Ordering::SeqCst);
+        out
+    }
+
+    fn render(
+        &self,
+        _: &ReadState,
+        _: &Scope,
+        _: &str,
+        _: &str,
+        _: &RenderInputs,
+    ) -> Result<RenderedUpload, RdyError> {
+        panic!("a sync renders nothing")
+    }
+}
+
+/// A push of `e`'s canon through `hub` with `renderer`.
+fn push_rendered(
+    e: &Env,
+    hub: &Hub,
+    renderer: &(dyn PublishRenderer + std::marker::Sync),
+    request: PushRequest,
+) -> Result<PushOutcome, RdyError> {
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    SyncService::new(&e.project, &e.user_file, &api, &clock, hub, renderer).push(
+        &e.engine,
+        &agent(),
+        request,
+    )
+}
+
+/// Lands a doc with one prose block in `engine`; returns the block's id.
+fn land_prose(engine: &Local) -> String {
+    rdy_engine::engine::with_writer_result(engine, |r| {
+        let w = r.write(
+            &writer(),
+            rdy_engine::WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(serde_json::json!([
+                    {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "secret", "title": "Secret", "doc_type": "page"}},
+                    {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The launch code is ZEBRA-7731."}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: "r5907".into(),
+            },
+        )?;
+        let p = r.propose(&writer(), "work", "batch", Some(common::TEST_SUMMARY))?;
+        common::confirm_exceptions(r, &founder(), &p);
+        r.land(&founder(), &p.id)?;
+        Ok(w.created["$p"].clone())
+    })
+    .unwrap()
+}
+
+/// Removes every version of block `target` of `engine` through the store's own landing path.
+fn remove_in(engine: &Local, target: &str) {
+    let target = target.to_string();
+    rdy_engine::engine::with_writer_result(engine, move |r| {
+        let s = writer();
+        let req = r.redact(
+            &s,
+            rdy_engine::redaction::RedactInput {
+                targets: vec![target],
+                reason_class: "secret".into(),
+                reason: "a leaked code".into(),
+                dry_run: false,
+            },
+        )?;
+        assert!(req.redaction.is_some());
+        let p = r.propose(&s, "work", "Remove the code", None)?;
+        let version: Hash = p.id.parse().unwrap();
+        r.seal_open()?;
+        r.store_mut().set_held(false)?;
+        r.store_mut().land_atomic(rdy_store::LandRequest {
+            proposal: version,
+            accept: None,
+            approver: rdy_model::Provenance {
+                actor: "human:t".into(),
+                run: None,
+                role: rdy_model::Role::Approver,
+                at_ms: 1_000_000,
+            },
+            alt: None,
+            relay: None,
+            evidence: None,
+            assessment: None,
+        })?;
+        r.store_mut().set_held(true)?;
+        r.invalidate();
+        Ok(())
+    })
+    .unwrap()
+}
+
+/// Overwrites one byte in the middle of `kind` record `hash`'s stored payload in `e`.
+fn corrupt_in(e: &Env, kind: u8, hash: &Hash) {
+    use std::io::{Seek, SeekFrom, Write};
+    let read = e.engine.read();
+    let (_, payload) = read.reader().get_kind_raw(kind, hash).unwrap();
+    let segments = read.reader().dir().join("segments");
+    let mut hits = Vec::new();
+    for entry in std::fs::read_dir(&segments).unwrap() {
+        let path = entry.unwrap().path();
+        let bytes = std::fs::read(&path).unwrap();
+        if let Some(at) = bytes.windows(payload.len()).position(|w| w == &payload[..]) {
+            hits.push((path, at));
+        }
+    }
+    assert_eq!(hits.len(), 1, "the payload is stored once");
+    let (path, at) = &hits[0];
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    let mid = payload.len() / 2;
+    f.seek(SeekFrom::Start((*at + mid) as u64)).unwrap();
+    f.write_all(&[payload[mid] ^ 0xa5]).unwrap();
+    f.sync_all().unwrap();
+}
+
+fn capture_error() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "the injected capture refusal",
+        "the test's fix",
+    )
+}
+
+#[track_caller]
+fn envelope(e: &RdyError) -> (&str, &str, &str) {
+    (e.code, e.message.as_str(), e.fix.as_str())
+}
+
+/// D-3PNRK ruling 1: the canon capture runs on one worker beside the caller's walk, and both
+/// meet before either ends; the worker joins before the first put, and only one worker runs at
+/// a time (the batch preparation's starts after the capture's joined).
+#[test]
+fn r5907_capture_overlaps_walk_and_joins_before_send() {
+    let e = env(2);
+    let head = *e.landings.last().unwrap();
+    let hub = Hub::new().with_state(|s| s.batch_records = 2);
+    let (to_walk, at_walk) = mpsc::channel();
+    let (to_capture, at_capture) = mpsc::channel();
+    let renderer = CanonRenderer {
+        meet: Some((Mutex::new(to_walk), Mutex::new(at_capture))),
+        ..CanonRenderer::default()
+    };
+    let done = renderer.done.clone();
+    let walk: Arc<dyn Fn() + Send + std::marker::Sync> = {
+        let (to_capture, at_walk) = (Mutex::new(to_capture), Mutex::new(at_walk));
+        Arc::new(move || {
+            to_capture.lock().unwrap().send(()).unwrap();
+            at_walk
+                .lock()
+                .unwrap()
+                .recv_timeout(STUCK)
+                .expect("the capture runs while the walk starts");
+        })
+    };
+    let captured_before_put = Arc::new(Mutex::new(None));
+    {
+        let (done, seen) = (done.clone(), captured_before_put.clone());
+        *hub.hook.lock().unwrap() = Some((
+            "put",
+            Box::new(move |_| *seen.lock().unwrap() = Some(done.load(Ordering::SeqCst))),
+        ));
+    }
+    // the worker setup reaches the capture's and the preparation's workers
+    let workers = Arc::new(Mutex::new(Vec::new()));
+    let setup: rdy_engine::hub_publish_stream::UploadWorkerSetup = {
+        let workers = workers.clone();
+        Arc::new(move || {
+            let name = std::thread::current().name().unwrap_or("").to_string();
+            workers.lock().unwrap().push(name);
+            Box::new(())
+        })
+    };
+    let probe = Arc::new(UploadProbe::default());
+    let out = with_upload_worker_setup_for_tests(setup, || {
+        with_upload_probe_for_tests(probe.clone(), || {
+            with_canon_walk_hook_for_tests(walk, || {
+                push_rendered(&e, &hub, &renderer, PushRequest::default())
+            })
+        })
+    })
+    .unwrap();
+    let (_, base, pushed, _, _, sent) = taken(&out);
+    assert_eq!((base, pushed), (None, head));
+    assert!(sent.batches >= 2, "{sent:?}");
+    assert_eq!(*captured_before_put.lock().unwrap(), Some(true));
+    let steps = hub.steps();
+    assert_eq!(&steps[..3], ["discovery", "state", "put"]);
+    assert_eq!(steps.last(), Some(&"write"));
+    assert_eq!(
+        *workers.lock().unwrap(),
+        ["rdy-canon-capture", "rdy-upload-prepare"]
+    );
+    assert_eq!(probe.workers_started.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.max_workers.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.live_workers.load(Ordering::SeqCst), 0);
+    // one capture of canon, as before
+    assert_eq!(renderer.inner.scopes.lock().unwrap().len(), 1);
+}
+
+/// D-3PNRK ruling 1: when the capture and the walk both fail, the capture's error is returned;
+/// a capture that succeeds never hides a failed walk; a capture panic is core's own words. Each
+/// joins its worker, and nothing is sent or written.
+#[test]
+fn r5907_capture_failure_precedes_walk_failure() {
+    for case in ["both", "walk only", "panic"] {
+        let e = env(2);
+        let block = land_prose(&e.engine);
+        let fixed = rdy_engine::render_inputs::capture(&e.engine.read()).unwrap();
+        let (removed, at_walk) = mpsc::channel();
+        let engine = &e.engine;
+        let renderer = CanonRenderer {
+            // the removal lands while the walk waits, so the walk's reads fail
+            before: Some(Box::new(move || {
+                remove_in(engine, &block);
+                removed.send(()).unwrap();
+            })),
+            fail: (case == "both").then(capture_error),
+            panic: case == "panic",
+            fixed: Some(fixed),
+            ..CanonRenderer::default()
+        };
+        let walk: Arc<dyn Fn() + Send + std::marker::Sync> = {
+            let at_walk = Mutex::new(at_walk);
+            Arc::new(move || {
+                at_walk.lock().unwrap().recv_timeout(STUCK).unwrap();
+            })
+        };
+        let hub = Hub::new();
+        let probe = Arc::new(UploadProbe::default());
+        let got = with_upload_probe_for_tests(probe.clone(), || {
+            with_canon_walk_hook_for_tests(walk, || {
+                push_rendered(&e, &hub, &renderer, PushRequest::default())
+            })
+        });
+        let x = err(got);
+        match case {
+            "both" => assert_eq!(envelope(&x), envelope(&capture_error())),
+            "walk only" => assert_eq!(x.code, E_REDACTED_STATE, "{x}"),
+            _ => {
+                assert_eq!(
+                    envelope(&x),
+                    (E_INTERNAL, CAPTURE_FAILED_MESSAGE, CAPTURE_FAILED_FIX)
+                );
+                assert!(!format!("{x:?}").contains("SENTINEL"));
+                assert!(!format!("{x:?}").contains(&access()));
+            }
+        }
+        assert_eq!(hub.steps(), ["discovery", "state"], "{case}");
+        assert_eq!(probe.workers_started.load(Ordering::SeqCst), 1, "{case}");
+        assert_eq!(probe.live_workers.load(Ordering::SeqCst), 0, "{case}");
+        assert_eq!(upload_of(&e, "shared"), None, "{case}");
+        assert_eq!(pending_of(&e, "shared"), None, "{case}");
+    }
+}
+
+/// The captured read stays the one the push sends: a landing during the capture is left out,
+/// and a removal during it refuses the push.
+#[test]
+fn r5907_capture_and_epoch_guards_survive() {
+    // a later append is excluded
+    let e = env(2);
+    let head = *e.landings.last().unwrap();
+    let engine = &e.engine;
+    let later = Arc::new(Mutex::new(None));
+    let renderer = CanonRenderer {
+        before: Some(Box::new({
+            let later = later.clone();
+            move || *later.lock().unwrap() = Some(land_in(engine, "later"))
+        })),
+        ..CanonRenderer::default()
+    };
+    let hub = Hub::new();
+    let out = push_rendered(&e, &hub, &renderer, PushRequest::default()).unwrap();
+    let (_, base, pushed, tip, _, _) = taken(&out);
+    assert_eq!((base, pushed, tip), (None, head, head));
+    let sent_keys: BTreeSet<ObjectKey> = hub.sent_keys().into_iter().collect();
+    assert_eq!(sent_keys, closure(&e, head, None));
+    let later = later.lock().unwrap().unwrap();
+    assert!(!sent_keys.contains(&landing(later)));
+    assert_eq!(e.engine.read().canon_head(), Some(later));
+    assert_eq!(hub.state.lock().unwrap().canon, Some(head));
+
+    // a later removal refuses before anything is sent
+    let e = env(2);
+    let block = land_prose(&e.engine);
+    let engine = &e.engine;
+    let renderer = CanonRenderer {
+        before: Some(Box::new(move || remove_in(engine, &block))),
+        ..CanonRenderer::default()
+    };
+    let hub = Hub::new();
+    let x = err(push_rendered(&e, &hub, &renderer, PushRequest::default()));
+    assert_eq!(x.code, E_REDACTED_STATE, "{x}");
+    assert_eq!(hub.steps(), ["discovery", "state"]);
+    assert_eq!(upload_of(&e, "shared"), None);
+}
+
+/// D-3PNRK ruling 1: a new canon push to an empty hub (no repo id, no canon, no view) sends its
+/// first put with no known step; a held repo id, a resumed push and a view keep known. A bad
+/// record refuses before any put, and a racing seed loses the hub's compare.
+#[test]
+fn r5907_seed_skips_known_only_when_empty() {
+    // empty and new: put first, every key travels
+    let e = env(2);
+    let head = *e.landings.last().unwrap();
+    let hub = Hub::new();
+    taken(&push(&e, &hub, None).unwrap());
+    assert_eq!(hub.steps(), ["discovery", "state", "put", "write"]);
+    let sent_keys: BTreeSet<ObjectKey> = hub.sent_keys().into_iter().collect();
+    assert_eq!(sent_keys, closure(&e, head, None));
+
+    // a hub that holds the repo but no canon keeps known
+    let e = env(2);
+    let repo = repo_of(&e);
+    let hub = Hub::new().with_state(|s| s.repo_id = Some(repo));
+    taken(&push(&e, &hub, None).unwrap());
+    assert_eq!(hub.steps(), ["discovery", "state", "known", "put", "write"]);
+
+    // a view keeps known, after canon's seed
+    let e = env(1);
+    write_in(&e.engine, "alpha", "a1");
+    let hub = Hub::new();
+    Sync::new(&e, &hub)
+        .push(PushRequest {
+            views: names(&["alpha"]),
+            ..PushRequest::default()
+        })
+        .unwrap();
+    assert_eq!(
+        hub.steps(),
+        [
+            "discovery",
+            "state",
+            "put",
+            "write",
+            "known",
+            "put",
+            "write"
+        ]
+    );
+    assert_eq!(
+        write_kinds(&hub),
+        [
+            (WriteKind::Landings, None),
+            (WriteKind::View, Some("alpha".into()))
+        ]
+    );
+
+    // a resumed push keeps known, under the same push id
+    let e = env(2);
+    let hub = Hub::new().with_state(|s| s.batch_records = 2);
+    hub.fail_at("put", 2, transport_failure());
+    let x = err(push(&e, &hub, None));
+    assert_eq!(x.code, E_UPSTREAM_TRANSPORT, "{x}");
+    let first = hub.calls()[2].push.clone();
+    assert_eq!(hub.steps()[..3], ["discovery", "state", "put"]);
+    let slot = upload_of(&e, "shared").expect("the upload slot stays");
+    hub.clear();
+    let out = push(&e, &hub, None).unwrap();
+    let (id, _, _, _, resumed, _) = taken(&out);
+    assert!(resumed);
+    assert_eq!(Some(id.clone()), first);
+    assert_eq!(slot.push, id);
+    assert_eq!(hub.steps()[..3], ["discovery", "state", "known"]);
+
+    // a bad record refuses before any put
+    let e = env(2);
+    let landing_record: rdy_model::LandingRecord = e
+        .engine
+        .read()
+        .reader()
+        .get_typed(kinds::LANDING, &e.landings[0])
+        .unwrap();
+    corrupt_in(&e, kinds::CHANGE, &landing_record.changes[0]);
+    let hub = Hub::new();
+    let x = err(push(&e, &hub, None));
+    assert_eq!(x.code, E_IO, "{x}");
+    assert_eq!(hub.steps(), ["discovery", "state"]);
+    assert_eq!(upload_of(&e, "shared"), None);
+
+    // a seed racing another loses the hub's compare: canon is unchanged and nothing retries
+    let e = env(2);
+    let hub = Hub::new();
+    hub.plan_write(1, WritePlan::Refuse(hub_words("E_HUB_BEHIND")));
+    let head = e.engine.read().canon_head();
+    let out = push(&e, &hub, None).unwrap();
+    let WriteEnd::Refused { error, .. } = &out.canon else {
+        panic!("{out:?}")
+    };
+    assert_eq!(error.code, "E_HUB_BEHIND");
+    assert_eq!(hub.steps(), ["discovery", "state", "put", "write"]);
+    assert_eq!(hub.writes().len(), 1);
+    assert_eq!(canon_of(&e, "shared"), None);
+    assert_eq!(e.engine.read().canon_head(), head);
+    assert_eq!(hub.state.lock().unwrap().canon, None);
 }

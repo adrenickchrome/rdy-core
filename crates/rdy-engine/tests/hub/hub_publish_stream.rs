@@ -1225,3 +1225,44 @@ fn hpb11_failure_never_retries_or_changes_push() {
         .collect();
     assert_eq!(all.len(), n);
 }
+
+/// A tag history goes through the same pipeline: its checked export is read by the one
+/// preparation worker while the caller puts, and the batches are the serial upload's bytes. The
+/// pinned clock is made again on the worker through the worker hook.
+#[test]
+fn r5907_tag_history_pipeline_matches_serial_bodies() {
+    use rdy_engine::hub_publish_stream::{
+        UploadProbe, serial_bodies_for_tests, with_upload_probe_for_tests,
+        with_upload_worker_setup_for_tests,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    let _clock = pin_clock(1_000_000);
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, doc, _, _) = project(&dir.path().join("src"));
+    retitle(&mut r, &doc, "Guide two");
+    let v2 = tag(&mut r, "v2.0.0");
+    let limits = BatchLimits {
+        bytes: WIDE.bytes,
+        records: 3,
+    };
+    let mut h = PreparedHistory::capture(&r.read(), v2).unwrap();
+    let serial = serial_bodies_for_tests(&h, &h.keys(), limits, false).unwrap();
+    assert!(serial.len() >= 3, "{}", serial.len());
+    let hub = FakeHub::new(BTreeSet::new());
+    let probe = Arc::new(UploadProbe::default());
+    let setup: rdy_engine::hub_publish_stream::UploadWorkerSetup =
+        Arc::new(|| Box::new(pin_clock(1_000_000)));
+    let (sent, asked) = with_upload_worker_setup_for_tests(setup, || {
+        with_upload_probe_for_tests(probe.clone(), || send(&mut h, &hub, &PushId::new(), limits))
+    });
+    let sent = sent.unwrap();
+    let raw: Vec<Vec<u8>> = serial.into_iter().map(|(raw, _)| raw).collect();
+    assert_eq!(hub.bodies(), raw);
+    assert_eq!(sent.batches as usize, raw.len());
+    assert_eq!(asked, 1 + raw.len());
+    assert_eq!(probe.workers_started.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.max_workers.load(Ordering::SeqCst), 1);
+    assert!(probe.max_bodies.load(Ordering::SeqCst) <= 2);
+    assert_eq!(probe.live_scratch.load(Ordering::SeqCst), 0);
+}
