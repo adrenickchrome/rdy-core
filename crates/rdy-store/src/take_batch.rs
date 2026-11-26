@@ -654,6 +654,40 @@ impl Records for UploadSource<'_> {
     fn held_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
         self.store.snapshot_delta_of(landing)
     }
+
+    /// A holder whose history is incomplete: its records of the attaching kinds that the union
+    /// does not hold, from the index (a partial holder holds its canon state and its own work).
+    fn held_attachments(&mut self) -> Result<Vec<ObjectKey>, StreamError> {
+        let reader = self.store.reader;
+        if reader
+            .partial_history()
+            .map_err(|e| store_error(e, None))?
+            .is_none()
+        {
+            return Ok(Vec::new());
+        }
+        let mut held: Vec<ObjectKey> = Vec::new();
+        let mut short = false;
+        for &kind in stream_source::ATTACHING_KINDS {
+            let walked = reader.for_each_object_of(kind, |hash| {
+                let k = ObjectKey { kind, hash };
+                if self.union.contains_key(&k) {
+                    return Ok(());
+                }
+                if held.try_reserve(1).is_err() {
+                    short = true;
+                    return Err(StoreError::Refused(String::new()));
+                }
+                held.push(k);
+                Ok(())
+            });
+            if short {
+                return Err(StreamError::allocation(None, 0));
+            }
+            walked.map_err(|e| store_error(e, None))?;
+        }
+        Ok(held)
+    }
 }
 
 impl UploadSource<'_> {

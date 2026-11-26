@@ -5357,6 +5357,138 @@ fn r59019_completion_takes_older_plans_as_fetched() {
     engine.close().unwrap();
 }
 
+/// A landing in view `w-plan` whose sealed plan's chain restarts at a whole version: an edit of
+/// a claim that another claim builds on opens one plan item, answered until the delta chain is
+/// [`rdy_model::plan_encoding::MAX_PLAN_DELTA_DEPTH`] long, so the proposal's bound version is
+/// written whole with a `prev`. The seal is a delta on that whole version. Returns the landing.
+fn land_restarted_plan_chain(r: &mut Rdy) -> Hash {
+    let write = |r: &mut Rdy, view: &str, ops: serde_json::Value| {
+        r.write(
+            &writer(),
+            WriteRequest {
+                view: view.into(),
+                ops: serde_json::from_value(ops).unwrap(),
+                justification: None,
+                message: "r59019".into(),
+            },
+        )
+        .unwrap()
+    };
+    let w = write(
+        r,
+        "work",
+        serde_json::json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$d", "body": "A holds 30 days."},
+            {"op": "create", "type": "claim", "id": "$b", "parent": "$d", "body": "B builds on {{$a}}."}
+        ]),
+    );
+    let claim = w.created["$a"].clone();
+    let p = r
+        .propose(&writer(), "work", "work", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap();
+    write(
+        r,
+        "w-plan",
+        serde_json::json!([{"op": "update", "id": claim, "body": "A holds 40 days."}]),
+    );
+    let items: Vec<String> = r
+        .read()
+        .view_plan("w-plan")
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|row| match row {
+            rdy_engine::plan::api::PlanRow::Live(i) => Some(i.id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!items.is_empty(), "the edit opens a plan item");
+    for n in 0..rdy_model::plan_encoding::MAX_PLAN_DELTA_DEPTH {
+        let answers: Vec<rdy_engine::plan::PlanAnswerInput> = items
+            .iter()
+            .map(|i| rdy_engine::plan::PlanAnswerInput {
+                item: i.clone(),
+                act: rdy_model::plan::PlanAct::Confirm,
+                reason: Some(format!("it still holds ({n})")),
+            })
+            .collect();
+        r.answer_plan(&writer(), "w-plan", &answers).unwrap();
+    }
+    let p = r
+        .propose(&writer(), "w-plan", "w-plan", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap().parse().unwrap()
+}
+
+/// A canon state carries the root's sealed plan back to the nearest whole version; that
+/// version's own `prev` is a frontier edge, so the older plan versions arrive with the history,
+/// and only that held whole version links to them. The completion reaches them through the
+/// held sealed plan, as the closure attaches it to the root: the history completes with no
+/// warning, and the clone's canon history equals the source's.
+#[test]
+fn r59019_completion_reaches_plans_behind_a_held_sealed_chain() {
+    let mut e = env(1);
+    let root =
+        rdy_engine::engine::with_writer_result(&e.engine, |r| Ok(land_restarted_plan_chain(r)))
+            .unwrap();
+    e.landings.push(root);
+    // the shape: the state's plans end at a whole version whose `prev` the state does not hold
+    let read = e.engine.read();
+    let state =
+        rdy_engine::canon_state_export::PreparedCanonState::new(read.clone(), root).unwrap();
+    assert!(
+        state.prerequisites().iter().any(|k| k.kind == kinds::PLAN),
+        "the state names an older plan version as a frontier edge: {:?}",
+        state.prerequisites()
+    );
+    let mut source = Vec::new();
+    let full = rdy_engine::stream_export::write_history(
+        &read,
+        StreamPurpose::CanonHistory,
+        root,
+        None,
+        &BTreeSet::new(),
+        &mut source,
+    )
+    .unwrap();
+    drop(read);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    assert!(s.history_pending());
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, s, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    let history = done.history.unwrap();
+    assert!(history.complete, "{history:?}");
+    assert_eq!(history.held, history.total);
+    let engine = Local::open(&dest).unwrap();
+    engine.inspect(Rdy::fsck_full).unwrap();
+    let read = engine.read();
+    let mut clone = Vec::new();
+    let got = rdy_engine::stream_export::write_history(
+        &read,
+        StreamPurpose::CanonHistory,
+        root,
+        None,
+        &BTreeSet::new(),
+        &mut clone,
+    )
+    .unwrap();
+    drop(read);
+    engine.close().unwrap();
+    assert_eq!(
+        got.keys.iter().collect::<BTreeSet<_>>(),
+        full.keys.iter().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(got.digest, full.digest);
+}
+
 /// The older landings a completion makes visible order by canon's ancestry, not by where the
 /// log holds them (the state take wrote the tip first): the completed clone keeps the drift
 /// the complete-history reference has, after a reopen and a reindex too.

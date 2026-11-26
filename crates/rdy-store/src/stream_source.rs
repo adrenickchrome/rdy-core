@@ -96,6 +96,15 @@ pub(crate) trait Records {
     fn held_delta_of(&mut self, _landing: &Hash) -> Result<Option<Hash>, StreamError> {
         Ok(None)
     }
+    /// The keys of the holder's records of the [`ATTACHING_KINDS`] that are not incoming, when
+    /// the holder's history is incomplete (D-4PV25): a canon state's attachments of its root
+    /// (the root's sealed plan, its tags, answers, signatures and carried shapes) are held, and
+    /// their frontier edges lead into the incoming history, so the closure walk attaches them
+    /// as it attaches incoming ones. Empty for a source with no holder, and for a holder with
+    /// its whole history, which holds the closure of every record it holds.
+    fn held_attachments(&mut self) -> Result<Vec<ObjectKey>, StreamError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The forward links of one record, under the features of the stream or store that holds it:
@@ -245,34 +254,36 @@ struct Attachments {
     tags: HashMap<Hash, Vec<ObjectKey>>,
 }
 
-/// Collects the incoming records' attachments: every answer, signature, request and apply they
-/// hold. The root's relay answer is one that targets exactly the root TAG
-/// (`is_relay_answer_of`): an answer to a tag of the same name that targets another tag object
-/// is not attached by name.
-fn attachments(
+/// The kinds whose records a closure walk attaches by what they name, not by a link to them: a
+/// canon history attaches its TAGs this way as well.
+pub(crate) const ATTACHING_KINDS: &[u8] = &[
+    kinds::TAG,
+    kinds::ANSWER,
+    kinds::SIGNATURE,
+    kinds::REDACTION,
+    kinds::REDACTION_APPLY,
+    kinds::PLAN,
+    kinds::DISPUTE,
+    kinds::DISPUTE_RESOLUTION,
+    kinds::CHECK_REQUEST,
+    kinds::REVIEW,
+    kinds::SNAPSHOT_DELTA,
+];
+
+/// Collects the attachments of the records `keys` (the incoming ones, and a partial holder's
+/// [`Records::held_attachments`]): every answer, signature, request and apply they hold. The
+/// root's relay answer is one that targets exactly the root TAG (`is_relay_answer_of`): an
+/// answer to a tag of the same name that targets another tag object is not attached by name.
+fn attachments<'k>(
     source: &mut dyn ObjectSource,
     root_key: ObjectKey,
     root: Option<&Tag>,
-    input_keys: &[ObjectKey],
+    keys: impl Iterator<Item = &'k ObjectKey>,
 ) -> Result<Attachments, StreamError> {
     let mut a = Attachments::default();
     let canon = root_key.kind == kinds::LANDING;
-    let keys = input_keys.iter().filter(|k| {
-        (canon && k.kind == kinds::TAG)
-            || matches!(
-                k.kind,
-                kinds::ANSWER
-                    | kinds::SIGNATURE
-                    | kinds::REDACTION
-                    | kinds::REDACTION_APPLY
-                    | kinds::PLAN
-                    | kinds::DISPUTE
-                    | kinds::DISPUTE_RESOLUTION
-                    | kinds::CHECK_REQUEST
-                    | kinds::REVIEW
-                    | kinds::SNAPSHOT_DELTA
-            )
-    });
+    let keys =
+        keys.filter(|k| (canon || k.kind != kinds::TAG) && ATTACHING_KINDS.contains(&k.kind));
     for k in keys.copied() {
         match k.kind {
             kinds::ANSWER => {
@@ -429,7 +440,9 @@ pub(crate) fn check_snapshot_deltas(
 /// landings and the resolutions of reached disputes, and the check requests of reached changes
 /// and proposal versions and the reviews of reached requests. The first incoming key outside it, in key order, is
 /// `object is outside the tag closure`. A record of the source that is not incoming (a holder's)
-/// may be reached, and is never required to be.
+/// may be reached, and is never required to be. A holder whose history is incomplete attaches
+/// its own records as well ([`Records::held_attachments`]): its canon state's sealed plan and
+/// the root's other attachments are held, and the older history they link to is incoming.
 ///
 /// The walk expands the keys the source indexes in memory (`Records::in_memory`: a take's
 /// union) before keys only a holder holds, and it ends once every incoming key is reached and
@@ -463,7 +476,13 @@ fn walk_closure(
     max_records: u64,
     max_edges: u64,
 ) -> Result<(), StreamError> {
-    let att = attachments(rec.object_source(), root_key, root, input_keys)?;
+    let held = rec.held_attachments()?;
+    let att = attachments(
+        rec.object_source(),
+        root_key,
+        root,
+        input_keys.iter().chain(&held),
+    )?;
     let mut walk = Walk {
         reached: HashSet::new(),
         wanted: HashSet::new(),
