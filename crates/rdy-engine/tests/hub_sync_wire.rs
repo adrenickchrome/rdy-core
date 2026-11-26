@@ -2661,3 +2661,558 @@ fn dump_file(e: &sync_env::Env, name: &str) -> (tempfile::TempDir, std::path::Pa
     e.engine.read().dump(&file).unwrap();
     (dir, file)
 }
+
+// ---------------------------------------------------------------------------------------------
+// r59013: get replies may be zstd
+// ---------------------------------------------------------------------------------------------
+
+/// One zstd frame of `body` with its content size and checksum, as a put makes it, whether or not
+/// it is smaller than the body.
+fn zstd_of(body: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+    enc.include_checksum(true).unwrap();
+    enc.set_pledged_src_size(Some(body.len() as u64)).unwrap();
+    enc.write_all(body).unwrap();
+    enc.finish().unwrap()
+}
+
+/// A reply of `body` with the coding `coding` (none: identity).
+fn coded(status: u16, coding: Option<&str>, body: &[u8]) -> Reply {
+    let mut headers = vec![
+        "content-type: application/octet-stream".to_string(),
+        format!("content-length: {}", body.len()),
+        "connection: close".to_string(),
+    ];
+    if let Some(c) = coding {
+        headers.push(format!("content-encoding: {c}"));
+    }
+    Reply::with_headers(status, &headers, body)
+}
+
+/// The complete error of a reply that does not match the client contract.
+#[track_caller]
+fn assert_protocol(e: &RdyError) {
+    assert_eq!(e.code, E_UPSTREAM_PROTOCOL);
+    assert_eq!(
+        e.message,
+        "the hub reply does not match the client contract"
+    );
+    assert_eq!(e.fix, "check that this rdy version supports the hub's API");
+    assert!(e.issues.is_empty(), "{:?}", e.issues);
+}
+
+/// D-N8PR2, D-SEGWK: a get offers `Accept-Encoding: zstd` and nothing else changes in its
+/// request; an old hub that sends identity is served as before, and a zstd reply counts and
+/// delivers its decoded bytes. A dump makes no offer, and the other steps send no header.
+#[test]
+fn r59013_get_requests_zstd_and_accepts_identity() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let root = key(kinds::LANDING, 1);
+    let get = GetRequest {
+        keys: vec![key(1, 1), key(1, 2)],
+        purpose: StreamPurpose::CanonHistory,
+        root,
+    };
+    let dump = DumpRequest {
+        dump: "dmp_00000000000000000000000001".into(),
+    };
+    let batch: Vec<u8> = (0..70_000u32).map(|i| (i % 7) as u8).collect();
+    let wire = zstd_of(&batch);
+    assert!(wire.len() < batch.len() / 10);
+
+    // an old hub ignores the offer and sends identity: the bytes as they come
+    let mut sink = Vec::new();
+    let (r, old) = served(&mut s, coded(200, None, &batch), || {
+        hub.wire.get(&cx, &get, &mut sink, batch.len() as u64)
+    });
+    assert_eq!(r.unwrap(), batch.len() as u64);
+    assert_eq!(sink, batch);
+    assert_eq!(old.method, "POST");
+    assert_eq!(old.target, "/sync/acme/docs/objects/get");
+    assert_eq!(old.header("accept-encoding"), Some("zstd"));
+    assert_eq!(
+        old.headers
+            .iter()
+            .filter(|(n, _)| n == "accept-encoding")
+            .count(),
+        1
+    );
+    assert_eq!(old.header("content-encoding"), None, "the request's body");
+    // and says identity in so many words
+    let mut sink = Vec::new();
+    let (r, _) = served(&mut s, coded(200, Some("identity"), &batch), || {
+        hub.wire.get(&cx, &get, &mut sink, batch.len() as u64)
+    });
+    assert_eq!(r.unwrap(), batch.len() as u64);
+    assert_eq!(sink, batch);
+
+    // a hub that takes the offer: the decoded bytes, and their count, not the wire's
+    let mut sink = Vec::new();
+    let (r, new) = served(&mut s, coded(200, Some("zstd"), &wire), || {
+        hub.wire.get(&cx, &get, &mut sink, batch.len() as u64)
+    });
+    assert_eq!(r.unwrap(), batch.len() as u64);
+    assert_eq!(sink, batch);
+    assert_ne!(batch.len(), wire.len());
+    assert_eq!(new.head.replace("zstd", ""), old.head.replace("zstd", ""));
+    assert_eq!(new.body, old.body, "the request body is unchanged");
+    // the limit counts decoded bytes: a limit under the batch refuses it
+    let mut sink = Vec::new();
+    let (r, _) = served(&mut s, coded(200, Some("zstd"), &wire), || {
+        hub.wire.get(&cx, &get, &mut sink, batch.len() as u64 - 1)
+    });
+    assert_protocol(&err(r));
+    assert!(sink.len() < batch.len());
+
+    // the same request but for the offer: the fixture's get step sent no other header
+    let names = |r: &Recorded| -> Vec<String> {
+        r.headers
+            .iter()
+            .map(|(n, _)| n.clone())
+            .filter(|n| n != "accept-encoding")
+            .collect()
+    };
+
+    // a dump makes no offer, takes identity, and refuses a coded reply it did not ask for
+    let mut sink = Vec::new();
+    let (r, d) = served(&mut s, binary(&batch), || {
+        hub.wire.dump(&cx, &dump, &mut sink, u64::MAX)
+    });
+    assert_eq!(r.unwrap(), batch.len() as u64);
+    assert_eq!(sink, batch);
+    assert_eq!(d.header("accept-encoding"), None);
+    assert_eq!(
+        names(&d),
+        names(&old),
+        "get and dump differ by the offer alone"
+    );
+    let mut sink = Vec::new();
+    let (r, _) = served(&mut s, coded(200, Some("zstd"), &wire), || {
+        hub.wire.dump(&cx, &dump, &mut sink, u64::MAX)
+    });
+    assert_protocol(&err(r));
+    assert!(sink.is_empty());
+
+    // no other step offers a coding
+    let (_, k) = served(
+        &mut s,
+        Reply::json(200, r#"{"keys":[],"next":null}"#),
+        || {
+            hub.wire.known_pull(
+                &cx,
+                &KnownPull {
+                    after: None,
+                    base: None,
+                    purpose: StreamPurpose::CanonHistory,
+                    root,
+                },
+            )
+        },
+    );
+    assert_eq!(k.header("accept-encoding"), None);
+    let (_, p) = served(
+        &mut s,
+        Reply::json(200, r#"{"records":1,"bytes":1}"#),
+        || hub.wire.put(&cx, PUSH, &mut &b"x"[..], 1),
+    );
+    assert_eq!(p.header("accept-encoding"), None);
+    let (_, o) = served(&mut s, Reply::json(200, "{}"), || {
+        hub.wire.outcome(&cx, PUSH)
+    });
+    assert_eq!(o.header("accept-encoding"), None);
+    assert_eq!(s.finish(), 0);
+}
+
+/// A body of `n` bytes that does not compress.
+fn noise(n: usize) -> Vec<u8> {
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect()
+}
+
+/// The get's errors when its reply is a frame outside the contract: each is the old protocol
+/// error, complete, with no bytes counted as a batch.
+#[test]
+fn r59013_wire_refusals_are_the_protocol_error() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let get = GetRequest {
+        keys: vec![key(1, 1)],
+        purpose: StreamPurpose::CanonHistory,
+        root: key(kinds::LANDING, 1),
+    };
+    let plain = noise(40_000);
+    let good = zstd_of(&plain);
+    let mut sum = good.clone();
+    let last = sum.len() - 1;
+    sum[last] ^= 1;
+    let mut tail = good.clone();
+    tail.extend_from_slice(b"tail");
+    let big = zstd_of(&vec![0u8; 4 << 20]);
+    let cases: Vec<(&str, Reply)> = vec![
+        ("unknown coding", coded(200, Some("gzip"), &good)),
+        ("a list", coded(200, Some("zstd, identity"), &good)),
+        (
+            "truncated",
+            coded(200, Some("zstd"), &good[..good.len() - 9]),
+        ),
+        ("checksum", coded(200, Some("zstd"), &sum)),
+        ("trailing", coded(200, Some("zstd"), &tail)),
+        ("expansion", coded(200, Some("zstd"), &big)),
+        ("a coded refusal", coded(400, Some("zstd"), &good)),
+    ];
+    for (case, reply) in cases {
+        let mut sink = Vec::new();
+        let (r, _) = served(&mut s, reply, || {
+            hub.wire.get(&cx, &get, &mut sink, 1 << 20)
+        });
+        assert_protocol(&err(r));
+        assert!(sink.len() <= 1 << 20, "{case}");
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// A get over the wire that serves each batch as the hub's own export, coded as zstd through the
+/// real HTTPS wire, and everything else from the fake hub.
+struct ZstdRelay<'a> {
+    fake: &'a sync_env::Hub,
+    http: Hub,
+    server: std::sync::Mutex<Server>,
+}
+
+impl SyncWire for ZstdRelay<'_> {
+    fn discovery(
+        &self,
+        cx: &UploadContext,
+        remote: &str,
+    ) -> Result<rdy_engine::hub_publish_wire::Discovery, RdyError> {
+        self.fake.discovery(cx, remote)
+    }
+
+    fn state(
+        &self,
+        cx: &UploadContext,
+        request: &SyncStateRequest,
+    ) -> Result<rdy_engine::hub_sync_wire::SyncState, RdyError> {
+        self.fake.state(cx, request)
+    }
+
+    fn known(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        keys: &[ObjectKey],
+    ) -> Result<Vec<ObjectKey>, RdyError> {
+        self.fake.known(cx, push, keys)
+    }
+
+    fn put(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut dyn std::io::Read,
+        len: u64,
+    ) -> Result<ObjectPut, RdyError> {
+        self.fake.put(cx, push, body, len)
+    }
+
+    fn known_pull(
+        &self,
+        cx: &UploadContext,
+        request: &KnownPull,
+    ) -> Result<rdy_engine::hub_sync_wire::KnownPage, RdyError> {
+        self.fake.known_pull(cx, request)
+    }
+
+    fn get(
+        &self,
+        cx: &UploadContext,
+        request: &GetRequest,
+        sink: &mut dyn std::io::Write,
+        limit: u64,
+    ) -> Result<u64, RdyError> {
+        let mut plain = Vec::new();
+        self.fake.get(cx, request, &mut plain, u64::MAX)?;
+        {
+            let mut s = self.server.lock().unwrap();
+            s.reply(coded(200, Some("zstd"), &zstd_of(&plain)));
+            s.accept_n(1);
+        }
+        self.http.wire.get(&self.http.cx(), request, sink, limit)
+    }
+
+    fn write(
+        &self,
+        cx: &UploadContext,
+        request: &SyncWrite,
+    ) -> Result<rdy_engine::hub_sync_wire::WriteReply, WriteFailure> {
+        self.fake.write(cx, request)
+    }
+
+    fn outcome(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+    ) -> Result<rdy_engine::hub_sync_wire::OutcomeReply, RdyError> {
+        self.fake.outcome(cx, push)
+    }
+
+    fn settings(
+        &self,
+        cx: &UploadContext,
+    ) -> Result<rdy_engine::hub_sync_wire::SettingsBundle, RdyError> {
+        self.fake.settings(cx)
+    }
+
+    fn dump(
+        &self,
+        cx: &UploadContext,
+        request: &DumpRequest,
+        sink: &mut dyn std::io::Write,
+        limit: u64,
+    ) -> Result<u64, RdyError> {
+        self.fake.dump(cx, request, sink, limit)
+    }
+}
+
+/// A pull from the fake hub's history whose gets come as zstd through the wire.
+fn pull_through_zstd(
+    e: &sync_env::Env,
+    fake: &sync_env::Hub,
+) -> (Result<rdy_engine::hub_sync::PullOutcome, RdyError>, usize) {
+    let server = Server::start();
+    let relay = ZstdRelay {
+        fake,
+        http: Hub::new(&server, &[], &[]),
+        server: std::sync::Mutex::new(server),
+    };
+    let sync = sync_env::Sync::new(e, fake);
+    let service = rdy_engine::hub_sync::SyncService::new(
+        &e.project,
+        &e.user_file,
+        &sync.api,
+        &sync.clock,
+        &relay,
+        &sync.renderer,
+    );
+    let r = service.pull(&e.engine, &sync_env::founder(), PullRequest::default());
+    let server = relay.server.into_inner().unwrap();
+    let seen = server.requests();
+    assert!(
+        seen.iter()
+            .all(|q| q.header("accept-encoding") == Some("zstd")),
+        "every get offers zstd"
+    );
+    assert_eq!(server.finish(), 0);
+    (r, seen.len())
+}
+
+/// D-SEGWK: a batch that arrives as zstd is the batch: the same checks run on the decoded bytes,
+/// so a good history lands as it does with identity replies, and a wrong object hash, an invalid
+/// block or a bad trailer inside a correct frame fails with the error the same bytes give
+/// without zstd, at the same position, with nothing placed.
+#[test]
+fn r59013_bad_record_inside_good_zstd_still_fails() {
+    let e = fake_env(2);
+    let (_dir, hub_store) = sync_env::copy_project(&e);
+    for i in 0..6 {
+        sync_env::write_in(&hub_store, "drafts", &format!("draft-{i}"));
+    }
+    let later = sync_env::land_in(&hub_store, "later");
+    let hub_read = hub_store.read();
+    let mut whole = Vec::new();
+    rdy_engine::stream_export::write_history(
+        &hub_read,
+        StreamPurpose::CanonHistory,
+        later,
+        None,
+        &BTreeSet::new(),
+        &mut whole,
+    )
+    .unwrap();
+
+    // each bad batch: the error is the identity error, whichever the coding
+    let flip = |at: usize| {
+        let mut b = whole.clone();
+        b[at] ^= 0x55;
+        b
+    };
+    let mut bad: Vec<(&str, Vec<u8>)> = vec![
+        ("a flipped byte early", flip(whole.len() / 5)),
+        ("a flipped byte late", flip(whole.len() - whole.len() / 5)),
+        ("a bad trailer", whole[..whole.len() - 3].to_vec()),
+        ("a byte past the trailer", {
+            let mut b = whole.clone();
+            b.push(0);
+            b
+        }),
+        ("not a batch", b"not a stream of records".to_vec()),
+    ];
+    // a batch of another purpose, whose records are right
+    let view = hub_read.view_head("drafts").unwrap().head;
+    let mut other = Vec::new();
+    rdy_engine::stream_export::write_history(
+        &hub_read,
+        StreamPurpose::ViewHistory,
+        view,
+        None,
+        &BTreeSet::new(),
+        &mut other,
+    )
+    .unwrap();
+    bad.push(("another purpose", other));
+    let mut codes = BTreeSet::new();
+    for (case, bytes) in bad {
+        let plain = {
+            let fake = sync_env::Hub::new();
+            fake.serve(hub_store.read());
+            fake.state.lock().unwrap().canon = Some(later);
+            *fake.get_bytes.lock().unwrap() = Some(bytes.clone());
+            let x = err(sync_env::Sync::new(&e, &fake).pull(PullRequest::default()));
+            assert_eq!(sync_env::canon_of(&e, "shared"), None, "{case}");
+            x
+        };
+        let zstd = {
+            let fake = sync_env::Hub::new();
+            fake.serve(hub_store.read());
+            fake.state.lock().unwrap().canon = Some(later);
+            *fake.get_bytes.lock().unwrap() = Some(bytes);
+            let (r, gets) = pull_through_zstd(&e, &fake);
+            assert_eq!(gets, 1, "{case}: the first batch ends the pull");
+            assert_eq!(sync_env::canon_of(&e, "shared"), None, "{case}");
+            assert!(
+                !e.engine
+                    .read()
+                    .reader()
+                    .has_kind(kinds::LANDING, &later)
+                    .unwrap(),
+                "{case}"
+            );
+            err(r)
+        };
+        assert_eq!(
+            (&zstd.code, &zstd.message, &zstd.fix),
+            (&plain.code, &plain.message, &plain.fix),
+            "{case}"
+        );
+        codes.insert(plain.code);
+    }
+    // the checker reached its own errors, not only the wire's
+    assert!(codes.contains(E_BAD_RECORD), "{codes:?}");
+
+    // the good history, as zstd, into the same engine: it lands, as an identity pull of it does
+    let fake = sync_env::Hub::new();
+    fake.serve(hub_store.read());
+    fake.state.lock().unwrap().canon = Some(later);
+    let (r, gets) = pull_through_zstd(&e, &fake);
+    r.unwrap();
+    assert!(gets >= 1);
+    assert_eq!(
+        sync_env::canon_of(&e, "shared").unwrap().fetched,
+        Some(later)
+    );
+    let want = fake.history(StreamPurpose::CanonHistory, later, None);
+    let got = e.engine.read();
+    for k in &want {
+        assert!(got.reader().has_kind(k.kind, &k.hash).unwrap(), "{k:?}");
+    }
+    drop(got);
+}
+
+/// The guards of a streamed get that a coding does not touch: a refusal is identity JSON that the
+/// token scan still reads, the wrong status and a redirect keep their errors, and a lost
+/// connection stays a transport failure. The fixtures' faults are deterministic replies, never a
+/// clock.
+#[test]
+fn r59013_error_token_and_deadline_guards_remain() {
+    let f = fixture_v2();
+    let st = f["steps"].as_array().unwrap();
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let get = GetRequest {
+        keys: vec![key(1, 1)],
+        purpose: StreamPurpose::CanonHistory,
+        root: key(kinds::LANDING, 1),
+    };
+    let call = |s: &mut Server, reply: Reply| {
+        let mut sink = Vec::new();
+        let (r, _) = served(s, reply, || hub.wire.get(&cx, &get, &mut sink, 1 << 20));
+        (r, sink)
+    };
+
+    // the hub's refusal, identity JSON, is read as ever
+    let (r, sink) = call(&mut s, reply_of(&st[17]));
+    matches_refusal(&err(r), &st[17]);
+    assert!(sink.is_empty());
+    // with the token (or a token prefix) in a member the client ignores, the body is discarded
+    let body = st[17]["reply"]["body"].clone();
+    for extra in [
+        json!({"note": ACCESS}),
+        json!({"note": {"deep": ["rdyh_r_x"]}}),
+        json!({"rdyh_a_key": 1}),
+    ] {
+        let mut v = body.clone();
+        for (k, m) in extra.as_object().unwrap() {
+            v[k] = m.clone();
+        }
+        let status = st[17]["reply"]["status"].as_u64().unwrap() as u16;
+        let (r, sink) = call(&mut s, Reply::json(status, &v.to_string()));
+        assert_protocol(&err(r));
+        assert!(sink.is_empty());
+    }
+    // a coded refusal is not read, and does not echo its bytes
+    let coded_refusal = zstd_of(body.to_string().as_bytes());
+    let status = st[17]["reply"]["status"].as_u64().unwrap() as u16;
+    let (r, _) = call(&mut s, coded(status, Some("zstd"), &coded_refusal));
+    assert_protocol(&err(r));
+    // the wrong success status, and a redirect
+    for status in [201u16, 202, 204] {
+        let (r, sink) = call(&mut s, coded(status, None, b"batch"));
+        assert_eq!(err(r).code, E_UPSTREAM_PROTOCOL, "{status}");
+        assert!(sink.is_empty());
+    }
+    let (r, sink) = call(
+        &mut s,
+        Reply::with_headers(
+            302,
+            &[
+                "location: https://elsewhere.invalid/".to_string(),
+                "content-length: 0".to_string(),
+                "connection: close".to_string(),
+            ],
+            b"",
+        ),
+    );
+    assert_protocol(&err(r));
+    assert!(sink.is_empty());
+    // a connection that dies before the reply, and one that dies in it
+    let (r, _) = call(&mut s, Reply::Close);
+    let e = err(r);
+    assert_eq!(e.code, rdy_engine::upstream_transport().code);
+    let good = zstd_of(&noise(10_000));
+    let (r, _) = call(
+        &mut s,
+        Reply::with_headers(
+            200,
+            &[
+                "content-encoding: zstd".to_string(),
+                format!("content-length: {}", good.len() + 50),
+                "connection: close".to_string(),
+            ],
+            &good,
+        ),
+    );
+    assert_eq!(err(r).code, rdy_engine::upstream_transport().code);
+    assert_eq!(s.finish(), 0);
+}

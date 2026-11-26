@@ -27,7 +27,7 @@
 //!   `E_HUB_NOT_FOUND`.
 use crate::error::{E_BAD_INPUT, E_UPSTREAM_UNCERTAIN, RdyError, actor_unbound, upstream_protocol};
 use crate::formats::formats;
-use crate::hub_http::HttpHubTransport;
+use crate::hub_http::{HttpHubTransport, ReplyEncoding};
 use crate::hub_publish_wire::{
     Discovery, Effect, HttpPublishWire, KNOWN_REPLY_BYTES, KNOWN_REQUEST_BYTES, KeyWire,
     MAX_JSON_VALUES, MAX_KNOWN_KEYS, ObjectPut, PostError, PublishState, PublishWire, REPLY_BYTES,
@@ -699,7 +699,9 @@ pub trait SyncWire: Send + Sync {
     /// `POST <base>/known`, pull form: one page.
     fn known_pull(&self, cx: &UploadContext, request: &KnownPull) -> Result<KnownPage, RdyError>;
     /// `POST <base>/objects/get`: the batch streamed to `sink`, at most `limit` bytes. Returns
-    /// its bytes. The reply streams in pieces of at most
+    /// its bytes. The request offers zstd (`Accept-Encoding: zstd`); a reply that takes the offer
+    /// is decoded as it arrives, and `limit` and the returned count are decoded bytes. The reply
+    /// streams in pieces of at most
     /// [`UPLOAD_BUFFER_BYTES`](crate::hub_http::UPLOAD_BUFFER_BYTES), each written while the
     /// bytes so far are within `limit`; the first piece past it fails the get unwritten.
     fn get(
@@ -867,8 +869,15 @@ impl SyncWire for HttpSyncWire {
         }
         let json = encode(request, KNOWN_REQUEST_BYTES)?;
         let url = route(cx, &["objects", "get"], &[])?;
-        self.inner
-            .post_streamed(cx, &url, SYNC_MEDIA_TYPE, json, sink, limit)
+        self.inner.post_streamed(
+            cx,
+            &url,
+            SYNC_MEDIA_TYPE,
+            json,
+            sink,
+            limit,
+            ReplyEncoding::ZstdOrIdentity,
+        )
     }
 
     fn write(
@@ -923,7 +932,14 @@ impl SyncWire for HttpSyncWire {
         crate::sync_dump::check_dump_id(&request.dump)?;
         let json = encode(request, REPLY_BYTES)?;
         let url = route(cx, &["dump"], &[])?;
-        self.inner
-            .post_streamed(cx, &url, SYNC_MEDIA_TYPE, json, sink, limit)
+        self.inner.post_streamed(
+            cx,
+            &url,
+            SYNC_MEDIA_TYPE,
+            json,
+            sink,
+            limit,
+            ReplyEncoding::Identity,
+        )
     }
 }
