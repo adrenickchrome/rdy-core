@@ -1928,7 +1928,12 @@ mod tests {
             ),
             (
                 "build".into(),
-                report::WORKSPACE_TEST_ARGS.map(String::from).to_vec(),
+                // a nightly-feature build of this test builds the nightly tier too
+                report::WORKSPACE_TEST_ARGS
+                    .into_iter()
+                    .chain(tier_feature_args())
+                    .map(String::from)
+                    .collect(),
             ),
         ];
         assert_eq!(seen, want);
