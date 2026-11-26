@@ -172,6 +172,20 @@ pub struct DaemonConfig {
     /// How long a daemon whose project is gone waits for the project's start lock before its
     /// socket goes (`serve.start_timeout`, D-122E5); `new` takes the default.
     pub start_timeout: Duration,
+    /// Test hook: holds a daemon that a client of another version replaces between its decision
+    /// to leave and its `exiting` reply.
+    #[doc(hidden)]
+    pub exiting_pause: Option<Arc<ExitingPause>>,
+}
+
+/// Test hook ([`DaemonConfig::exiting_pause`]): a daemon that a client of another version
+/// replaces notifies `reached` once it has decided to leave, then waits for `release` before it
+/// answers that client and stops. A test sends other hellos in that window.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct ExitingPause {
+    pub reached: Notify,
+    pub release: Notify,
 }
 
 impl DaemonConfig {
@@ -183,6 +197,7 @@ impl DaemonConfig {
             idle_timeout: None,
             expected_account: None,
             start_timeout: crate::client::DEFAULT_START_TIMEOUT,
+            exiting_pause: None,
         }
     }
 }
@@ -739,6 +754,7 @@ impl Daemon {
             root: self.config.run.root(),
             check: Arc::clone(&self.check),
             keepers: self.keepers.clone(),
+            exiting_pause: self.config.exiting_pause.clone(),
         });
         let idle = self.config.idle_timeout;
         let mut stop = self.info.stop.subscribe();
@@ -1081,6 +1097,7 @@ struct Conn {
     root: PathBuf,
     check: Arc<ProjectCheck>,
     keepers: Keepers,
+    exiting_pause: Option<Arc<ExitingPause>>,
 }
 
 /// The project check (final ruling, D-A6ZZA), shared by every socket connection, the idle tick
@@ -1351,6 +1368,47 @@ impl Conn {
         check
     }
 
+    /// The version step of a client of another version, under the lock that admits sessions
+    /// ([`Self::admit`]). With no session open, or the daemon leaving already, the daemon leaves:
+    /// it is marked leaving and its run files and reason go, before the `exiting` reply. The client
+    /// spawns a successor as soon as it reads that reply, and the successor's run files must not
+    /// be removed by `run`'s cleanup afterwards; a stop that comes once the client has read the
+    /// reply finds the reason set. From the mark on, every hello hears `exiting`: on Windows the
+    /// pipe's name stays until the stop, and a session opened there would end with this daemon.
+    /// False when a session is open: the client is refused.
+    fn leave_for_version(&self) -> bool {
+        let mut leave = false;
+        self.keepers.update(|k| {
+            if k.leaving.load(Ordering::SeqCst) || self.info.sessions.is_empty() {
+                k.leaving.store(true, Ordering::SeqCst);
+                self.files.remove(&self.run);
+                let _ = self.reason.set(ExitReason::VersionReplaced);
+                leave = true;
+            }
+        });
+        leave
+    }
+
+    /// Opens the session of a client past its hello, under the keepers' lock, unless the daemon
+    /// is leaving to be replaced: then `None`, and the client hears `exiting`. So a client of
+    /// another version either finds this session open and is refused, or makes the daemon leave
+    /// before this client is admitted.
+    fn admit(&self, hello: &crate::hello::Hello, peer: sys::Account) -> Option<SessionInfo> {
+        let mut session = None;
+        self.keepers.update(|k| {
+            if !k.leaving.load(Ordering::SeqCst) {
+                session = Some(self.info.sessions.insert(
+                    hello.proto,
+                    hello.version.clone(),
+                    hello.build.clone(),
+                    hello.cwd.clone(),
+                    peer,
+                ));
+            }
+        });
+        session
+    }
+
     async fn serve(self: Arc<Self>, mut stream: sys::Stream, mut end: ConnEnd) {
         // (a) the peer check
         let peer = match sys::check_client(&stream, self.expected_account) {
@@ -1408,15 +1466,14 @@ impl Conn {
         }
         // (d) the version handshake
         if hello.version != self.version {
-            if self.info.sessions.is_empty() {
+            if self.leave_for_version() {
                 let reply = HelloReply::Exiting {
                     version: self.version.clone(),
                 };
-                // before the reply: the client spawns a successor as soon as it reads it, and the
-                // successor's run files must not be removed by `run`'s cleanup afterwards; and the
-                // reason, so a stop that comes once the client has read the reply finds it set
-                self.files.remove(&self.run);
-                let _ = self.reason.set(ExitReason::VersionReplaced);
+                if let Some(pause) = &self.exiting_pause {
+                    pause.reached.notify_one();
+                    pause.release.notified().await;
+                }
                 close_after_reply(stream, &reply).await;
                 log(&format!(
                     "a client of version {} arrived with no sessions; exiting to be replaced",
@@ -1452,13 +1509,13 @@ impl Conn {
         if !self.wait_ready(&mut stream).await {
             return;
         }
-        let session = self.info.sessions.insert(
-            hello.proto,
-            hello.version.clone(),
-            hello.build.clone(),
-            hello.cwd.clone(),
-            peer,
-        );
+        let Some(session) = self.admit(&hello, peer) else {
+            let reply = HelloReply::Exiting {
+                version: self.version.clone(),
+            };
+            close_after_reply(stream, &reply).await;
+            return;
+        };
         end.session = Some(session.clone());
         // the host's start of the session (a pack reload) before `ready`; a stop closes the
         // connection, and one `starting` reply goes out if it takes a while

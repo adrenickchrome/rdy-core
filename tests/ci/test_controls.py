@@ -1850,7 +1850,7 @@ class CiSplit(unittest.TestCase):
 
 
 NIGHTLY_JOBS = {
-    'own': (120, None),
+    'own': (180, None),
     'own-windows': (240, ['self-hosted', 'rdy-gate', 'windows']),
     'hosted-macos': (180, 'macos-26'),
     'hosted-windows': (300, 'windows-2025'),
@@ -1868,7 +1868,7 @@ class NightlyPolicy(unittest.TestCase):
         self.text = (WORKFLOWS / 'nightly.yml').read_text()
 
     def test_triggers_and_concurrency(self):
-        self.assertEqual(self.on, {'schedule': [{'cron': '0 3 * * *'}], 'workflow_dispatch': None})
+        self.assertEqual(self.on, {'schedule': [{'cron': '17 3 * * *'}], 'workflow_dispatch': None})
         self.assertEqual(self.doc['concurrency'], {'group': 'rdy-core-nightly', 'cancel-in-progress': True})
         self.assertEqual(self.doc['permissions'], {})
 
@@ -1880,8 +1880,10 @@ class NightlyPolicy(unittest.TestCase):
             if runs_on is not None:
                 self.assertEqual(jobs[name]['runs-on'], runs_on, name)
         own = jobs['own']
-        self.assertEqual(own['runs-on'], ['self-hosted', 'rdy-gate', '${{ matrix.os }}'])
-        self.assertEqual(own['strategy'], {'fail-fast': False, 'matrix': {'os': ['linux', 'macos']}})
+        # Linux on core's own machine (rdy-core-gate), as gate.yml; the build servers are rdyhub's.
+        self.assertEqual(own['runs-on'], ['self-hosted', '${{ matrix.group }}', '${{ matrix.os }}'])
+        self.assertEqual(own['strategy'], {'fail-fast': False, 'matrix': {'include': [
+            {'os': 'linux', 'group': 'rdy-core-gate'}, {'os': 'macos', 'group': 'rdy-gate'}]}})
 
     def test_only_the_report_job_writes_and_no_job_holds_a_secret(self):
         for name, job in self.doc['jobs'].items():

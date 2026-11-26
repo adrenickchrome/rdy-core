@@ -4,7 +4,7 @@
 use rdy_qa::gate_steps::{
     AreaEnv, BINARY_JOBS, ENV_PROBE_BINARY, ENV_PROBE_TEST, ENV_PROBE_VAR, SERIAL_AREAS, cargo,
     env_probe_args, launch_area, own_profile_args, parse_artifacts, parse_env_probe, probe_envs_of,
-    run_areas, run_bounded,
+    run_areas, run_bounded, tier_feature_args,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -83,10 +83,12 @@ fn differences(direct: &AreaEnv, by_cargo: &AreaEnv) -> Vec<String> {
 /// rebuilds once, with its dependents.
 #[test]
 fn direct_env_matches_cargo() {
-    // the env probe's binary, as the gate's discovery names it, in this test's own profile
+    // the env probe's binary, as the gate's discovery names it, in this test's own profile and
+    // tier: the same units as the gate's build, so this call builds nothing new
     let profile = own_profile_args();
     let mut args: Vec<&str> = vec!["test", "--workspace"];
     args.extend(profile.iter().map(String::as_str));
+    args.extend(tier_feature_args());
     args.extend([
         "--test",
         ENV_PROBE_BINARY,

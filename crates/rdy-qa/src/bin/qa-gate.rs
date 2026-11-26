@@ -2,10 +2,10 @@
 use clap::Parser;
 use rdy_qa::gate_steps::{
     Allowances, AreaEnv, BINARY_JOBS, BUILD_STEP, CEILING_FACTOR, ChildOutput, Clock, GateStep,
-    HEAVY_JOBS, SERIAL_AREAS, Stages, TestBinary, TestExe, UNBOUNDED, budget_row, build_steps,
-    cargo, discover_command, fail_tail, fmt_step, gate_exit, is_heavy, launch_area, list_guarded,
-    not_started, on_real_disk, over_target_row, parse_test_binaries, probe_envs, run_areas,
-    run_areas_capped, run_bounded, run_stage, stale_units,
+    SERIAL_AREAS, Stages, TestBinary, TestExe, UNBOUNDED, budget_row, build_steps, cargo,
+    discover_command, fail_tail, fmt_step, gate_exit, heavy_jobs, is_heavy, launch_area,
+    list_guarded, not_started, on_real_disk, over_target_row, parse_test_binaries, probe_envs,
+    run_areas, run_areas_capped, run_bounded, run_stage, stale_units,
 };
 use rdy_qa::perf::{self, Baseline, Measure};
 use rdy_qa::report::{self, Area, Gate, Report, StageRecord, Timing};
@@ -970,9 +970,10 @@ fn main() {
     jobs.sort_by(|a, b| allowance(&job_key(b)).total_cmp(&allowance(&job_key(a))));
     let alone = |j: &Job| matches!(j, Job::Area(a) if SERIAL_AREAS.contains(a));
     let t = Instant::now();
+    let heavy_cap = heavy_jobs(tmp_root.is_some());
     if !jobs.is_empty() {
         eprintln!(
-            "==> test pool: {} binaries, {BINARY_JOBS} at a time",
+            "==> test pool: {} binaries, {BINARY_JOBS} at a time, {heavy_cap} of them rdy-qa areas",
             jobs.len()
         );
     }
@@ -981,7 +982,7 @@ fn main() {
         Job::Area(a) => is_heavy("rdy-qa", "test", a),
         Job::Lib => false,
     };
-    let ran = run_areas_capped(&jobs, alone, BINARY_JOBS, heavy, HEAVY_JOBS, |j| match j {
+    let ran = run_areas_capped(&jobs, alone, BINARY_JOBS, heavy, heavy_cap, |j| match j {
         Job::Workspace(b) => launch.run(b, &format!("workspace {}", b.key())).0,
         Job::Area(binary) => {
             let id = area_step(binary).id;

@@ -1178,6 +1178,14 @@ mod tests {
         }
     }
 
+    /// The `127.0.0.1` bind that gave `port` from `ports`: on that port, or `127.0.0.1:0` when
+    /// every candidate refused and the operating system assigned it (D-5GFFX). A Windows
+    /// excluded port range or another process can refuse the whole window of a test root.
+    fn v4_bind(ports: &[u16], port: u16) -> SocketAddr {
+        let asked = if ports.contains(&port) { port } else { 0 };
+        SocketAddr::from((Ipv4Addr::LOCALHOST, asked))
+    }
+
     fn bound(steps: &[seam::Step]) -> Vec<SocketAddr> {
         steps
             .iter()
@@ -1219,7 +1227,7 @@ mod tests {
         let steps = seam::take(&root);
         configured_before_bind(&steps);
         let port = o.port;
-        let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let v4 = v4_bind(&addr::candidates(None, &root), port);
         let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
         let lan = SocketAddr::from((lan_ip, port));
         let binds = bound(&steps);
@@ -1281,7 +1289,7 @@ mod tests {
         );
         let binds = bound(&steps);
         for at in [
-            SocketAddr::from((Ipv4Addr::LOCALHOST, only)),
+            v4_bind(&addr::profile_candidates(&root, "guide"), only),
             SocketAddr::from((Ipv6Addr::LOCALHOST, only)),
             SocketAddr::from((lan_ip, only)),
         ] {

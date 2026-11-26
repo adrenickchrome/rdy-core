@@ -4132,6 +4132,7 @@ impl Rdy {
             Ok(out) => out,
             Err(e) => return Err(approver_stale(e, &view)),
         };
+        landing_at(LandingPoint::Appended);
         // 5. publish canon incrementally: the previous canon with the landed ops (snap1). A
         // landing that applies removal requests seals its batch with the moves computed against
         // the masked preview, then publishes a state read again in the new epoch; its failures
@@ -4149,6 +4150,7 @@ impl Rdy {
             let _ = self.publish(Delta::Full);
             return Err(e);
         }
+        landing_at(LandingPoint::Sealed);
         let assurance = self
             .store
             .landing(&out.landing)?
@@ -4546,4 +4548,43 @@ fn moves_reach_edges(
     Ok(new
         .symmetric_difference(&old)
         .any(|end| reach.contains(end)))
+}
+
+/// A point of a landing (`Rdy::commit_landing`) where a test hook runs
+/// ([`on_landing_at_for_tests`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandingPoint {
+    /// The landing's frames are in the log, in the open held batch, before the seal that adds
+    /// the batch's TRANSITION record, writes its marker and syncs it. A crash here must leave
+    /// no trace of the landing.
+    Appended,
+    /// The batch is sealed and the new state published, before the landing is answered. A
+    /// crash here must leave the whole landing.
+    Sealed,
+}
+
+type LandingHook = Box<dyn Fn(LandingPoint) + Send + Sync>;
+
+/// The process's landing hook ([`on_landing_at_for_tests`]). Process-wide, not per thread: a
+/// daemon lands on its writer thread, not on the thread that installs the hook.
+static LANDING_HOOK: std::sync::OnceLock<LandingHook> = std::sync::OnceLock::new();
+
+/// Test hook: `hook` runs at each [`LandingPoint`] of every landing in this process, on the
+/// landing's thread, for the life of the process (a second install panics). A crash test's
+/// child daemon stops a landing there and is killed, so the kill falls at a known point of the
+/// landing. No CLI, MCP, config or environment path reaches it.
+#[doc(hidden)]
+pub fn on_landing_at_for_tests(hook: impl Fn(LandingPoint) + Send + Sync + 'static) {
+    assert!(
+        LANDING_HOOK.set(Box::new(hook)).is_ok(),
+        "a landing hook is already installed"
+    );
+}
+
+/// Calls the process's landing hook, if any, at `point`.
+fn landing_at(point: LandingPoint) {
+    if let Some(hook) = LANDING_HOOK.get() {
+        hook(point);
+    }
 }

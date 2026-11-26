@@ -7362,6 +7362,35 @@ fn tier_vectors(
     facts
 }
 
+/// What [`run_workload`] keeps under its temp root between tiers: the typical project and the
+/// lagging-index snapshot, which later ops reopen. The deep projects stay until the log ops
+/// close them; every other entry is one tier's own fixture.
+const TYPICAL_KEEP: [&str; 2] = ["p", "index.snapshot"];
+
+/// What [`run_large_tier`] keeps under its temp root between tiers: the 50k project.
+const LARGE_KEEP: [&str; 1] = ["p50"];
+
+/// Removes every entry of the workload's temp root `root` but those named in `keep`. Each tier
+/// leaves its fixtures (project copies, clones, loads, dumps, built sites, projects of its own)
+/// under the root by names no other tier reads, so they are removed when the tier returns,
+/// outside every timer: the run's peak disk use is then the kept projects plus the largest
+/// single tier, not the sum of all tiers (the 15 GB tmpfs of the nightly bench filled up).
+fn sweep_scratch(root: &std::path::Path, keep: &[&str]) {
+    for e in std::fs::read_dir(root).expect("read the temp root") {
+        let e = e.expect("entry");
+        if keep.iter().any(|k| e.file_name() == *k) {
+            continue;
+        }
+        let p = e.path();
+        if e.file_type().expect("file type").is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        }
+        .unwrap_or_else(|err| panic!("remove {}: {err}", p.display()));
+    }
+}
+
 pub fn run_workload() -> Vec<Measure> {
     rdy_model::seed_ids_for_tests(0x7064_6566);
     let dir = tempfile::tempdir().expect("tempdir");
@@ -7477,6 +7506,9 @@ pub fn run_workload() -> Vec<Measure> {
             took
         }));
     }
+    // no later op reads the deep projects: close them, and the next sweep removes them
+    drop(deep);
+    drop(deep_block_project);
     // the flat landings moved canon on, and `va` (pinned) stayed on the 10k canon
     assert_ne!(
         r.read().effective_base("va"),
@@ -7486,8 +7518,11 @@ pub fn run_workload() -> Vec<Measure> {
     tier_reads(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_edit_loop(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_code(&mut out, &r, &fx, dir.path());
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_wc(&mut out, &r, dir.path());
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_render(&mut out, &r, dir.path(), "", 5);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_diff_since(&mut out, &r, "v0.1.0", 5);
     tier_site_build(&mut out, &r, "", 5);
     out.push(measure("export_import", 5, |i| {
@@ -7498,25 +7533,39 @@ pub fn run_workload() -> Vec<Measure> {
         let mut r2 = Rdy::init(&fresh, "rdy-standard").expect("init");
         r2.import(&approver(), "work", &export).expect("import");
     }));
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     drop(r);
     tier_cold_open(&mut out, &proj, "", 5);
     tier_render_cold(&mut out, &proj, dir.path(), "", 5);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_dump(&mut out, &proj, dir.path(), "", 5);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_dump_chain(&mut out, &proj, dir.path(), &fx.section, &fx.claim, "", 5);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_redaction(&mut out, &proj, dir.path(), &fx.claim, "", 5);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_export(&mut out, &proj, dir.path(), 5);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_clone(&mut out, &proj, dir.path(), "", 5);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_publication(&mut out, &proj, dir.path(), 5);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_publication_costs(&mut out, &proj, dir.path(), "", 5);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_signatures(&mut out, &proj, dir.path(), "", SIGNATURE_RUNS);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     // on projects of their own: the check ops (D-JQD5X), reported
     tier_checks(&mut out, dir.path(), &TYPICAL_RUNS);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     // on projects of their own: the check-module rows (D-QVTJ9), each with a fixed ceiling
     tier_wasm_checks(&mut out, dir.path(), &WASM_BENCH);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     // on a project of its own: the vector rows (D-5BM47, D-Y1WEY, D-76Y9H), each with a fixed
     // ceiling
     tier_vectors(&mut out, dir.path(), &VECTOR_BENCH);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_change_plan(&mut out, &proj, dir.path(), "", &TYPICAL_RUNS, 5, PLAN_N);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
     let mut lag = None;
@@ -7548,11 +7597,17 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     out.extend(daemon_ops(&proj, ""));
     out.extend(daemon_mcp_on_copy(&proj, dir.path()));
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     out.extend(site_ops(&proj, dir.path(), &docs, &fx, "", &TYPICAL_RUNS));
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_site_profiles(&mut out, &proj, dir.path(), &fx, "", 5, &TYPICAL_RUNS);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     out.extend(bound_ops(dir.path()));
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     out.extend(stdio_mcp_ops(dir.path()));
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     // the view ops last: the views and landings they leave behind would move the ops above
     let mut r = Rdy::open(&proj).expect("open");
     // as the daemon does after `ready`: what moved while no rdy ran is logged here, outside the
@@ -7580,11 +7635,17 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     // on projects of their own: the records they add move nothing above
     tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_m3a(&mut out, dir.path(), "", TYPICAL_RUNS.landing, &M3A_TYPICAL);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_m3(&mut out, dir.path(), M3_RUNS);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_snapshot_delta(&mut out, dir.path());
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
     // the large `rdy_write` last, on a reopened project: its 6,000 blocks move nothing above
     tier_mcp(&mut out, &proj);
+    // nothing below reads the typical project or its index snapshot
+    sweep_scratch(dir.path(), &[]);
     if crate::fixtures::deep() {
         out.extend(run_large_tier(dir.path()));
     }
@@ -7742,11 +7803,14 @@ fn sd1_land(out: &mut Vec<Measure>, parent: &std::path::Path, runs: usize) {
 
 /// `snapshot_delta_upgrade_large`: the writer's open of a legacy project of
 /// [`crate::snapshot_delta_fixture::PERF_UPGRADE`] (10,000 landings, each with a SNAPSHOT of
-/// 10,000 entries; one changed entry per later landing). The source is streamed once into a
-/// pristine project outside every timer (gigabytes of SNAPSHOTs, `write_legacy_streamed`); each
-/// run copies it, outside the timer, and times `maintenance::run`: the backup copy, the append of
-/// 10,000 deltas, the reindex, the full check and the mirrors. After each run, outside the
-/// timer, every landing's `state` and delta and the final map are verified.
+/// 10,000 entries; one changed entry per later landing). Each run streams the legacy project into
+/// a pristine directory of its own outside the timer (gigabytes of SNAPSHOTs,
+/// `write_legacy_streamed`), and times `maintenance::run`: the backup copy, the append of 10,000
+/// deltas, the reindex, the full check and the mirrors. No source copy is kept beside the run:
+/// the project and the upgrade's own backup copy are about 4 GB each, and a third copy would
+/// put this op alone over 12 GB of the nightly bench's 15 GB /tmp. After each run, outside the
+/// timer, every landing's `state` and delta and the final map are verified, and the run's
+/// directory is removed.
 fn sd1_upgrade_large(
     out: &mut Vec<Measure>,
     parent: &std::path::Path,
@@ -7754,12 +7818,10 @@ fn sd1_upgrade_large(
     recipe: crate::snapshot_delta_fixture::Recipe,
 ) {
     use crate::snapshot_delta_fixture as fx;
-    let source = parent.join("sdl-upgrade-source");
-    let facts = fx::legacy_project(&source, recipe, 50);
-    assert_eq!(facts.landings.len(), recipe.landings);
     out.push(measure_timed("snapshot_delta_upgrade_large", runs, |i| {
         let work = parent.join(format!("sdl-upgrade-run{i}"));
-        copy_project(&source, &work);
+        let facts = fx::legacy_project(&work, recipe, 50);
+        assert_eq!(facts.landings.len(), recipe.landings);
         let s = Instant::now();
         let report = rdy_engine::maintenance::run(&work, false).expect("the upgrade");
         let took = s.elapsed();
@@ -7788,10 +7850,9 @@ fn sd1_upgrade_large(
         assert!(tip.blocks == facts.final_map, "the final map");
         drop(reader);
         drop(r);
-        std::fs::remove_dir_all(&work).expect("remove the copy");
+        std::fs::remove_dir_all(&work).expect("remove the upgraded project");
         took
     }));
-    std::fs::remove_dir_all(&source).expect("remove the source");
 }
 
 /// The three SD1 rows of the typical workload ([`SD1_OPS`] but the upgrade): each on a project or
@@ -8944,20 +9005,31 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_reads(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     tier_edit_loop(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     tier_render(&mut out, &r, parent, sfx, 3);
+    sweep_scratch(parent, &LARGE_KEEP);
     tier_site_build(&mut out, &r, sfx, 3);
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
     tier_render_cold(&mut out, &proj, parent, sfx, 3);
+    sweep_scratch(parent, &LARGE_KEEP);
     tier_dump(&mut out, &proj, parent, sfx, 3);
+    sweep_scratch(parent, &LARGE_KEEP);
     tier_dump_chain(&mut out, &proj, parent, &fx.section, &fx.claim, sfx, 3);
+    sweep_scratch(parent, &LARGE_KEEP);
     tier_redaction(&mut out, &proj, parent, &fx.claim, sfx, 3);
+    sweep_scratch(parent, &LARGE_KEEP);
     tier_clone(&mut out, &proj, parent, sfx, 3);
+    sweep_scratch(parent, &LARGE_KEEP);
     tier_publication_costs(&mut out, &proj, parent, sfx, 3);
+    sweep_scratch(parent, &LARGE_KEEP);
     tier_signatures(&mut out, &proj, parent, sfx, SIGNATURE_RUNS);
+    sweep_scratch(parent, &LARGE_KEEP);
     tier_change_plan(&mut out, &proj, parent, sfx, &LARGE_RUNS, 3, PLAN_N);
+    sweep_scratch(parent, &LARGE_KEEP);
     out.extend(daemon_ops(&proj, sfx));
     out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
+    sweep_scratch(parent, &LARGE_KEEP);
     tier_site_profiles(&mut out, &proj, parent, &fx, sfx, 3, &LARGE_RUNS);
+    sweep_scratch(parent, &LARGE_KEEP);
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
     let mut r = Rdy::open(&proj).expect("open");
     // as the daemon does after `ready`, outside every timer (plan M2e2)
@@ -8980,6 +9052,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     drop(r);
     // on projects of their own: the 10,000-block cases of the M3a operations
     tier_m3a(&mut out, parent, sfx, LARGE_RUNS.landing, &M3A_LARGE);
+    sweep_scratch(parent, &LARGE_KEEP);
     // the SD1 upgrade row, on a project of its own (the other SD1 rows are typical-only)
     sd1_upgrade_large(
         &mut out,
@@ -11837,6 +11910,38 @@ mod tests {
         assert!(typical.ops.contains_key("context") && !typical.ops.contains_key("context_50k"));
         let fresh = merge_baseline(None, "y", &[m("context", 3.0)]);
         assert_eq!((fresh.machine.as_str(), fresh.ops.len()), ("y", 1));
+    }
+
+    /// The temp root's sweep between tiers keeps the named entries and removes every other one,
+    /// directories and files alike; both workload bodies sweep with their own keep list.
+    #[test]
+    fn sweep_scratch_keeps_the_named_entries_and_removes_the_rest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        for d in ["p", "site_cold0/a/b", "checks"] {
+            std::fs::create_dir_all(root.join(d)).expect("mkdir");
+        }
+        std::fs::write(root.join("p/f"), "kept").expect("write");
+        std::fs::write(root.join("site_cold0/a/b/f"), "gone").expect("write");
+        std::fs::write(root.join("index.snapshot"), "kept").expect("write");
+        std::fs::write(root.join("d-0.rdydump"), "gone").expect("write");
+        sweep_scratch(root, &TYPICAL_KEEP);
+        let mut left: Vec<String> = std::fs::read_dir(root)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["index.snapshot", "p"]);
+        assert!(root.join("p/f").is_file());
+        sweep_scratch(root, &[]);
+        assert_eq!(std::fs::read_dir(root).expect("read_dir").count(), 0);
+        let src = include_str!("perf.rs");
+        let body = |f: &str| {
+            let from = src.find(f).expect(f);
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        assert!(body("pub fn run_workload(").contains("sweep_scratch(dir.path(), &TYPICAL_KEEP);"));
+        assert!(body("fn run_large_tier(").contains("sweep_scratch(parent, &LARGE_KEEP);"));
     }
 
     #[test]

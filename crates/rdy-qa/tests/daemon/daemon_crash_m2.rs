@@ -1,15 +1,18 @@
 //! sg6 (spec §15.2 crash tests): `kill -9` the daemon during a large include and during a landing
 //! that rebases views. Each op is all or nothing: after the restart by the next client, fsck is
 //! clean with no unlogged move, and the invariant checker passes.
-use rdy_engine::{Rdy, Scope};
+use rdy_daemon::ServeOptions;
+use rdy_daemon::{Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, connect};
+use rdy_engine::{LandingPoint, Rdy, Scope, on_landing_at_for_tests};
 use rdy_model::Hash;
-use rdy_qa::daemon::Served;
+use rdy_qa::daemon::{Served, wait_endpoint_live};
 use rdy_qa::fixtures::*;
 use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::invariants::check_all;
 use rdy_qa::mcp::{DEADLINE, McpClient};
 use rdy_qa::tensions::ag;
 use serde_json::{Value, json};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// The changes view `src` holds.
@@ -18,7 +21,7 @@ const SRC_CHANGES: usize = 2_000;
 const VIEWS: usize = 20;
 /// How many of those views also edit the seed claim the person edits.
 const COLLIDING: usize = 3;
-/// A hang guard for one child command, not a speed check.
+/// A hang guard for one approve, not a speed check.
 const CHILD_BUDGET: Duration = Duration::from_secs(120);
 
 fn lcg(seed: &mut u64) -> u64 {
@@ -48,28 +51,35 @@ enum Hit {
     InFlight,
 }
 
-/// The narrowest kill window, in ms: the time an op takes varies from run to run, so the window
-/// never closes to one point.
+/// The narrowest kill window of the include, in ms: the time an op takes varies from run to run,
+/// so the window never closes to one point.
 const MIN_WIDTH: u64 = 4;
 
-/// A seeded kill delay in `[lo, hi]` ms, and the window narrowed by where it fell: a kill after the
-/// answer lowers `hi`, a kill before the op reached the daemon raises `lo`. Under load the time an
-/// op takes drifts from attempt to attempt, so a window narrowed on earlier attempts can sit beside
-/// the op: a miss in a window already at `MIN_WIDTH` resets it to the timed window `[0, full]`.
+/// A seeded kill delay in `[lo, hi]` (in the window's unit), and the window narrowed by where it
+/// fell: a kill after the answer lowers `hi`, a kill before the op reached the daemon raises `lo`.
+/// Under load the time an op takes drifts from attempt to attempt, so a window narrowed on earlier
+/// attempts can sit beside the op: a miss in a window already at its narrowest (`min`) resets it
+/// to the timed window `[0, full]`.
 struct Window {
     lo: u64,
     hi: u64,
-    /// The timed window's upper end: the un-killed op's time, in ms.
+    /// The timed window's upper end: the un-killed op's time.
     full: u64,
+    /// The narrowest width.
+    min: u64,
+    /// The unit, for the log: `ms` or `µs`.
+    unit: &'static str,
     seed: u64,
 }
 
 impl Window {
-    fn new(full: u64, seed: u64) -> Window {
+    fn new(full: u64, min: u64, unit: &'static str, seed: u64) -> Window {
         Window {
             lo: 0,
             hi: full,
             full,
+            min,
+            unit,
             seed,
         }
     }
@@ -77,17 +87,18 @@ impl Window {
         self.lo + lcg(&mut self.seed) % (self.hi - self.lo + 1)
     }
     fn narrow(&mut self, d: u64, hit: &Hit) {
-        if *hit != Hit::InFlight && self.hi - self.lo <= MIN_WIDTH {
+        if *hit != Hit::InFlight && self.hi - self.lo <= self.min {
+            let u = self.unit;
             eprintln!(
-                "sg6 window {}..{} ms missed at {d} ms ({hit:?}): reset to 0..{} ms",
+                "sg6 window {}..{} {u} missed at {d} {u} ({hit:?}): reset to 0..{} {u}",
                 self.lo, self.hi, self.full
             );
             (self.lo, self.hi) = (0, self.full);
             return;
         }
         match hit {
-            Hit::Answered => self.hi = d.max(self.lo + MIN_WIDTH),
-            Hit::Early => self.lo = d.min(self.hi.saturating_sub(MIN_WIDTH)),
+            Hit::Answered => self.hi = d.max(self.lo + self.min),
+            Hit::Early => self.lo = d.min(self.hi.saturating_sub(self.min)),
             Hit::InFlight => {}
         }
     }
@@ -199,7 +210,7 @@ fn sg6_a_kill_during_a_large_include_is_all_or_nothing() {
     assert_eq!(hit, Hit::Answered);
     let n = in_process(&s, "dst-cal", |r| r.read().included("dst-cal").len());
     assert_eq!(n, SRC_CHANGES, "the include took every change");
-    let mut w = Window::new(took.as_millis() as u64, 0x7367_3661);
+    let mut w = Window::new(took.as_millis() as u64, MIN_WIDTH, "ms", 0x7367_3661);
     let (mut hits, mut attempt) = (0, 0);
     while hits < points() {
         assert!(
@@ -288,57 +299,202 @@ fn rebasing_landing() -> (Served, Landing) {
     )
 }
 
-/// Waits for `child` with a hang guard; returns its success and its JSON (stdout or stderr).
-fn finish(mut child: std::process::Child) -> (bool, Value) {
-    let end = Instant::now() + CHILD_BUDGET;
-    while child.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < end, "rdy approve hung");
+/// The person's ctl connection to the served daemon, its `session` op answered.
+async fn person(s: &Served) -> Client {
+    let hello = Hello {
+        rdy: PROTO_VERSION,
+        version: env!("CARGO_PKG_VERSION").into(),
+        build: rdy_daemon::BUILD.to_string(),
+        proto: Proto::Ctl,
+        cwd: s.dir.path().into(),
+        project: RunDir::of_project(s.dir.path())
+            .project_id()
+            .expect("the project's .rdy"),
+    };
+    let mut c = match connect(&RunDir::of_project(s.dir.path()), &hello).await {
+        Attempt::Ready(c) => c,
+        // a daemon that just bound is still building its state: wait for its `ready`
+        Attempt::Starting(p) => p
+            .wait(Instant::now() + CHILD_WAIT, &mut |_| {})
+            .await
+            .unwrap_or_else(|e| panic!("the daemon did not become ready: {e}")),
+        Attempt::Exiting => panic!(
+            "the daemon is of another build than this test: rebuild rdy with cargo build -p \
+             rdy-cli, in the profile this test runs in"
+        ),
+        other => panic!("no daemon: {other:?}"),
+    };
+    c.ctl("session", json!({"actor": null, "run": null}))
+        .await
+        .expect("the person's session");
+    c
+}
+
+/// The child daemon's project root; unset in a normal test run ([`sg6_landing_child`]).
+const CHILD_PROJECT: &str = "RDY_SG6_CHILD_PROJECT";
+/// The landing point the child daemon stops at: `appended` or `sealed`.
+const CHILD_POINT: &str = "RDY_SG6_CHILD_POINT";
+/// The file the child daemon creates when a landing reaches its point.
+const CHILD_MARKER: &str = "RDY_SG6_CHILD_MARKER";
+/// A hang guard for the child daemon to start and for its landing to reach its point.
+const CHILD_WAIT: Duration = Duration::from_secs(120);
+
+/// The name of each landing point in [`CHILD_POINT`].
+fn point_name(p: LandingPoint) -> &'static str {
+    match p {
+        LandingPoint::Appended => "appended",
+        LandingPoint::Sealed => "sealed",
+    }
+}
+
+/// Not a test on its own: the daemon [`approve_killed_at`] starts, the real daemon of this build
+/// (`rdy_daemon::start`) in a process of its own. Its landing hook stops every landing at the
+/// point [`CHILD_POINT`] names: it creates the marker file and blocks on stdin, so the landing
+/// stays there until the parent kills this process. A parent that dies first closes the pipe,
+/// and the child exits there too, its landing unfinished.
+#[test]
+fn sg6_landing_child() {
+    let (Some(project), Some(point), Some(marker)) = (
+        std::env::var_os(CHILD_PROJECT),
+        std::env::var(CHILD_POINT).ok(),
+        std::env::var_os(CHILD_MARKER),
+    ) else {
+        return;
+    };
+    let point = [LandingPoint::Appended, LandingPoint::Sealed]
+        .into_iter()
+        .find(|p| point_name(*p) == point)
+        .unwrap_or_else(|| panic!("{CHILD_POINT}={point:?} names no landing point"));
+    let marker = std::path::PathBuf::from(marker);
+    on_landing_at_for_tests(move |p| {
+        if p != point {
+            return;
+        }
+        std::fs::write(&marker, b"").expect("the marker file");
+        // the parent kills this process here; EOF means the parent is gone
+        let _ = std::io::Read::read(&mut std::io::stdin(), &mut [0u8; 1]);
+        std::process::exit(3);
+    });
+    let run = rdy_daemon::start(ServeOptions {
+        project: project.into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        detach: false,
+        idle_timeout: Some(CHILD_WAIT),
+        human_actor: Some("human:qa".into()),
+        site_lan_override: None,
+    })
+    .unwrap_or_else(|e| panic!("sg6 child: start: {e}"));
+    let code = match run.wait() {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("sg6 child: {e}");
+            1
+        }
+    };
+    // do not return into the test harness: the child's work is the daemon, now done
+    std::process::exit(code);
+}
+
+/// The person's `approve` of the landing, over a connection that is open and has its session
+/// before the request. Returns the reply.
+fn approve(s: &Served, l: &Landing) -> Value {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut c = rt.block_on(person(s));
+    let args = json!({"proposal": l.proposal});
+    rt.block_on(async { tokio::time::timeout(CHILD_BUDGET, c.ctl("approve", args)).await })
+        .expect("the approve hung")
+        .unwrap_or_else(|e| panic!("an approve with no kill failed: {e:?}"))
+}
+
+/// Kills and reaps the child daemon on every way out of [`approve_killed_at`]: a failed attempt
+/// leaves no daemon behind.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The person's `approve` of the landing, served by a child daemon of this build
+/// ([`sg6_landing_child`]) that stops the landing at `point`; the child is killed with
+/// `kill -9` once the landing is there. Returns where the kill fell and the error the client
+/// got.
+///
+/// The kill waits for the landing to reach a known point, not for a drawn delay: a landing takes
+/// a few milliseconds, and on a slow or loaded machine a delay drawn in that window fell before
+/// or after the landing on most attempts.
+fn approve_killed_at(s: &Served, l: &Landing, point: LandingPoint) -> (Hit, Value) {
+    // the served daemon `rebasing_landing` started gives the project to the child
+    let first = s.daemon_pid().expect("the served daemon");
+    s.stop();
+    s.wait_killed(first);
+    let run = s.run_dir();
+    run.ensure().expect("the run dir");
+    let marker = s.dir.path().join("sg6-landing-point");
+    let mut cmd = Command::new(std::env::current_exe().expect("the test binary"));
+    cmd.args([
+        "daemon_crash_m2::sg6_landing_child",
+        "--exact",
+        "--nocapture",
+    ])
+    .current_dir(s.dir.path());
+    let home = empty_home();
+    isolate_person(&mut cmd, home, &home.join(".config"));
+    if let Some((k, v)) = coverage_env() {
+        cmd.env(k, v);
+    }
+    let log = rdy_qa::platform::open_private_log(&run.log_file()).expect("the daemon log");
+    cmd.env(CHILD_PROJECT, s.dir.path())
+        .env(CHILD_POINT, point_name(point))
+        .env(CHILD_MARKER, &marker)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(log.try_clone().expect("the daemon log")))
+        .stderr(Stdio::from(log));
+    let mut child = KillOnDrop(cmd.spawn().expect("start the child daemon"));
+    wait_endpoint_live(&run);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut c = rt.block_on(person(s));
+    assert_eq!(
+        s.daemon_pid(),
+        Some(child.0.id()),
+        "the child daemon serves the project"
+    );
+    let args = json!({"proposal": l.proposal});
+    let call = rt.spawn(async move { c.ctl("approve", args).await });
+    let t0 = Instant::now();
+    while !marker.exists() {
+        assert!(
+            !call.is_finished(),
+            "the approve was answered before its landing reached {point:?}"
+        );
+        assert!(
+            t0.elapsed() < CHILD_WAIT,
+            "the landing never reached {point:?} in {} s",
+            CHILD_WAIT.as_secs()
+        );
+        // test-hygiene: allow wait the poll interval of a wait on the marker file, under CHILD_WAIT
         std::thread::sleep(Duration::from_millis(5));
     }
-    let out = child.wait_with_output().unwrap();
-    let ok = out.status.success();
-    let text = String::from_utf8_lossy(if ok { &out.stdout } else { &out.stderr }).into_owned();
-    let v = serde_json::from_str(text.trim())
-        .or_else(|_| serde_json::from_str(text.trim().lines().last().unwrap_or("")))
-        .unwrap_or(Value::String(text));
-    (ok, v)
+    rdy_qa::platform::kill_hard(child.0.id());
+    child.0.wait().expect("reap the killed child daemon");
+    let reply = rt
+        .block_on(async { tokio::time::timeout(CHILD_BUDGET, call).await })
+        .expect("the approve hung")
+        .expect("the approve task");
+    match reply {
+        Ok(v) => panic!("an approve whose daemon was killed in the landing was answered: {v}"),
+        Err(e) => {
+            let v = serde_json::to_value(&e).unwrap();
+            (killed_hit(&v), v)
+        }
+    }
 }
 
-/// `rdy --json approve <proposal>` as the person, with the daemon killed `delay` ms after the
-/// command starts (`None`: not killed). Returns where the kill fell, the reply, and the time.
-fn approve(s: &Served, l: &Landing, delay: Option<u64>) -> (Hit, Value, Duration) {
-    let t = Instant::now();
-    let child = s.spawn(&["--json", "approve", &l.proposal]);
-    let Some(d) = delay else {
-        let (ok, v) = finish(child);
-        assert!(ok, "an approve with no kill failed: {v}");
-        return (Hit::Answered, v, t.elapsed());
-    };
-    let mut child = child;
-    std::thread::sleep(Duration::from_millis(d));
-    if child.try_wait().unwrap().is_some() {
-        let (ok, v) = finish(child);
-        assert!(ok, "the approve failed before the kill: {v}");
-        return (Hit::Answered, v, t.elapsed());
-    }
-    s.kill9();
-    let (ok, v) = finish(child);
-    let took = t.elapsed();
-    if ok {
-        // answered just before the kill, or run on a successor the command started after it
-        let hit = if s.daemon_pid().is_some() {
-            Hit::Early
-        } else {
-            Hit::Answered
-        };
-        return (hit, v, took);
-    }
-    (killed_hit(&v), v, took)
-}
-
-/// Where the kill fell, from the error a killed `rdy approve` exits with. The CLI sends a
-/// `session` op before `approve`, and a kill during either one gives `E_DAEMON_GONE`; only the
-/// one that names `approve` fell while the landing was in flight.
+/// Where the kill fell, from the error of a killed approve. A client sends a `session` op before
+/// `approve`, and a kill during either one gives `E_DAEMON_GONE`; only the one that names
+/// `approve` fell while the landing was in flight.
 fn killed_hit(v: &Value) -> Hit {
     let message = v["message"].as_str().unwrap_or("");
     match v["code"].as_str() {
@@ -351,7 +507,7 @@ fn killed_hit(v: &Value) -> Hit {
 
 #[test]
 fn sg6_a_narrowed_window_that_misses_resets_to_the_timed_window() {
-    let mut w = Window::new(20, 1);
+    let mut w = Window::new(20, MIN_WIDTH, "ms", 1);
     w.narrow(12, &Hit::Early);
     w.narrow(16, &Hit::Answered);
     assert_eq!((w.lo, w.hi), (12, 16), "narrowed to MIN_WIDTH");
@@ -419,10 +575,10 @@ fn all_or_nothing(s: &Served, l: &Landing, what: &str) -> (bool, u64) {
 
 #[test]
 fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
-    // an approve with no kill: it lands and rebases every view, and it times the window
+    // an approve with no kill: it lands and rebases every view
     let (s, l) = rebasing_landing();
     let before = transitions(&s, "before the approve");
-    let (_, v, took) = approve(&s, &l, None);
+    let v = approve(&s, &l);
     let after = transitions(&s, "after the approve");
     assert!(
         after > before,
@@ -443,25 +599,20 @@ fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
     }
     assert_eq!(all_or_nothing(&s, &l, "no kill"), (true, after));
     drop(s);
-    let mut w = Window::new(took.as_millis() as u64, 0x6c61_6e64);
-    let (mut hits, mut attempt) = (0, 0);
-    while hits < points() {
-        assert!(
-            attempt < points() * MAX_TRIES,
-            "only {hits} of {} kills fell in flight in {attempt} attempts (window {}..{} ms)",
-            points(),
-            w.lo,
-            w.hi
-        );
+    // each kill falls at a known point of the landing: with its frames in the log before the
+    // seal (nothing may survive), or sealed before the answer (all of it must)
+    for attempt in 0..points() {
+        let point = if attempt % 2 == 0 {
+            LandingPoint::Appended
+        } else {
+            LandingPoint::Sealed
+        };
         let (s, l) = rebasing_landing();
-        let d = w.draw();
-        let (hit, v, _) = approve(&s, &l, Some(d));
-        let what =
-            format!("attempt {attempt}, killed {d} ms after the approve started ({hit:?}: {v})");
+        let (hit, v) = approve_killed_at(&s, &l, point);
+        let what = format!("attempt {attempt}, killed at {point:?} ({hit:?}: {v})");
+        assert_eq!(hit, Hit::InFlight, "{what}");
         let (landed, moves) = all_or_nothing(&s, &l, &what);
-        if v.get("landing").is_some() {
-            assert!(landed, "{what}: an acknowledged landing is lost");
-        }
+        assert_eq!(landed, point == LandingPoint::Sealed, "{what}");
         // the landing's TRANSITION record is logged with it, in its batch, or not at all
         let want = if landed { after } else { before };
         assert_eq!(
@@ -469,15 +620,10 @@ fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
             "{what}: {moves} TRANSITION records (landed: {landed}; {before} before the landing, \
              {after} after)"
         );
-        if hit == Hit::InFlight {
-            hits += 1;
-        }
         eprintln!(
-            "sg6 landing: attempt {attempt}, killed at {d} ms: {hit:?}, landed: {landed}, \
+            "sg6 landing: attempt {attempt}, killed at {point:?}: landed: {landed}, \
              transitions: {moves}"
         );
-        w.narrow(d, &hit);
-        attempt += 1;
     }
 }
 

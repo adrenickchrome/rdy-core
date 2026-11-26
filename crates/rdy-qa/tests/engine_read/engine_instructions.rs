@@ -1821,7 +1821,24 @@ fn agi2_handles_reasons_and_limits_fail_closed() {
     );
     // a stored doc id is no built-in name
     let (_pj, p_req, _, _, _) = rules_project("Project reason", "Must.", "May.", None);
-    assert!(LoadRequest::parse(&strings(&[&format!("rdy:{p_req}")])).is_err());
+    // an id whose five body characters are all digits (`d-12345`) is a well-formed name, so
+    // it parses and is then not found; any other id is refused by the parse
+    let as_name = format!("rdy:{p_req}");
+    match LoadRequest::parse(&strings(&[&as_name])) {
+        Err(_) => {}
+        Ok(_) => assert_eq!(
+            refusal(projectless(&host, &req(&[&as_name], false))).0,
+            "E_NOT_FOUND",
+            "{as_name}"
+        ),
+    }
+    for digits_only in ["rdy:d-12345", "rdy:d-00000"] {
+        assert_eq!(
+            refusal(projectless(&host, &req(&[digits_only], false))).0,
+            "E_NOT_FOUND",
+            "{digits_only}"
+        );
+    }
 
     // a stale reason in a stored rule still refuses the whole call
     let mut bad = source("Stale reasons");

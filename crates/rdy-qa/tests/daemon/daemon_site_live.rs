@@ -484,10 +484,12 @@ fn ls5_a_page_opened_before_its_scope_builds_gets_reload() {
         .subscribe(&sh, &d(), "alpha.html", OLD, OLD)
         .unwrap();
     assert!(empty(&mut alpha), "no build, no comparison");
+    // counted before the write: the worker's step for its publish may render the open page
+    // before the request does, and the request then serves the kept page
+    let renders = sh.site.page_renders();
     on_writer(&sh, |r| {
         edit_second_prose(r, "draft", "Alpha", "Draft one.", false)
     });
-    let renders = sh.site.page_renders();
     review(&sh, &d(), "alpha.html");
     assert_eq!(
         sh.site.page_renders(),
@@ -495,6 +497,41 @@ fn ls5_a_page_opened_before_its_scope_builds_gets_reload() {
         "the open page rendered once"
     );
     assert_eq!(alpha.rx.try_recv(), Ok(LiveEvent::Reload));
+    assert!(empty(&mut alpha), "one reload");
+}
+
+/// The order of the test above that failed under load: the worker's step for the publish runs
+/// before the request. The worker renders the open page and sends the reload; the request
+/// serves the kept page, and the stream hears nothing more.
+#[test]
+fn ls5_a_page_opened_before_its_scope_builds_gets_reload_from_the_worker_first() {
+    let h = host_two_docs();
+    let sh = shared(&h);
+    let mut alpha = sh
+        .site
+        .subscribe(&sh, &d(), "alpha.html", OLD, OLD)
+        .unwrap();
+    assert!(empty(&mut alpha), "no build, no comparison");
+    let renders = sh.site.page_renders();
+    on_writer(&sh, |r| {
+        edit_second_prose(r, "draft", "Alpha", "Draft one.", false)
+    });
+    // the worker's step for the publish, as it runs before the request (the real worker's own
+    // step, before or after, finds the page kept)
+    sh.site.step(&sh);
+    assert_eq!(
+        sh.site.page_renders(),
+        renders + 1,
+        "the worker rendered the open page"
+    );
+    assert_eq!(alpha.rx.try_recv(), Ok(LiveEvent::Reload));
+    review(&sh, &d(), "alpha.html");
+    assert_eq!(
+        sh.site.page_renders(),
+        renders + 1,
+        "the request served the kept page"
+    );
+    assert!(empty(&mut alpha), "one reload");
 }
 
 /// slb1 (TASK-2307): the test cap on the bytes of inactive builds, small so a few builds of

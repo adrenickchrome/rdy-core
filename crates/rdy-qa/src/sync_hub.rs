@@ -1266,6 +1266,7 @@ impl Drop for Proj {
     fn drop(&mut self) {
         let _ = crate::fixtures::rdy_command()
             .env_clear()
+            .envs(crate::fixtures::coverage_env())
             .arg("--project")
             .arg(self.dir.path())
             .args(["serve", "--stop"])
@@ -1298,6 +1299,7 @@ pub fn kit(docs: &[&str]) -> Kit {
 pub fn command_in(dir: &Path, home: &Home, args: &[&str]) -> Command {
     let mut cmd = crate::fixtures::rdy_command();
     cmd.env_clear()
+        .envs(crate::fixtures::coverage_env())
         .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
         .envs(std::env::var_os("TEMP").map(|dir| ("TEMP", dir)))
         .envs(std::env::var_os("TMP").map(|dir| ("TMP", dir)))
@@ -1312,6 +1314,7 @@ pub fn command_in(dir: &Path, home: &Home, args: &[&str]) -> Command {
 pub fn command(p: &Path, home: &Home, args: &[&str]) -> Command {
     let mut cmd = crate::fixtures::rdy_command();
     cmd.env_clear()
+        .envs(crate::fixtures::coverage_env())
         .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
         .envs(std::env::var_os("TEMP").map(|dir| ("TEMP", dir)))
         .envs(std::env::var_os("TMP").map(|dir| ("TMP", dir)))

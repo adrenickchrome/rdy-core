@@ -614,6 +614,7 @@ impl Drop for Proj {
     fn drop(&mut self) {
         let _ = rdy_qa::fixtures::rdy_command()
             .env_clear()
+            .envs(rdy_qa::fixtures::coverage_env())
             .arg("--project")
             .arg(self.dir.path())
             .args(["serve", "--stop"])
@@ -646,6 +647,7 @@ fn kit() -> Kit {
 fn command(p: &Path, home: &Home, extra: &[(&str, &str)], args: &[&str]) -> Command {
     let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.env_clear()
+        .envs(rdy_qa::fixtures::coverage_env())
         // Windows sockets do not start in a process without it; no other platform has it
         .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
         // without these a Windows process's temporary directory is the system's, which a

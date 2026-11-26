@@ -407,6 +407,14 @@ pub fn rdy_command() -> Command {
     cmd
 }
 
+/// The coverage runtime's variable for a command that clears its environment: `LLVM_PROFILE_FILE`
+/// when this process has it, else nothing. An instrumented build (`cargo llvm-cov`) writes its
+/// raw profile where the variable names, and into its working directory when it is unset, so a
+/// cleared child would leave a `.profraw` file in a directory the test checks is empty.
+pub fn coverage_env() -> Option<(&'static str, std::ffi::OsString)> {
+    std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v))
+}
+
 /// Runs `cmd` as `Command::output` does (stdin null, stdout and stderr captured), but kills it
 /// at `budget`: a hang guard, not a speed check. A command still running at `budget` is killed,
 /// reaped, and returned as an error.

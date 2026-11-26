@@ -176,6 +176,7 @@ impl Home {
     fn command(&self, cwd: &Path, extra: &[(&str, &str)], args: &[&str]) -> Command {
         let mut cmd = rdy_qa::fixtures::rdy_command();
         cmd.env_clear()
+            .envs(rdy_qa::fixtures::coverage_env())
             // Windows sockets do not start in a process without it; no other platform has it
             .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
             .envs(self.env())
@@ -183,11 +184,6 @@ impl Home {
             .args(args)
             .current_dir(cwd)
             .stdin(Stdio::null());
-        // an instrumented build (coverage) writes its raw profile where this names, and into
-        // its working directory when it is unset: keep it where the test run put it
-        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
-            cmd.env("LLVM_PROFILE_FILE", profile);
-        }
         cmd
     }
 

@@ -219,6 +219,7 @@ fn run(args: &[&str]) -> (Option<i32>, String, String) {
     let path = tempfile::tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_qa-release-readme"));
     cmd.env_clear()
+        .envs(rdy_qa::fixtures::coverage_env())
         .env("PATH", path.path())
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())

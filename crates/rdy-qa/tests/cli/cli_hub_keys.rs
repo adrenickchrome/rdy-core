@@ -364,6 +364,7 @@ impl Drop for Proj {
     fn drop(&mut self) {
         let _ = rdy_qa::fixtures::rdy_command()
             .env_clear()
+            .envs(rdy_qa::fixtures::coverage_env())
             .arg("--project")
             .arg(self.dir.path())
             .args(["serve", "--stop"])
@@ -393,6 +394,7 @@ fn caller<'a>(home: &'a Home, sock: Option<&'a Path>) -> Caller<'a> {
 fn command(p: &Path, c: &Caller<'_>, args: &[&str]) -> Command {
     let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.env_clear()
+        .envs(rdy_qa::fixtures::coverage_env())
         // Windows sockets do not start in a process without it; no other platform has it
         .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
         .envs(c.home.env())

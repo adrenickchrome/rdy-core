@@ -108,6 +108,7 @@ fn hpb15_no_role_can_override_profile_or_audience() {
     ] {
         let o = rdy_qa::fixtures::rdy_command()
             .env_clear()
+            .envs(rdy_qa::fixtures::coverage_env())
             .args(["--project"])
             .arg(dir.path())
             .args([

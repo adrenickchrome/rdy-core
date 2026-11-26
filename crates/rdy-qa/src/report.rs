@@ -2017,7 +2017,7 @@ mod tests {
             include_str!("bin/qa-gate.rs")
                 .split_whitespace()
                 .collect::<String>()
-                .contains("run_areas_capped(&jobs,alone,BINARY_JOBS,heavy,HEAVY_JOBS"),
+                .contains("run_areas_capped(&jobs,alone,BINARY_JOBS,heavy,heavy_cap"),
             "every test binary shares the one pool and runs"
         );
         let out = "\
