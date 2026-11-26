@@ -1820,7 +1820,7 @@ class CiSplit(unittest.TestCase):
 
 
 NIGHTLY_JOBS = {
-    'own': (120, None),
+    'own': (180, None),
     'own-windows': (240, ['self-hosted', 'rdy-gate', 'windows']),
     'hosted-macos': (180, 'macos-26'),
     'hosted-windows': (300, 'windows-2025'),

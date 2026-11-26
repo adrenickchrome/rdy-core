@@ -28,7 +28,8 @@ jobs:
           - os: macos
             group: rdy-gate
     runs-on: [self-hosted, "${{ matrix.group }}", "${{ matrix.os }}"]
-    timeout-minutes: 120
+    # the real disk runs two heavy areas at a time (rdy-qa gate_steps), so the pool takes longer
+    timeout-minutes: 180
     permissions:
       contents: read
     env:
