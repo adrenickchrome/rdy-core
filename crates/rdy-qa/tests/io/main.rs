@@ -34,6 +34,7 @@ mod io_m3_gate_records;
 mod io_markdown_capture;
 mod io_migration;
 mod io_onboarding;
+mod io_partial_history_fixture;
 mod io_plan_metadata;
 mod io_publication;
 mod io_reader;

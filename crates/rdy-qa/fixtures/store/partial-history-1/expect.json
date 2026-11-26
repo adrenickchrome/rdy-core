@@ -1,0 +1,110 @@
+{
+  "inventory": [
+    {
+      "blake3": "860475773ed139227a65b94e95d5e2920d515c440ba86177fd02b0234b9e78bc",
+      "len": 560,
+      "path": "FEATURES"
+    },
+    {
+      "blake3": "4c868f80ec8fe4af835ef534d83468e8b2121b4a5dcf5cfd9319113d914e6a90",
+      "len": 33,
+      "path": "FORMAT"
+    },
+    {
+      "blake3": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+      "len": 0,
+      "path": "lock"
+    },
+    {
+      "blake3": "d6e350b595f67a2f3da5b4e10b88581c13c24787d7bdfa1783bed02128f3ee54",
+      "len": 2403,
+      "path": "segments/seg-000000.log"
+    }
+  ],
+  "published": false,
+  "rdy": "0.58.0",
+  "source": {
+    "frontier": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+    "history": "sync4-canon-history.bin",
+    "records": 19,
+    "repo_id": "8a55d733ad6ec262d2fd59d66db4ba8f",
+    "state": "sync5-canon-state.bin"
+  },
+  "store": {
+    "fsck": {
+      "history": {
+        "complete": false,
+        "held": 4,
+        "total": 19
+      },
+      "landings": 1
+    },
+    "history": {
+      "complete": false,
+      "frontier": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+      "held": 4,
+      "total": 19
+    },
+    "landings": [
+      "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75"
+    ],
+    "log_end": [
+      0,
+      2403
+    ],
+    "manifest": {
+      "features": [
+        {
+          "class": "incompatible",
+          "name": "assessment",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "content_hash_v2",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "dedup_spans",
+          "required_rdy": "0.59.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "object_encoding",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "partial_history",
+          "required_rdy": "0.59.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "snapshot_delta",
+          "required_rdy": "0.52.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "sync_state",
+          "required_rdy": "0.53.0"
+        }
+      ],
+      "manifest_version": 1
+    },
+    "refs": [
+      "canon",
+      "meta/repo_id",
+      "meta/store_features",
+      "meta/sync/origin/canon",
+      "meta/sync/origin/history",
+      "tag/v2.0.0"
+    ],
+    "tags": [
+      [
+        "v2.0.0",
+        "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75"
+      ]
+    ]
+  }
+}

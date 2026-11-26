@@ -4396,8 +4396,9 @@ impl ReadState {
         for v in self.versions()? {
             tags.entry(v.landing).or_default().push(v.name);
         }
-        // an incomplete history's frontier is the state the clone took: its proposal is behind
-        // it, so the log ends before it (the reply says so with W_HISTORY_PENDING)
+        // an incomplete history's frontier is the state the clone took: the log lists the held
+        // landings through it, the frontier's own row last (the reply says so with
+        // W_HISTORY_PENDING)
         let frontier = self.history_frontier()?;
         let mut rows = vec![];
         for item in walk {
@@ -4405,11 +4406,14 @@ impl ReadState {
                 break;
             }
             let (id, rec) = item?;
-            if Some(id) == stop || Some(id) == frontier {
+            if Some(id) == stop {
                 break;
             }
             let tags = tags.remove(&id.to_string()).unwrap_or_default();
             rows.push(self.landing_row(id, &rec, tags)?);
+            if Some(id) == frontier {
+                break;
+            }
         }
         Ok(rows)
     }
@@ -4450,8 +4454,19 @@ impl ReadState {
         rec: &LandingRecord,
         tags: Vec<String>,
     ) -> Result<LandingRow, RdyError> {
-        let p = self.reader().proposal(&rec.proposal)?;
+        // the frontier landing of a history still arriving: its proposal and approved version
+        // are behind the frontier until the history is held, so their columns are left empty
+        // (no provenance is invented); every other landing's are held
+        let behind = |kind: u8, h: &Hash| -> Result<bool, RdyError> {
+            Ok(self.history_frontier()? == Some(id) && !self.reader().has_kind(kind, h)?)
+        };
+        let p = if behind(rdy_store::kinds::PROPOSAL, &rec.proposal)? {
+            None
+        } else {
+            Some(self.reader().proposal(&rec.proposal)?)
+        };
         let approved = match &rec.approved_version {
+            Some(h) if behind(rdy_store::kinds::PROPOSAL, h)? => None,
             Some(h) => Some(version_ref(self, h)?.to_string()),
             None => None,
         };
@@ -4461,12 +4476,14 @@ impl ReadState {
             proposal: rec.proposal.to_string(),
             approved_version: rec.approved_version.map(|h| h.to_string()),
             approved,
-            title: p.title.clone(),
-            summary: p.summary.clone(),
+            title: p.as_ref().map_or_else(String::new, |p| p.title.clone()),
+            summary: p.as_ref().and_then(|p| p.summary.clone()),
             approved_by: rec.approved_by.actor.clone(),
             proposed_by: RelayedByRow {
-                actor: p.provenance.actor.clone(),
-                run: p.provenance.run.clone(),
+                actor: p
+                    .as_ref()
+                    .map_or_else(String::new, |p| p.provenance.actor.clone()),
+                run: p.as_ref().and_then(|p| p.provenance.run.clone()),
             },
             assurance: rec.assurance.as_str().into(),
             relayed_by: rec.relayed_by.as_ref().map(|r| RelayedByRow {
@@ -4493,7 +4510,7 @@ impl ReadState {
             rebased_from: rec.rebased_from.iter().map(|h| h.to_string()).collect(),
             at: rfc3339(rec.approved_by.at_ms),
             at_ms: rec.approved_by.at_ms,
-            changes: p.changes.len(),
+            changes: p.as_ref().map_or(rec.changes.len(), |p| p.changes.len()),
             tags,
             chosen: rec.chosen.as_ref().map(|c| AltRef {
                 set: alt_label(&c.set),

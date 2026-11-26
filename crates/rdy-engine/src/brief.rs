@@ -981,6 +981,10 @@ pub struct Briefing {
     /// the detail cut (`cut_tensions`).
     #[serde(skip)]
     sides_read: bool,
+    /// The W_HISTORY_PENDING of a history still arriving, which follows the as-built warnings
+    /// on every page.
+    #[serde(skip)]
+    history_warning: Option<Issue>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -1140,6 +1144,7 @@ impl Briefing {
             .iter()
             .filter_map(|b| b.warning.clone())
             .take(crate::as_built::MAX_AS_BUILT_WARNINGS)
+            .chain(self.history_warning.clone())
             .collect();
     }
 
@@ -2131,6 +2136,7 @@ impl ReadState {
         // D-Y1WEY: the vector rows' order vouches for a page; their scores and reasons do not
         let vector_sizes = digest_vectors(&mut digested, &vector_neighbors);
         let digest = Hash::of(&digested);
+        let history_warning = self.history_warning()?;
         Ok(Briefing {
             covers: ids.len(),
             governs,
@@ -2162,6 +2168,7 @@ impl ReadState {
                 .iter()
                 .filter_map(|b| b.warning.clone())
                 .take(crate::as_built::MAX_AS_BUILT_WARNINGS)
+                .chain(history_warning.clone())
                 .collect(),
             base,
             truncated: false,
@@ -2177,6 +2184,7 @@ impl ReadState {
             neighbor_sizes,
             vector_sizes,
             sides_read: false,
+            history_warning,
         })
     }
 

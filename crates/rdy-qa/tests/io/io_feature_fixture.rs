@@ -503,7 +503,8 @@ struct FirstUse {
 /// and the native store `store/reduction-1`, whose own tests are `r5906_` in the io and release
 /// areas. `partial_history` (D-GGTYA, D-4PV25), the canon state of format 5 lists it: the sync
 /// pair `sync5-canon-state`, the state of the frozen `sync4-canon-history` root, whose own tests
-/// are `r59017_` in the sync areas. Its expect file's `receiver_features` is the state stream's
+/// are `r59017_` in the sync areas, and the native store `store/partial-history-1`, the store
+/// that took it, whose own tests are `r59018_` in the io area. Its expect file's `receiver_features` is the state stream's
 /// header manifest, the manifest a receiver is expected to hold after its take; it is expected
 /// only until the take of a canon state checks it.
 const FIRST_USE: &[FirstUse] = &[
@@ -690,7 +691,7 @@ const FIRST_USE: &[FirstUse] = &[
                 "bdd142ebcf05c1d9ad83303718f45bf199f545cffa4f60caf961c654f8d5b8af",
             ),
         ],
-        native: None,
+        native: Some("fixtures/store/partial-history-1/expect.json"),
         baseline: false,
     },
 ];
@@ -805,7 +806,16 @@ fn all_features() -> StoreFeatures {
                 &std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap(),
             )
             .unwrap();
-            assert_eq!(native["store"]["manifest"], manifest, "{path}");
+            // a feature only a sync pair freezes records the receiver's expected manifest,
+            // which the store that took it holds with the features its own writer adds
+            if f.dump.is_empty() {
+                let held = native["store"]["manifest"]["features"].as_array().unwrap();
+                for g in features {
+                    assert!(held.contains(g), "{path}: its manifest holds {g}");
+                }
+            } else {
+                assert_eq!(native["store"]["manifest"], manifest, "{path}");
+            }
         }
         for g in features {
             let name = g["name"].as_str().unwrap().to_string();

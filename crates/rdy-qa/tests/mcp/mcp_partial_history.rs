@@ -94,8 +94,23 @@ fn r59018_tools_on_a_partial_project() {
     let read = c.call("rdy_read", json!({"id": "d-JQKR9"}));
     assert_eq!(read.code(), None, "{read:?}");
 
+    // the context's history stops at the frontier and says so once, after its other warnings
+    let ctx = c.call("rdy_context", json!({"id": "d-JQKR9"})).ok();
+    let warnings = ctx["warnings"].as_array().expect("warnings");
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| w["code"] == "W_HISTORY_PENDING")
+            .count(),
+        1,
+        "{ctx}"
+    );
+    assert_eq!(warnings.last().unwrap()["message"], WARNING, "{ctx}");
+
+    // the log lists the held frontier landing, whose proposal is behind the frontier
     let log = c.call("rdy_log", json!({})).ok();
-    assert_eq!(log["items"], json!([]), "{log}");
+    assert_eq!(log["items"].as_array().unwrap().len(), 1, "{log}");
+    assert_eq!(log["items"][0]["title"], "", "{log}");
     assert_eq!(log["warnings"].as_array().unwrap().len(), 1, "{log}");
     assert_eq!(log["warnings"][0]["code"], "W_HISTORY_PENDING", "{log}");
     assert_eq!(log["warnings"][0]["message"], WARNING, "{log}");

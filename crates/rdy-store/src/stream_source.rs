@@ -975,6 +975,19 @@ pub(crate) fn check_applies(
     Ok(out)
 }
 
+/// [`check_applies`] of a canon state's take (D-4PV25): each apply by
+/// [`sync_proof::check_carried_state`], whose landing is a frontier edge.
+pub(crate) fn check_state_applies(
+    rec: &mut dyn Records,
+    applies: impl IntoIterator<Item = Hash>,
+) -> Result<BTreeMap<Hash, PortableRemoval>, StreamError> {
+    let mut out = BTreeMap::new();
+    for a in applies {
+        out.insert(a, sync_proof::check_carried_state(rec.object_source(), a)?);
+    }
+    Ok(out)
+}
+
 /// The approved tuples of each key: those of the `held` approvals in their order, then those of
 /// the `incoming` ones in apply order.
 pub(crate) fn approved_tuples<'a>(

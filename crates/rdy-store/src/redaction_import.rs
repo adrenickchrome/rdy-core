@@ -758,8 +758,8 @@ impl SyncedAuthority {
 }
 
 /// What the fetched applies of `c` before `upto` authorize (D-FNRXT; see [`Synced`]): each
-/// apply's portable proof over the log's own records (`sync_proof::check`: a person's approval,
-/// never a policy), then rules 2 and 3 of the module docs over every frame before `upto`,
+/// apply's portable proof over the log's own records (`sync_proof::check_carried_state`: a
+/// person's approval, never a policy, once the apply's landing is held), then rules 2 and 3 of the module docs over every frame before `upto`,
 /// except that an uncovered local carrier keeps its bytes. It reads the log alone, never the
 /// native applies, so the native check can run with it ([`SyncedAuthority::block_id_at`]); a
 /// failure is `RedactionCorrupt` at the apply or the frame.
@@ -788,7 +788,11 @@ pub(crate) fn synced_authority(
     for a in &frames {
         let corrupt = || StoreError::corrupt_at(a.loc);
         let record = a.record.clone().ok_or_else(corrupt)?;
-        let removal = sync_proof::check(&mut source, a.hash).map_err(|e| proof_error(e, a.loc))?;
+        // A canon state's carried apply waits for its landing while the history arrives
+        // (D-4PV25): its fetch held the rest of the proof, and the check reads the landing
+        // once it is held.
+        let removal = sync_proof::check_carried_state(&mut source, a.hash)
+            .map_err(|e| proof_error(e, a.loc))?;
         for t in removal.objects.values() {
             if let Some(r) = t.residue
                 && !residues.contains_key(&r)

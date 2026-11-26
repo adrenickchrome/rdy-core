@@ -410,15 +410,21 @@ pub(crate) fn parse_change(s: &str) -> Result<Hash, RdyError> {
     })
 }
 
-/// The landings at or before `base` on canon's chain (none for `None`).
+/// The landings at or before `base` on canon's chain (none for `None`). An incomplete history's
+/// chain ends at its frontier (D-4PV25): the landings behind it are not held, and no held
+/// change landed in them.
 pub(crate) fn landings_through(
     st: &ReadState,
     base: Option<Hash>,
 ) -> Result<BTreeSet<Hash>, RdyError> {
+    let frontier = st.history_frontier()?;
     let mut out = BTreeSet::new();
     let mut cur = base;
     while let Some(h) = cur {
         out.insert(h);
+        if frontier == Some(h) {
+            break;
+        }
         cur = st.reader().landing(&h)?.prev;
     }
     Ok(out)

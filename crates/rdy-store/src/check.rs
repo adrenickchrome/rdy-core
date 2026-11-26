@@ -166,6 +166,7 @@ impl StoreReader {
         let mut relayed = 0;
         for (l, rec) in &landings {
             if frontier == Some(*l) {
+                self.check_frontier_landing(l, rec)?;
                 landed_changes += rec.changes.len();
                 continue;
             }
@@ -803,6 +804,69 @@ impl StoreReader {
             return Err(bad(format!(
                 "landing {l}: assurance is policy but it names no policy"
             )));
+        }
+        Ok(())
+    }
+
+    /// The landing field rules of an incomplete history's frontier landing `l` (`rec`), edge by
+    /// edge against the canon state link table (D-4PV25): its value rules and the policy rule
+    /// as every landing's; each frontier edge (`prev`, `proposal`, `approved_version`, each
+    /// change, `assessment`, each `rebased_from`) may be absent, and when it is held it is held
+    /// as its kind. An edge held only as another kind is the record's damage.
+    pub(crate) fn check_frontier_landing(
+        &self,
+        l: &Hash,
+        rec: &LandingRecord,
+    ) -> Result<(), StoreError> {
+        // whether `h`, held or not, may be the edge of kind `kind`: held as that kind, or not
+        // held as any kind
+        let edge = |kind: u8, h: &Hash| -> Result<bool, StoreError> {
+            if self.has_kind(kind, h)? {
+                return Ok(true);
+            }
+            for other in 1..=kinds::SNAPSHOT_DELTA {
+                if other != kind && self.has_kind(other, h)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
+        landing_field_rules(l, rec, None, &mut |kind, h| edge(kind, h))?;
+        // its state, never absent, is the canonical encoding of its map (the take's rule)
+        if let Ok((raw, payload)) = self.get_kind_raw(kinds::SNAPSHOT, &rec.state)
+            && !crate::snapshot::canonical_snapshot(raw, &payload)
+        {
+            return Err(bad(crate::snapshot::noncanonical_snapshot(&rec.state)));
+        }
+        if rec.assurance == Assurance::Policy
+            && rec.policy.is_none()
+            && rec.read_identity.is_none_or(|i| i.version >= 1)
+        {
+            return Err(bad(format!(
+                "landing {l}: assurance is policy but it names no policy"
+            )));
+        }
+        let edges = rec
+            .prev
+            .iter()
+            .map(|h| (kinds::LANDING, h, "prev"))
+            .chain(std::iter::once((
+                kinds::PROPOSAL,
+                &rec.proposal,
+                "proposal",
+            )))
+            .chain(rec.changes.iter().map(|h| (kinds::CHANGE, h, "change")))
+            .chain(
+                rec.assessment
+                    .iter()
+                    .map(|h| (kinds::ASSESSMENT, h, "assessment")),
+            );
+        for (kind, h, what) in edges {
+            if !edge(kind, h)? {
+                return Err(bad(format!(
+                    "landing {l}: its {what} {h} is held as another kind of record"
+                )));
+            }
         }
         Ok(())
     }

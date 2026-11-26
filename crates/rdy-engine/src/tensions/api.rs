@@ -594,6 +594,10 @@ pub fn run_tensions(
     if reviews_omitted > 0 {
         out["reviews_omitted"] = json!(reviews_omitted);
     }
+    // a history still arriving: drift reads the held history only, said once, last
+    if let Some(w) = st.history_warning()? {
+        out["warnings"] = json!([{"code": w.code, "message": w.message, "fix": w.fix}]);
+    }
     Ok(out)
 }
 

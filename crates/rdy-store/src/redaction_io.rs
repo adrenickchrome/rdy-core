@@ -452,8 +452,22 @@ pub(crate) fn request_agrees(
     record: &RedactionApply,
     buf: &mut Option<Vec<u8>>,
 ) -> Result<bool, StoreError> {
-    if !landing.changes.contains(&request.carrier)
-        || check_bounds(request).is_err()
+    if !landing.changes.contains(&request.carrier) {
+        return Ok(false);
+    }
+    request_agrees_alone(request, record, buf)
+}
+
+/// [`request_agrees`] less its landing rule: the request keeps its bounds, its canonical
+/// manifest order and its selector expansion, and the apply binds its report hash. A canon
+/// state's carried apply whose landing is behind the frontier checks this alone
+/// (`crate::sync_proof::check_carried_state`).
+pub(crate) fn request_agrees_alone(
+    request: &Redaction,
+    record: &RedactionApply,
+    buf: &mut Option<Vec<u8>>,
+) -> Result<bool, StoreError> {
+    if check_bounds(request).is_err()
         || !manifest_in_order(&request.manifest)
         || targets_agree(request).is_err()
     {

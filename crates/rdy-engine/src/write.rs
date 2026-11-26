@@ -2066,9 +2066,12 @@ fn build_ops(
                         }
                         // D-GGTYA: while the history is still arriving, an id the view does not
                         // hold may name a block deleted behind the frontier; its re-creation
-                        // cannot be told apart from a new block, so it waits
+                        // cannot be told apart from a new block, so it waits. A deletion the
+                        // store holds (a local one, or one the state carried) is evidence: that
+                        // re-creation keeps its existing rule
                         if ov.get(&g).is_none()
                             && let Some(e) = history_pending
+                            && !store.reader().ever_deleted([&g]).map_err(RdyError::from)?
                         {
                             return Err(e.clone());
                         }

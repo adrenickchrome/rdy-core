@@ -1356,8 +1356,8 @@ const DUMP_FIXTURES_DIGEST: (usize, &str) = (
     "232ec8e9db5e8f4b582e82c3a4543c42743cdd59d82a36b3d39f75f7fe6a5d8e",
 );
 const STORE_FIXTURES_DIGEST: (usize, &str) = (
-    85,
-    "e5c48b33394612a9d4acc0f8325eaaa880953eb9dfa3ae723527b89853443fc8",
+    90,
+    "7971edb0e04087185b8c0342eb1abf3fea00b96e252a0af50dccc7f59a781d8d",
 );
 
 fn tree_digest(dir: &Path) -> (usize, String) {

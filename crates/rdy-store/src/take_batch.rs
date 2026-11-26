@@ -1658,8 +1658,13 @@ fn prepare_intake<E>(
             new_applies.push(k.hash);
         }
     }
-    let incoming: BTreeMap<Hash, PortableRemoval> =
-        stream_source::check_applies(&mut source, new_applies)?;
+    // a canon state's active applies are carried while their landings are frontier edges
+    // (D-4PV25): the checks that read the landing wait for the history
+    let incoming: BTreeMap<Hash, PortableRemoval> = if state {
+        stream_source::check_state_applies(&mut source, new_applies)?
+    } else {
+        stream_source::check_applies(&mut source, new_applies)?
+    };
     let removal_of = |apply: &Hash| incoming.get(apply).or_else(|| active.removals.get(apply));
     // the approved tuples of each key: the holder's applies in log order, then the upload's
     let held = rx

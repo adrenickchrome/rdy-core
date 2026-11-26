@@ -29,7 +29,7 @@ use crate::dump::check_dropped;
 use crate::kinds::{self, BlobManifest};
 use crate::object_refs::ObjectKey;
 use crate::redaction::{is_removable, residue_matches};
-use crate::redaction_io::{human_approval, request_agrees, residue_fits};
+use crate::redaction_io::{human_approval, request_agrees, request_agrees_alone, residue_fits};
 use crate::store::encode;
 use crate::stream_error::{Reason, StreamError};
 use crate::sync_stream::StreamRecord;
@@ -145,6 +145,28 @@ fn typed<T: DeserializeOwned + 'static>(
 /// the record that fails, E_UNRESOLVED_REF for a proof record the source does not hold, or the
 /// bound a record breaks.
 pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemoval, StreamError> {
+    check_with(source, apply, false)
+}
+
+/// [`check`] of an active apply that a canon state carries (D-4PV25, the carried row "each
+/// active REDACTION_APPLY with its REDACTION and residue proofs"): the apply's `landing` is a
+/// frontier edge, so when `source` does not hold that landing the checks that read it (its
+/// human approval, its `checks`, the approved proposal and the landing's carrier) wait for the
+/// history, as does the carrier when it is not held. Every other rule is [`check`]'s: the apply,
+/// the request with its bounds, order, selectors and report hash, the residues, the blob
+/// manifests and every held payload. A held landing or carrier takes the whole check.
+pub fn check_carried_state(
+    source: &mut dyn ObjectSource,
+    apply: Hash,
+) -> Result<PortableRemoval, StreamError> {
+    check_with(source, apply, true)
+}
+
+fn check_with(
+    source: &mut dyn ObjectSource,
+    apply: Hash,
+    frontier: bool,
+) -> Result<PortableRemoval, StreamError> {
     let apply_key = key(kinds::REDACTION_APPLY, apply);
     let apply_bytes = payload(source, apply_key)?;
     let record: RedactionApply = bounded::decode(&apply_bytes)
@@ -154,6 +176,25 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
     }
     // the human landing
     let landing_key = key(kinds::LANDING, record.landing);
+    if frontier && source.record(landing_key)?.is_none() {
+        let request_key = key(kinds::REDACTION, record.request);
+        let request: Redaction = typed(source, request_key)?;
+        let carrier_key = key(kinds::CHANGE, request.carrier);
+        if source.record(carrier_key)?.is_some() {
+            let carrier: Change = typed(source, carrier_key)?;
+            if !carrier.ops.is_empty() || carrier.message != CARRIER_MESSAGE {
+                return Err(invalid(carrier_key));
+            }
+        }
+        let mut buf = None;
+        match request_agrees_alone(&request, &record, &mut buf) {
+            Ok(true) => {}
+            Ok(false) => return Err(invalid(request_key)),
+            Err(_) => return Err(StreamError::allocation(None, 0).with_object(Some(request_key))),
+        }
+        drop(buf);
+        return spans_of(source, apply, &record, &request);
+    }
     let landing: LandingRecord = typed(source, landing_key)?;
     if !human_approval(&landing) {
         return Err(invalid(landing_key));
@@ -203,6 +244,17 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
         Err(_) => return Err(StreamError::allocation(None, 0).with_object(Some(request_key))),
     }
     drop(buf);
+    spans_of(source, apply, &record, &request)
+}
+
+/// The logical tuples of the spans of `request`, which apply `apply` (record `record`) approves,
+/// each checked against its residue and every payload `source` still holds.
+fn spans_of(
+    source: &mut dyn ObjectSource,
+    apply: Hash,
+    record: &RedactionApply,
+    request: &Redaction,
+) -> Result<PortableRemoval, StreamError> {
     // the logical tuples of the spans
     let m = &request.manifest;
     let versions: BTreeSet<(BlockId, Hash)> = m.versions.iter().cloned().collect();

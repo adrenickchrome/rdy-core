@@ -109,7 +109,13 @@ fn r59018_cli_status_fsck_log_and_dump_on_a_partial_project() {
 
     let (ok, log) = s.json(&["--json", "log"]);
     assert!(ok, "{log}");
-    assert_eq!(log["items"], serde_json::json!([]), "{log}");
+    // the held frontier landing is listed, its proposal columns left empty
+    assert_eq!(log["items"].as_array().unwrap().len(), 1, "{log}");
+    assert_eq!(
+        log["items"][0]["landing"], status["history"]["frontier"],
+        "{log}"
+    );
+    assert_eq!(log["items"][0]["title"], "", "{log}");
     assert_eq!(log["warnings"][0]["code"], "W_HISTORY_PENDING", "{log}");
     assert_eq!(log["warnings"][0]["message"], WARNING, "{log}");
 
@@ -120,4 +126,32 @@ fn r59018_cli_status_fsck_log_and_dump_on_a_partial_project() {
     assert_eq!(e["message"], PENDING, "{e}");
     assert_eq!(e["fix"], FIX, "{e}");
     assert!(!out_file.exists());
+}
+
+/// r59018: `status` never fails on the history's key file. With the key file damaged, the
+/// history is partial with the held count it can prove, after the key file's error.
+#[test]
+fn r59018_cli_status_with_a_damaged_key_file() {
+    let s = Served::seeded(|root| {
+        partial_seed(root);
+        std::fs::write(partial_history::key_file(root, "origin"), b"damaged").unwrap();
+    });
+    let (ok, status) = s.json(&["--json", "status"]);
+    assert!(ok, "{status}");
+    assert_eq!(status["history"]["held"], 0, "{status}");
+    assert_eq!(status["history"]["total"], 19, "{status}");
+    assert_eq!(status["history"]["complete"], false, "{status}");
+    let warnings: Vec<&str> = status["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let at = warnings
+        .iter()
+        .position(|w| w.starts_with("W_HISTORY_PENDING: "))
+        .expect("the history warning");
+    assert_eq!(at, warnings.len() - 1, "{status}");
+    assert!(at >= 1, "the key file's error comes first: {status}");
+    assert!(warnings[at - 1].starts_with("E_"), "{status}");
 }

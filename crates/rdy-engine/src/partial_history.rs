@@ -498,4 +498,47 @@ impl ReadState {
             .filter(|p| !p.complete)
             .map(|p| p.warning()))
     }
+
+    /// Appends the reply's one W_HISTORY_PENDING to `warnings`, after the warnings it already
+    /// holds, while the history is incomplete; a reply that holds it already is left as it is.
+    pub fn push_history_warning(
+        &self,
+        warnings: &mut Vec<rdy_schema::Issue>,
+    ) -> Result<(), RdyError> {
+        if let Some(w) = self.history_warning()?
+            && !warnings.iter().any(|x| x.code == w.code)
+        {
+            warnings.push(w);
+        }
+        Ok(())
+    }
+
+    /// The progress a status reports, which never fails on the history's key file: with a key
+    /// file missing or damaged, the history is partial with the held count it can prove (none
+    /// of the listed records), and the key file's error is returned beside it as the status's
+    /// corruption warning. None for a project with no history ref.
+    pub fn history_status(&self) -> Result<Option<(HistoryProgress, Option<RdyError>)>, RdyError> {
+        match self.history_progress() {
+            Ok(p) => Ok(p.map(|p| (p, None))),
+            Err(e) => match self.partial_history()? {
+                Some((_, h)) => Ok(Some((
+                    HistoryProgress {
+                        frontier: h.frontier,
+                        complete: false,
+                        held: 0,
+                        total: h.records,
+                    },
+                    Some(e),
+                ))),
+                None => Err(e),
+            },
+        }
+    }
+
+    /// [`ReadState::history_warning`] as one warning line, `code: message; fix`.
+    pub fn history_warning_line(&self) -> Result<Option<String>, RdyError> {
+        Ok(self
+            .history_warning()?
+            .map(|w| format!("{}: {}; {}", w.code, w.message, w.fix)))
+    }
 }

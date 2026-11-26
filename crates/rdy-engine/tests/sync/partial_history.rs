@@ -9,6 +9,7 @@ use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_state::SyncHistory;
 use rdy_store::sync_stream::StreamPurpose;
 use rdy_store::take_batch::FetchTarget;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 
@@ -185,6 +186,37 @@ fn r59018_pending_refusals_cover_all_surfaces() {
     .unwrap_err();
     pending(&e, "explicit id");
     assert_eq!(r.store().log_end(), end, "a refusal writes nothing");
+    // held local deletion evidence keeps the existing rule: a block made and deleted here is
+    // re-created by its explicit id
+    let made = write(
+        &mut r,
+        "m",
+        serde_json::json!([{"op": "create", "type": "prose", "id": "$p", "parent": BLOCK, "body": "Made here."}]),
+    )
+    .unwrap();
+    let made = made.created["$p"].clone();
+    let p = r
+        .propose(&writer(), "m", "m", Some(crate::common::TEST_SUMMARY))
+        .unwrap();
+    crate::common::confirm_exceptions(&mut r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap();
+    write(
+        &mut r,
+        "x",
+        serde_json::json!([{"op": "delete", "id": made}]),
+    )
+    .unwrap();
+    let p = r
+        .propose(&writer(), "x", "x", Some(crate::common::TEST_SUMMARY))
+        .unwrap();
+    crate::common::confirm_exceptions(&mut r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap();
+    write(
+        &mut r,
+        "y",
+        serde_json::json!([{"op": "create", "type": "prose", "id": made, "parent": BLOCK, "body": "Back."}]),
+    )
+    .unwrap();
 }
 
 /// r59018: read, write, propose and land work on the partial project; the history reads omit
@@ -219,9 +251,50 @@ fn r59018_read_warnings_do_not_hide_content() {
                 .entries
                 .is_empty()
         );
-        // the canon walk and the log stop at the frontier
+        // the context, the brief and the export each say so once, after their own warnings
+        let once = |w: &[rdy_schema::Issue], what: &str| {
+            assert_eq!(
+                w.iter().filter(|w| w.code == W_HISTORY_PENDING).count(),
+                1,
+                "{what}: {w:?}"
+            );
+            assert_eq!(w.last().unwrap().code, W_HISTORY_PENDING, "{what}");
+        };
+        once(&st.context(&Scope::Canon, &id).unwrap().warnings, "context");
+        let cov = Coverage {
+            ids: vec![id.to_string()],
+            path: None,
+        };
+        once(
+            &st.brief(&Scope::Canon, &cov, None).unwrap().warnings,
+            "brief",
+        );
+        let out = d.path().join("export");
+        let summary = st.export(&Scope::Canon, &out).unwrap();
+        assert_eq!(
+            summary
+                .warnings
+                .iter()
+                .filter(|w| w.starts_with("W_HISTORY_PENDING: "))
+                .count(),
+            1,
+            "{:?}",
+            summary.warnings
+        );
+        assert_eq!(
+            summary.warnings.last().unwrap(),
+            "W_HISTORY_PENDING: history is still arriving (4 of 19 records); wait for the clone to finish, or run rdy pull to resume it"
+        );
+        // the canon walk stops at the frontier; the log lists the held frontier landing, whose
+        // proposal is behind it, with its columns left empty
         assert_eq!(st.landings().unwrap().len(), 1);
-        assert!(st.log_page(None, None).unwrap().is_empty());
+        let log = st.log_page(None, None).unwrap();
+        assert_eq!(log.len(), 1, "the frontier landing is logged");
+        let (_, frontier) = state_facts();
+        assert_eq!(log[0].landing, frontier.to_string());
+        assert_eq!(log[0].title, "");
+        assert_eq!(log[0].proposed_by.actor, "");
+        assert!(log[0].approved.is_none());
     }
     // an ordinary edit of held content: the version is the frontier map's, whose producer is
     // behind the frontier; it is written, proposed and landed like any other edit
@@ -265,8 +338,8 @@ fn r59018_read_warnings_do_not_hide_content() {
     assert_eq!(st.landings().unwrap().len(), 3);
     assert_eq!(
         st.log_page(None, None).unwrap().len(),
-        2,
-        "the local landings are logged"
+        3,
+        "the local landings are logged, then the frontier"
     );
     assert!(st.history_warning().unwrap().is_some(), "still partial");
     drop(st);
@@ -274,7 +347,14 @@ fn r59018_read_warnings_do_not_hide_content() {
     let report = r.fsck().unwrap();
     assert_eq!(report.landings, 3);
     assert!(!report.history.unwrap().complete);
-    drop(r);
+    // the tension read (restatement drift over the held history) says so once
+    let e = rdy_engine::engine::Local::new(r);
+    let t =
+        rdy_engine::tensions::api::run_tensions(&e as &dyn Engine, &writer(), Default::default())
+            .unwrap();
+    assert_eq!(t["warnings"].as_array().unwrap().len(), 1, "{t}");
+    assert_eq!(t["warnings"][0]["code"], W_HISTORY_PENDING, "{t}");
+    drop(e);
     // a delete of held content, in a second partial project: proposed and landed
     let root = d.path().join("q");
     std::fs::create_dir(&root).unwrap();
@@ -410,6 +490,8 @@ fn r59018_partial_fsck_is_strict() {
     let r = Rdy::open(&root).unwrap();
     let e = r.fsck().unwrap_err();
     assert_eq!(e.code, E_BAD_RECORD, "{e:?}");
+    drop(r);
+    partial_fsck_strict_cases();
 }
 
 /// r59018 (fix round 1): the full check runs before completion. The frozen canon history taken
@@ -714,4 +796,364 @@ fn copy_tree(from: &Path, to: &Path) {
 
 fn pending_any(e: &RdyError) {
     assert_eq!(e.code, E_HISTORY_PENDING, "{e:?}");
+}
+
+/// The canon state of `root` in `src`, one batch at `dir/state.batch`, and its canon history,
+/// one batch at `dir/history.batch`, with the history's keys.
+fn split_source(src: &Rdy, root: Hash, dir: &Path) -> (PathBuf, PathBuf, Vec<ObjectKey>) {
+    use rdy_engine::canon_state_export::PreparedCanonState;
+    let state = PreparedCanonState::new(src.read(), root).unwrap();
+    let keys = state.keys().to_vec();
+    let state_path = dir.join("state.batch");
+    state
+        .write_keys(&keys, std::fs::File::create(&state_path).unwrap())
+        .unwrap();
+    let repo = src.store().repo_id().unwrap().unwrap();
+    let reader = src.store().reader();
+    let end = rdy_store::closure::END_OF_LOG;
+    let found = rdy_store::closure::history_closure_before(
+        &reader,
+        StreamPurpose::CanonHistory,
+        root,
+        &Default::default(),
+        None,
+        end,
+    )
+    .unwrap();
+    let header = rdy_store::sync_stream::StreamHeader::canon_history(
+        found.features.clone(),
+        repo,
+        root,
+        found.prerequisites.clone(),
+    );
+    let mut source = rdy_store::closure::StoreSource {
+        reader: &reader,
+        end,
+    };
+    let history_path = dir.join("history.batch");
+    rdy_store::closure::write_batch(
+        &mut source,
+        &header,
+        &found.records,
+        std::fs::File::create(&history_path).unwrap(),
+    )
+    .unwrap();
+    (state_path, history_path, found.records.clone())
+}
+
+/// A fresh project at `dest` of repo `repo` that took the canon state at `state` (root `root`)
+/// and wrote the checked key file of `keys`.
+fn take_state(dest: &Path, repo: RepoId, root: Hash, state: &Path, keys: Vec<ObjectKey>) {
+    std::fs::create_dir(dest).unwrap();
+    Rdy::init(dest, "rdy-standard").unwrap().close().unwrap();
+    let store_dir = dest.join(".rdy").join(rdy_store::layout::STORE_DIR);
+    std::fs::remove_dir_all(&store_dir).unwrap();
+    let mut s = Store::create_fork_project(&store_dir, repo).unwrap();
+    let history = SyncHistory {
+        repo_id: repo,
+        url: URL.into(),
+        frontier: root,
+        complete: false,
+        records: keys.len() as u64,
+    };
+    let target = FetchTarget {
+        remote: "origin".into(),
+        url: URL.into(),
+        purpose: StreamPurpose::CanonState,
+        root,
+        view: None,
+    };
+    s.take_canon_state::<Infallible>(
+        &[std::fs::File::open(state).unwrap()],
+        &target,
+        &history,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    s.reader().check_objects().unwrap();
+    s.close().unwrap();
+    write_keys(dest, repo, root, keys);
+}
+
+/// r59018 (D-4PV25, the carried row): a canon state that carries an active REDACTION_APPLY is
+/// taken, and its removal proof waits only for the apply's landing, which is behind the
+/// frontier. The store's partial check passes; its full check refuses the missing history.
+#[test]
+fn r59018_a_carried_removal_is_taken() {
+    let w = crate::canon_state::rich();
+    let root = w.root;
+    let repo = w.r.store().repo_id().unwrap().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let (state, _, keys) = split_source(&w.r, root, d.path());
+    let dest = d.path().join("dest");
+    take_state(&dest, repo, root, &state, keys);
+    let store_dir = dest.join(".rdy").join(rdy_store::layout::STORE_DIR);
+    let s = Store::open(&store_dir).unwrap();
+    s.reader().check_objects().unwrap();
+    assert!(s.reader().full_history_reader().check_objects().is_err());
+    s.close().unwrap();
+    // (the source's signatures are not real, so the store's checks stand for fsck here)
+    let r = Rdy::open(&dest).unwrap();
+    assert!(r.read().history_warning().unwrap().is_some());
+}
+
+/// The sealed batches of the store at `dir`, in log order: each batch's frames (raw kind and
+/// payload), its marker left out.
+fn store_batches(dir: &Path) -> Vec<Vec<(u8, Vec<u8>)>> {
+    use rdy_store::redaction::StoredFrame;
+    let s = Store::open(dir).unwrap();
+    let r = s.reader();
+    let (mut out, mut cur) = (vec![], vec![]);
+    let origin = rdy_store::segment::Location {
+        segment: 0,
+        offset: 0,
+    };
+    r.for_each_record_from(origin, s.log_end(), |_, f, _| {
+        let StoredFrame::Present { kind, payload, .. } = f else {
+            panic!("the fixture drops no payload");
+        };
+        if rdy_store::codec::logical_kind(kind) == rdy_store::kinds::BATCH_COMMIT {
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push((kind, payload.to_vec()));
+        }
+        Ok(())
+    })
+    .unwrap();
+    drop(r);
+    s.close().unwrap();
+    out
+}
+
+/// Writes `batches` as the whole log of the store at `dir`, each batch sealed; the derived files
+/// (index and span map) are removed, so the open rebuilds them.
+fn write_batches(dir: &Path, batches: &[Vec<(u8, Vec<u8>)>]) {
+    let segs = dir.join("segments");
+    std::fs::remove_dir_all(&segs).unwrap();
+    std::fs::create_dir(&segs).unwrap();
+    for derived in std::fs::read_dir(dir).unwrap() {
+        let path = derived.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if !["FORMAT", "FEATURES", "lock", "segments"].contains(&name.as_str()) {
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+    }
+    let (mut log, _) =
+        rdy_store::segment::SegmentLog::open_marked(&segs, 64 * 1024 * 1024, None).unwrap();
+    for b in batches.iter().filter(|b| !b.is_empty()) {
+        log.append_batch(b).unwrap();
+    }
+    log.sync().unwrap();
+}
+
+/// Replaces every copy of `from`'s bytes with `to`'s in the payloads of `batches`, then every
+/// copy of the hash of each payload that changed, until none changes; returns each moved hash.
+fn move_hash(batches: &mut [Vec<(u8, Vec<u8>)>], from: Hash, to: Hash) -> BTreeMap<Hash, Hash> {
+    let mut moved = BTreeMap::new();
+    let mut todo = vec![(from, to)];
+    while let Some((a, b)) = todo.pop() {
+        moved.insert(a, b);
+        for batch in batches.iter_mut() {
+            for (_, p) in batch.iter_mut() {
+                let old = Hash::of(p);
+                if replace_bytes(p, &a.0, &b.0) {
+                    todo.push((old, Hash::of(p)));
+                }
+            }
+        }
+    }
+    moved
+}
+
+fn replace_bytes(p: &mut [u8], from: &[u8], to: &[u8]) -> bool {
+    let mut hit = false;
+    let mut i = 0;
+    while i + from.len() <= p.len() {
+        if &p[i..i + from.len()] == from {
+            p[i..i + from.len()].copy_from_slice(to);
+            hit = true;
+            i += from.len();
+        } else {
+            i += 1;
+        }
+    }
+    hit
+}
+
+/// The first frame of logical kind `kind` in `batches`: its batch, place and hash.
+fn frame_of(batches: &[Vec<(u8, Vec<u8>)>], kind: u8) -> (usize, usize, Hash) {
+    for (b, batch) in batches.iter().enumerate() {
+        for (i, (k, p)) in batch.iter().enumerate() {
+            if rdy_store::codec::logical_kind(*k) == kind {
+                return (b, i, Hash::of(p));
+            }
+        }
+    }
+    panic!("no frame of kind {kind}");
+}
+
+/// The strict cases of [`r59018_partial_fsck_is_strict`]: every record the partial project
+/// holds is checked, the frontier landing edge by edge against the canon state link table
+/// (D-4PV25). Each case forges the fixture's taken state from its own frames, so only the named
+/// damage differs; a forged copy with no damage passes.
+fn partial_fsck_strict_cases() {
+    use rdy_store::kinds;
+    let d = tempfile::tempdir().unwrap();
+    let base = d.path().join("base");
+    std::fs::create_dir(&base).unwrap();
+    partial_project(&base);
+    let (repo, frontier) = state_facts();
+    let store_of = |root: &Path| root.join(".rdy").join(rdy_store::layout::STORE_DIR);
+    let original = store_batches(&store_of(&base));
+    let rec = Store::open(&store_of(&base))
+        .unwrap()
+        .reader()
+        .landing(&frontier)
+        .unwrap();
+    let (_, _, block) = frame_of(&original, kinds::BLOCK);
+    // each case: its name, the damage, and whether the state's checks already refused it before
+    // the frontier landing's edges were checked (a guard)
+    type Damage = Box<dyn Fn(&mut Vec<Vec<(u8, Vec<u8>)>>) -> Hash>;
+    let in_landing = |from: Hash, to: Hash| -> Damage {
+        Box::new(move |b: &mut Vec<Vec<(u8, Vec<u8>)>>| {
+            let (bi, i, _) = frame_of(b, kinds::LANDING);
+            assert!(replace_bytes(&mut b[bi][i].1, &from.0, &to.0));
+            let new = Hash::of(&b[bi][i].1);
+            let moved = move_hash(b, frontier, new);
+            moved[&frontier]
+        })
+    };
+    let drop_kind = |kind: u8| -> Damage {
+        Box::new(move |b: &mut Vec<Vec<(u8, Vec<u8>)>>| {
+            let (bi, i, _) = frame_of(b, kind);
+            b[bi].remove(i);
+            frontier
+        })
+    };
+    let cases: Vec<(&str, Damage)> = vec![
+        (
+            "none",
+            Box::new(move |_: &mut Vec<Vec<(u8, Vec<u8>)>>| frontier),
+        ),
+        (
+            "approved version held as a block",
+            in_landing(rec.approved_version.unwrap(), block),
+        ),
+        ("change held as a block", in_landing(rec.changes[0], block)),
+        (
+            "assessment held as a block",
+            in_landing(rec.assessment.unwrap(), block),
+        ),
+        ("prev held as a block", in_landing(rec.prev.unwrap(), block)),
+        (
+            "bad snapshot hash",
+            Box::new(move |b: &mut Vec<Vec<(u8, Vec<u8>)>>| {
+                let (bi, i, _) = frame_of(b, kinds::SNAPSHOT);
+                let last = b[bi][i].1.len() - 1;
+                b[bi][i].1[last] ^= 1;
+                frontier
+            }),
+        ),
+        (
+            "noncanonical snapshot bytes",
+            Box::new(move |b: &mut Vec<Vec<(u8, Vec<u8>)>>| {
+                let (bi, i, old) = frame_of(b, kinds::SNAPSHOT);
+                b[bi][i].1.push(0);
+                let new = Hash::of(&b[bi][i].1);
+                b[bi][i].1.pop();
+                let moved = move_hash(b, old, new);
+                b[bi][i].1.push(0);
+                moved.get(&frontier).copied().unwrap_or(frontier)
+            }),
+        ),
+        ("missing map block", drop_kind(kinds::BLOCK)),
+        ("missing delta", drop_kind(kinds::SNAPSHOT_DELTA)),
+        (
+            "missing snapshot (never absent)",
+            drop_kind(kinds::SNAPSHOT),
+        ),
+        ("missing tag (carried)", drop_kind(kinds::TAG)),
+        (
+            "wrong delta",
+            Box::new(move |b: &mut Vec<Vec<(u8, Vec<u8>)>>| {
+                let (bi, i, old) = frame_of(b, kinds::SNAPSHOT_DELTA);
+                let mut p = b[bi][i].1.clone();
+                let last = p.len() - 1;
+                p[last] ^= 1;
+                let new = Hash::of(&p);
+                b[bi][i].1 = p;
+                move_hash(b, old, new);
+                frontier
+            }),
+        ),
+        (
+            "corrupt history value",
+            Box::new(move |b: &mut Vec<Vec<(u8, Vec<u8>)>>| {
+                for batch in b.iter_mut() {
+                    for (k, p) in batch.iter_mut() {
+                        // the value's `complete` flag, after its frontier, is no bool
+                        if rdy_store::codec::logical_kind(*k) == kinds::REF_UPDATE
+                            && p.windows(24).any(|w| w == b"meta/sync/origin/history")
+                        {
+                            let at = p.windows(32).position(|w| w == frontier.0).unwrap();
+                            p[at + 32] = 7;
+                        }
+                    }
+                }
+                frontier
+            }),
+        ),
+    ];
+    let mut outcomes = vec![];
+    for (name, damage) in cases {
+        let root = d.path().join(name.replace(' ', "-"));
+        copy_tree(&base, &root);
+        let mut batches = original.clone();
+        let new_frontier = damage(&mut batches);
+        write_batches(&store_of(&root), &batches);
+        write_keys(&root, repo, new_frontier, history_keys());
+        let got = Rdy::open(&root).and_then(|r| r.fsck().map(|_| ()));
+        outcomes.push((name, got.map_err(|e| format!("{}: {}", e.code, e.message))));
+    }
+    for (name, got) in outcomes {
+        if name == "none" {
+            assert!(got.is_ok(), "{name}: {got:?}");
+        } else {
+            assert!(got.is_err(), "{name}: the partial check passed");
+        }
+    }
+}
+
+/// r59018: the status's progress never fails on the key file. Missing or damaged, the history
+/// is partial with the held count the status can prove, and the key file's error is returned
+/// beside it as the corruption warning.
+#[test]
+fn r59018_status_progress_survives_a_bad_key_file() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("p");
+    std::fs::create_dir(&root).unwrap();
+    partial_project(&root);
+    let (_, frontier) = state_facts();
+    let path = partial_history::key_file(&root, "origin");
+    for damage in [None, Some(&b"not a key file"[..])] {
+        match damage {
+            None => std::fs::remove_file(&path).unwrap(),
+            Some(bytes) => std::fs::write(&path, bytes).unwrap(),
+        }
+        let r = Rdy::open(&root).unwrap();
+        let st = r.read();
+        assert!(st.history_progress().is_err(), "the strict progress fails");
+        let (p, e) = st.history_status().unwrap().expect("a partial history");
+        assert_eq!(
+            (p.frontier, p.complete, p.held, p.total),
+            (frontier, false, 0, 19)
+        );
+        let e = e.expect("the key file's error");
+        assert_ne!(e.code, W_HISTORY_PENDING);
+        assert_eq!(p.warning().code, W_HISTORY_PENDING);
+    }
 }

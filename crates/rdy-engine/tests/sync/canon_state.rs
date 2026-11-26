@@ -341,25 +341,25 @@ fn r59017_state_export_never_walks_history_closure() {
 // ---------------------------------------------------------------------------------------------
 // r59017_attachments_and_frontier_are_exact
 
-struct Rich {
-    _dir: tempfile::TempDir,
-    r: Rdy,
+pub(crate) struct Rich {
+    pub(crate) _dir: tempfile::TempDir,
+    pub(crate) r: Rdy,
     /// The first landing (a tag, a signature, a check request and a dispute of its own, none
     /// of them part of the root's state), the removal's landing, the root, and a later landing.
-    p1: Hash,
-    p2: Hash,
-    root: Hash,
-    p4: Hash,
-    blob: Hash,
-    tags: [Hash; 2],
-    signatures: [Hash; 2],
-    request: Hash,
-    review: Hash,
-    dispute: Hash,
-    resolution: Hash,
-    secret: BlockId,
+    pub(crate) p1: Hash,
+    pub(crate) p2: Hash,
+    pub(crate) root: Hash,
+    pub(crate) p4: Hash,
+    pub(crate) blob: Hash,
+    pub(crate) tags: [Hash; 2],
+    pub(crate) signatures: [Hash; 2],
+    pub(crate) request: Hash,
+    pub(crate) review: Hash,
+    pub(crate) dispute: Hash,
+    pub(crate) resolution: Hash,
+    pub(crate) secret: BlockId,
     /// A plain block that a later removal may take.
-    spare: BlockId,
+    pub(crate) spare: BlockId,
 }
 
 /// A doc with a secret prose block, a figure with a two-chunk blob and a claim, landed (`p1`,
@@ -367,7 +367,7 @@ struct Rich {
 /// (the root, `root`), relay-tagged `v1.0.0` and tagged `v1.0.1`, the root and the second tag
 /// signed, a check request of the root's change with its review, and a dispute of the root
 /// resolved by a later landing `p4`.
-fn rich() -> Rich {
+pub(crate) fn rich() -> Rich {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let blob = r.store_mut().put_blob(&vec![7u8; (1 << 20) + 5]).unwrap();

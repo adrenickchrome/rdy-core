@@ -605,8 +605,8 @@ const KEPT_TREES: [(&str, usize, &str); 12] = [
     ),
     (
         "fixtures/store",
-        90,
-        "974cec98b1ae6594f6e6aba6f15dd4b7ec5c6a35bea0930967d68d7c98010499",
+        95,
+        "d5c0dae9e8f99b1eb0d7ffb4a5bf84ab0410699a4fcaff6fbb171406c1694021",
     ),
     (
         "fixtures/sync",

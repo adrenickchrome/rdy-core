@@ -348,7 +348,9 @@ impl ReadState {
         suspects.retain(|s| !self.is_presentational_source(&m, s));
         let suspects = self.suspect_rows(scope, suspects, Some(std::slice::from_ref(id)))?;
         let as_built = self.as_built(scope, [id])?;
-        let warnings = self.as_built_warnings(scope, &as_built)?;
+        let mut warnings = self.as_built_warnings(scope, &as_built)?;
+        // a history still arriving: the as-built and history reads stop at its frontier
+        self.push_history_warning(&mut warnings)?;
         Ok(Context {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),

@@ -1060,6 +1060,10 @@ impl ReadState {
             serde_yaml_ng::to_string(&manifest).expect("manifest"),
         )
         .map_err(io_err)?;
+        // a history still arriving leaves out the authors behind its frontier, said once, last
+        if let Some(w) = self.history_warning_line()? {
+            summary.warnings.push(w);
+        }
         Ok(summary)
     }
 }

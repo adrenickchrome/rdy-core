@@ -139,11 +139,22 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
     for w in &uncovered {
         warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
     }
-    // a history still arriving (D-GGTYA): its progress, said once after the others
-    let history = st.history_progress()?;
-    if let Some(w) = st.history_warning()? {
-        warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
-    }
+    // a history still arriving (D-GGTYA): its progress, said once after the others. A key file
+    // missing or damaged never fails the status: its error is the corruption warning, and the
+    // progress counts only what it can prove
+    let history = match st.history_status()? {
+        Some((p, damage)) => {
+            if let Some(e) = damage {
+                warnings.push(format!("{}: {}; {}", e.code, e.message, e.fix));
+            }
+            if !p.complete {
+                let w = p.warning();
+                warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
+            }
+            Some(p)
+        }
+        None => None,
+    };
     let suspects = st.suspect_details(&Scope::Canon)?.len();
     // cc15 (FW-CH3a): the current score, its dimensions, the issue count and the kinds, from
     // the memoised summary; the pages, areas and issues are `rdy coverage`'s. A coverage read
@@ -331,10 +342,8 @@ pub(super) fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
         .map_or(Value::Null, |e| to_json(&e.justification));
     v["history"] = to_json(&h.entries);
     v["history_more"] = Value::Bool(h.more);
-    // a history still arriving leaves out the entries behind its frontier, said once
-    if let Some(w) = st.history_warning()? {
-        v["warnings"] = json!([{"code": w.code, "message": w.message, "fix": w.fix}]);
-    }
+    // a history still arriving leaves out the entries behind its frontier: the context's
+    // warnings say so once, after its as-built warnings
     Ok(v)
 }
 
