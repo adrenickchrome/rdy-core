@@ -198,8 +198,10 @@ fn delta(was: &str, now: &str) -> BTreeMap<String, (String, Value)> {
 /// leaves, and plan deltas' (`plan_delta`): the feature, its activation by a PLAN of encoding 1,
 /// its rule and its first-use dump and sync fixtures; and the refusal texts of the recovery task:
 /// four error rows and two templates (`r5909_successor_contract_changes_only_refusal_text`); and
-/// a partial history's codes ([`HISTORY_CODES`]). A later task of the release adds its own rows.
-const RELEASE_DELTA: [&str; 36] = [
+/// a partial history's codes ([`HISTORY_CODES`]); and the eight new templates of the overlapped
+/// upload preparation and the canon input check, whose start or worker failures a push reports
+/// (`UPLOAD_*` and `CAPTURE_*`). A later task of the release adds its own rows.
+const RELEASE_DELTA: [&str; 44] = [
     "added /cli/runtime/probes/compact/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/fsck/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/status/stdout/deduplicated_bytes",
@@ -211,6 +213,14 @@ const RELEASE_DELTA: [&str; 36] = [
     "added /dump_load/fixture_digests/v4-f1-reduction-chain.expect.json",
     "added /dump_load/fixture_digests/v4-f1-reduction.expect.json",
     "added /dump_load/fixture_digests/v4-f1-reduction.rdydump",
+    "added /errors_warnings/templates/CAPTURE_FAILED_FIX",
+    "added /errors_warnings/templates/CAPTURE_FAILED_MESSAGE",
+    "added /errors_warnings/templates/CAPTURE_START_FIX",
+    "added /errors_warnings/templates/CAPTURE_START_MESSAGE",
+    "added /errors_warnings/templates/UPLOAD_FAILED_FIX",
+    "added /errors_warnings/templates/UPLOAD_FAILED_MESSAGE",
+    "added /errors_warnings/templates/UPLOAD_START_FIX",
+    "added /errors_warnings/templates/UPLOAD_START_MESSAGE",
     "added /mcp/result_fields/rdy_compact/ok/deduplicated_bytes",
     "added /store/activation/kind 24 encoding 1",
     "added /store/creation_baseline/features/name=dedup_spans",
@@ -385,8 +395,9 @@ fn descriptive(path: &str) -> bool {
 }
 
 /// The shape leaves later tasks of the release add to the agent subtrees: span maps' byte count
-/// in the compact report, and a partial history's two codes (their refusal rows, `rdy_schema`
-/// entries, codes, error rows and fix template). Nothing else may move.
+/// in the compact report, a partial history's two codes (their refusal rows, `rdy_schema`
+/// entries, codes, error rows and fix template), and the eight new upload and canon-input
+/// templates. Nothing else may move.
 const ADDED_LEAVES: &[&str] = &[
     "length /mcp/refusal_error_rows",
     "member /mcp/result_fields/rdy_compact/ok/deduplicated_bytes",
@@ -395,7 +406,15 @@ const ADDED_LEAVES: &[&str] = &[
     "member /errors_warnings/codes/E_HISTORY_PENDING",
     "member /errors_warnings/codes/W_HISTORY_PENDING",
     "length /errors_warnings/error_rows",
+    "member /errors_warnings/templates/CAPTURE_FAILED_FIX",
+    "member /errors_warnings/templates/CAPTURE_FAILED_MESSAGE",
+    "member /errors_warnings/templates/CAPTURE_START_FIX",
+    "member /errors_warnings/templates/CAPTURE_START_MESSAGE",
     "member /errors_warnings/templates/HISTORY_PENDING_FIX",
+    "member /errors_warnings/templates/UPLOAD_FAILED_FIX",
+    "member /errors_warnings/templates/UPLOAD_FAILED_MESSAGE",
+    "member /errors_warnings/templates/UPLOAD_START_FIX",
+    "member /errors_warnings/templates/UPLOAD_START_MESSAGE",
 ];
 
 /// Every difference between `was` and `now` below `path`: a changed string leaf, or a change of
