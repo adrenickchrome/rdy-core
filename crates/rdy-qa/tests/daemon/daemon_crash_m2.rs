@@ -1,6 +1,7 @@
 //! sg6 (spec §15.2 crash tests): `kill -9` the daemon during a large include and during a landing
 //! that rebases views. Each op is all or nothing: after the restart by the next client, fsck is
 //! clean with no unlogged move, and the invariant checker passes.
+use rdy_daemon::{Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, connect};
 use rdy_engine::{Rdy, Scope};
 use rdy_model::Hash;
 use rdy_qa::daemon::Served;
@@ -18,7 +19,7 @@ const SRC_CHANGES: usize = 2_000;
 const VIEWS: usize = 20;
 /// How many of those views also edit the seed claim the person edits.
 const COLLIDING: usize = 3;
-/// A hang guard for one child command, not a speed check.
+/// A hang guard for one approve, not a speed check.
 const CHILD_BUDGET: Duration = Duration::from_secs(120);
 
 fn lcg(seed: &mut u64) -> u64 {
@@ -48,28 +49,39 @@ enum Hit {
     InFlight,
 }
 
-/// The narrowest kill window, in ms: the time an op takes varies from run to run, so the window
-/// never closes to one point.
+/// The narrowest kill window of the include, in ms: the time an op takes varies from run to run,
+/// so the window never closes to one point.
 const MIN_WIDTH: u64 = 4;
 
-/// A seeded kill delay in `[lo, hi]` ms, and the window narrowed by where it fell: a kill after the
-/// answer lowers `hi`, a kill before the op reached the daemon raises `lo`. Under load the time an
-/// op takes drifts from attempt to attempt, so a window narrowed on earlier attempts can sit beside
-/// the op: a miss in a window already at `MIN_WIDTH` resets it to the timed window `[0, full]`.
+/// The narrowest kill window of the landing, in µs: the landing takes a few ms, timed from its
+/// request on an open connection.
+const MIN_WIDTH_US: u64 = 200;
+
+/// A seeded kill delay in `[lo, hi]` (in the window's unit), and the window narrowed by where it
+/// fell: a kill after the answer lowers `hi`, a kill before the op reached the daemon raises `lo`.
+/// Under load the time an op takes drifts from attempt to attempt, so a window narrowed on earlier
+/// attempts can sit beside the op: a miss in a window already at its narrowest (`min`) resets it
+/// to the timed window `[0, full]`.
 struct Window {
     lo: u64,
     hi: u64,
-    /// The timed window's upper end: the un-killed op's time, in ms.
+    /// The timed window's upper end: the un-killed op's time.
     full: u64,
+    /// The narrowest width.
+    min: u64,
+    /// The unit, for the log: `ms` or `µs`.
+    unit: &'static str,
     seed: u64,
 }
 
 impl Window {
-    fn new(full: u64, seed: u64) -> Window {
+    fn new(full: u64, min: u64, unit: &'static str, seed: u64) -> Window {
         Window {
             lo: 0,
             hi: full,
             full,
+            min,
+            unit,
             seed,
         }
     }
@@ -77,17 +89,18 @@ impl Window {
         self.lo + lcg(&mut self.seed) % (self.hi - self.lo + 1)
     }
     fn narrow(&mut self, d: u64, hit: &Hit) {
-        if *hit != Hit::InFlight && self.hi - self.lo <= MIN_WIDTH {
+        if *hit != Hit::InFlight && self.hi - self.lo <= self.min {
+            let u = self.unit;
             eprintln!(
-                "sg6 window {}..{} ms missed at {d} ms ({hit:?}): reset to 0..{} ms",
+                "sg6 window {}..{} {u} missed at {d} {u} ({hit:?}): reset to 0..{} {u}",
                 self.lo, self.hi, self.full
             );
             (self.lo, self.hi) = (0, self.full);
             return;
         }
         match hit {
-            Hit::Answered => self.hi = d.max(self.lo + MIN_WIDTH),
-            Hit::Early => self.lo = d.min(self.hi.saturating_sub(MIN_WIDTH)),
+            Hit::Answered => self.hi = d.max(self.lo + self.min),
+            Hit::Early => self.lo = d.min(self.hi.saturating_sub(self.min)),
             Hit::InFlight => {}
         }
     }
@@ -199,7 +212,7 @@ fn sg6_a_kill_during_a_large_include_is_all_or_nothing() {
     assert_eq!(hit, Hit::Answered);
     let n = in_process(&s, "dst-cal", |r| r.read().included("dst-cal").len());
     assert_eq!(n, SRC_CHANGES, "the include took every change");
-    let mut w = Window::new(took.as_millis() as u64, 0x7367_3661);
+    let mut w = Window::new(took.as_millis() as u64, MIN_WIDTH, "ms", 0x7367_3661);
     let (mut hits, mut attempt) = (0, 0);
     while hits < points() {
         assert!(
@@ -288,57 +301,72 @@ fn rebasing_landing() -> (Served, Landing) {
     )
 }
 
-/// Waits for `child` with a hang guard; returns its success and its JSON (stdout or stderr).
-fn finish(mut child: std::process::Child) -> (bool, Value) {
-    let end = Instant::now() + CHILD_BUDGET;
-    while child.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < end, "rdy approve hung");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let out = child.wait_with_output().unwrap();
-    let ok = out.status.success();
-    let text = String::from_utf8_lossy(if ok { &out.stdout } else { &out.stderr }).into_owned();
-    let v = serde_json::from_str(text.trim())
-        .or_else(|_| serde_json::from_str(text.trim().lines().last().unwrap_or("")))
-        .unwrap_or(Value::String(text));
-    (ok, v)
-}
-
-/// `rdy --json approve <proposal>` as the person, with the daemon killed `delay` ms after the
-/// command starts (`None`: not killed). Returns where the kill fell, the reply, and the time.
-fn approve(s: &Served, l: &Landing, delay: Option<u64>) -> (Hit, Value, Duration) {
-    let t = Instant::now();
-    let child = s.spawn(&["--json", "approve", &l.proposal]);
-    let Some(d) = delay else {
-        let (ok, v) = finish(child);
-        assert!(ok, "an approve with no kill failed: {v}");
-        return (Hit::Answered, v, t.elapsed());
+/// The person's ctl connection to the served daemon, its `session` op answered.
+async fn person(s: &Served) -> Client {
+    let hello = Hello {
+        rdy: PROTO_VERSION,
+        version: env!("CARGO_PKG_VERSION").into(),
+        build: rdy_daemon::BUILD.to_string(),
+        proto: Proto::Ctl,
+        cwd: s.dir.path().into(),
+        project: RunDir::of_project(s.dir.path())
+            .project_id()
+            .expect("the project's .rdy"),
     };
-    let mut child = child;
-    std::thread::sleep(Duration::from_millis(d));
-    if child.try_wait().unwrap().is_some() {
-        let (ok, v) = finish(child);
-        assert!(ok, "the approve failed before the kill: {v}");
-        return (Hit::Answered, v, t.elapsed());
-    }
-    s.kill9();
-    let (ok, v) = finish(child);
-    let took = t.elapsed();
-    if ok {
-        // answered just before the kill, or run on a successor the command started after it
-        let hit = if s.daemon_pid().is_some() {
-            Hit::Early
-        } else {
-            Hit::Answered
-        };
-        return (hit, v, took);
-    }
-    (killed_hit(&v), v, took)
+    let mut c = match connect(&RunDir::of_project(s.dir.path()), &hello).await {
+        Attempt::Ready(c) => c,
+        Attempt::Exiting => panic!(
+            "the daemon is of another build than this test: rebuild rdy with cargo build -p \
+             rdy-cli, in the profile this test runs in"
+        ),
+        other => panic!("no daemon: {other:?}"),
+    };
+    c.ctl("session", json!({"actor": null, "run": null}))
+        .await
+        .expect("the person's session");
+    c
 }
 
-/// Where the kill fell, from the error a killed `rdy approve` exits with. The CLI sends a
-/// `session` op before `approve`, and a kill during either one gives `E_DAEMON_GONE`; only the
-/// one that names `approve` fell while the landing was in flight.
+/// The person's `approve` of the landing, over a connection that is open and has its session
+/// before the clock starts, with the daemon killed `delay` after the request (`None`: not
+/// killed). Returns where the kill fell, the reply (or the error), and the time from the request
+/// to the reply.
+///
+/// The kill is timed from the request on an open connection, not from the start of a CLI
+/// process: the landing takes a few milliseconds, and a process start, its connect and its
+/// session op vary by more than that on a loaded or fast machine, so a delay counted from the
+/// process start fell before or after the landing nearly every time.
+fn approve(s: &Served, l: &Landing, delay: Option<Duration>) -> (Hit, Value, Duration) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut c = rt.block_on(person(s));
+    let args = json!({"proposal": l.proposal});
+    let t = Instant::now();
+    let call = rt.spawn(async move { c.ctl("approve", args).await });
+    if let Some(d) = delay {
+        // test-hygiene: allow wait the drawn kill point inside the landing, not a wait for work
+        std::thread::sleep(d);
+        if !call.is_finished() {
+            s.kill9();
+        }
+    }
+    let reply = rt
+        .block_on(async { tokio::time::timeout(CHILD_BUDGET, call).await })
+        .expect("the approve hung")
+        .expect("the approve task");
+    let took = t.elapsed();
+    match reply {
+        Ok(v) => (Hit::Answered, v, took),
+        Err(e) => {
+            let v = serde_json::to_value(&e).unwrap();
+            assert!(delay.is_some(), "an approve with no kill failed: {v}");
+            (killed_hit(&v), v, took)
+        }
+    }
+}
+
+/// Where the kill fell, from the error of a killed approve. A client sends a `session` op before
+/// `approve`, and a kill during either one gives `E_DAEMON_GONE`; only the one that names
+/// `approve` fell while the landing was in flight.
 fn killed_hit(v: &Value) -> Hit {
     let message = v["message"].as_str().unwrap_or("");
     match v["code"].as_str() {
@@ -351,7 +379,7 @@ fn killed_hit(v: &Value) -> Hit {
 
 #[test]
 fn sg6_a_narrowed_window_that_misses_resets_to_the_timed_window() {
-    let mut w = Window::new(20, 1);
+    let mut w = Window::new(20, MIN_WIDTH, "ms", 1);
     w.narrow(12, &Hit::Early);
     w.narrow(16, &Hit::Answered);
     assert_eq!((w.lo, w.hi), (12, 16), "narrowed to MIN_WIDTH");
@@ -443,21 +471,21 @@ fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
     }
     assert_eq!(all_or_nothing(&s, &l, "no kill"), (true, after));
     drop(s);
-    let mut w = Window::new(took.as_millis() as u64, 0x6c61_6e64);
+    let mut w = Window::new(took.as_micros() as u64, MIN_WIDTH_US, "µs", 0x6c61_6e64);
     let (mut hits, mut attempt) = (0, 0);
     while hits < points() {
         assert!(
             attempt < points() * MAX_TRIES,
-            "only {hits} of {} kills fell in flight in {attempt} attempts (window {}..{} ms)",
+            "only {hits} of {} kills fell in flight in {attempt} attempts (window {}..{} µs)",
             points(),
             w.lo,
             w.hi
         );
         let (s, l) = rebasing_landing();
         let d = w.draw();
-        let (hit, v, _) = approve(&s, &l, Some(d));
+        let (hit, v, _) = approve(&s, &l, Some(Duration::from_micros(d)));
         let what =
-            format!("attempt {attempt}, killed {d} ms after the approve started ({hit:?}: {v})");
+            format!("attempt {attempt}, killed {d} µs after the approve request ({hit:?}: {v})");
         let (landed, moves) = all_or_nothing(&s, &l, &what);
         if v.get("landing").is_some() {
             assert!(landed, "{what}: an acknowledged landing is lost");
@@ -473,7 +501,7 @@ fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
             hits += 1;
         }
         eprintln!(
-            "sg6 landing: attempt {attempt}, killed at {d} ms: {hit:?}, landed: {landed}, \
+            "sg6 landing: attempt {attempt}, killed at {d} µs: {hit:?}, landed: {landed}, \
              transitions: {moves}"
         );
         w.narrow(d, &hit);
