@@ -21,7 +21,11 @@
 //!    write it answers the lookup `E_HUB_BUSY` with `retry_after`: the lookup waits that many
 //!    seconds (1 to 5) and asks again, for at most 120 seconds and 82 asks, and then stops with
 //!    the uncertain words, with `pending` kept and no write sent. A completed refusal that
-//!    carries the code `E_HUB_BUSY` is a refusal, not a busy reply, and is never waited on.
+//!    carries the code `E_HUB_BUSY` is a refusal, not a busy reply, and is never waited on. A
+//!    taken or held outcome learned after a busy wait ends the write that the state of step 4
+//!    saw running, so the push or pull takes a new state (steps 4 and 5) before any further
+//!    sync work, and compares local state with that one only. A failure of that capture is
+//!    returned; what the recovery applied stays.
 //! 7. **Push.** One render-input capture per push, at the pushed head's scope, with the gate
 //!    settings of the same read state. Canon first, then each named view in Plan A's push
 //!    order. Each has its own push id, upload, known, put and write; a view write starts only
@@ -714,12 +718,27 @@ impl<'a> SyncService<'a> {
         cx: &UploadContext,
         push: &str,
     ) -> Result<Option<OutcomeReply>, RdyError> {
+        self.lookup_outcome_noted(cx, push).map(|(reply, _)| reply)
+    }
+
+    /// [`SyncService::lookup_outcome`] and whether the hub answered busy at least once, so the
+    /// outcome was learned after a wait.
+    fn lookup_outcome_noted(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+    ) -> Result<(Option<OutcomeReply>, bool), RdyError> {
         let own = SystemPollClock::new();
         let clock: &dyn OutcomePollClock = match self.poll_clock {
             Some(c) => c,
             None => &own,
         };
-        poll_outcome(clock, || self.wire.outcome(cx, push))
+        let mut asked = 0u32;
+        let reply = poll_outcome(clock, || {
+            asked += 1;
+            self.wire.outcome(cx, push)
+        })?;
+        Ok((reply, asked > 1))
     }
 
     fn credentials(&self) -> HubCredentials<'a> {
@@ -1069,16 +1088,18 @@ impl<'a> SyncService<'a> {
         Ok((base_url, state))
     }
 
-    /// Step 6 for the `pending` ref found on `t`.
+    /// Step 6 for the `pending` ref found on `t`. The flag is true when a taken or held outcome
+    /// was learned after the hub answered busy: the caller's hub state predates it, and it takes a fresh one
+    /// (`SyncService::recapture`) before any further sync work.
     fn lookup(
         &self,
         engine: &dyn Engine,
         t: &Target,
         base_url: &str,
         state: &SyncState,
-    ) -> Result<Option<Resolved>, RdyError> {
+    ) -> Result<(Option<Resolved>, bool), RdyError> {
         let Some(p) = remote_refs(engine, &t.name)?.pending else {
-            return Ok(None);
+            return Ok((None, false));
         };
         let read = engine.read();
         if p.url != t.url || p.repo_id != read.repo_id()? {
@@ -1086,7 +1107,7 @@ impl<'a> SyncService<'a> {
             return Err(busy(&t.name));
         }
         let cx = self.context(t, &read, Some(base_url))?;
-        let reply = self.lookup_outcome(&cx, &p.push)?;
+        let (reply, waited) = self.lookup_outcome_noted(&cx, &p.push)?;
         drop(cx);
         // the hub still runs the write: it may yet complete, so `pending` stays and no write goes
         let Some(reply) = reply else {
@@ -1119,13 +1140,33 @@ impl<'a> SyncService<'a> {
                 self.reply_only(engine, t, &p.push)?;
             }
         }
-        Ok(Some(Resolved {
+        // only a taken or held outcome changes what the hub's state means for this store
+        let stale = waited
+            && matches!(
+                reply.outcome,
+                LookupOutcome::Taken { .. } | LookupOutcome::Held { .. }
+            );
+        let resolved = Resolved {
             push: p.push,
             kind: p.kind,
             view: p.view,
             outcome: reply.outcome,
             fetched,
-        }))
+        };
+        Ok((Some(resolved), stale))
+    }
+
+    /// The discovery and state steps again, for the hub state a recovery made stale: the write
+    /// the first capture saw running has ended (D-H0BZN, D-GS59E). A failure is returned; what
+    /// the recovery applied stays.
+    fn recapture(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        views: &[String],
+    ) -> Result<(String, SyncState), RdyError> {
+        let read = engine.read();
+        self.open(t, &read, views)
     }
 
     /// Clears `pending` of push `push`.
@@ -1364,7 +1405,19 @@ impl<'a> SyncService<'a> {
             push_plan(&read, &request.views, &hub_views)?;
         }
         drop(read);
-        let lookup = self.lookup(engine, t, &base_url, &state)?;
+        let (lookup, waited) = self.lookup(engine, t, &base_url, &state)?;
+        // an outcome learned after a busy wait ends the write the capture saw running: the rest
+        // of the push goes on a fresh capture, with the view rules checked again
+        let (base_url, state, hub_views) = if waited {
+            let (base_url, state) = self.recapture(engine, t, &request.views)?;
+            let hub_views = state.hub_views();
+            if !request.views.is_empty() {
+                push_plan(&engine.read(), &request.views, &hub_views)?;
+            }
+            (base_url, state, hub_views)
+        } else {
+            (base_url, state, hub_views)
+        };
 
         let read = engine.read();
         let (capture, prep) =
@@ -1753,7 +1806,20 @@ impl<'a> SyncService<'a> {
                 return Err(view_missing(name, &t.name));
             }
         }
-        let lookup = self.lookup(engine, t, &base_url, &state)?;
+        let (lookup, waited) = self.lookup(engine, t, &base_url, &state)?;
+        // an outcome learned after a busy wait ends the write the capture saw running: the rest
+        // of the pull compares local state with a fresh capture, never the old one
+        let (base_url, state) = if waited {
+            let (base_url, state) = self.recapture(engine, t, &request.views)?;
+            for name in &request.views {
+                if state.view_head(name).is_none() {
+                    return Err(view_missing(name, &t.name));
+                }
+            }
+            (base_url, state)
+        } else {
+            (base_url, state)
+        };
         let held = self.held_lookup(engine, t, &base_url)?;
         let hub = HubState {
             repo_id: state.repo_id,

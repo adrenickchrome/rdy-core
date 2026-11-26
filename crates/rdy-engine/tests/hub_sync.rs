@@ -3909,6 +3909,83 @@ fn r59016_busy_then_taken() {
     assert!(is_empty_dir(scratch.path()));
 }
 
+/// D-H0BZN, D-GS59E: the hub state a push or pull captured while the write still ran is stale
+/// once the recovery learns the write took. Local canon and the pending head are B (parent A);
+/// the pull's state names canon A, the lookup polls busy, then answers taken(B). The operation
+/// reads the hub state again after the recovery, so local canon stays B, no landing is marked
+/// replaced, and `pending` clears once.
+#[test]
+fn r59016_busy_then_taken_keeps_the_newer_canon() {
+    for pull in [false, true] {
+        let e = env(2);
+        let (a, b) = (e.landings[0], e.landings[1]);
+        seed_pending(&e, P1, b, T0);
+        let hub = Arc::new(Hub::new().with_state(|s| s.canon = Some(a)));
+        *hub.held.lock().unwrap() = closure(&e, b, None);
+        let copy = copy_project(&e);
+        hub.serve(copy.1.read());
+        hub.fail_at("outcome", 1, busy_refusal(1));
+        hub.answer(P1, LookupOutcome::Taken { tip: landing(b) });
+        // the write completes while the lookup waits: later state reads name canon B
+        let weak = Arc::downgrade(&hub);
+        let mut seen = 0;
+        *hub.each.lock().unwrap() = Some((
+            "outcome",
+            Box::new(move |_| {
+                seen += 1;
+                if seen == 2 {
+                    let h = weak.upgrade().expect("the hub is alive");
+                    h.state.lock().unwrap().canon = Some(b);
+                }
+            }),
+        ));
+        let s = Sync::new(&e, &hub);
+        let replaced = if pull {
+            let out = s.pull(PullRequest::default()).unwrap();
+            assert!(matches!(
+                out.lookup.map(|l| l.outcome),
+                Some(LookupOutcome::Taken { .. })
+            ));
+            out.canon.and_then(|c| c.replaced)
+        } else {
+            let out = s.push(PushRequest::default()).unwrap();
+            assert!(matches!(
+                out.lookup.map(|l| l.outcome),
+                Some(LookupOutcome::Taken { .. })
+            ));
+            None
+        };
+        assert_eq!(replaced, None, "pull: {pull}");
+        assert_eq!(e.engine.read().canon_head(), Some(b), "pull: {pull}");
+        assert_eq!(asks(&hub), [P1, P1], "pull: {pull}");
+        assert_eq!(s.poll.seconds(), [1]);
+        // the state is read again after the recovery, before any further sync work
+        assert_eq!(hub.states.lock().unwrap().len(), 2, "pull: {pull}");
+        assert!(hub.writes().is_empty());
+        assert_eq!(pending_of(&e, "shared"), None);
+        assert_eq!(canon_of(&e, "shared").unwrap().applied, Some(b));
+        let marks = e
+            .engine
+            .read()
+            .reader()
+            .refs_with_prefix("replaced/")
+            .unwrap();
+        assert!(marks.is_empty(), "pull: {pull}");
+    }
+
+    // a recovery that waited on no busy reply keeps its single state read
+    let e = env(2);
+    let b = e.landings[1];
+    seed_pending(&e, P1, b, T0);
+    let hub = Hub::new().with_state(|s| s.canon = Some(b));
+    *hub.held.lock().unwrap() = closure(&e, b, None);
+    hub.answer(P1, LookupOutcome::Taken { tip: landing(b) });
+    let s = Sync::new(&e, &hub);
+    s.push(PushRequest::default()).unwrap();
+    assert_eq!(hub.states.lock().unwrap().len(), 1);
+    assert!(s.poll.seconds().is_empty());
+}
+
 /// One recovery of a pending write that the hub keeps busy: returns the lookups made and the
 /// seconds waited, after pinning the exact error and that nothing else changed.
 fn bounded_pending(view: bool, pull: bool, retry: u64, cost: u64, epoch: i64) -> (usize, Vec<u64>) {
