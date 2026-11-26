@@ -185,6 +185,8 @@ pub struct Repo {
     /// Each push id's quarantined keys, and its batch root.
     pub quarantine: BTreeMap<String, BTreeSet<ObjectKey>>,
     pub roots: BTreeMap<String, Hash>,
+    /// Each push id's put bytes so far: a put reply names them, and they never fall.
+    pub put_bytes: BTreeMap<String, u64>,
     /// Each taken push: its write kind and tip.
     pub outcomes: BTreeMap<String, (String, String)>,
     /// The project whose history known and get serve.
@@ -900,13 +902,16 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
                 Err(e) => return Some(hub_error(422, "E_BAD_INPUT", &e.message, &e.fix)),
             };
             repo.roots.insert(push.clone(), report.header.tag);
+            let total = {
+                let t = repo.put_bytes.entry(push.clone()).or_default();
+                *t += req.body.len() as u64;
+                *t
+            };
             let mine = repo.quarantine.entry(push).or_default();
             mine.extend(report.keys.iter().copied());
             let records = mine.len();
-            Some(reply(
-                200,
-                &json!({"records": records, "bytes": req.body.len()}),
-            ))
+            // a hub replies the push's bytes so far, not this put's
+            Some(reply(200, &json!({"records": records, "bytes": total})))
         }
         ("POST", _, "/objects/get") => {
             let r = req.json();

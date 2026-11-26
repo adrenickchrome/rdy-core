@@ -182,6 +182,8 @@ struct Push {
     files: Vec<PathBuf>,
     keys: BTreeSet<ObjectKey>,
     checked: Vec<CheckedBatchFile>,
+    /// The put bytes so far: a put reply names them, and they never fall.
+    bytes: u64,
 }
 
 /// One client command's pull scope: the pull it prepared, by purpose, root and base, and the
@@ -1177,10 +1179,9 @@ fn put(req: &Req, repo: &mut Repo) -> Answer {
     p.files.push(path);
     p.keys.extend(checked.report().keys.iter().copied());
     p.checked.push(checked);
-    reply(
-        200,
-        &json!({"records": p.keys.len(), "bytes": req.body.len()}),
-    )
+    // a hub replies the push's bytes so far, not this put's
+    p.bytes += req.body.len() as u64;
+    reply(200, &json!({"records": p.keys.len(), "bytes": p.bytes}))
 }
 
 fn get(req: &Req, repo: &mut Repo) -> Answer {
