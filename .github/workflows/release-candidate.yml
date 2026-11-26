@@ -152,6 +152,13 @@ jobs:
         run: rustup toolchain install 1.99.0 --profile minimal
       - name: Not root
         run: test "$(id -u)" -ne 0
+      - name: Baseline x86-64 emulator
+        # The build step below runs the packaged Linux binary under qemu-x86_64 with a CPU model that has
+        # no SSE3, CX16 or LAHF-LM. There is no skip: a missing emulator refuses the candidate.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
+          command -v qemu-x86_64
       - name: Locked dependencies
         run: cargo fetch --locked
       - name: Fast gate counts of the gate run at S
