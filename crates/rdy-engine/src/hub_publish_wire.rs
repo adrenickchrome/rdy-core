@@ -42,8 +42,9 @@ use crate::error::{
 };
 use crate::formats::formats;
 use crate::hub_http::{
-    BodyEncoding, HttpHubTransport, JsonLimits, Prefixes, ReplySink, UploadHttpRequest,
-    UploadMethod, api_error_entry, decode_bounded_json, reply_echoes, zstd_frame,
+    BodyEncoding, HttpHubTransport, JsonLimits, Prefixes, ReplyEncoding, ReplySink,
+    UploadHttpRequest, UploadMethod, api_error_entry, decode_bounded_json, reply_echoes,
+    zstd_frame,
 };
 use crate::hub_types::{
     HubFailure, LimitUnit, MAX_ID_BYTES, MAX_URL_BYTES, Origin, OriginFence, RemoteUrl,
@@ -1479,7 +1480,10 @@ impl HttpPublishWire {
 
     /// `POST <url>` of a read step with the JSON body `json` as `content_type`, whose reply at
     /// status 200 streams to `sink`, at most `limit` bytes; a refusal is read within
-    /// [`REPLY_BYTES`]. Returns the bytes streamed.
+    /// [`REPLY_BYTES`]. `reply` is what the request offers: with
+    /// [`ReplyEncoding::ZstdOrIdentity`] the reply may be one zstd stream, and `limit` counts
+    /// its decoded bytes. Returns the bytes streamed, decoded.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn post_streamed(
         &self,
         cx: &UploadContext,
@@ -1488,6 +1492,7 @@ impl HttpPublishWire {
         json: Vec<u8>,
         sink: &mut dyn Write,
         limit: u64,
+        reply: ReplyEncoding,
     ) -> Result<u64, RdyError> {
         let effect = Effect::Read;
         let len = u64::try_from(json.len()).map_err(|_| hub_limit(usize::MAX, LimitUnit::Bytes))?;
@@ -1510,6 +1515,7 @@ impl HttpPublishWire {
                 status: 200,
                 out: sink,
                 limit,
+                encoding: reply,
             },
         );
         let (status, body, n) = sent.map_err(|f| failed(cx, effect, f))?;

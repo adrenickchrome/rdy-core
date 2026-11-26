@@ -11,6 +11,7 @@ mod hub_tls;
 #[path = "../modes/mod.rs"]
 mod modes;
 
+mod get_encoding;
 mod hub_config;
 mod hub_credentials;
 mod hub_http;

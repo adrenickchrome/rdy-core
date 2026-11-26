@@ -30,8 +30,10 @@
 //!   and failure suppression above; its body streams with its exact length and its reply cap is
 //!   the caller's, never over 16 MiB. A put body may go as one zstd frame ([`zstd_frame`]) with
 //!   `Content-Encoding: zstd` when the frame is smaller than the body; the frame is made before
-//!   the request, from the body read to its exact length. Sign-in and key requests stay on the
-//!   install alone.
+//!   the request, from the body read to its exact length. A streamed reply may come the same way
+//!   when the request offered it ([`ReplyEncoding`]): it is decoded as it arrives, within a
+//!   window of 8 MiB and the reply's cap on its encoded and its decoded bytes. Sign-in and key
+//!   requests stay on the install alone.
 use crate::error::{
     E_BAD_INPUT, E_IO, E_UPSTREAM_ORIGIN, RdyError, actor_unbound, signing_selector, upload_body,
     upstream_auth, upstream_ca, upstream_key_proof, upstream_origin, upstream_protocol,
@@ -221,12 +223,29 @@ impl fmt::Debug for UploadHttpRequest<'_> {
     }
 }
 
+/// How a streamed reply may be encoded on the wire.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReplyEncoding {
+    /// The reply's own bytes: the request makes no offer, so `Content-Encoding: zstd` is refused.
+    #[default]
+    Identity,
+    /// The request sends `Accept-Encoding: zstd`; the reply is identity or one zstd stream of
+    /// whole frames (D-SEGWK), decoded as it arrives.
+    ZstdOrIdentity,
+}
+
+/// The largest back-reference distance, as a power of two, of a zstd reply: 2^23 = 8,388,608
+/// bytes. A frame that needs a larger window is a contract mismatch.
+pub const ZSTD_REPLY_WINDOW_LOG: u32 = 23;
+
 /// Where [`HttpHubTransport::upload_streamed`] writes the reply of one status: `out`, at most
-/// `limit` bytes.
+/// `limit` bytes after any decoding.
 pub struct ReplySink<'a> {
     pub status: u16,
     pub out: &'a mut dyn Write,
     pub limit: u64,
+    /// What the request offers: [`ReplyEncoding::ZstdOrIdentity`] adds `Accept-Encoding: zstd`.
+    pub encoding: ReplyEncoding,
 }
 
 /// The bounds of one JSON document: its bytes, nesting depth, members and elements in total,
@@ -396,8 +415,16 @@ impl HttpHubTransport {
     /// [`upload`](Self::upload), with the reply of the status `sink.status` written to
     /// `sink.out` as it arrives, never held whole in memory: at most `sink.limit` bytes, else
     /// [`HubFailure::Protocol`]. A reply of any other status is read as `upload` reads it, within
-    /// the request's reply cap. Returns the status, the body read into memory (empty for a
-    /// streamed reply) and the bytes written to the sink. A sink that refuses a write is `E_IO`.
+    /// the request's reply cap, and must be identity. Returns the status, the body read into
+    /// memory (empty for a streamed reply) and the bytes written to the sink. A sink that
+    /// refuses a write is `E_IO`.
+    ///
+    /// With [`ReplyEncoding::ZstdOrIdentity`] the request adds `Accept-Encoding: zstd`, and a
+    /// streamed reply may be one `Content-Encoding: zstd` stream of whole frames: it is decoded
+    /// as it arrives, its encoded bytes and its decoded bytes each within `sink.limit`, with a
+    /// window of at most [`ZSTD_REPLY_WINDOW_LOG`]. The sink gets and the result counts the
+    /// decoded bytes. Any other `Content-Encoding` than one of `identity` (and `zstd`, when
+    /// offered), and any invalid, truncated or over-long stream, is [`HubFailure::Protocol`].
     pub fn upload_streamed(
         &self,
         install: &Origin,
@@ -412,6 +439,12 @@ impl HttpHubTransport {
         prepared.timeout = prepared
             .timeout
             .saturating_add(Duration::from_secs(sink.limit.div_ceil(UPLOAD_MIN_RATE)));
+        if sink.encoding == ReplyEncoding::ZstdOrIdentity {
+            prepared.headers.push((
+                http::header::ACCEPT_ENCODING,
+                HeaderValue::from_static("zstd"),
+            ));
+        }
         let roots = self.roots(ca_file)?;
         send(prepared, roots, Some(sink))
     }
@@ -1149,10 +1182,25 @@ fn send(
     if status.is_redirection() {
         return Err(HubFailure::Protocol);
     }
-    if let Some(sink) = sink
-        && sink.status == status.as_u16()
-    {
-        let n = stream_reply(response.body_mut(), sink)?;
+    let mut streamed = None;
+    if let Some(sink) = sink {
+        let streams = sink.status == status.as_u16();
+        // Only the sink's own status may be encoded, and only as the request offered.
+        let offered = if streams {
+            sink.encoding
+        } else {
+            ReplyEncoding::Identity
+        };
+        let coding = reply_coding(response.headers(), offered)?;
+        if streams {
+            streamed = Some((sink, coding));
+        }
+    }
+    if let Some((sink, coding)) = streamed {
+        let n = match coding {
+            Coding::Identity => stream_reply(response.body_mut(), sink)?,
+            Coding::Zstd => stream_zstd(response.body_mut(), sink)?,
+        };
         return Ok((status.as_u16(), Vec::new(), n));
     }
     // Read one byte past the limit, so an over-long body is seen.
@@ -1169,6 +1217,139 @@ fn send(
         return Err(HubFailure::Protocol);
     }
     Ok((status.as_u16(), body, 0))
+}
+
+/// The coding of a reply body.
+enum Coding {
+    Identity,
+    Zstd,
+}
+
+/// The coding a reply's `Content-Encoding` names, given what the request `offered`. No field, or
+/// one field of the single token `identity`, is identity; one field of the single token `zstd` is
+/// zstd when offered. Tokens compare case-insensitively after trimming optional whitespace.
+/// Duplicate fields, a list, an empty value, an unknown coding, `zstd` that was not offered and
+/// a value that is not text are [`HubFailure::Protocol`]; the value is never quoted.
+fn reply_coding(headers: &http::HeaderMap, offered: ReplyEncoding) -> Result<Coding, HubFailure> {
+    let mut fields = headers.get_all(http::header::CONTENT_ENCODING).iter();
+    let Some(field) = fields.next() else {
+        return Ok(Coding::Identity);
+    };
+    if fields.next().is_some() {
+        return Err(HubFailure::Protocol);
+    }
+    let text = field.to_str().map_err(|_| HubFailure::Protocol)?;
+    let token = text.trim_matches([' ', '\t']);
+    if token.eq_ignore_ascii_case("identity") {
+        Ok(Coding::Identity)
+    } else if token.eq_ignore_ascii_case("zstd") && offered == ReplyEncoding::ZstdOrIdentity {
+        Ok(Coding::Zstd)
+    } else {
+        Err(HubFailure::Protocol)
+    }
+}
+
+/// What a [`Feed`] saw, for sorting a decoder's failure into its cause.
+#[derive(Default)]
+struct FeedState {
+    /// The encoded bytes read so far.
+    encoded: Cell<u64>,
+    /// The body failed to read: a transport failure, not a bad frame.
+    read_failed: Cell<bool>,
+    /// The encoded bytes went past the cap.
+    over: Cell<bool>,
+}
+
+/// The encoded body, read at most one byte past `cap` so an over-long body is seen.
+struct Feed<'a, R> {
+    inner: R,
+    cap: u64,
+    state: &'a FeedState,
+}
+
+impl<R: Read> Read for Feed<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let seen = self.state.encoded.get();
+        let room = self.cap.saturating_sub(seen).saturating_add(1);
+        let take = usize::try_from(room).map_or(buf.len(), |r| r.min(buf.len()));
+        match self.inner.read(&mut buf[..take]) {
+            Ok(k) => {
+                let total = seen.checked_add(k as u64).filter(|t| *t <= self.cap);
+                let Some(total) = total else {
+                    self.state.over.set(true);
+                    return Err(std::io::Error::other("the encoded reply is over its cap"));
+                };
+                self.state.encoded.set(total);
+                Ok(k)
+            }
+            Err(e) => {
+                self.state.read_failed.set(true);
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Decodes the zstd `body` to `sink.out`: the decoded bytes written. The encoded bytes and the
+/// decoded bytes are each at most `sink.limit`, and a body of no bytes is not a frame. The
+/// output is read in [`UPLOAD_BUFFER_BYTES`] pieces, each checked before it is written, so no
+/// claimed size or ratio allocates or writes past the cap. An invalid, truncated or
+/// over-windowed stream, trailing bytes that are not a frame and an over-long body are a
+/// contract mismatch; a sink that refuses a write is `E_IO`; a failed read is read as
+/// [`stream_reply`] reads it.
+fn stream_zstd(body: &mut ureq::Body, sink: ReplySink<'_>) -> Result<u64, HubFailure> {
+    let reader = body
+        .with_config()
+        .limit(sink.limit.saturating_add(1))
+        .reader();
+    let state = FeedState::default();
+    let feed = Feed {
+        inner: reader,
+        cap: sink.limit,
+        state: &state,
+    };
+    let mut decoder = zstd::stream::read::Decoder::new(feed).map_err(|_| HubFailure::Protocol)?;
+    decoder
+        .window_log_max(ZSTD_REPLY_WINDOW_LOG)
+        .map_err(|_| HubFailure::Protocol)?;
+    let mut buf = vec![0u8; UPLOAD_BUFFER_BYTES];
+    let mut n: u64 = 0;
+    loop {
+        let k = match read_some(&mut decoder, &mut buf) {
+            Ok(0) => break,
+            Ok(k) => k,
+            Err(e) => {
+                if state.over.get() || !state.read_failed.get() {
+                    return Err(HubFailure::Protocol);
+                }
+                let inner = e.get_ref().and_then(|x| x.downcast_ref::<ureq::Error>());
+                return Err(match inner {
+                    Some(u) => failure(u, true),
+                    None => HubFailure::Transport {
+                        may_have_sent: true,
+                    },
+                });
+            }
+        };
+        n = match n.checked_add(k as u64) {
+            Some(t) if t <= sink.limit => t,
+            _ => return Err(HubFailure::Protocol),
+        };
+        sink.out.write_all(&buf[..k]).map_err(|_| sink_failed())?;
+    }
+    if state.encoded.get() == 0 {
+        return Err(HubFailure::Protocol);
+    }
+    Ok(n)
+}
+
+/// The `E_IO` failure of a sink that refuses a write.
+fn sink_failed() -> HubFailure {
+    HubFailure::Local(RdyError::new(
+        E_IO,
+        "the hub reply could not be written to its scratch file",
+        "check the temporary directory and available disk space",
+    ))
 }
 
 /// Copies `body` to `sink.out`, reading one byte past `sink.limit` so an over-long body is seen:
@@ -1199,13 +1380,7 @@ fn stream_reply(body: &mut ureq::Body, sink: ReplySink<'_>) -> Result<u64, HubFa
         if n > sink.limit {
             return Err(HubFailure::Protocol);
         }
-        sink.out.write_all(&buf[..k]).map_err(|_| {
-            HubFailure::Local(RdyError::new(
-                E_IO,
-                "the hub reply could not be written to its scratch file",
-                "check the temporary directory and available disk space",
-            ))
-        })?;
+        sink.out.write_all(&buf[..k]).map_err(|_| sink_failed())?;
     }
 }
 
