@@ -3216,3 +3216,97 @@ fn r59013_error_token_and_deadline_guards_remain() {
     assert_eq!(err(r).code, rdy_engine::upstream_transport().code);
     assert_eq!(s.finish(), 0);
 }
+
+/// A get that the hub refuses over its cap names the cap in the error object's `args` member as
+/// `get_batch_bytes`, a decimal string of a u64 from 1. The wire reads that one member into
+/// `hub_get_cap` for code `E_HUB_VALIDATION`; every other shape of `args`, a missing or null one
+/// and another code leave it unset, and the refusal's code, message, fix and request id are what
+/// they are without `args`.
+#[test]
+fn r59023_wire_reads_the_cap_marker_from_args() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let get = GetRequest {
+        keys: vec![key(1, 1)],
+        purpose: StreamPurpose::CanonHistory,
+        root: key(kinds::LANDING, 1),
+    };
+    let message = "the records you asked for are larger than 41943040 bytes";
+    let fix = "ask for fewer keys in each get";
+    let body = |code: &str, args: Option<&str>| {
+        let args = args.map(|a| format!(r#","args":{a}"#)).unwrap_or_default();
+        format!(
+            r#"{{"code":"{code}","message":"{message}","fix":"{fix}","issues":[],"request_id":"req_0001"{args}}}"#
+        )
+    };
+    let marker = r#"{"get_batch_bytes":"41943040"}"#;
+    let cases: [(&str, Option<&str>, Option<u64>); 17] = [
+        ("E_HUB_VALIDATION", Some(marker), Some(41_943_040)),
+        (
+            "E_HUB_VALIDATION",
+            Some(r#"{"get_batch_bytes":"1","other":"x"}"#),
+            Some(1),
+        ),
+        (
+            "E_HUB_VALIDATION",
+            Some(r#"{"get_batch_bytes":"18446744073709551615"}"#),
+            Some(u64::MAX),
+        ),
+        ("E_HUB_VALIDATION", None, None),
+        ("E_HUB_VALIDATION", Some("null"), None),
+        ("E_HUB_VALIDATION", Some(r#""41943040""#), None),
+        ("E_HUB_VALIDATION", Some("41943040"), None),
+        ("E_HUB_VALIDATION", Some("[]"), None),
+        ("E_HUB_VALIDATION", Some("{}"), None),
+        ("E_HUB_VALIDATION", Some(r#"{"get_batch_bytes":"0"}"#), None),
+        (
+            "E_HUB_VALIDATION",
+            Some(r#"{"get_batch_bytes":"abc"}"#),
+            None,
+        ),
+        (
+            "E_HUB_VALIDATION",
+            Some(r#"{"get_batch_bytes":"-5"}"#),
+            None,
+        ),
+        (
+            "E_HUB_VALIDATION",
+            Some(r#"{"get_batch_bytes":"18446744073709551616"}"#),
+            None,
+        ),
+        (
+            "E_HUB_VALIDATION",
+            Some(r#"{"get_batch_bytes":41943040}"#),
+            None,
+        ),
+        (
+            "E_HUB_VALIDATION",
+            Some(r#"{"get_batch_bytes":null}"#),
+            None,
+        ),
+        ("E_HUB_STREAM_INVALID", Some(marker), None),
+        ("E_HUB_KEY_LIMIT", Some(marker), None),
+    ];
+    for (code, args, want) in cases {
+        let (r, _) = served(&mut s, Reply::json(422, &body(code, args)), || {
+            hub.wire.get(&cx, &get, &mut Vec::new(), 1 << 20)
+        });
+        let e = err(r);
+        let name = format!("{code} {args:?}");
+        assert_eq!(e.hub_get_cap, want, "{name}");
+        // the same refusal as without `args`
+        assert_eq!(e.code, code, "{name}");
+        assert_eq!(
+            (e.message.as_str(), e.fix.as_str()),
+            (message, fix),
+            "{name}"
+        );
+        assert!(
+            e.issues.iter().any(|i| i.message == "hub request req_0001"),
+            "{name}: {:?}",
+            e.issues
+        );
+    }
+    assert_eq!(s.finish(), 0);
+}

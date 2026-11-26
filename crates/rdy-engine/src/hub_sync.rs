@@ -1801,6 +1801,18 @@ impl<'a> SyncService<'a> {
                 split.push(front);
                 continue;
             }
+            // a get that the hub refuses over its cap, with its structured marker, is split in
+            // two as a get over `batch_bytes` is; a refusal of one key, or without the marker,
+            // is the hub's error as it came
+            if let Err(e) = &got
+                && e.hub_get_cap.is_some()
+                && keys.len() > 1
+            {
+                let (front, back) = keys.split_at(keys.len() / 2);
+                split.push(back);
+                split.push(front);
+                continue;
+            }
             got?;
             file.seek(SeekFrom::Start(0)).map_err(|_| scratch_error())?;
             let mut records = Vec::new();

@@ -310,6 +310,10 @@ pub struct Hub {
     /// When set, the next get of two or more keys has its reply padded one byte past the state's
     /// `batch_bytes` (the client must split it), and the knob clears.
     pub pad_get: Mutex<bool>,
+    /// When set to `(cap, marker)`, a get whose export passes `cap` bytes is refused as the hub
+    /// refuses a get over its batch cap: `E_HUB_VALIDATION`, with the structured over-cap marker
+    /// on the error when `marker` is set.
+    pub refuse_get_over: Mutex<Option<(u64, bool)>>,
     /// A get reply served once in place of the store's batch.
     pub get_bytes: Mutex<Option<Vec<u8>>>,
     /// The dump files the dump step serves, by id (D-7CDEQ); an id with none is refused as
@@ -364,6 +368,7 @@ impl Hub {
             gets: Mutex::default(),
             get_replies: Mutex::default(),
             pad_get: Mutex::default(),
+            refuse_get_over: Mutex::default(),
             get_bytes: Mutex::default(),
             dumps: Mutex::default(),
             dump_ids: Mutex::default(),
@@ -718,6 +723,24 @@ impl SyncWire for Hub {
             if bytes.len() < past {
                 bytes.resize(past, 0);
             }
+        }
+        let refusal = *self.refuse_get_over.lock().unwrap();
+        if let Some((cap, marker)) = refusal
+            && bytes.len() as u64 > cap
+        {
+            self.get_replies
+                .lock()
+                .unwrap()
+                .push((bytes.len() as u64, 0));
+            let mut e = RdyError::new(
+                "E_HUB_VALIDATION",
+                format!("the records you asked for are larger than {cap} bytes"),
+                "ask for fewer records in each get",
+            );
+            if marker {
+                e.hub_get_cap = Some(cap);
+            }
+            return Err(e);
         }
         // as the transport streams a reply: piece by piece, each written while the bytes so far
         // are within `limit`; the first piece past it fails the get
