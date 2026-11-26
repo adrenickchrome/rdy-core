@@ -184,8 +184,8 @@ pub use events::{Event, EventKind, Events, SuspectMoved};
 pub use foreign::ForeignState;
 pub use foreign_guard::Deviation;
 pub use gate::{
-    LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, PolicyRow, ProposalInfo, ProposalRef,
-    RebasedInfo, RelayedByRow, run_land,
+    LandInfo, LandOptions, LandingPoint, LandingRow, PROPOSAL_TENSIONS_MAX, PolicyRow,
+    ProposalInfo, ProposalRef, RebasedInfo, RelayedByRow, on_landing_at_for_tests, run_land,
 };
 pub use history::{
     Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef, canon_step_reads,
