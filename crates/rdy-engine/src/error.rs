@@ -666,6 +666,11 @@ pub struct RdyError {
     /// splits its key group on it. Never serialized.
     #[serde(skip)]
     pub hub_get_cap: Option<u64>,
+    /// The seconds a busy hub asked a client to wait, as its error object's validated
+    /// `retry_after` gave them (1 to 31,536,000). The write outcome lookup reads it to pace its
+    /// own retries. Never serialized.
+    #[serde(skip)]
+    pub upstream_retry_after: Option<u64>,
 }
 
 impl RdyError {
@@ -680,6 +685,7 @@ impl RdyError {
             warnings: None,
             upstream_status: None,
             hub_get_cap: None,
+            upstream_retry_after: None,
         }
     }
 

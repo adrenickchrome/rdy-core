@@ -40,7 +40,7 @@ use rdy_model::Hash;
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_state::{
-    KIND_CANON, SYNC_LOCKED_FIX, SyncCanon, SyncHeld, SyncPending, SyncStep, SyncUpload,
+    KIND_CANON, KIND_VIEW, SYNC_LOCKED_FIX, SyncCanon, SyncHeld, SyncPending, SyncStep, SyncUpload,
     sync_locked_message,
 };
 use rdy_store::sync_stream::StreamPurpose;
@@ -1596,15 +1596,18 @@ fn scc8_pending_lookup_precedes_put_or_write_and_never_resends() {
     assert_ne!(id, P1);
     assert_eq!(pending_of(&e, "shared"), None);
 
-    // F7: the lookup itself refused (the write intent is open): pending stays, nothing else
+    // F7: the lookup itself refused (the write intent is open): the hub's busy refusal is waited
+    // out to the polling bound (r59016), then pending stays and nothing else goes
     let e = env(1);
     let head = e.landings[0];
     let sent = seed_pending(&e, P1, head, T0);
     let hub = Hub::new();
-    hub.fail_at("outcome", 1, hub_words("E_HUB_BUSY"));
+    script_busy(&hub, 1, 200);
     let x = err(push(&e, &hub, None));
-    assert_eq!(x.code, "E_HUB_BUSY");
-    assert_eq!(hub.steps(), ["discovery", "state", "outcome"]);
+    assert_sync_uncertain(&x, P1);
+    assert_eq!(asks(&hub).len(), 82);
+    assert_eq!(hub.steps().len(), 2 + 82);
+    assert!(hub.writes().is_empty());
     assert_eq!(pending_of(&e, "shared"), Some(sent.clone()));
     // E_HUB_NOT_FOUND (Q5): kept too
     let hub = Hub::new();
@@ -1614,10 +1617,11 @@ fn scc8_pending_lookup_precedes_put_or_write_and_never_resends() {
 
     // on pull: the lookup comes first too
     let hub = Hub::new();
-    hub.fail_at("outcome", 1, hub_words("E_HUB_BUSY"));
+    script_busy(&hub, 1, 200);
     let x = err(Sync::new(&e, &hub).pull(PullRequest::default()));
-    assert_eq!(x.code, "E_HUB_BUSY");
-    assert_eq!(hub.steps(), ["discovery", "state", "outcome"]);
+    assert_sync_uncertain(&x, P1);
+    assert_eq!(asks(&hub).len(), 82);
+    assert_eq!(hub.steps().len(), 2 + 82);
     assert_eq!(pending_of(&e, "shared"), Some(sent));
     let hub = Hub::new();
     hub.answer(
@@ -1679,8 +1683,9 @@ fn scc8_outcome_lookup_never_infers_from_store_and_fetches_changed_head() {
     let sent = seed_pending(&e, P1, head, T0);
     let hub = Hub::new().with_state(|s| s.canon = Some(head));
     *hub.held.lock().unwrap() = closure(&e, head, None);
-    hub.fail_at("outcome", 1, hub_words("E_HUB_BUSY"));
-    err(push(&e, &hub, None));
+    script_busy(&hub, 1, 200);
+    assert_sync_uncertain(&err(push(&e, &hub, None)), P1);
+    assert_eq!(asks(&hub).len(), 82);
     assert_eq!(pending_of(&e, "shared"), Some(sent));
     assert_eq!(canon_of(&e, "shared"), None);
 
@@ -2108,9 +2113,22 @@ fn restore_with(
     scratch: &std::path::Path,
     dump: &std::path::Path,
 ) -> Result<RestoreOutcome, RdyError> {
+    restore_polled(e, wire, renderer, scratch, dump, &PollClock::default())
+}
+
+/// [`restore_with`] whose busy outcome lookups run on the fake clock `poll`.
+fn restore_polled(
+    e: &Env,
+    wire: &dyn SyncWire,
+    renderer: &Renderer,
+    scratch: &std::path::Path,
+    dump: &std::path::Path,
+    poll: &PollClock,
+) -> Result<RestoreOutcome, RdyError> {
     let api = NoApi::default();
     let clock = Clock::at(T0);
     SyncService::new(&e.project, &e.user_file, &api, &clock, wire, renderer)
+        .with_outcome_poll_clock(poll)
         .scratch_in(scratch)
         .restore(
             &agent(),
@@ -2605,7 +2623,8 @@ fn scc8_restore_cleans_temp_store_on_every_exit() {
     assert_eq!(e.code, E_UPSTREAM_TRANSPORT);
     check("transport failure");
 
-    // a lost reply of a write that took: one outcome lookup in the same run reports it
+    // a lost reply of a write that took: the outcome lookup in the same run reports it (one
+    // lookup when the hub answers at once, as here; busy answers are waited out, r59016)
     let hub = Hub::new();
     hub.plan_write(1, WritePlan::Lost { apply: true });
     let tap = Tap::new(&hub, true);
@@ -3578,4 +3597,726 @@ fn r5907_seed_skips_known_only_when_empty() {
     assert_eq!(canon_of(&e, "shared"), None);
     assert_eq!(e.engine.read().canon_head(), head);
     assert_eq!(hub.state.lock().unwrap().canon, None);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Busy outcome lookups (r59016: D-GS59E, D-H0BZN, D-J3YA0)
+// ---------------------------------------------------------------------------------------------
+
+/// The quarantine life these tests give the fake hub, in seconds and milliseconds. The sign-in
+/// lasts an hour, so a clock two lives on still holds a valid access.
+const QUARANTINE_S: u64 = 60;
+const QUARANTINE_MS: i64 = 60_000;
+
+/// Scripts the next `n` outcome lookups of `hub` as busy refusals that ask for `seconds`.
+fn script_busy(hub: &Hub, seconds: u64, n: usize) {
+    let seen = hub.steps().iter().filter(|s| **s == "outcome").count();
+    for i in 1..=n {
+        hub.fail_at("outcome", seen + i, busy_refusal(seconds));
+    }
+}
+
+/// What the hub answers to the lookup of the write it saw last.
+#[derive(Clone, Copy)]
+enum Last {
+    Taken,
+    /// Taken, with a tip of this kind in place of the write's own.
+    TakenAs(u8),
+    Held(u64),
+    Refused(&'static str),
+}
+
+/// Makes every outcome lookup of `hub` that no refusal scripts answer as `last` for the latest
+/// write the hub received (its push id is not known before the run).
+fn answer_last_write(hub: &Arc<Hub>, last: Last) {
+    let weak = Arc::downgrade(hub);
+    *hub.each.lock().unwrap() = Some((
+        "outcome",
+        Box::new(move |_| {
+            let h = weak.upgrade().expect("the hub is alive");
+            let w = h.writes().last().cloned().expect("a write came first");
+            let outcome = match last {
+                Last::Taken | Last::TakenAs(_) => {
+                    let tip = match &w.view {
+                        None => h.state.lock().unwrap().canon,
+                        Some(name) => h.views.lock().unwrap().get(name).map(|v| v.1),
+                    }
+                    .expect("the write moved the hub");
+                    let kind = match last {
+                        Last::TakenAs(kind) => kind,
+                        _ => w.root_kind(),
+                    };
+                    LookupOutcome::Taken {
+                        tip: ObjectKey { kind, hash: tip },
+                    }
+                }
+                Last::Held(number) => LookupOutcome::Held {
+                    request: HubRequest { number, version: 1 },
+                    tip: None,
+                },
+                Last::Refused(code) => LookupOutcome::Refused { code: code.into() },
+            };
+            h.answer(&w.push, outcome);
+        }),
+    ));
+}
+
+/// Advances `poll` by `seconds` at the start of every outcome lookup of `hub`: a lookup that
+/// takes that long.
+fn lookup_costs(hub: &Hub, poll: &Arc<PollClock>, seconds: u64) {
+    let poll = Arc::clone(poll);
+    *hub.each.lock().unwrap() = Some((
+        "outcome",
+        Box::new(move |_| poll.advance(Duration::from_secs(seconds))),
+    ));
+}
+
+/// Seeds a sent write of view `view` at head `head`, as [`seed_pending`] seeds canon's.
+fn seed_view_pending(e: &Env, push: &str, view: &str, head: Hash, at_ms: i64) -> SyncPending {
+    let pending = SyncPending {
+        repo_id: repo_of(e),
+        url: e.url.clone(),
+        push: push.into(),
+        kind: KIND_VIEW,
+        view: Some(view.into()),
+        expected: None,
+        head,
+        at_ms,
+    };
+    seed_sync(
+        e,
+        "shared",
+        vec![
+            SyncStep::Upload(SyncUpload {
+                repo_id: pending.repo_id,
+                url: pending.url.clone(),
+                push: push.into(),
+                kind: KIND_VIEW,
+                view: Some(view.into()),
+                at_ms,
+            }),
+            SyncStep::Send(pending.clone()),
+        ],
+    );
+    pending
+}
+
+/// The recovery of a found pending write by the next push or pull: the lookup's outcome.
+fn recover(s: &Sync<'_>, pull: bool) -> Result<Option<LookupOutcome>, RdyError> {
+    if pull {
+        s.pull(PullRequest::default())
+            .map(|o| o.lookup.map(|l| l.outcome))
+    } else {
+        s.push(PushRequest::default())
+            .map(|o| o.lookup.map(|l| l.outcome))
+    }
+}
+
+/// How many outcome lookups the hub saw, and the push ids they named.
+fn asks(hub: &Hub) -> Vec<String> {
+    hub.calls()
+        .iter()
+        .filter(|c| c.step == "outcome")
+        .map(|c| c.push.clone().expect("a lookup names its push"))
+        .collect()
+}
+
+/// A restore of a project dump whose canon write's reply is lost (the write took), on a hub the
+/// `setup` scripts and a fake clock it may use. Returns what the run left.
+type Restored = (
+    Arc<Hub>,
+    Arc<PollClock>,
+    tempfile::TempDir,
+    Result<RestoreOutcome, RdyError>,
+);
+
+fn lost_restore(setup: impl FnOnce(&Arc<Hub>, &Arc<PollClock>)) -> Restored {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let src = env(1);
+    let dump = dump_of(&src.engine, dir.path(), "project.rdydump");
+    let hub = Arc::new(Hub::new());
+    let poll = Arc::new(PollClock::default());
+    hub.plan_write(1, WritePlan::Lost { apply: true });
+    setup(&hub, &poll);
+    let renderer = Renderer::default();
+    let result = restore_polled(&caller, &*hub, &renderer, scratch.path(), &dump, &poll);
+    (hub, poll, scratch, result)
+}
+
+/// A restore of a hub dump that holds view `v1`, whose view write's reply is lost (the write
+/// took) after a canon write that is answered.
+fn lost_view_restore(setup: impl FnOnce(&Arc<Hub>, &Arc<PollClock>)) -> Restored {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let hsrc = env(1);
+    write_in(&hsrc.engine, "v1", "a");
+    let dump = hub_dump(&hsrc, &["v1"], None, dir.path(), "hub.rdydump");
+    let hub = Arc::new(Hub::new().with_state(|s| s.repo_id = Some(repo_of(&hsrc))));
+    let poll = Arc::new(PollClock::default());
+    hub.plan_write(2, WritePlan::Lost { apply: true });
+    setup(&hub, &poll);
+    let renderer = Renderer::default();
+    let result = restore_polled(&caller, &*hub, &renderer, scratch.path(), &dump, &poll);
+    (hub, poll, scratch, result)
+}
+
+/// The sync words of an uncertain pending write of push `push`.
+#[track_caller]
+fn assert_sync_uncertain(x: &RdyError, push: &str) {
+    assert_eq!(
+        (x.code, x.message.as_str(), x.fix.as_str()),
+        (
+            E_UPSTREAM_UNCERTAIN,
+            &*format!("the sync write of push {push} may have completed"),
+            &*format!(
+                "run rdy push or rdy pull again: rdy finds the outcome of push {push} before it writes again"
+            ),
+        )
+    );
+}
+
+/// A restore's uncertain words, with the one issue that names `push` and no warning.
+#[track_caller]
+fn assert_restore_uncertain(x: &RdyError, push: &str) {
+    assert_eq!(
+        (x.code, x.message.as_str(), x.fix.as_str()),
+        (
+            E_UPSTREAM_UNCERTAIN,
+            "the hub request may have completed",
+            "check its state on the hub before trying again"
+        )
+    );
+    assert_eq!(x.issues.len(), 1, "{:?}", x.issues);
+    assert_eq!(
+        (x.issues[0].code, x.issues[0].message.as_str()),
+        (
+            E_UPSTREAM_UNCERTAIN,
+            &*format!("the restore's write of push {push} has no known outcome")
+        )
+    );
+    assert_eq!(
+        x.issues[0].fix,
+        "check its state on the hub before trying again"
+    );
+}
+
+/// D-GS59E, D-H0BZN: a lookup that finds the hub still running the write waits its
+/// `retry_after` and asks again for the same push id, on a pending write's recovery by push and
+/// by pull (canon's and a view's) and on a restore's lost write (canon's and a view's). The
+/// taken reply applies once, and `pending` clears only then.
+#[test]
+fn r59016_busy_then_taken() {
+    // a pending canon write, found by push and by pull
+    for pull in [false, true] {
+        let e = env(1);
+        let head = e.landings[0];
+        seed_pending(&e, P1, head, T0);
+        let hub = Hub::new().with_state(|s| s.canon = Some(head));
+        *hub.held.lock().unwrap() = closure(&e, head, None);
+        let copy = pull.then(|| copy_project(&e));
+        if let Some((_, hub_store)) = &copy {
+            hub.serve(hub_store.read());
+        }
+        hub.fail_at("outcome", 1, busy_refusal(2));
+        hub.fail_at("outcome", 2, busy_refusal(5));
+        hub.answer(P1, LookupOutcome::Taken { tip: landing(head) });
+        let s = Sync::new(&e, &hub);
+        let out = recover(&s, pull).unwrap();
+        assert!(matches!(out, Some(LookupOutcome::Taken { .. })), "{out:?}");
+        assert_eq!(asks(&hub), [P1, P1, P1], "pull: {pull}");
+        assert_eq!(s.poll.seconds(), [2, 5]);
+        assert!(hub.writes().is_empty());
+        assert_eq!(pending_of(&e, "shared"), None);
+        assert_eq!(canon_of(&e, "shared").unwrap().applied, Some(head));
+    }
+
+    // a pending view write: a view op is its taken tip
+    let e = env(1);
+    write_in(&e.engine, "v1", "a");
+    let v1 = view_head(&e, "v1");
+    seed_view_pending(&e, P1, "v1", v1, T0);
+    let canon = e.landings[0];
+    let hub = Hub::new().with_state(|s| s.canon = Some(canon));
+    *hub.held.lock().unwrap() = closure(&e, canon, None);
+    hub.fail_at("outcome", 1, busy_refusal(2));
+    hub.fail_at("outcome", 2, busy_refusal(5));
+    hub.answer(
+        P1,
+        LookupOutcome::Taken {
+            tip: ObjectKey {
+                kind: kinds::VIEW_OP,
+                hash: v1,
+            },
+        },
+    );
+    let s = Sync::new(&e, &hub);
+    let out = recover(&s, false).unwrap();
+    assert!(matches!(out, Some(LookupOutcome::Taken { .. })), "{out:?}");
+    assert_eq!(asks(&hub), [P1, P1, P1]);
+    assert_eq!(s.poll.seconds(), [2, 5]);
+    assert_eq!(pending_of(&e, "shared"), None);
+    let applied = e.engine.read().reader().sync_view("shared", "v1").unwrap();
+    assert_eq!(applied.unwrap().applied, Some(v1));
+
+    // a restore's lost canon write: one lookup record, the temporary store gone
+    let (hub, poll, scratch, out) = lost_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(2));
+        hub.fail_at("outcome", 2, busy_refusal(5));
+        answer_last_write(hub, Last::Taken);
+    });
+    let out = out.unwrap();
+    assert_eq!(hub.writes().len(), 1);
+    let push = hub.writes()[0].push.clone();
+    assert_eq!(asks(&hub), [push.clone(), push.clone(), push.clone()]);
+    assert_eq!(poll.seconds(), [2, 5]);
+    assert_eq!(out.lookups.len(), 1);
+    assert_eq!(out.lookups[0].push, push);
+    assert!(matches!(
+        out.lookups[0].outcome,
+        LookupOutcome::Taken { .. }
+    ));
+    assert_eq!(
+        taken_end(&out.canon).2,
+        hub.state.lock().unwrap().canon.unwrap()
+    );
+    assert!(is_empty_dir(scratch.path()));
+
+    // a restore's lost view write: the taken tip must be a view op
+    let (hub, poll, scratch, out) = lost_view_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(2));
+        hub.fail_at("outcome", 2, busy_refusal(5));
+        answer_last_write(hub, Last::Taken);
+    });
+    let out = out.unwrap();
+    assert_eq!(hub.writes().len(), 2);
+    let push = hub.writes()[1].push.clone();
+    assert_eq!(asks(&hub), [push.clone(), push.clone(), push.clone()]);
+    assert_eq!(poll.seconds(), [2, 5]);
+    assert_eq!(out.lookups.len(), 1);
+    assert_eq!(out.lookups[0].view.as_deref(), Some("v1"));
+    assert!(matches!(&out.views[..], [(n, WriteEnd::Taken { .. })] if n == "v1"));
+    assert!(is_empty_dir(scratch.path()));
+
+    let (hub, _, scratch, out) = lost_view_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(1));
+        answer_last_write(hub, Last::TakenAs(kinds::LANDING));
+    });
+    assert_eq!(err(out).code, E_UPSTREAM_PROTOCOL);
+    assert_eq!(hub.writes().len(), 2);
+    assert!(is_empty_dir(scratch.path()));
+}
+
+/// One recovery of a pending write that the hub keeps busy: returns the lookups made and the
+/// seconds waited, after pinning the exact error and that nothing else changed.
+fn bounded_pending(view: bool, pull: bool, retry: u64, cost: u64, epoch: i64) -> (usize, Vec<u64>) {
+    let e = env(1);
+    let head = e.landings[0];
+    let sent = if view {
+        write_in(&e.engine, "v1", "a");
+        let v1 = view_head(&e, "v1");
+        seed_view_pending(&e, P1, "v1", v1, T0)
+    } else {
+        seed_pending(&e, P1, head, T0)
+    };
+    let hub = Hub::new().with_state(|s| {
+        s.canon = Some(head);
+        s.quarantine_seconds = QUARANTINE_S;
+    });
+    script_busy(&hub, retry, 200);
+    let s = Sync::new(&e, &hub);
+    s.clock.0.store(epoch, Ordering::SeqCst);
+    if cost > 0 {
+        lookup_costs(&hub, &s.poll, cost);
+    }
+    let x = err(recover(&s, pull));
+    assert_sync_uncertain(&x, P1);
+    let n = asks(&hub).len();
+    // discovery and state, then lookups only: no known, put, get or write
+    assert_eq!(hub.steps().len(), 2 + n, "{:?}", hub.steps());
+    assert!(hub.writes().is_empty());
+    assert_eq!(pending_of(&e, "shared"), Some(sent));
+    assert_eq!(canon_of(&e, "shared"), None);
+    assert_eq!(
+        e.engine.read().reader().sync_view("shared", "v1").unwrap(),
+        None
+    );
+    (n, s.poll.seconds())
+}
+
+/// D-GS59E: past the polling bound the lookup stops with the uncertain words and changes
+/// nothing. At zero cost and `retry_after` 1 it makes 82 lookups and 81 waits; at 5, 17 and 16;
+/// a lookup that takes 39 seconds leaves room for three lookups and two waits. The bound is the
+/// fake monotonic clock's: the epoch clock the stored refs use never feeds it.
+#[test]
+fn r59016_busy_past_bound_is_uncertain() {
+    let cases: [(u64, u64, usize, usize); 3] = [(1, 0, 82, 81), (5, 0, 17, 16), (1, 39, 3, 2)];
+    for (retry, cost, calls, waits) in cases {
+        let ones = vec![retry.clamp(1, 5); waits];
+        for (i, (view, pull)) in [(false, false), (false, true), (true, false)]
+            .into_iter()
+            .enumerate()
+        {
+            // the epoch clock may stand anywhere, and go back
+            let epoch = [T0, T0 + 2 * QUARANTINE_MS, T0 - 5_000_000][i];
+            let (n, seconds) = bounded_pending(view, pull, retry, cost, epoch);
+            assert_eq!(
+                (n, seconds.clone()),
+                (calls, ones.clone()),
+                "pending view {view} pull {pull} retry {retry} cost {cost}"
+            );
+        }
+
+        // a restore's lost write: its own uncertain words, no busy warning
+        let (hub, poll, scratch, out) = lost_restore(|hub, poll| {
+            script_busy(hub, retry, 200);
+            if cost > 0 {
+                lookup_costs(hub, poll, cost);
+            }
+        });
+        let x = err(out);
+        let push = hub.writes()[0].push.clone();
+        assert_restore_uncertain(&x, &push);
+        assert_eq!(asks(&hub).len(), calls, "restore retry {retry} cost {cost}");
+        assert_eq!(poll.seconds(), ones);
+        assert_eq!(hub.writes().len(), 1);
+        assert!(is_empty_dir(scratch.path()));
+
+        // a restore's lost view write
+        let (hub, poll, scratch, out) = lost_view_restore(|hub, poll| {
+            script_busy(hub, retry, 200);
+            if cost > 0 {
+                lookup_costs(hub, poll, cost);
+            }
+        });
+        let x = err(out);
+        let push = hub.writes()[1].push.clone();
+        assert_restore_uncertain(&x, &push);
+        assert_eq!(asks(&hub).len(), calls);
+        assert_eq!(poll.seconds(), ones);
+        assert_eq!(hub.writes().len(), 2);
+        assert!(is_empty_dir(scratch.path()));
+    }
+}
+
+/// D-H0BZN "After a lost write reply, the client never sends that write again": while the hub
+/// answers busy, the restore and the next push or pull send no known, put, write or get, also
+/// when the pending record is older than the quarantine life; a bound exit keeps it so, and a
+/// later taken reply clears `pending` without sending that push id's write again.
+#[test]
+fn r59016_busy_never_sends_a_second_write() {
+    // a restore: the one write is the lost one
+    let seen = Arc::new(Mutex::new(Vec::<(usize, &'static str)>::new()));
+    let (hub, poll, _scratch, out) = lost_restore(|hub, poll| {
+        script_busy(hub, 1, 200);
+        let (weak, probe) = (Arc::downgrade(hub), Arc::clone(&seen));
+        poll.on_wait(move |_| {
+            let h = weak.upgrade().unwrap();
+            probe
+                .lock()
+                .unwrap()
+                .push((h.writes().len(), *h.steps().last().unwrap()));
+        });
+    });
+    assert_restore_uncertain(&err(out), &hub.writes()[0].push);
+    assert_eq!(poll.seconds().len(), 81);
+    assert_eq!(seen.lock().unwrap().len(), 81);
+    assert!(seen.lock().unwrap().iter().all(|s| *s == (1, "outcome")));
+    assert_eq!(hub.writes().len(), 1);
+    let steps = hub.steps();
+    let write_at = steps.iter().position(|s| *s == "write").unwrap();
+    assert!(steps[write_at + 1..].iter().all(|s| *s == "outcome"));
+
+    // a push that loses its write reply stops at once; the next push and pull wait
+    let e = env(1);
+    let head = e.landings[0];
+    let hub = Arc::new(Hub::new().with_state(|s| s.quarantine_seconds = QUARANTINE_S));
+    hub.plan_write(1, WritePlan::Lost { apply: true });
+    let s = Sync::new(&e, &hub);
+    let first = err(s.push(PushRequest::default()));
+    let pending = pending_of(&e, "shared").expect("the lost write stays pending");
+    assert_sync_uncertain(&first, &pending.push);
+    assert!(asks(&hub).is_empty());
+    assert!(s.poll.seconds().is_empty());
+    assert_eq!(hub.writes().len(), 1);
+
+    // older than the quarantine life, still busy: not cleared, nothing sent
+    s.clock.0.store(T0 + 2 * QUARANTINE_MS, Ordering::SeqCst);
+    let during = Arc::new(Mutex::new(Vec::<(usize, &'static str)>::new()));
+    let (weak, probe) = (Arc::downgrade(&hub), Arc::clone(&during));
+    s.poll.on_wait(move |_| {
+        let h = weak.upgrade().unwrap();
+        probe
+            .lock()
+            .unwrap()
+            .push((h.writes().len(), *h.steps().last().unwrap()));
+    });
+    let before = hub.steps().len();
+    script_busy(&hub, 1, 200);
+    for pull in [false, true] {
+        assert_sync_uncertain(&err(recover(&s, pull)), &pending.push);
+        assert_eq!(pending_of(&e, "shared"), Some(pending.clone()));
+        assert_eq!(hub.writes().len(), 1);
+    }
+    assert_eq!(s.poll.seconds().len(), 162);
+    assert!(during.lock().unwrap().iter().all(|s| *s == (1, "outcome")));
+    assert!(
+        hub.steps()[before..]
+            .iter()
+            .all(|s| ["discovery", "state", "outcome"].contains(s))
+    );
+
+    // taken at last: pending clears, and the write of that push id is not sent again
+    hub.fail.lock().unwrap().clear();
+    hub.answer(&pending.push, LookupOutcome::Taken { tip: landing(head) });
+    let out = s.push(PushRequest::default()).unwrap();
+    assert!(matches!(
+        out.lookup.map(|l| l.outcome),
+        Some(LookupOutcome::Taken { .. })
+    ));
+    assert_eq!(pending_of(&e, "shared"), None);
+    assert_eq!(canon_of(&e, "shared").unwrap().applied, Some(head));
+    assert_eq!(hub.writes().len(), 1);
+}
+
+/// D-H0BZN, D-H67EN: a busy reply that ends in held or refused is that outcome, applied once.
+/// A completed refusal whose code is `E_HUB_BUSY` is not a running write: no wait follows it,
+/// whatever the pending record's age. Unknown and every other lookup failure stop at once with
+/// their own rule, and the held-request refresh asks once.
+#[test]
+fn r59016_busy_held_and_refused_are_terminal() {
+    // busy, then held: recorded once, no write
+    let e = env(1);
+    let head = e.landings[0];
+    seed_pending(&e, P1, head, T0);
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, busy_refusal(1));
+    hub.answer(
+        P1,
+        LookupOutcome::Held {
+            request: HubRequest {
+                number: 4,
+                version: 1,
+            },
+            tip: None,
+        },
+    );
+    let s = Sync::new(&e, &hub);
+    let out = s.push(PushRequest::default()).unwrap();
+    assert!(matches!(out.canon, WriteEnd::HeldOpen { request: 4, .. }));
+    assert_eq!(asks(&hub).len(), 2);
+    assert_eq!(s.poll.seconds(), [1]);
+    assert_eq!(pending_of(&e, "shared"), None);
+    assert_eq!(
+        canon_of(&e, "shared").unwrap().held,
+        Some(SyncHeld {
+            head,
+            request: 4,
+            push: P1.into(),
+        })
+    );
+
+    // busy, then refused: cleared once, and the push goes on under a new push id
+    let e = env(1);
+    let head = e.landings[0];
+    seed_pending(&e, P1, head, T0);
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, busy_refusal(1));
+    hub.answer(
+        P1,
+        LookupOutcome::Refused {
+            code: "E_HUB_BEHIND".into(),
+        },
+    );
+    let s = Sync::new(&e, &hub);
+    let out = s.push(PushRequest::default()).unwrap();
+    assert_eq!(
+        hub.steps(),
+        ["discovery", "state", "outcome", "outcome", "put", "write"]
+    );
+    assert_eq!(s.poll.seconds(), [1]);
+    assert_ne!(taken(&out).0, P1);
+    assert_eq!(pending_of(&e, "shared"), None);
+
+    // a completed refusal with the code E_HUB_BUSY: no wait, however old the record
+    for pull in [false, true] {
+        let e = env(1);
+        let head = e.landings[0];
+        seed_pending(&e, P1, head, T0);
+        let hub = Hub::new().with_state(|s| s.quarantine_seconds = QUARANTINE_S);
+        hub.answer(
+            P1,
+            LookupOutcome::Refused {
+                code: "E_HUB_BUSY".into(),
+            },
+        );
+        let copy = pull.then(|| copy_project(&e));
+        if let Some((_, hub_store)) = &copy {
+            hub.serve(hub_store.read());
+        }
+        let s = Sync::new(&e, &hub);
+        s.clock.0.store(T0 + 2 * QUARANTINE_MS, Ordering::SeqCst);
+        let out = if pull {
+            s.pull(PullRequest::default()).map(|_| None)
+        } else {
+            s.push(PushRequest::default()).map(Some)
+        }
+        .unwrap();
+        assert_eq!(asks(&hub), [P1], "pull {pull}");
+        assert!(s.poll.seconds().is_empty());
+        assert_eq!(pending_of(&e, "shared"), None);
+        if let Some(out) = out {
+            // the same behavior as before: a new push id sends the history again
+            assert_eq!(
+                hub.steps(),
+                ["discovery", "state", "outcome", "put", "write"]
+            );
+            assert_ne!(taken(&out).0, P1);
+        }
+    }
+
+    // unknown: a young record stops uncertain, at once or after busy; an old one clears
+    for (busy, young) in [(false, true), (true, true), (true, false)] {
+        let e = env(1);
+        let head = e.landings[0];
+        let sent = seed_pending(&e, P1, head, T0);
+        let hub = Hub::new().with_state(|s| s.quarantine_seconds = QUARANTINE_S);
+        if busy {
+            hub.fail_at("outcome", 1, busy_refusal(1));
+        }
+        let s = Sync::new(&e, &hub);
+        if !young {
+            s.clock.0.store(T0 + 2 * QUARANTINE_MS, Ordering::SeqCst);
+        }
+        let waits = usize::from(busy);
+        let r = s.push(PushRequest::default());
+        assert_eq!(s.poll.seconds().len(), waits);
+        assert_eq!(asks(&hub).len(), 1 + waits);
+        if young {
+            assert_sync_uncertain(&err(r), P1);
+            assert_eq!(pending_of(&e, "shared"), Some(sent));
+        } else {
+            assert_eq!(r.unwrap().lookup.unwrap().outcome, LookupOutcome::Unknown);
+            assert_eq!(pending_of(&e, "shared"), None);
+        }
+    }
+
+    // other failures stop at once: after a wait, a hub error of another code; a busy refusal
+    // with no wait stays the protocol error
+    let e = env(1);
+    let head = e.landings[0];
+    let sent = seed_pending(&e, P1, head, T0);
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, busy_refusal(1));
+    hub.fail_at("outcome", 2, hub_words("E_HUB_NOT_FOUND"));
+    let s = Sync::new(&e, &hub);
+    assert_eq!(err(s.push(PushRequest::default())).code, "E_HUB_NOT_FOUND");
+    assert_eq!(s.poll.seconds(), [1]);
+    assert_eq!(asks(&hub).len(), 2);
+    assert_eq!(pending_of(&e, "shared"), Some(sent.clone()));
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, transport_failure());
+    let s = Sync::new(&e, &hub);
+    assert_eq!(
+        err(s.push(PushRequest::default())).code,
+        E_UPSTREAM_TRANSPORT
+    );
+    assert!(s.poll.seconds().is_empty());
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, hub_words("E_HUB_BUSY"));
+    let s = Sync::new(&e, &hub);
+    assert_eq!(
+        err(s.push(PushRequest::default())).code,
+        E_UPSTREAM_PROTOCOL
+    );
+    assert!(s.poll.seconds().is_empty());
+    assert_eq!(asks(&hub).len(), 1);
+    assert_eq!(pending_of(&e, "shared"), Some(sent));
+
+    // the held-request refresh asks once and warns: it never waits
+    let e = env(2);
+    let tip = e.landings[0];
+    let hub = Hub::new().with_state(|s| s.canon = Some(tip));
+    hub.plan_write(
+        1,
+        WritePlan::Held {
+            number: 3,
+            version: 1,
+        },
+    );
+    let out = push(&e, &hub, None).unwrap();
+    let WriteEnd::Held { push: held, .. } = &out.canon else {
+        panic!("{:?}", out.canon)
+    };
+    let held = held.clone();
+    let (_dir, hub_store) = copy_project(&e);
+    hub.serve(hub_store.read());
+    hub.fail_at("outcome", 1, busy_refusal(1));
+    let s = Sync::new(&e, &hub);
+    let out = s.pull(PullRequest::default()).unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.code == "W_UPSTREAM_HELD_LOOKUP"),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(asks(&hub), [held]);
+    assert!(s.poll.seconds().is_empty());
+
+    // a restore: busy then held, busy then refused, a completed E_HUB_BUSY refusal (no wait),
+    // unknown, and a failed lookup after a wait
+    let (hub, poll, scratch, out) = lost_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(1));
+        answer_last_write(hub, Last::Held(7));
+    });
+    let out = out.unwrap();
+    assert!(
+        matches!(&out.canon, Some(WriteEnd::Held { request, .. }) if request.number == 7),
+        "{:?}",
+        out.canon
+    );
+    assert_eq!((out.lookups.len(), poll.seconds()), (1, vec![1]));
+    assert_eq!(hub.writes().len(), 1);
+    assert!(is_empty_dir(scratch.path()));
+
+    for (busy, code, waits) in [(true, "E_HUB_BEHIND", 1), (false, "E_HUB_BUSY", 0)] {
+        let (hub, poll, scratch, out) = lost_restore(|hub, _| {
+            if busy {
+                hub.fail_at("outcome", 1, busy_refusal(1));
+            }
+            answer_last_write(hub, Last::Refused(code));
+        });
+        let out = out.unwrap();
+        let push = hub.writes()[0].push.clone();
+        assert!(
+            matches!(&out.canon, Some(WriteEnd::Refused { push: Some(p), .. }) if *p == push),
+            "{:?}",
+            out.canon
+        );
+        assert_eq!(out.lookups.len(), 1);
+        assert_eq!(poll.seconds().len(), waits);
+        assert_eq!(asks(&hub).len(), 1 + waits);
+        assert_eq!(hub.writes().len(), 1);
+        assert!(is_empty_dir(scratch.path()));
+    }
+
+    let (hub, poll, _scratch, out) = lost_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(1));
+    });
+    assert_restore_uncertain(&err(out), &hub.writes()[0].push);
+    assert_eq!((asks(&hub).len(), poll.seconds()), (2, vec![1]));
+
+    let (hub, poll, _scratch, out) = lost_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(1));
+        hub.fail_at("outcome", 2, hub_words("E_HUB_NOT_FOUND"));
+    });
+    let x = err(out);
+    assert_eq!(x.code, E_UPSTREAM_UNCERTAIN);
+    assert_eq!(x.issues.len(), 2, "{:?}", x.issues);
+    assert_eq!(x.issues[1].code, "E_HUB_NOT_FOUND");
+    assert_eq!((asks(&hub).len(), poll.seconds()), (2, vec![1]));
+    assert_eq!(hub.writes().len(), 1);
 }

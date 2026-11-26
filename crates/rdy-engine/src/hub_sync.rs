@@ -17,7 +17,11 @@
 //!    or write step: taken and held apply the write reply's rules (a taken tip other than the
 //!    pushed head is fetched first), refused clears it, and unknown stops with the uncertain
 //!    words until the quarantine life has passed since it was sent. A refusal of the lookup
-//!    keeps it. An outcome is never inferred from store facts.
+//!    keeps it. An outcome is never inferred from store facts. While the hub still runs the
+//!    write it answers the lookup `E_HUB_BUSY` with `retry_after`: the lookup waits that many
+//!    seconds (1 to 5) and asks again, for at most 120 seconds and 82 asks, and then stops with
+//!    the uncertain words, with `pending` kept and no write sent. A completed refusal that
+//!    carries the code `E_HUB_BUSY` is a refusal, not a busy reply, and is never waited on.
 //! 7. **Push.** One render-input capture per push, at the pushed head's scope, with the gate
 //!    settings of the same read state. Canon first, then each named view in Plan A's push
 //!    order. Each has its own push id, upload, known, put and write; a view write starts only
@@ -62,9 +66,9 @@ use crate::hub_publish_stream::{
 };
 use crate::hub_publish_wire::{MAX_KNOWN_KEYS, ObjectPut, PublishState, UploadContext};
 use crate::hub_sync_wire::{
-    GateSettings, GetRequest, HubRequest, KnownPull, LookupOutcome, ProposeGate, SyncState,
-    SyncStateRequest, SyncWire, WriteFailure, WriteKind, WriteOutcome, WriteReply, WriteRequest,
-    WriteTag, check_view_names, encode_write,
+    GateSettings, GetRequest, HubRequest, KnownPull, LookupOutcome, OutcomeReply, ProposeGate,
+    SyncState, SyncStateRequest, SyncWire, WriteFailure, WriteKind, WriteOutcome, WriteReply,
+    WriteRequest, WriteTag, check_view_names, encode_write,
 };
 use crate::hub_types::{HubClock, HubTransport, Origin, RequestClaim};
 use crate::landing_check::CheckInputs;
@@ -93,6 +97,7 @@ use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// A push's request: the remote (none for the default one), the named views, and whether it
 /// forces hub canon to local canon's head.
@@ -506,6 +511,92 @@ pub struct SyncService<'a> {
     pub(crate) renderer: &'a (dyn PublishRenderer + Sync),
     /// Where a restore makes its temporary store: the system temp root when None.
     pub(crate) scratch: Option<PathBuf>,
+    /// The clock of a busy outcome lookup's waits: a private monotonic one when None.
+    poll_clock: Option<&'a dyn OutcomePollClock>,
+}
+
+/// The hub's refusal of an outcome lookup while it still runs the write.
+const HUB_BUSY: &str = "E_HUB_BUSY";
+/// The most time the lookups and waits of one recovery take together, in milliseconds.
+const OUTCOME_POLL_BUDGET_MS: u64 = 120_000;
+/// The time one lookup may take at most (30 seconds and the byte-scaled part of the read
+/// deadline for the largest outcome body and reply), kept free before every request.
+const OUTCOME_LOOKUP_RESERVE_MS: u64 = 39_000;
+/// The most lookups one recovery begins.
+const OUTCOME_POLL_MAX_REQUESTS: u32 = 82;
+/// The shortest and longest wait between two lookups, in seconds.
+const OUTCOME_RETRY_MIN_SECONDS: u64 = 1;
+const OUTCOME_RETRY_MAX_SECONDS: u64 = 5;
+
+/// The monotonic time and the sleep of a busy outcome lookup. Production uses the system's;
+/// a test injects a clock that moves only when it says so.
+#[doc(hidden)]
+pub trait OutcomePollClock: Send + Sync {
+    /// The time since this clock began, never going back.
+    fn now(&self) -> Duration;
+    /// Waits for `delay`.
+    fn wait(&self, delay: Duration);
+}
+
+/// The system's monotonic clock and thread sleep.
+struct SystemPollClock {
+    start: Instant,
+}
+
+impl SystemPollClock {
+    fn new() -> SystemPollClock {
+        SystemPollClock {
+            start: Instant::now(),
+        }
+    }
+}
+
+impl OutcomePollClock for SystemPollClock {
+    fn now(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    fn wait(&self, delay: Duration) {
+        std::thread::sleep(delay);
+    }
+}
+
+/// Asks `ask` for an outcome until it gives one, waiting between the hub's busy refusals. The
+/// 120-second budget covers the asks and waits, and starts here. No ask begins unless 39
+/// seconds (the longest an ask may take) remain and fewer than 82 have begun. A busy refusal
+/// waits its `retry_after` clamped to 1 to 5 seconds, and ends the polling with `None` when that
+/// wait and the next ask's reserve no longer fit. A refusal with another code, and any other
+/// failure, is returned at once. Only the current reply is kept.
+fn poll_outcome(
+    clock: &dyn OutcomePollClock,
+    mut ask: impl FnMut() -> Result<OutcomeReply, RdyError>,
+) -> Result<Option<OutcomeReply>, RdyError> {
+    let budget = Duration::from_millis(OUTCOME_POLL_BUDGET_MS);
+    let reserve = Duration::from_millis(OUTCOME_LOOKUP_RESERVE_MS);
+    let start = clock.now();
+    let remaining = |now: Duration| budget.saturating_sub(now.saturating_sub(start));
+    let mut begun = 0u32;
+    loop {
+        if begun >= OUTCOME_POLL_MAX_REQUESTS || remaining(clock.now()) < reserve {
+            return Ok(None);
+        }
+        begun += 1;
+        let e = match ask() {
+            Ok(reply) => return Ok(Some(reply)),
+            Err(e) if e.code == HUB_BUSY => e,
+            Err(e) => return Err(e),
+        };
+        let seconds = e.upstream_retry_after.ok_or_else(upstream_protocol)?;
+        let delay = Duration::from_secs(
+            seconds.clamp(OUTCOME_RETRY_MIN_SECONDS, OUTCOME_RETRY_MAX_SECONDS),
+        );
+        if begun >= OUTCOME_POLL_MAX_REQUESTS
+            || delay.saturating_add(reserve) > remaining(clock.now())
+        {
+            return Ok(None);
+        }
+        clock.wait(delay);
+    }
 }
 
 /// The sync wire's known and put steps for the history sender.
@@ -578,6 +669,7 @@ impl<'a> SyncService<'a> {
             renderer,
             scratch: None,
             projectless: false,
+            poll_clock: None,
         }
     }
 
@@ -603,6 +695,31 @@ impl<'a> SyncService<'a> {
     pub fn scratch_in(mut self, root: &Path) -> SyncService<'a> {
         self.scratch = Some(root.to_path_buf());
         self
+    }
+
+    /// This coordinator with its busy outcome lookups timed and paced by `clock` in place of the
+    /// system's monotonic clock and thread sleep (a test's fake clock).
+    #[doc(hidden)]
+    pub fn with_outcome_poll_clock(mut self, clock: &'a dyn OutcomePollClock) -> SyncService<'a> {
+        self.poll_clock = Some(clock);
+        self
+    }
+
+    /// The outcome of write `push`, asked again while the hub still runs it (module docs,
+    /// "Busy outcome lookups"). `Some` is a decoded outcome, `Unknown` among them; `None` means
+    /// the polling budget ran out with the hub still busy; an error is any other failure of the
+    /// lookup. It never sends a write.
+    pub(crate) fn lookup_outcome(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+    ) -> Result<Option<OutcomeReply>, RdyError> {
+        let own = SystemPollClock::new();
+        let clock: &dyn OutcomePollClock = match self.poll_clock {
+            Some(c) => c,
+            None => &own,
+        };
+        poll_outcome(clock, || self.wire.outcome(cx, push))
     }
 
     fn credentials(&self) -> HubCredentials<'a> {
@@ -969,8 +1086,12 @@ impl<'a> SyncService<'a> {
             return Err(busy(&t.name));
         }
         let cx = self.context(t, &read, Some(base_url))?;
-        let reply = self.wire.outcome(&cx, &p.push)?;
+        let reply = self.lookup_outcome(&cx, &p.push)?;
         drop(cx);
+        // the hub still runs the write: it may yet complete, so `pending` stays and no write goes
+        let Some(reply) = reply else {
+            return Err(sync_uncertain(&p.push));
+        };
         let want = if p.kind == KIND_VIEW {
             kinds::VIEW_OP
         } else {
@@ -2122,4 +2243,174 @@ fn capture_with(
     validate_inputs(&inputs)?;
     let gate = gate_settings(read, &inputs);
     Ok(Capture { inputs, gate, head })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hub_sync_wire::OutcomeReply;
+    use std::sync::Mutex;
+
+    /// A clock that moves only when a lookup or a wait moves it; `slack` is the time each wait
+    /// takes beyond its delay (a late wake).
+    #[derive(Default)]
+    struct Fake {
+        now: Mutex<Duration>,
+        waits: Mutex<Vec<Duration>>,
+        slack: Mutex<Duration>,
+    }
+
+    impl Fake {
+        fn advance(&self, by: Duration) {
+            *self.now.lock().unwrap() += by;
+        }
+
+        fn seconds(&self) -> Vec<u64> {
+            self.waits
+                .lock()
+                .unwrap()
+                .iter()
+                .map(Duration::as_secs)
+                .collect()
+        }
+    }
+
+    impl OutcomePollClock for Fake {
+        fn now(&self) -> Duration {
+            *self.now.lock().unwrap()
+        }
+
+        fn wait(&self, delay: Duration) {
+            self.waits.lock().unwrap().push(delay);
+            let slack = *self.slack.lock().unwrap();
+            self.advance(delay + slack);
+        }
+    }
+
+    fn busy(seconds: Option<u64>) -> RdyError {
+        let mut e = RdyError::new(HUB_BUSY, "busy", "wait");
+        e.upstream_retry_after = seconds;
+        e
+    }
+
+    fn unknown() -> OutcomeReply {
+        OutcomeReply {
+            outcome: LookupOutcome::Unknown,
+            kind: None,
+            view: None,
+            request_state: None,
+        }
+    }
+
+    /// Polls with a hub that is busy for `busy_for` lookups (each taking `cost` and asking for
+    /// `retry` seconds), then answers unknown. Returns the result, the lookups begun and the
+    /// seconds waited.
+    fn run(
+        clock: &Fake,
+        busy_for: usize,
+        retry: Option<u64>,
+        cost: Duration,
+    ) -> (Result<Option<OutcomeReply>, RdyError>, usize, Vec<u64>) {
+        let mut begun = 0;
+        let r = poll_outcome(clock, || {
+            begun += 1;
+            clock.advance(cost);
+            if begun <= busy_for {
+                Err(busy(retry))
+            } else {
+                Ok(unknown())
+            }
+        });
+        (r, begun, clock.seconds())
+    }
+
+    #[test]
+    fn r59016_poll_bounds_and_clock() {
+        let none = Duration::ZERO;
+        let always = usize::MAX;
+
+        // the wait is the hub's retry_after clamped to 1 to 5 seconds
+        for (asked, waited) in [
+            (0, 1),
+            (1, 1),
+            (5, 5),
+            (6, 5),
+            (31_536_000, 5),
+            (u64::MAX, 5),
+        ] {
+            let clock = Fake::default();
+            let (r, begun, seconds) = run(&clock, 1, Some(asked), none);
+            assert!(matches!(r, Ok(Some(_))), "{asked}");
+            assert_eq!((begun, seconds), (2, vec![waited]), "{asked}");
+        }
+
+        // metadata the decoder always sets is missing: the protocol error, no guessed wait
+        let clock = Fake::default();
+        let (r, begun, seconds) = run(&clock, always, None, none);
+        assert_eq!(r.unwrap_err().code, crate::error::E_UPSTREAM_PROTOCOL);
+        assert_eq!((begun, seconds), (1, vec![]));
+
+        // the lookup count and the 120-second budget
+        for (retry, cost, calls, waits) in
+            [(1, 0, 82, 81), (5, 0, 17, 16), (1, 39, 3, 2), (5, 39, 2, 1)]
+        {
+            let clock = Fake::default();
+            let (r, begun, seconds) = run(&clock, always, Some(retry), Duration::from_secs(cost));
+            assert!(matches!(r, Ok(None)), "retry {retry} cost {cost}");
+            assert_eq!(
+                (begun, seconds.len()),
+                (calls, waits),
+                "retry {retry} cost {cost}"
+            );
+            // never past the budget: the last lookup began with its reserve free
+            assert!(
+                clock.now()
+                    <= Duration::from_millis(OUTCOME_POLL_BUDGET_MS) + Duration::from_secs(cost)
+            );
+        }
+
+        // a lookup begins with exactly 39,000 ms left, and not with 38,999
+        for (slack_ms, begins) in [(1_000, 2), (1_001, 1)] {
+            let clock = Fake::default();
+            *clock.slack.lock().unwrap() = Duration::from_millis(slack_ms);
+            // the first lookup takes 79 s; its wait takes 1 s and the slack: 39,000 or 38,999 ms
+            // are left
+            let (r, begun, seconds) = run(&clock, 1, Some(1), Duration::from_secs(79));
+            if begins == 2 {
+                assert!(matches!(r, Ok(Some(_))));
+            } else {
+                assert!(matches!(r, Ok(None)));
+            }
+            assert_eq!((begun, seconds), (begins, vec![1]), "slack {slack_ms}");
+        }
+
+        // the wait itself needs its delay and the next lookup's reserve: 40,000 ms
+        for (cost_ms, waits) in [(80_000, 1), (80_001, 0)] {
+            let clock = Fake::default();
+            let (r, _, seconds) = run(&clock, always, Some(1), Duration::from_millis(cost_ms));
+            assert!(matches!(r, Ok(None)));
+            assert_eq!(seconds.len(), waits, "cost {cost_ms}");
+        }
+
+        // a completed outcome and a failure of another kind stop at once
+        let clock = Fake::default();
+        let (r, begun, seconds) = run(&clock, 0, Some(1), none);
+        assert!(matches!(r, Ok(Some(_))));
+        assert_eq!((begun, seconds), (1, vec![]));
+        let clock = Fake::default();
+        let mut begun = 0;
+        let r = poll_outcome(&clock, || {
+            begun += 1;
+            Err(RdyError::new("E_HUB_NOT_FOUND", "no push", "check it"))
+        });
+        assert_eq!(r.unwrap_err().code, "E_HUB_NOT_FOUND");
+        assert_eq!((begun, clock.seconds()), (1, vec![]));
+
+        // the clock starts with the first lookup, wherever it stands
+        let clock = Fake::default();
+        clock.advance(Duration::from_secs(3_600));
+        let (r, begun, _) = run(&clock, always, Some(1), none);
+        assert!(matches!(r, Ok(None)));
+        assert_eq!(begun, 82);
+    }
 }

@@ -3310,3 +3310,75 @@ fn r59023_wire_reads_the_cap_marker_from_args() {
     }
     assert_eq!(s.finish(), 0);
 }
+
+/// A busy refusal of the outcome lookup keeps the hub's validated `retry_after` as typed
+/// metadata beside the unchanged issue, and the metadata never reaches the serialized error. Every
+/// reply the decoder refuses stays the protocol error: a missing, zero, string, negative or
+/// over-limit wait, a duplicated member, a reply past the reply cap and a token echo. The
+/// maximum wait survives whole; the polling clamp to 5 seconds is pinned in the library tests.
+#[test]
+fn r59016_retry_metadata_keeps_wire_guards() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let body = |retry: &str, message: &str| {
+        format!(
+            r#"{{"code":"E_HUB_BUSY","message":"{message}","fix":"wait","issues":[],"request_id":"req_0001"{retry}}}"#
+        )
+    };
+    // valid: the typed wait and the issue beside the same words as before
+    for n in [1u64, 7, 31_536_000] {
+        let retry = format!(r#","retry_after":{n}"#);
+        let (r, _) = served(&mut s, Reply::json(503, &body(&retry, "busy")), || {
+            hub.wire.outcome(&cx, PUSH)
+        });
+        let e = err(r);
+        assert_eq!(e.code, "E_HUB_BUSY");
+        assert_eq!((e.message.as_str(), e.fix.as_str()), ("busy", "wait"));
+        assert_eq!(e.upstream_retry_after, Some(n));
+        let wait = format!("retry after {n} seconds");
+        assert!(e.issues.iter().any(|i| i.message == wait), "{:?}", e.issues);
+        assert!(
+            e.issues.iter().any(|i| i.message == "hub request req_0001"),
+            "{:?}",
+            e.issues
+        );
+        // the serialized error is what it was before the metadata
+        let sent = serde_json::to_value(&e).unwrap();
+        assert!(sent.get("upstream_retry_after").is_none(), "{sent}");
+        let mut bare = e.clone();
+        bare.upstream_retry_after = None;
+        assert_eq!(sent, serde_json::to_value(&bare).unwrap());
+    }
+    // refused: the body is discarded whole and no metadata survives
+    let over = format!(
+        "{}{}",
+        body("", "busy"),
+        " ".repeat(REPLY_BYTES + 1 - body("", "busy").len())
+    );
+    let echo = body(r#","retry_after":3"#, ACCESS);
+    let cases: Vec<(&str, String)> = vec![
+        ("missing", body("", "busy")),
+        ("null", body(r#","retry_after":null"#, "busy")),
+        ("zero", body(r#","retry_after":0"#, "busy")),
+        ("string", body(r#","retry_after":"3""#, "busy")),
+        ("negative", body(r#","retry_after":-1"#, "busy")),
+        ("fraction", body(r#","retry_after":1.5"#, "busy")),
+        ("over the limit", body(r#","retry_after":31536001"#, "busy")),
+        (
+            "duplicate",
+            body(r#","retry_after":1,"retry_after":2"#, "busy"),
+        ),
+        ("oversized", over),
+        ("token echo", echo),
+    ];
+    for (name, reply) in cases {
+        let (r, _) = served(&mut s, Reply::json(503, &reply), || {
+            hub.wire.outcome(&cx, PUSH)
+        });
+        let e = err(r);
+        assert_eq!(e.code, E_UPSTREAM_PROTOCOL, "{name}");
+        assert_eq!(e.upstream_retry_after, None, "{name}");
+    }
+    assert_eq!(s.finish(), 0);
+}

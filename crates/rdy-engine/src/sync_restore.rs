@@ -26,10 +26,12 @@
 //!    is listed as kept. A project dump's views stay on the machine. Held chains and replaced
 //!    marks travel only as records that canon or a view names.
 //! 6. **No resumable state.** A restore records no `upload` or `pending` ref; the temporary
-//!    store goes when the restore ends. A write whose reply was lost is looked up once, in the
-//!    same run, by the push id it holds: taken, held and refused are reported; an unknown
-//!    outcome or a failed lookup stops with `E_UPSTREAM_UNCERTAIN` in publish's words, naming
-//!    the push id.
+//!    store goes when the restore ends. A write whose reply was lost is looked up in the same
+//!    run, by the push id it holds, and the lookup waits while the hub answers busy (the polling
+//!    rule of `crate::hub_sync`): taken, held and refused are reported; an unknown outcome, a
+//!    failed lookup or a hub still busy at the end of the polling budget stops with
+//!    `E_UPSTREAM_UNCERTAIN` in publish's words, naming the push id. The write is never sent
+//!    again.
 //! 7. **Cleanup.** The temporary store is removed after success, a refusal, a failure, and when
 //!    the call unwinds. A cleanup failure is reported and never hides the restore's result.
 //!
@@ -558,7 +560,8 @@ impl<'a, 's> Exchange<'a, 's> {
         }
     }
 
-    /// Step 6: the one outcome lookup of the write `request`, whose reply was lost.
+    /// Step 6: the outcome lookup of the write `request`, whose reply was lost, asked again while
+    /// the hub answers busy (`SyncService::lookup_outcome`).
     fn look_up(
         &self,
         job: &Job,
@@ -567,10 +570,14 @@ impl<'a, 's> Exchange<'a, 's> {
         out: &mut RestoreOutcome,
     ) -> Result<WriteEnd, RdyError> {
         let id = request.push.clone();
-        let reply = self
-            .context()
-            .and_then(|cx| self.service.wire.outcome(&cx, &id))
-            .map_err(|e| uncertain(&id, Some(e)))?;
+        let cx = self.context().map_err(|e| uncertain(&id, Some(e)))?;
+        let reply = match self.service.lookup_outcome(&cx, &id) {
+            Ok(Some(reply)) => reply,
+            // the hub still runs the write: its outcome is not known, and it is never sent again
+            Ok(None) => return Err(uncertain(&id, None)),
+            Err(e) => return Err(uncertain(&id, Some(e))),
+        };
+        drop(cx);
         let end = match &reply.outcome {
             LookupOutcome::Taken { tip } if tip.kind == request.root_kind() => WriteEnd::Taken {
                 push: id.clone(),
