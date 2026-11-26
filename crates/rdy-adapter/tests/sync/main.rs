@@ -18,6 +18,7 @@ mod link_export;
 mod link_take;
 mod load_chain;
 mod move_removal_reads;
+mod prepared_pull;
 mod repo_links_journey;
 mod stream;
 mod sync;

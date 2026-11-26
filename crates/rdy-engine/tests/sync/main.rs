@@ -15,6 +15,7 @@ mod foreign_refs;
 mod foreign_signals;
 mod foreign_state;
 mod links;
+mod prepared_pull;
 mod snapshot_delta_checks;
 mod snapshot_delta_reads;
 mod snapshot_delta_upgrade;

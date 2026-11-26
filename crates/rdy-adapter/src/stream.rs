@@ -3,18 +3,22 @@
 //! The batch format, its checks, its errors and its limits belong to core
 //! (`rdy_engine::stream_check`, `rdy_engine::stream_export`); this module delegates and re-exports
 //! the types those calls use, so a consumer names them from this crate alone. Nothing here keeps
-//! state: a check opens no store and a new process can make each call, and an export reads only
-//! the refs the snapshot captured. A host that wants independent batches from one ordered stream
+//! state of its own: a check opens no store and a new process can make each call, and an export
+//! reads only the refs the snapshot captured. The one exception is a first pull a caller
+//! prepares ([`Snapshot::prepare_pull`]): the caller owns that value for one operation, and
+//! dropping it releases what it kept. A host that wants independent batches from one ordered stream
 //! splits it with [`StreamReader`] and [`StreamWriter`]; those re-exports claim no authorization
 //! for a single batch and manage no files. The host owns its batch files, upload ids and
 //! quarantine (D-WDKWQ); a checked batch is not a complete upload.
 
 use crate::store::Snapshot;
-pub use rdy_engine::stream_export::KeyPage;
+pub use rdy_engine::hub_http::BodyEncoding;
+pub use rdy_engine::stream_export::{EncodedHistory, KeyPage, PreparedPull};
 use rdy_engine::{RdyError, stream_check, stream_export};
 use rdy_model::{Hash, RepoId};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
+use std::sync::Arc;
 
 pub use rdy_engine::history_facts::ObjectPresence;
 pub use rdy_store::object_refs::ObjectKey;
@@ -105,5 +109,61 @@ impl Snapshot {
         out: W,
     ) -> Result<BatchReport, RdyError> {
         stream_export::write_history_keys(self.read_state(), purpose, root, keys, out)
+    }
+
+    /// Prepares one caller-owned first pull of the canon history (`purpose` canon_history,
+    /// `root` a landing) or view history (view_history, `root` a view op) of this snapshot: it
+    /// walks the history once and keeps that closure with a share of the snapshot's captured
+    /// state. Its pages and gets read the closure and walk nothing again, so a pull of many gets
+    /// uses the one canon tip and set of view heads that this snapshot captured. The caller
+    /// owns the value for the one operation: nothing is cached in the process or on disk, and
+    /// dropping it releases the captured state. A root the snapshot does not hold is
+    /// `E_UNRESOLVED_REF`; another purpose is `E_STREAM_PURPOSE`. An incremental read (a base)
+    /// uses [`Snapshot::history_page`] and [`Snapshot::write_history`], which keep their walks.
+    pub fn prepare_pull(
+        &self,
+        purpose: StreamPurpose,
+        root: Hash,
+    ) -> Result<PreparedPull, RdyError> {
+        PreparedPull::new(Arc::clone(self.shared_state()), purpose, root)
+    }
+
+    /// [`Snapshot::prepare_pull`] for a hub's get replies: its gets come back as the bytes that
+    /// go on the wire, framed as one zstd frame when the caller accepts it.
+    pub fn prepare_pull_reply(
+        &self,
+        purpose: StreamPurpose,
+        root: Hash,
+    ) -> Result<PullReply, RdyError> {
+        Ok(PullReply {
+            pull: self.prepare_pull(purpose, root)?,
+        })
+    }
+}
+
+/// One first pull's replies: a [`PreparedPull`] that gives each get as an [`EncodedHistory`].
+/// The caller owns it for the one operation, as it owns a prepared pull.
+#[derive(Debug)]
+pub struct PullReply {
+    pull: PreparedPull,
+}
+
+impl PullReply {
+    /// A page of at most `limit` keys after `after`, as [`PreparedPull::page`].
+    pub fn page(&self, after: Option<ObjectKey>, limit: usize) -> Result<KeyPage, RdyError> {
+        self.pull.page(after, limit)
+    }
+
+    /// The batch of exactly the records `keys` name as a get reply, as
+    /// [`PreparedPull::write_keys_encoded`]: one zstd frame when `accept_zstd` and the frame is
+    /// smaller than the batch, else the batch's own bytes. The report counts the batch's raw
+    /// bytes; `wire_bytes` counts the reply's. Nothing is encoded for a source record that fails
+    /// its checks.
+    pub fn write_keys_encoded(
+        &self,
+        keys: &[ObjectKey],
+        accept_zstd: bool,
+    ) -> Result<EncodedHistory, RdyError> {
+        self.pull.write_keys_encoded(keys, accept_zstd)
     }
 }
