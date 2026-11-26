@@ -1,5 +1,6 @@
 pub mod answer;
 pub mod bounded;
+pub mod canon_state;
 pub mod carried_records;
 mod check;
 pub mod check_holder;

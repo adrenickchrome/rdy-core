@@ -1480,20 +1480,26 @@ fn hfp5_no_format_or_feature_moves() {
         (2, 3, 4),
         "the stream formats"
     );
-    assert_eq!(rdy_store::sync_stream::READ_FORMATS, [2, 3, 4]);
+    // format 5 (the canon state) came later; this release read 2, 3 and 4
+    assert_eq!(rdy_store::sync_stream::READ_FORMATS[..3], [2, 3, 4]);
     // the registry less the features later plans registered (hub ports, `ported_change`; span
-    // maps, `dedup_spans`; plan deltas, `plan_delta`) is the 12 features of this plan, and those
-    // are the only additions
+    // maps, `dedup_spans`; plan deltas, `plan_delta`; canon states, `partial_history`) is the 12
+    // features of this plan, and those are the only additions
     let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
         .iter()
         .copied()
-        .filter(|n| *n != "ported_change" && *n != "dedup_spans" && *n != "plan_delta")
+        .filter(|n| {
+            *n != "ported_change"
+                && *n != "dedup_spans"
+                && *n != "plan_delta"
+                && *n != "partial_history"
+        })
         .collect();
     assert_eq!(live.len(), 12);
     assert_eq!(
         rdy_store::format::REGISTERED_FEATURES.len(),
-        live.len() + 3,
-        "ported_change, dedup_spans and plan_delta are the only additions"
+        live.len() + 4,
+        "ported_change, dedup_spans, plan_delta and partial_history are the only additions"
     );
     assert!(rdy_store::format::REGISTERED_FEATURES.contains(&"hub_canon"));
     let (was, now) = (read(PREDECESSOR), read(CURRENT));

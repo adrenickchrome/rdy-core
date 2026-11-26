@@ -10,6 +10,8 @@
 //! The binary is `$RDY_BIN`, else the `rdy` beside this test's `deps` directory. Projects are
 //! made, landed and read through the core calls while their daemons are stopped.
 
+#[path = "sync_e2e/canon_state.rs"]
+mod canon_state;
 #[path = "sync_e2e/mock.rs"]
 mod mock;
 #[path = "sync_e2e/speed.rs"]

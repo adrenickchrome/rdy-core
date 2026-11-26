@@ -1580,7 +1580,13 @@ fn scc6_contract_reports_sync_capabilities() {
     .unwrap();
     let history = &contract["sync"]["history"];
     assert_eq!(history["format"], json!(sync.history_format));
-    assert_eq!(history["read_formats"], json!(sync.stream_formats));
+    // format 5 (the canon state, D-GGTYA) came after that contract: it reads the same formats
+    // before it
+    assert_eq!(sync.stream_formats.last(), Some(&5));
+    assert_eq!(
+        history["read_formats"],
+        json!(sync.stream_formats[..sync.stream_formats.len() - 1])
+    );
     // and the capability serializes as a host reads it
     let v = serde_json::to_value(sync).unwrap();
     assert_eq!(

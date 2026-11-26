@@ -1,0 +1,607 @@
+{
+  "about": [
+    "The fixture hub's canon state exchange (D-GGTYA, D-4PV25), version 6: recorded from the adapter's mock hub for the hand-off to the hub's own tests. It shows the shapes this client reads; it is not a record of a deployed hub.",
+    "Hub canon is seeded with the frozen format-4 canon history sync4-canon-history.bin; each get body is named by its decoded batch bytes and blake3 (the whole state is sync5-canon-state.bin).",
+    "The client names format 4 alone in its state request; a hub that lists format 5 in stream_write sends a canon tip's state under purpose canon_state. Its known page carries bytes, the state's exact object frame bytes. The last steps are a hub with format 5 switched off."
+  ],
+  "fixture": "sync-client-wire",
+  "steps": [
+    {
+      "case": "a client of format 4; the hub sends canon states",
+      "reply": {
+        "body": {
+          "artifact_bytes": 1073741824,
+          "artifact_files": 32000,
+          "audience": null,
+          "batch_bytes": 104857600,
+          "batch_records": 100000,
+          "canon": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          },
+          "features": [
+            {
+              "class": "incompatible",
+              "name": "assessment"
+            },
+            {
+              "class": "incompatible",
+              "name": "content_hash_v2"
+            },
+            {
+              "class": "incompatible",
+              "name": "dedup_spans"
+            },
+            {
+              "class": "incompatible",
+              "name": "hub_canon"
+            },
+            {
+              "class": "incompatible",
+              "name": "object_encoding"
+            },
+            {
+              "class": "incompatible",
+              "name": "snapshot_delta"
+            }
+          ],
+          "min_rdy": "0.59.0",
+          "profile": null,
+          "quarantine_seconds": 86400,
+          "rdy": "0.59.0",
+          "repo_id": "8a55d733ad6ec262d2fd59d66db4ba8f",
+          "stream_read": [
+            2,
+            4
+          ],
+          "stream_write": [
+            2,
+            4,
+            5
+          ],
+          "views": [],
+          "zstd": true
+        },
+        "content_encoding": null,
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "accept_encoding": null,
+        "body": {
+          "actor": "agent:ana/claude",
+          "rdy": "0.59.0",
+          "run": "run-ana",
+          "site": null,
+          "stream_read": [
+            4
+          ],
+          "stream_write": [
+            4
+          ]
+        },
+        "route": "/state"
+      }
+    },
+    {
+      "case": "the known pull of the canon tip's state",
+      "reply": {
+        "body": {
+          "bytes": 722,
+          "keys": [
+            {
+              "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+              "kind": 4
+            },
+            {
+              "hash": "c0c408ff5302692edc569c1b12fbfc935574715e83ec24d3e66c96b93dad3b07",
+              "kind": 1
+            },
+            {
+              "hash": "621cca36fcf827a6e1d0a2e5ab273946c542d2cbc48ac29532fcce4e11342cd9",
+              "kind": 5
+            },
+            {
+              "hash": "8b19a504c104de64768f717530c758d41189f9f27d98df6ef63296385c652714",
+              "kind": 9
+            },
+            {
+              "hash": "50f8f520a3094ef5948372c78729103ac8618c36c6206f65ab11a489e1a078db",
+              "kind": 30
+            }
+          ],
+          "next": null
+        },
+        "content_encoding": null,
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "accept_encoding": null,
+        "body": {
+          "after": null,
+          "base": null,
+          "purpose": "canon_state",
+          "root": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          }
+        },
+        "route": "/known"
+      }
+    },
+    {
+      "case": "the get of the whole state",
+      "reply": {
+        "body": {
+          "batch_blake3": "bdd142ebcf05c1d9ad83303718f45bf199f545cffa4f60caf961c654f8d5b8af",
+          "batch_bytes": 1403,
+          "wire_bytes": 1403
+        },
+        "content_encoding": null,
+        "content_type": "application/octet-stream",
+        "status": 200
+      },
+      "request": {
+        "accept_encoding": null,
+        "body": {
+          "keys": [
+            {
+              "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+              "kind": 4
+            },
+            {
+              "hash": "c0c408ff5302692edc569c1b12fbfc935574715e83ec24d3e66c96b93dad3b07",
+              "kind": 1
+            },
+            {
+              "hash": "621cca36fcf827a6e1d0a2e5ab273946c542d2cbc48ac29532fcce4e11342cd9",
+              "kind": 5
+            },
+            {
+              "hash": "8b19a504c104de64768f717530c758d41189f9f27d98df6ef63296385c652714",
+              "kind": 9
+            },
+            {
+              "hash": "50f8f520a3094ef5948372c78729103ac8618c36c6206f65ab11a489e1a078db",
+              "kind": 30
+            }
+          ],
+          "purpose": "canon_state",
+          "root": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          }
+        },
+        "route": "/objects/get"
+      }
+    },
+    {
+      "case": "split get 1 of 2",
+      "reply": {
+        "body": {
+          "batch_blake3": "e4861b02029b7487c872af9ba586cf315a979bd7b58323c964ce7518d5e86165",
+          "batch_bytes": 1018,
+          "wire_bytes": 1018
+        },
+        "content_encoding": null,
+        "content_type": "application/octet-stream",
+        "status": 200
+      },
+      "request": {
+        "accept_encoding": null,
+        "body": {
+          "keys": [
+            {
+              "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+              "kind": 4
+            },
+            {
+              "hash": "c0c408ff5302692edc569c1b12fbfc935574715e83ec24d3e66c96b93dad3b07",
+              "kind": 1
+            }
+          ],
+          "purpose": "canon_state",
+          "root": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          }
+        },
+        "route": "/objects/get"
+      }
+    },
+    {
+      "case": "split get 2 of 2",
+      "reply": {
+        "body": {
+          "batch_blake3": "47ef4e940b021490bbf68e28ec6839952569ba6ba7091256156312937ef8573b",
+          "batch_bytes": 967,
+          "wire_bytes": 967
+        },
+        "content_encoding": null,
+        "content_type": "application/octet-stream",
+        "status": 200
+      },
+      "request": {
+        "accept_encoding": null,
+        "body": {
+          "keys": [
+            {
+              "hash": "621cca36fcf827a6e1d0a2e5ab273946c542d2cbc48ac29532fcce4e11342cd9",
+              "kind": 5
+            },
+            {
+              "hash": "8b19a504c104de64768f717530c758d41189f9f27d98df6ef63296385c652714",
+              "kind": 9
+            },
+            {
+              "hash": "50f8f520a3094ef5948372c78729103ac8618c36c6206f65ab11a489e1a078db",
+              "kind": 30
+            }
+          ],
+          "purpose": "canon_state",
+          "root": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          }
+        },
+        "route": "/objects/get"
+      }
+    },
+    {
+      "case": "the zstd get of the whole state",
+      "reply": {
+        "body": {
+          "batch_blake3": "bdd142ebcf05c1d9ad83303718f45bf199f545cffa4f60caf961c654f8d5b8af",
+          "batch_bytes": 1403,
+          "wire_bytes": 849
+        },
+        "content_encoding": "zstd",
+        "content_type": "application/octet-stream",
+        "status": 200
+      },
+      "request": {
+        "accept_encoding": "zstd",
+        "body": {
+          "keys": [
+            {
+              "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+              "kind": 4
+            },
+            {
+              "hash": "c0c408ff5302692edc569c1b12fbfc935574715e83ec24d3e66c96b93dad3b07",
+              "kind": 1
+            },
+            {
+              "hash": "621cca36fcf827a6e1d0a2e5ab273946c542d2cbc48ac29532fcce4e11342cd9",
+              "kind": 5
+            },
+            {
+              "hash": "8b19a504c104de64768f717530c758d41189f9f27d98df6ef63296385c652714",
+              "kind": 9
+            },
+            {
+              "hash": "50f8f520a3094ef5948372c78729103ac8618c36c6206f65ab11a489e1a078db",
+              "kind": 30
+            }
+          ],
+          "purpose": "canon_state",
+          "root": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          }
+        },
+        "route": "/objects/get"
+      }
+    },
+    {
+      "case": "a hub that sends no canon state",
+      "reply": {
+        "body": {
+          "artifact_bytes": 1073741824,
+          "artifact_files": 32000,
+          "audience": null,
+          "batch_bytes": 104857600,
+          "batch_records": 100000,
+          "canon": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          },
+          "features": [
+            {
+              "class": "incompatible",
+              "name": "assessment"
+            },
+            {
+              "class": "incompatible",
+              "name": "content_hash_v2"
+            },
+            {
+              "class": "incompatible",
+              "name": "dedup_spans"
+            },
+            {
+              "class": "incompatible",
+              "name": "hub_canon"
+            },
+            {
+              "class": "incompatible",
+              "name": "object_encoding"
+            },
+            {
+              "class": "incompatible",
+              "name": "snapshot_delta"
+            }
+          ],
+          "min_rdy": "0.59.0",
+          "profile": null,
+          "quarantine_seconds": 86400,
+          "rdy": "0.59.0",
+          "repo_id": "8a55d733ad6ec262d2fd59d66db4ba8f",
+          "stream_read": [
+            2,
+            4
+          ],
+          "stream_write": [
+            2,
+            4
+          ],
+          "views": [],
+          "zstd": true
+        },
+        "content_encoding": null,
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "accept_encoding": null,
+        "body": {
+          "actor": "agent:ana/claude",
+          "rdy": "0.59.0",
+          "run": "run-ana",
+          "site": null,
+          "stream_read": [
+            4
+          ],
+          "stream_write": [
+            4
+          ]
+        },
+        "route": "/state"
+      }
+    },
+    {
+      "case": "its refusal of a state pull",
+      "reply": {
+        "body": {
+          "code": "E_HUB_VALIDATION",
+          "fix": "pull the canon history",
+          "issues": [],
+          "message": "this hub sends no canon state",
+          "request_id": "req_00000000000000000000000009"
+        },
+        "content_encoding": null,
+        "content_type": "application/json",
+        "status": 422
+      },
+      "request": {
+        "accept_encoding": null,
+        "body": {
+          "after": null,
+          "base": null,
+          "purpose": "canon_state",
+          "root": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          }
+        },
+        "route": "/known"
+      }
+    },
+    {
+      "case": "the canon history pull that stays",
+      "reply": {
+        "body": {
+          "keys": [
+            {
+              "hash": "c0c408ff5302692edc569c1b12fbfc935574715e83ec24d3e66c96b93dad3b07",
+              "kind": 1
+            },
+            {
+              "hash": "d02ab7982061f800950ef9d10b41f54e2c448cb9c4d5880109cb0ffda4e0ba68",
+              "kind": 1
+            },
+            {
+              "hash": "280d4688b4f00fad6c7620ce67ef7c67721a120475fe5f69627cf744bbaae21b",
+              "kind": 1
+            },
+            {
+              "hash": "b441b6cc0af1e44384bc910142eb631864c9dac8139e6616679b8153e28b7a8b",
+              "kind": 2
+            },
+            {
+              "hash": "9ff94de1fc25a599f2f46184d972bdb69f883a304d02f2a52d2d6921e4edde03",
+              "kind": 2
+            },
+            {
+              "hash": "e8a816a8fffbae2eee78101a411e32316a4a31e17da1328b17146a80584f5b31",
+              "kind": 2
+            },
+            {
+              "hash": "911a6a0af596e41015c3a31c587c060072b2100fe7f067eddda5aed64474c8ab",
+              "kind": 3
+            },
+            {
+              "hash": "2c07deef1743f3f433b970dc1af94ff2fe660011c1ad1c4cb792ec96cfb1ce45",
+              "kind": 25
+            },
+            {
+              "hash": "372557b8f546da728919dcef3f10372f2d4a44d443e9550a0fe15c12b5e7de13",
+              "kind": 4
+            },
+            {
+              "hash": "a0a0f90ae9b8747740e2d068dd756a1ea61647a191e2a1e52e8cb4f4c7ea1b07",
+              "kind": 3
+            },
+            {
+              "hash": "2a5666313ee47d665d7a871537a3698c57d3bc6eedda6597a69295d8dbb7ff8b",
+              "kind": 25
+            },
+            {
+              "hash": "678b577cc940690b7d8dbe734cd15215b73de2eb9ebb119b4558957fda676fd1",
+              "kind": 4
+            },
+            {
+              "hash": "c28db875d1db94f4128227baa16fa81365422d26896d43bce29183400b338c34",
+              "kind": 3
+            },
+            {
+              "hash": "c13e3ac11bd03f12770bc08df446d1f0454f9dd9bea33e38fd915c3f9d90fb2a",
+              "kind": 25
+            },
+            {
+              "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+              "kind": 4
+            },
+            {
+              "hash": "8b19a504c104de64768f717530c758d41189f9f27d98df6ef63296385c652714",
+              "kind": 9
+            },
+            {
+              "hash": "33ef3a4d22fd2a356b8701f97ab1577c68863dca26e4f475aa2bac8be26aee0b",
+              "kind": 30
+            },
+            {
+              "hash": "f974cabffd9ef55ab87f75cb249b7d5999c9054b21af5331bfd317407e4f5601",
+              "kind": 30
+            },
+            {
+              "hash": "50f8f520a3094ef5948372c78729103ac8618c36c6206f65ab11a489e1a078db",
+              "kind": 30
+            }
+          ],
+          "next": null
+        },
+        "content_encoding": null,
+        "content_type": "application/json",
+        "status": 200
+      },
+      "request": {
+        "accept_encoding": null,
+        "body": {
+          "after": null,
+          "base": null,
+          "purpose": "canon_history",
+          "root": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          }
+        },
+        "route": "/known"
+      }
+    },
+    {
+      "case": "its get",
+      "reply": {
+        "body": {
+          "batch_blake3": "8d51365e1d9bd84bf9c00526e672d401298d0128cdf3590d1c09f50eb5f746e4",
+          "batch_bytes": 5884,
+          "wire_bytes": 5884
+        },
+        "content_encoding": null,
+        "content_type": "application/octet-stream",
+        "status": 200
+      },
+      "request": {
+        "accept_encoding": null,
+        "body": {
+          "keys": [
+            {
+              "hash": "c0c408ff5302692edc569c1b12fbfc935574715e83ec24d3e66c96b93dad3b07",
+              "kind": 1
+            },
+            {
+              "hash": "d02ab7982061f800950ef9d10b41f54e2c448cb9c4d5880109cb0ffda4e0ba68",
+              "kind": 1
+            },
+            {
+              "hash": "280d4688b4f00fad6c7620ce67ef7c67721a120475fe5f69627cf744bbaae21b",
+              "kind": 1
+            },
+            {
+              "hash": "b441b6cc0af1e44384bc910142eb631864c9dac8139e6616679b8153e28b7a8b",
+              "kind": 2
+            },
+            {
+              "hash": "9ff94de1fc25a599f2f46184d972bdb69f883a304d02f2a52d2d6921e4edde03",
+              "kind": 2
+            },
+            {
+              "hash": "e8a816a8fffbae2eee78101a411e32316a4a31e17da1328b17146a80584f5b31",
+              "kind": 2
+            },
+            {
+              "hash": "911a6a0af596e41015c3a31c587c060072b2100fe7f067eddda5aed64474c8ab",
+              "kind": 3
+            },
+            {
+              "hash": "2c07deef1743f3f433b970dc1af94ff2fe660011c1ad1c4cb792ec96cfb1ce45",
+              "kind": 25
+            },
+            {
+              "hash": "372557b8f546da728919dcef3f10372f2d4a44d443e9550a0fe15c12b5e7de13",
+              "kind": 4
+            },
+            {
+              "hash": "a0a0f90ae9b8747740e2d068dd756a1ea61647a191e2a1e52e8cb4f4c7ea1b07",
+              "kind": 3
+            },
+            {
+              "hash": "2a5666313ee47d665d7a871537a3698c57d3bc6eedda6597a69295d8dbb7ff8b",
+              "kind": 25
+            },
+            {
+              "hash": "678b577cc940690b7d8dbe734cd15215b73de2eb9ebb119b4558957fda676fd1",
+              "kind": 4
+            },
+            {
+              "hash": "c28db875d1db94f4128227baa16fa81365422d26896d43bce29183400b338c34",
+              "kind": 3
+            },
+            {
+              "hash": "c13e3ac11bd03f12770bc08df446d1f0454f9dd9bea33e38fd915c3f9d90fb2a",
+              "kind": 25
+            },
+            {
+              "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+              "kind": 4
+            },
+            {
+              "hash": "8b19a504c104de64768f717530c758d41189f9f27d98df6ef63296385c652714",
+              "kind": 9
+            },
+            {
+              "hash": "33ef3a4d22fd2a356b8701f97ab1577c68863dca26e4f475aa2bac8be26aee0b",
+              "kind": 30
+            },
+            {
+              "hash": "f974cabffd9ef55ab87f75cb249b7d5999c9054b21af5331bfd317407e4f5601",
+              "kind": 30
+            },
+            {
+              "hash": "50f8f520a3094ef5948372c78729103ac8618c36c6206f65ab11a489e1a078db",
+              "kind": 30
+            }
+          ],
+          "purpose": "canon_history",
+          "root": {
+            "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+            "kind": 4
+          }
+        },
+        "route": "/objects/get"
+      }
+    }
+  ],
+  "version": 6
+}

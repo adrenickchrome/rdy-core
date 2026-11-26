@@ -140,6 +140,14 @@ impl SyncState {
             .collect()
     }
 
+    /// Whether the hub sends a canon tip's state (stream format 5, D-GGTYA): its reply's
+    /// `stream_write` lists format 5. The request still names format 4 alone.
+    pub fn sends_canon_state(&self) -> bool {
+        self.state
+            .stream_write
+            .contains(&rdy_store::sync_stream::CANON_STATE_FORMAT)
+    }
+
     /// The hub's head of the named view `name`; None when the hub lacks it or it was not named.
     pub fn view_head(&self, name: &str) -> Option<Hash> {
         self.views
@@ -808,17 +816,19 @@ fn check_request(cx: &UploadContext, r: &SyncStateRequest) -> Result<(), RdyErro
 }
 
 /// A history request's own checks: a canon or view history whose root (and base) are its root
-/// kind.
+/// kind, or a canon state (D-GGTYA) of a landing, which has no base.
 fn check_history(
     purpose: StreamPurpose,
     root: &ObjectKey,
     base: Option<&ObjectKey>,
 ) -> Result<(), RdyError> {
-    let ok = matches!(
-        purpose,
-        StreamPurpose::CanonHistory | StreamPurpose::ViewHistory
-    ) && root.kind == purpose.root_kind()
-        && base.is_none_or(|b| b.kind == purpose.root_kind());
+    let ok = match purpose {
+        StreamPurpose::CanonHistory | StreamPurpose::ViewHistory => {
+            base.is_none_or(|b| b.kind == purpose.root_kind())
+        }
+        StreamPurpose::CanonState => base.is_none(),
+        _ => false,
+    } && root.kind == purpose.root_kind();
     if !ok {
         return Err(RdyError::new(
             E_BAD_INPUT,

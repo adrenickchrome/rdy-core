@@ -201,6 +201,76 @@ fn checked<R: Read, T>(
     })
 }
 
+/// Checks the files of one canon-state fetch (stream format 5, D-GGTYA): each file whole, as
+/// [`check_batch`] checks a history (the framing, each record's bounded typed decode and local
+/// limits, its dependencies and its prerequisites), then the files together against the
+/// state's link table (`rdy_store::canon_state::StateUnion`): the root landing, its canonical
+/// SNAPSHOT and its one delta, the map's block ids, and every never-absent link within the
+/// union. Every file must carry one header (purpose, repo, root and features; `batch header
+/// differs` otherwise). Another purpose is `E_STREAM_PURPOSE`. Returns each file's report, in
+/// order, only when every check passes.
+pub fn check_state_batches<R: Read>(
+    inputs: Vec<R>,
+    expected_repo: Option<RepoId>,
+) -> Result<Vec<BatchReport>, RdyError> {
+    use rdy_store::canon_state::StateUnion;
+    use std::cell::RefCell;
+    if inputs.is_empty() {
+        return Err(to_rdy(StreamError::bad_record(0, 0, Reason::NoBatchFiles)));
+    }
+    let state: RefCell<(Option<StreamHeader>, Option<StateUnion>)> = RefCell::new((None, None));
+    let mut reports = Vec::new();
+    for input in inputs {
+        let checked = checked(
+            input,
+            expected_repo,
+            |_, _, _| {},
+            |input, header, record| {
+                sync_stream::check_canon_state_prepared_with(
+                    input,
+                    |h: &StreamHeader| {
+                        header(h)?;
+                        let mut s = state.borrow_mut();
+                        match &s.0 {
+                            Some(first)
+                                if (first.repo_id, first.tag, &first.features)
+                                    != (h.repo_id, h.tag, &h.features) =>
+                            {
+                                return Err(Stop::Stream(StreamError::bad_record(
+                                    0,
+                                    0,
+                                    Reason::BatchHeaderDiffers,
+                                )));
+                            }
+                            Some(_) => {}
+                            None => {
+                                s.1 = Some(StateUnion::new(h.tag, &h.features));
+                                s.0 = Some(h.clone());
+                            }
+                        }
+                        Ok(())
+                    },
+                    |n: u64, at: u64, r: &StreamRecord, d: &DecodedRecord| {
+                        record(n, at, r, d)?;
+                        let mut s = state.borrow_mut();
+                        let (Some(h), Some(union)) = (&s.0.clone(), s.1.as_mut()) else {
+                            return Ok(());
+                        };
+                        union.add(n, at, &h.features, r, d).map_err(Stop::Stream)
+                    },
+                )
+            },
+        )?;
+        reports.push(checked.into_report());
+    }
+    let (_, union) = state.into_inner();
+    union
+        .expect("a checked file has a header")
+        .finish()
+        .map_err(to_rdy)?;
+    Ok(reports)
+}
+
 /// E_REPO_MISMATCH: a stream of repo `source` offered to the holder of repo `target`.
 fn repo_mismatch(source: &RepoId, target: &RepoId) -> RdyError {
     RdyError::new(

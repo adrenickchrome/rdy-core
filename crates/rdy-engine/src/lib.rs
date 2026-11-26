@@ -5,6 +5,7 @@ pub mod answer;
 mod areas;
 pub mod as_built;
 pub mod brief;
+pub mod canon_state_export;
 pub mod card_words;
 pub mod carried_warning;
 pub mod check;

@@ -7,6 +7,7 @@ mod carried_fixture;
 #[path = "../support/redaction.rs"]
 mod redaction_fixture;
 
+mod canon_state;
 mod carried_records;
 mod checked_reuse;
 mod decoded_batch;

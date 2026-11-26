@@ -12,6 +12,7 @@
 //! quarantine (D-WDKWQ); a checked batch is not a complete upload.
 
 use crate::store::Snapshot;
+pub use rdy_engine::canon_state_export::PreparedCanonState;
 pub use rdy_engine::hub_http::BodyEncoding;
 pub use rdy_engine::stream_export::{EncodedHistory, KeyPage, PreparedPull};
 use rdy_engine::{RdyError, stream_check, stream_export};
@@ -24,8 +25,8 @@ pub use rdy_engine::history_facts::ObjectPresence;
 pub use rdy_store::object_refs::ObjectKey;
 pub use rdy_store::stream_error::StreamError;
 pub use rdy_store::sync_stream::{
-    BatchReport, HISTORY_FORMAT, StreamHeader, StreamPurpose, StreamReader, StreamRecord,
-    StreamTotals, StreamWriter,
+    BatchReport, CANON_STATE_FORMAT, HISTORY_FORMAT, StreamHeader, StreamPurpose, StreamReader,
+    StreamRecord, StreamTotals, StreamWriter,
 };
 
 /// Checks one complete batch read from `input` and returns its report: the header, the logical
@@ -126,6 +127,17 @@ impl Snapshot {
         root: Hash,
     ) -> Result<PreparedPull, RdyError> {
         PreparedPull::new(Arc::clone(self.shared_state()), purpose, root)
+    }
+
+    /// Prepares one caller-owned read of the state of the canon tip `root` (a landing) of this
+    /// snapshot (stream format 5, D-GGTYA): the root landing, its map read through the store's
+    /// map read (no walk of the history closure), the SNAPSHOT made from that map, the blocks it
+    /// names, the tip's delta and its attachments, with a share of the snapshot's captured state.
+    /// Its pages and gets read that one selection. The caller owns the value for the one
+    /// operation; dropping it releases the captured state. A root the snapshot does not hold is
+    /// `E_UNRESOLVED_REF`.
+    pub fn prepare_canon_state(&self, root: Hash) -> Result<PreparedCanonState, RdyError> {
+        PreparedCanonState::new(Arc::clone(self.shared_state()), root)
     }
 
     /// [`Snapshot::prepare_pull`] for a hub's get replies: its gets come back as the bytes that

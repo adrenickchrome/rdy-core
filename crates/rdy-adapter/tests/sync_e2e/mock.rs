@@ -19,6 +19,16 @@
 //! keep their one-request snapshot reads. A scope is test-driver ownership, not a hub session.
 //! [`Peer`] plays an older hub or client for the encoding checks.
 //!
+//! The state reply lists stream format 5 in `stream_write`: the hub sends a canon tip's state
+//! (D-GGTYA). A known pull or get of purpose `canon_state` reads one `PreparedCanonState`
+//! ([`rdy_adapter::Snapshot::prepare_canon_state`]): the scope's, prepared once on its first
+//! page, or the request's own outside a scope. Its known pages carry `bytes`, the state's exact
+//! object frame bytes. It never reads a history page, a history closure or a prepared pull; the
+//! hub counts those reads ([`Hub::history_reads`], [`Hub::history_walks`]).
+//! [`Hub::send_canon_state`] is the test switch that takes format 5 out of the state reply, for
+//! the fallback cases: it is test configuration, not a wire field. [`Hub::seed`] seeds hub canon
+//! from batch files in process, and [`Hub::call`] serves one sync step in process.
+//!
 //! All requests and faults are in memory. A request holds the hub's state lock for its whole run,
 //! so two requests never interleave. Nothing sleeps: each connection runs on its own thread, and
 //! [`Hub::finish`] stops the listener and joins every thread.
@@ -29,7 +39,7 @@
 mod hub_tls;
 
 use hub_tls::{Ca, LOOPBACK};
-use rdy_adapter::stream::{BodyEncoding, ObjectKey, PullReply, StreamPurpose};
+use rdy_adapter::stream::{BodyEncoding, ObjectKey, PreparedCanonState, PullReply, StreamPurpose};
 use rdy_adapter::sync::{CanonMove, CheckedBatchFile, Moved, check_batch_file};
 use rdy_adapter::{Hash, RdyError, RepoId, StoreHandle};
 use rdy_engine::readiness::assessment::pack_digest;
@@ -168,11 +178,35 @@ struct Push {
     checked: Vec<CheckedBatchFile>,
 }
 
-/// One client command's first-pull scope: the pull it prepared, by purpose and root.
+/// One client command's first-pull scope: the pull it prepared, by purpose and root, and the
+/// canon state it prepared, by root.
 #[derive(Default)]
 struct Scope {
     operation: String,
     reply: Option<(StreamPurpose, Hash, PullReply)>,
+    state: Option<(Hash, PreparedCanonState)>,
+}
+
+/// One sync step served in process ([`Hub::call`]): its status, head fields and body.
+#[derive(Clone, Debug)]
+pub struct Called {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Called {
+    pub fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).expect("a JSON reply")
+    }
+
+    /// The value of the head field `name` (lower case), if any.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 /// The hub repo's state.
@@ -197,6 +231,14 @@ struct Repo {
     batch: Option<(u64, u64)>,
     /// Whether the reply being served is one zstd frame.
     zstd_reply: bool,
+    /// Whether the state reply lists stream format 5 (the test switch).
+    canon_state: bool,
+    /// The canon states prepared so far.
+    states_prepared: u64,
+    /// The history reads the steps made: history pages, history gets and prepared pulls.
+    history_reads: u64,
+    /// The history closure walks (`rdy_engine::stream_export::walks_for_tests`) the steps made.
+    history_walks: u64,
 }
 
 pub struct Shared {
@@ -254,6 +296,10 @@ impl Hub {
                 served: Vec::new(),
                 batch: None,
                 zstd_reply: false,
+                canon_state: true,
+                states_prepared: 0,
+                history_reads: 0,
+                history_walks: 0,
             }),
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -319,9 +365,100 @@ impl Hub {
         self.shared.repo.lock().unwrap().scope = Some(Scope {
             operation: operation.to_string(),
             reply: None,
+            state: None,
         });
         ScopeGuard {
             shared: Arc::clone(&self.shared),
+        }
+    }
+
+    /// Whether the state reply lists stream format 5 (on by default): off plays a hub that sends
+    /// no canon state, for the fallback cases.
+    pub fn send_canon_state(&self, on: bool) {
+        self.shared.repo.lock().unwrap().canon_state = on;
+    }
+
+    /// The canon states the hub prepared so far.
+    pub fn states_prepared(&self) -> u64 {
+        self.shared.repo.lock().unwrap().states_prepared
+    }
+
+    /// The history reads the hub's steps made so far: history pages, history gets and prepared
+    /// pulls, each counted once.
+    pub fn history_reads(&self) -> u64 {
+        self.shared.repo.lock().unwrap().history_reads
+    }
+
+    /// The history closure walks the hub's steps made so far, as the engine counts them on the
+    /// thread that served each step.
+    pub fn history_walks(&self) -> u64 {
+        self.shared.repo.lock().unwrap().history_walks
+    }
+
+    /// Seeds hub canon from the batch `files` of one canon history, as a seed write takes them,
+    /// in process: a new holder of the files' repo, their quarantine check and the seed move.
+    pub fn seed(&self, files: &[PathBuf]) {
+        let mut repo = self.shared.repo.lock().unwrap();
+        assert!(repo.holder.is_none(), "a hub repo is seeded once");
+        let first = check_batch_file(
+            File::open(&files[0]).expect("a batch file"),
+            None,
+            |_, _, _| {},
+        )
+        .expect("a checked batch");
+        let id = first.report().header.repo_id;
+        let holder =
+            StoreHandle::create_holder(&repo.dir.path().join("holder"), id).expect("the holder");
+        let opened: Vec<File> = files
+            .iter()
+            .map(|f| File::open(f).expect("a batch file"))
+            .collect();
+        let checked = holder
+            .snapshot()
+            .expect("a snapshot")
+            .check_quarantine(&opened)
+            .expect("the seed's check");
+        holder
+            .move_canon(&checked, CanonMove::Seed, None)
+            .expect("the seed move");
+        repo.holder = Some(holder);
+        repo.repo_id = Some(id);
+    }
+
+    /// Serves one sync step `route` (such as `/state`) with the JSON `body` in process, as the
+    /// listener serves it, and returns its reply. `offer_zstd` sends `Accept-Encoding: zstd`.
+    pub fn call(&self, route: &str, body: &Value, offer_zstd: bool) -> Called {
+        let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
+        if offer_zstd {
+            headers.push(("accept-encoding".to_string(), "zstd".to_string()));
+        }
+        let req = Req {
+            method: "POST".into(),
+            path: format!("{SYNC_BASE}{route}"),
+            query: BTreeMap::new(),
+            headers,
+            body: serde_json::to_vec(body).expect("a JSON body"),
+        };
+        self.shared.log.lock().unwrap().push(req.clone());
+        let Answer::Whole(bytes) = answer(&req, &self.shared) else {
+            panic!("an in-process step has a whole reply");
+        };
+        let end = find(&bytes, b"\r\n\r\n").expect("a reply head");
+        let head = String::from_utf8(bytes[..end].to_vec()).expect("a text head");
+        let mut lines = head.split("\r\n");
+        let status = lines
+            .next()
+            .and_then(|l| l.split(' ').nth(1))
+            .and_then(|s| s.parse().ok())
+            .expect("a status");
+        let headers = lines
+            .filter_map(|l| l.split_once(':'))
+            .map(|(n, v)| (n.to_ascii_lowercase(), v.trim().to_string()))
+            .collect();
+        Called {
+            status,
+            headers,
+            body: bytes[end + 4..].to_vec(),
         }
     }
 
@@ -662,6 +799,7 @@ fn key_json(kind: u8, hash: &str) -> Value {
 fn purpose_of(name: &str) -> StreamPurpose {
     match name {
         "view_history" => StreamPurpose::ViewHistory,
+        "canon_state" => StreamPurpose::CanonState,
         _ => StreamPurpose::CanonHistory,
     }
 }
@@ -706,7 +844,9 @@ fn answer(req: &Req, shared: &Shared) -> Answer {
     let mut repo = shared.repo.lock().unwrap();
     repo.batch = None;
     repo.zstd_reply = false;
+    let (walks, _) = rdy_engine::stream_export::walks_for_tests();
     let out = route(req, &mut repo);
+    repo.history_walks += rdy_engine::stream_export::walks_for_tests().0 - walks;
     let reply_bytes = match &out {
         Answer::Whole(b) | Answer::Cut(b, _) => body_len(b),
         Answer::Nothing => 0,
@@ -784,7 +924,7 @@ fn state(req: &Req, repo: &Repo) -> Answer {
         200,
         &json!({"canon": snap.as_ref().and_then(|s| s.canon()).map(|h| key_json(LANDING, &h.to_string())),
             "repo_id": repo.repo_id.map(|r| r.to_string()), "rdy": r["rdy"],
-            "stream_read": [2, 4], "stream_write": [2, 4], "features": features,
+            "stream_read": [2, 4], "stream_write": stream_write(repo), "features": features,
             "min_rdy": min_rdy, "batch_bytes": 104_857_600u64,
             "batch_records": 100_000, "quarantine_seconds": 86_400,
             "profile": null, "audience": null, "artifact_bytes": 1_073_741_824u64,
@@ -800,6 +940,89 @@ fn state(req: &Req, repo: &Repo) -> Answer {
         })
         .unwrap(),
     )
+}
+
+/// The formats the hub sends: 2 and 4, and 5 (the canon state) unless the switch is off.
+fn stream_write(repo: &Repo) -> Value {
+    if repo.canon_state {
+        json!([2, 4, 5])
+    } else {
+        json!([2, 4])
+    }
+}
+
+/// Runs `f` on the canon state of `root`: the scope's, prepared once, or this request's own
+/// outside a scope. A hub with format 5 switched off refuses the purpose; a root the holder
+/// does not hold as a landing is not found.
+fn with_state<T>(
+    repo: &mut Repo,
+    snap: &rdy_adapter::Snapshot,
+    root: ObjectKey,
+    f: impl FnOnce(&PreparedCanonState) -> T,
+) -> Result<T, Answer> {
+    if !repo.canon_state {
+        return Err(hub_error(
+            422,
+            "E_HUB_VALIDATION",
+            "this hub sends no canon state",
+            "pull the canon history",
+        ));
+    }
+    let missing = || not_found(&format!("{}:{}", root.kind, root.hash));
+    if root.kind != LANDING {
+        return Err(missing());
+    }
+    if let Some(scope) = repo.scope.as_mut() {
+        if scope.state.as_ref().is_none_or(|(h, _)| *h != root.hash) {
+            let prepared = snap.prepare_canon_state(root.hash).map_err(|_| missing())?;
+            scope.state = Some((root.hash, prepared));
+            repo.states_prepared += 1;
+        }
+        let (_, prepared) = repo
+            .scope
+            .as_ref()
+            .and_then(|s| s.state.as_ref())
+            .expect("the scope's state");
+        return Ok(f(prepared));
+    }
+    let prepared = snap.prepare_canon_state(root.hash).map_err(|_| missing())?;
+    repo.states_prepared += 1;
+    Ok(f(&prepared))
+}
+
+/// A known pull of a canon state: one page of the prepared state, with the state's exact
+/// object frame bytes.
+fn known_state(
+    repo: &mut Repo,
+    snap: &rdy_adapter::Snapshot,
+    root: ObjectKey,
+    base: Option<Hash>,
+    after: Option<ObjectKey>,
+) -> Answer {
+    if base.is_some() {
+        return hub_error(
+            422,
+            "E_HUB_VALIDATION",
+            "a canon state has no base",
+            "pull the state with no base",
+        );
+    }
+    let page = with_state(repo, snap, root, |p| {
+        p.page(after, 100_000).map(|page| (page, p.frame_bytes()))
+    });
+    match page {
+        Ok(Ok((page, bytes))) => {
+            let keys: Vec<Value> = page
+                .keys
+                .iter()
+                .map(|k| key_json(k.kind, &k.hash.to_string()))
+                .collect();
+            let next = page.next.map(|k| key_json(k.kind, &k.hash.to_string()));
+            reply(200, &json!({"bytes": bytes, "keys": keys, "next": next}))
+        }
+        Ok(Err(_)) => not_found(&format!("{}:{}", root.kind, root.hash)),
+        Err(answer) => answer,
+    }
 }
 
 fn known(req: &Req, repo: &mut Repo) -> Answer {
@@ -840,6 +1063,10 @@ fn known(req: &Req, repo: &mut Repo) -> Answer {
     };
     let base = key_of(&r["base"]).map(|b| b.hash);
     let purpose = purpose_of(r["purpose"].as_str().unwrap_or("canon_history"));
+    if purpose == StreamPurpose::CanonState {
+        return known_state(repo, &snap, root, base, after);
+    }
+    repo.history_reads += 1;
     // a first pull in a scope: prepared once, on its first page
     if base.is_none()
         && let Some(scope) = repo.scope.as_mut()
@@ -959,6 +1186,10 @@ fn get(req: &Req, repo: &mut Repo) -> Answer {
         return not_found("of that root");
     };
     let purpose = purpose_of(r["purpose"].as_str().unwrap_or("canon_history"));
+    let state = purpose == StreamPurpose::CanonState;
+    if !state {
+        repo.history_reads += 1;
+    }
     let keys: Vec<ObjectKey> = r["keys"]
         .as_array()
         .into_iter()
@@ -982,7 +1213,29 @@ fn get(req: &Req, repo: &mut Repo) -> Answer {
         .and_then(|s| s.reply.as_ref())
         .filter(|(p, h, _)| (*p, *h) == (purpose, root.hash))
         .map(|(_, _, reply)| reply);
-    let bytes = if let Some(reply) = scoped {
+    let bytes = if state {
+        // the canon state, as the wire bytes: one zstd frame only when offered
+        let enc = match with_state(repo, &snap, root, |p| p.write_keys_encoded(&keys, accept)) {
+            Ok(Ok(enc)) => enc,
+            Ok(Err(_)) => return not_found("of one of those keys"),
+            Err(answer) => return answer,
+        };
+        let mut enc = enc;
+        let mut body = Vec::new();
+        enc.body.read_to_end(&mut body).expect("the reply body");
+        assert_eq!(body.len() as u64, enc.wire_bytes);
+        let zstd = enc.encoding == BodyEncoding::Zstd;
+        let mut bytes = head_bytes_encoded(
+            200,
+            "application/octet-stream",
+            body.len(),
+            zstd.then_some("zstd"),
+        );
+        bytes.extend_from_slice(&body);
+        repo.batch = Some((enc.wire_bytes, enc.report.bytes));
+        repo.zstd_reply = zstd;
+        bytes
+    } else if let Some(reply) = scoped {
         // the scope's prepared pull, as the wire bytes: one zstd frame only when offered
         let Ok(mut enc) = reply.write_keys_encoded(&keys, accept) else {
             return not_found("of one of those keys");

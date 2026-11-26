@@ -2471,13 +2471,18 @@ fn hpt5_owned_leaves_hold_the_planned_values() {
         format::PORTED_CHANGE_REQUIRED_RDY
     );
     assert_eq!(format::PORTED_CHANGE_REQUIRED_RDY, "0.58.0");
-    // the registry less span maps' dedup_spans and plan deltas' plan_delta, which came later
+    // the registry less span maps' dedup_spans, plan deltas' plan_delta and canon states'
+    // partial_history, which came later
     assert_eq!(
         fixture["store"]["registered_names"],
         json!(
             format::REGISTERED_FEATURES
                 .iter()
-                .filter(|n| **n != format::FEATURE_DEDUP_SPANS && **n != format::FEATURE_PLAN_DELTA)
+                .filter(|n| {
+                    **n != format::FEATURE_DEDUP_SPANS
+                        && **n != format::FEATURE_PLAN_DELTA
+                        && **n != format::FEATURE_PARTIAL_HISTORY
+                })
                 .collect::<Vec<_>>()
         )
     );
@@ -3146,9 +3151,12 @@ fn hpt5_formats_stay_fixed_and_first_use_is_required() {
         (2, 3, 4),
         "the stream formats"
     );
-    assert_eq!(rdy_store::sync_stream::READ_FORMATS, [2, 3, 4]);
-    // span maps' dedup_spans and plan deltas' plan_delta came later
-    assert_eq!(format::REGISTERED_FEATURES.len(), 15);
+    // format 5 (the canon state) came later; this release read 2, 3 and 4
+    assert_eq!(rdy_store::sync_stream::READ_FORMATS[..3], [2, 3, 4]);
+    // span maps' dedup_spans, plan deltas' plan_delta and canon states' partial_history came
+    // later
+    assert_eq!(format::REGISTERED_FEATURES.len(), 16);
+    assert!(format::REGISTERED_FEATURES.contains(&format::FEATURE_PARTIAL_HISTORY));
     assert!(format::REGISTERED_FEATURES.contains(&format::FEATURE_DEDUP_SPANS));
     assert!(format::REGISTERED_FEATURES.contains(&format::FEATURE_PLAN_DELTA));
     let (was, now) = (read(PREDECESSOR), read(CURRENT));

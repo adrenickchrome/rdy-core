@@ -501,7 +501,11 @@ struct FirstUse {
 /// the io area. `plan_delta` (D-3PNRK), any PLAN of encoding 1 activates it: the dump pair
 /// `v4-f1-reduction`, the dump chain `v4-f1-reduction-chain`, the sync pair `sync4-reduction`
 /// and the native store `store/reduction-1`, whose own tests are `r5906_` in the io and release
-/// areas.
+/// areas. `partial_history` (D-GGTYA, D-4PV25), the canon state of format 5 lists it: the sync
+/// pair `sync5-canon-state`, the state of the frozen `sync4-canon-history` root, whose own tests
+/// are `r59017_` in the sync areas. Its expect file's `receiver_features` is the state stream's
+/// header manifest, the manifest a receiver is expected to hold after its take; it is expected
+/// only until the take of a canon state checks it.
 const FIRST_USE: &[FirstUse] = &[
     FirstUse {
         name: "foreign_copy",
@@ -671,6 +675,22 @@ const FIRST_USE: &[FirstUse] = &[
             ),
         ],
         native: Some("fixtures/store/reduction-1/expect.json"),
+        baseline: false,
+    },
+    FirstUse {
+        name: "partial_history",
+        dump: &[],
+        sync: &[
+            (
+                "sync5-canon-state.expect.json",
+                "4ab5dea998333f1ae3426497d7c055ecc097dbca19dc632691a0e7f07831784c",
+            ),
+            (
+                "sync5-canon-state.bin",
+                "bdd142ebcf05c1d9ad83303718f45bf199f545cffa4f60caf961c654f8d5b8af",
+            ),
+        ],
+        native: None,
         baseline: false,
     },
 ];

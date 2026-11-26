@@ -193,7 +193,7 @@ fn scc2_format4_roots_and_old_formats_are_exact() {
         "a tag history is still written in format 2"
     );
     assert_eq!(HISTORY_FORMAT, 4);
-    assert_eq!(READ_FORMATS, [2, 3, 4]);
+    assert_eq!(READ_FORMATS, [2, 3, 4, 5]);
     for (byte, purpose, name, first, root) in [
         (0, StreamPurpose::TagHistory, "tag_history", 2, kinds::TAG),
         (
@@ -226,7 +226,8 @@ fn scc2_format4_roots_and_old_formats_are_exact() {
             assert_eq!(purpose.root_kind(), root, "{name}");
         }
     }
-    assert_eq!(StreamPurpose::of(4), None);
+    // byte 4 is the format-5 canon state (D-GGTYA)
+    assert_eq!(StreamPurpose::of(5), None);
 
     let (_d, _p, s, [l1, _, l3]) = history();
     let reader = s.reader();
@@ -301,7 +302,7 @@ fn scc2_format4_roots_and_old_formats_are_exact() {
     );
     // a format no rdy reads is a bad header
     assert_eq!(
-        check_batch(&with_format(&canon, 5)[..]).unwrap_err().code,
+        check_batch(&with_format(&canon, 6)[..]).unwrap_err().code,
         "E_BAD_RECORD"
     );
     // the frozen fixtures read as they were written

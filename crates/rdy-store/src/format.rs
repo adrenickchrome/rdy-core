@@ -86,6 +86,8 @@ pub const PORTED_CHANGE_REQUIRED_RDY: &str = "0.58.0";
 pub const DEDUP_SPANS_REQUIRED_RDY: &str = "0.59.0";
 /// The first rdy that knows `plan_delta` (D-3PNRK).
 pub const PLAN_DELTA_REQUIRED_RDY: &str = "0.59.0";
+/// The first rdy that knows [`FEATURE_PARTIAL_HISTORY`].
+pub const PARTIAL_HISTORY_REQUIRED_RDY: &str = "0.59.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -134,11 +136,17 @@ pub const FEATURE_DEDUP_SPANS: &str = "dedup_spans";
 /// whole version or the difference from the version before it. The first committed batch that
 /// stores one activates it, a whole version-1 record too. A PLAN of encoding 0 never uses it.
 pub const FEATURE_PLAN_DELTA: &str = "plan_delta";
+/// A partial history (D-GGTYA, D-4PV25): a canon state (sync stream format 5) holds a tip's
+/// state and attachments, and names as prerequisites the frontier edges that a later history
+/// fetch brings. A canon state's header lists it, so its receiver reads those prerequisites by
+/// the state's link table. No record uses it and no new store writes it: a store lists it only
+/// when it takes a canon state, with the history ref that marks it incomplete.
+pub const FEATURE_PARTIAL_HISTORY: &str = "partial_history";
 
 /// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM; D-DZDB7;
-/// D-3RSCW; hub ports, D-RHYNQ), sorted by name. Each is `incompatible` and needs its own
-/// minimum ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 15] = [
+/// D-3RSCW; hub ports, D-RHYNQ; D-GGTYA), sorted by name. Each is `incompatible` and needs its
+/// own minimum ([`required_rdy`]).
+pub const REGISTERED_FEATURES: [&str; 16] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
@@ -148,6 +156,7 @@ pub const REGISTERED_FEATURES: [&str; 15] = [
     FEATURE_FOREIGN_COPY,
     FEATURE_HUB_CANON,
     FEATURE_OBJECT_ENCODING,
+    FEATURE_PARTIAL_HISTORY,
     FEATURE_PLAN_DELTA,
     FEATURE_PLAN_TENSION,
     FEATURE_PORTED_CHANGE,
@@ -161,7 +170,8 @@ pub const REGISTERED_FEATURES: [&str; 15] = [
 /// [`SNAPSHOT_DELTA_REQUIRED_RDY`] for `snapshot_delta`, [`HUB_CANON_REQUIRED_RDY`] for
 /// `hub_canon`, [`SYNC_STATE_REQUIRED_RDY`] for `sync_state`, [`PORTED_CHANGE_REQUIRED_RDY`] for
 /// `ported_change`, [`DEDUP_SPANS_REQUIRED_RDY`] for `dedup_spans`, [`PLAN_DELTA_REQUIRED_RDY`]
-/// for `plan_delta`, [`FEATURE_REQUIRED_RDY`] for the seven of O11.
+/// for `plan_delta`, [`PARTIAL_HISTORY_REQUIRED_RDY`] for `partial_history`,
+/// [`FEATURE_REQUIRED_RDY`] for the seven of O11.
 pub fn required_rdy(name: &str) -> &'static str {
     match name {
         FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
@@ -172,6 +182,7 @@ pub fn required_rdy(name: &str) -> &'static str {
         FEATURE_PORTED_CHANGE => PORTED_CHANGE_REQUIRED_RDY,
         FEATURE_DEDUP_SPANS => DEDUP_SPANS_REQUIRED_RDY,
         FEATURE_PLAN_DELTA => PLAN_DELTA_REQUIRED_RDY,
+        FEATURE_PARTIAL_HISTORY => PARTIAL_HISTORY_REQUIRED_RDY,
         _ => FEATURE_REQUIRED_RDY,
     }
 }

@@ -1,6 +1,7 @@
 //! Sync tests: sync, takes, streams, links, followers, the hub contract and upgrades, grouped into
 //! one test binary (one module per former root file).
 
+mod canon_state;
 mod checked_reuse;
 mod compare_size;
 mod dump_after;
