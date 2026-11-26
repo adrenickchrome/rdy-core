@@ -463,19 +463,20 @@ pub(crate) fn invalid_context(
     invalid_context_deferring(h, p, look, None)
 }
 
-/// A PLAN of the carried chain of an incomplete history's frontier (the closed state link
-/// table, D-4PV25): the root's sealed PLAN, or a record of its `prev` chain back to and
-/// including the nearest Full record. Its frontier links may be absent while the history is
-/// incomplete: its `proposal` and `seal.version`, and the Full record's own `prev`. Every other
-/// rule, and each frontier link that is held, is checked as for any plan.
+/// A PLAN of the carried chain of a history ref's frontier (the closed state link table,
+/// D-4PV25): the root's sealed PLAN, or a record of its `prev` chain back to and including the
+/// nearest Full record. Its frontier links may be absent while the history is incomplete: its
+/// `proposal` and `seal.version`, and the Full record's own `prev`. Every other rule, and each
+/// frontier link that is held, is checked as for any plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CarriedPlan {
     /// Whether the record is the chain's Full record (a whole version), whose own `prev` is a
     /// frontier link; a delta's `prev` is never absent.
     pub(crate) full: bool,
-    /// Whether this is the full check (`StoreReader::full_history_reader`): no link is
-    /// deferred, and each frontier link must be held, in the log before the plan or in the
-    /// history's later batches, and keep its rules.
+    /// Whether the full rule holds (a complete history ref, or the full check of
+    /// `StoreReader::full_history_reader`): no link is deferred, and each frontier link must
+    /// be held, in the log before the plan or in the history's later batches, and keep its
+    /// rules.
     pub(crate) full_check: bool,
 }
 
@@ -1652,8 +1653,9 @@ impl StoreReader {
         let mut bound: HashMap<Hash, Hash> = HashMap::new();
         let mut sealed: HashMap<Hash, Hash> = HashMap::new();
         let landings = RefCell::new(BatchLandings::default());
-        // the carried chain of an incomplete history's frontier, whose frontier links may be
-        // absent (D-4PV25); none in a full check, which validates them
+        // the carried chains of the history refs (D-4PV25): an incomplete ref's frontier links
+        // may be absent; a complete ref's, or any in a full check, must be held, perhaps in a
+        // later batch of the history
         let carried = self.carried_plan_chain()?;
         // the derived rows the log gives, from the same entries and reducer as the index
         let want = crate::index::Index::in_memory()?;
@@ -1814,49 +1816,44 @@ impl StoreReader {
         Ok(n)
     }
 
-    /// The carried PLAN chain of an incomplete history's frontier (the closed state link table,
-    /// D-4PV25): the seal of the frontier landing, then its `prev` chain back to and including
-    /// the nearest Full record, at most `MAX_PLAN_DELTA_DEPTH` deltas and that record; each
-    /// marked whether it is the Full record ([`CarriedPlan`]). Empty with no incomplete history
-    /// (and in a full check, `StoreReader::full_history_reader`), or when the frontier has no
-    /// sealed plan. A record that does not read ends the walk: the plan checks report it.
+    /// The carried PLAN chains of the project's history refs (the closed state link table,
+    /// D-4PV25): for each ref's frontier, the seal of the frontier landing, then its `prev`
+    /// chain back to and including the nearest Full record, at most `MAX_PLAN_DELTA_DEPTH`
+    /// deltas and that record; each marked whether it is the Full record ([`CarriedPlan`]).
+    /// The state take wrote these records before the history that holds their frontier links,
+    /// so the chain is known for as long as its ref stands, complete or not. An incomplete
+    /// ref's links may be absent, except in a full check (`StoreReader::full_history_reader`);
+    /// a complete ref's links must all be held, and may stand in a later batch than the plan.
+    /// Empty with no history ref, or when no frontier has a sealed plan. A record that does
+    /// not read ends the walk: the plan checks report it.
     fn carried_plan_chain(&self) -> Result<HashMap<Hash, CarriedPlan>, StoreError> {
-        let mut out = HashMap::new();
-        // the incomplete ref's frontier, which a full check keeps as it stands
-        let Some(frontier) = self.partial_history()?.map(|h| h.frontier) else {
-            return Ok(out);
-        };
-        let full_check = self.is_full_history();
-        let mut at = self.plan_of_landing(&frontier, crate::closure::END_OF_LOG)?;
-        while let Some(h) = at {
-            if out.len() > rdy_model::plan_encoding::MAX_PLAN_DELTA_DEPTH || out.contains_key(&h) {
-                break;
-            }
-            let Ok((version, body)) = self.get_versioned_body(kinds::PLAN, &h) else {
-                break;
-            };
-            match plan_record::decode_body(version, &body) {
-                Ok((PlanRecord::Full(_), _)) => {
-                    out.insert(
-                        h,
-                        CarriedPlan {
-                            full: true,
-                            full_check,
-                        },
-                    );
+        let mut out: HashMap<Hash, CarriedPlan> = HashMap::new();
+        for (_, history) in self.histories()? {
+            let full_check = history.complete || self.is_full_history();
+            let mut chain: HashMap<Hash, CarriedPlan> = HashMap::new();
+            let mut at = self.plan_of_landing(&history.frontier, crate::closure::END_OF_LOG)?;
+            while let Some(h) = at {
+                if chain.len() > rdy_model::plan_encoding::MAX_PLAN_DELTA_DEPTH
+                    || chain.contains_key(&h)
+                {
                     break;
                 }
-                Ok((PlanRecord::Delta(d), _)) => {
-                    out.insert(
-                        h,
-                        CarriedPlan {
-                            full: false,
-                            full_check,
-                        },
-                    );
-                    at = PlanRecord::Delta(d).prev();
-                }
-                Err(_) => break,
+                let Ok((version, body)) = self.get_versioned_body(kinds::PLAN, &h) else {
+                    break;
+                };
+                let (full, next) = match plan_record::decode_body(version, &body) {
+                    Ok((PlanRecord::Full(_), _)) => (true, None),
+                    Ok((PlanRecord::Delta(d), _)) => (false, PlanRecord::Delta(d).prev()),
+                    Err(_) => break,
+                };
+                chain.insert(h, CarriedPlan { full, full_check });
+                at = next;
+            }
+            // a record two chains carry takes the stricter rule: no link deferred
+            for (h, c) in chain {
+                out.entry(h)
+                    .and_modify(|o| o.full_check |= c.full_check)
+                    .or_insert(c);
             }
         }
         Ok(out)

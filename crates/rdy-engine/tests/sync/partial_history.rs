@@ -643,6 +643,21 @@ fn r59018_a_carried_sealed_plan_passes_partial_fsck() {
     pending_any(&r.fsck_full().unwrap_err());
     drop(r);
 
+    // fix round 2: a completed ref keeps no partial exception. Completed with no history
+    // taken (the caller's full check skipped), the records behind the frontier are missing,
+    // and both store checks refuse the store
+    {
+        let bare = d.path().join("bare");
+        copy_tree(&store_dir, &bare);
+        let mut s = Store::open(&bare).unwrap();
+        let epoch = s.redaction_epoch();
+        s.complete_history("origin", root, epoch).unwrap();
+        for reader in [s.reader(), s.reader().full_history_reader()] {
+            assert!(reader.check_objects().is_err());
+        }
+        s.close().unwrap();
+    }
+
     // the canon history arrives: the full check validates the plan's deferred links
     {
         let mut s = Store::open(&store_dir).unwrap();
@@ -662,6 +677,39 @@ fn r59018_a_carried_sealed_plan_passes_partial_fsck() {
     let full = r.fsck_full().unwrap();
     assert_eq!(full.landings, 2);
     assert!(!full.history.unwrap().complete);
+    let epoch = r.store().redaction_epoch();
+    drop(r);
+
+    // fix round 2: completion keeps the carried chain. The completed ref still names it, so
+    // its links may have arrived in the later history batch, and each must be held
+    {
+        let mut s = Store::open(&store_dir).unwrap();
+        s.complete_history("origin", root, epoch).unwrap();
+        s.reader().check_objects().unwrap();
+        s.reader().full_history_reader().check_objects().unwrap();
+        s.close().unwrap();
+    }
+    let r = Rdy::open(&dest).unwrap();
+    let done = r.fsck().unwrap();
+    assert_eq!(done.landings, 2);
+    assert!(done.history.unwrap().complete);
+    let full = r.fsck_full().unwrap();
+    assert_eq!(full.landings, 2);
+    assert!(full.history.unwrap().complete);
+    assert!(r.read().history_warning().unwrap().is_none());
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dest = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_tree(&e.path(), &dest);
+        } else {
+            std::fs::copy(e.path(), dest).unwrap();
+        }
+    }
 }
 
 fn pending_any(e: &RdyError) {
