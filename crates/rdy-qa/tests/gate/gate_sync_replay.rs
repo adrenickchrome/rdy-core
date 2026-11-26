@@ -542,10 +542,13 @@ const READERS: [(&str, &str, Reads); 37] = [
 
 /// The production `landing_of` calls added after b8b16064, which read current canon too: the
 /// gate fix after Task 1b (D-TVC38, D-08SPN: `through_replay` in `landed_as`), and Task 4's
-/// re-chained view onto a current base, which drops its landed changes (`view_rebase_rechained`).
-const ADDED: [(&str, &str); 2] = [
+/// re-chained view onto a current base, which drops its landed changes (`view_rebase_rechained`),
+/// and the partial-history writer lookup, which keeps a producer only when a canon landing carries
+/// it while history is incomplete (`writer_of`).
+const ADDED: [(&str, &str); 3] = [
     ("crates/rdy-engine/src/gate.rs", "propose_relayed"),
     ("crates/rdy-store/src/view.rs", "view_rebase_rechained"),
+    ("crates/rdy-engine/src/history.rs", "writer_of"),
 ];
 
 fn workspace() -> std::path::PathBuf {
