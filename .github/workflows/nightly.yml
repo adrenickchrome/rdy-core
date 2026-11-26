@@ -1,4 +1,4 @@
-# The nightly run, 03:00 UTC on main: what no release reads. The whole suite (`--tier nightly`) on our
+# The nightly run, 03:17 UTC on main: what no release reads. The whole suite (`--tier nightly`) on our
 # three machines with no --tmp-root, so every test meets the real disk once a day; the whole suite on
 # GitHub's hosted macOS and Windows Server images (the old platforms run); the deep gate with perf and
 # the memory soak on the bench; and coverage. Each job may fail alone. The last job opens one issue that
@@ -7,7 +7,9 @@
 name: nightly
 on:
   schedule:
-    - cron: "0 3 * * *"
+    # 17 past, not on the hour: GitHub delays or drops scheduled runs at the top of the hour, and
+    # the first night at 03:00 never started.
+    - cron: "17 3 * * *"
   workflow_dispatch:
 permissions: {}
 concurrency:

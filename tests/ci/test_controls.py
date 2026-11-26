@@ -1838,7 +1838,7 @@ class NightlyPolicy(unittest.TestCase):
         self.text = (WORKFLOWS / 'nightly.yml').read_text()
 
     def test_triggers_and_concurrency(self):
-        self.assertEqual(self.on, {'schedule': [{'cron': '0 3 * * *'}], 'workflow_dispatch': None})
+        self.assertEqual(self.on, {'schedule': [{'cron': '17 3 * * *'}], 'workflow_dispatch': None})
         self.assertEqual(self.doc['concurrency'], {'group': 'rdy-core-nightly', 'cancel-in-progress': True})
         self.assertEqual(self.doc['permissions'], {})
 
