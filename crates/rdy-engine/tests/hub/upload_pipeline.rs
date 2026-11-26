@@ -700,7 +700,9 @@ fn r5907_two_slots_and_one_worker_are_the_limit() {
         if n == 0 {
             // the put of batch 0 is held: batch 1 gets prepared, batch 2 never starts
             wait_for(&rx, UploadStage::Compressed, 1);
-            let next = rx.recv_timeout(Duration::from_millis(300));
+            // no wait: batch 2's job is sent only after body 0 is taken, so a third stage event
+            // cannot be queued while the put of batch 0 is held (`max_bodies` below pins the bound)
+            let next = rx.try_recv();
             *held.borrow_mut() = Some((
                 next.ok(),
                 probe.live_bodies.load(Ordering::SeqCst),
