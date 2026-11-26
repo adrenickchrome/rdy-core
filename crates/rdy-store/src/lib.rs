@@ -36,6 +36,7 @@ pub mod meta;
 pub mod object_refs;
 pub mod pio;
 pub mod plan;
+pub mod plan_record;
 pub mod redaction;
 pub mod redaction_carried;
 pub mod redaction_import;

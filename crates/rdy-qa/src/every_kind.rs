@@ -821,10 +821,11 @@ pub struct PlanFixture {
 /// The view of the every-kind plan chain.
 pub const PLAN_VIEW: &str = "plan-a";
 
-/// The PLAN frame of `p` and its `plan/<view>` ref, as the plan writers compose them.
+/// The PLAN frame of `p` (a whole version of encoding 1, named by `p.id()`) and its
+/// `plan/<view>` ref, as the plan writers compose them.
 pub fn plan_frames(p: &Plan) -> Vec<(u8, Vec<u8>)> {
     let refs = vec![(rdy_store::plan::plan_ref(&p.view), p.id().0.to_vec())];
-    let mut out = vec![(kinds::PLAN, postcard::to_allocvec(p).unwrap())];
+    let mut out = vec![rdy_store::codec::item_new(kinds::PLAN, p)];
     out.extend(refs.into_iter().map(|(name, value)| {
         (
             kinds::REF_UPDATE,
@@ -948,6 +949,7 @@ pub fn add_plan_fixture_records(r: &mut Rdy, parent: &BlockId, cause: &BlockId) 
         heads: heads.clone(),
         provenance: agent.clone(),
         seal: None,
+        read_identity: None,
     };
     r.store_mut()
         .write_guarded_for_tests(plan_frames(&bound))
@@ -1127,6 +1129,7 @@ pub fn add_plan_fixture_records(r: &mut Rdy, parent: &BlockId, cause: &BlockId) 
             heads,
             provenance: agent,
             seal: None,
+            read_identity: None,
         })
         .unwrap();
     r.invalidate();
@@ -1348,6 +1351,7 @@ pub fn finish_reflects_fixture(r: &mut Rdy, fx: &ReflectsFixture) -> Hash {
         }],
         provenance: agent.clone(),
         seal: None,
+        read_identity: None,
     };
     r.store_mut()
         .write_guarded_for_tests(plan_frames(&bound))

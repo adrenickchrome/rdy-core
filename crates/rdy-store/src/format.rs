@@ -84,6 +84,8 @@ pub const PORTED_CHANGE_REQUIRED_RDY: &str = "0.58.0";
 /// The first rdy that knows [`FEATURE_DEDUP_SPANS`] (D-1ER84): the release that first maps a
 /// repeated byte run.
 pub const DEDUP_SPANS_REQUIRED_RDY: &str = "0.59.0";
+/// The first rdy that knows `plan_delta` (D-3PNRK).
+pub const PLAN_DELTA_REQUIRED_RDY: &str = "0.59.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -128,11 +130,15 @@ pub const FEATURE_SYNC_STATE: &str = "sync_state";
 /// in an older store, the optional upgrade step `dedup-spans-1` activates it
 /// (`crate::upgrade::dedup_spans_step`). No object turns it on.
 pub const FEATURE_DEDUP_SPANS: &str = "dedup_spans";
+/// Plan deltas (D-3PNRK): any PLAN frame of encoding 1 (`crate::codec::PLAN_DELTA_ENCODINGS`), a
+/// whole version or the difference from the version before it. The first committed batch that
+/// stores one activates it, a whole version-1 record too. A PLAN of encoding 0 never uses it.
+pub const FEATURE_PLAN_DELTA: &str = "plan_delta";
 
 /// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM; D-DZDB7;
 /// D-3RSCW; hub ports, D-RHYNQ), sorted by name. Each is `incompatible` and needs its own
 /// minimum ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 14] = [
+pub const REGISTERED_FEATURES: [&str; 15] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
@@ -142,6 +148,7 @@ pub const REGISTERED_FEATURES: [&str; 14] = [
     FEATURE_FOREIGN_COPY,
     FEATURE_HUB_CANON,
     FEATURE_OBJECT_ENCODING,
+    FEATURE_PLAN_DELTA,
     FEATURE_PLAN_TENSION,
     FEATURE_PORTED_CHANGE,
     FEATURE_SNAPSHOT_DELTA,
@@ -153,7 +160,8 @@ pub const REGISTERED_FEATURES: [&str; 14] = [
 /// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`,
 /// [`SNAPSHOT_DELTA_REQUIRED_RDY`] for `snapshot_delta`, [`HUB_CANON_REQUIRED_RDY`] for
 /// `hub_canon`, [`SYNC_STATE_REQUIRED_RDY`] for `sync_state`, [`PORTED_CHANGE_REQUIRED_RDY`] for
-/// `ported_change`, [`FEATURE_REQUIRED_RDY`] for the seven of O11.
+/// `ported_change`, [`DEDUP_SPANS_REQUIRED_RDY`] for `dedup_spans`, [`PLAN_DELTA_REQUIRED_RDY`]
+/// for `plan_delta`, [`FEATURE_REQUIRED_RDY`] for the seven of O11.
 pub fn required_rdy(name: &str) -> &'static str {
     match name {
         FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
@@ -163,6 +171,7 @@ pub fn required_rdy(name: &str) -> &'static str {
         FEATURE_SYNC_STATE => SYNC_STATE_REQUIRED_RDY,
         FEATURE_PORTED_CHANGE => PORTED_CHANGE_REQUIRED_RDY,
         FEATURE_DEDUP_SPANS => DEDUP_SPANS_REQUIRED_RDY,
+        FEATURE_PLAN_DELTA => PLAN_DELTA_REQUIRED_RDY,
         _ => FEATURE_REQUIRED_RDY,
     }
 }
@@ -1093,7 +1102,9 @@ pub fn registered_features() -> Vec<StoreFeature> {
 /// - `view_replay`: a CHANGE whose `links.replayed_from` is set;
 /// - `assessment`: an ASSESSMENT, or a LANDING whose `assessment` is set;
 /// - `plan_tension`: a PLAN with a sealed item of kind Tension or outcome Dismissed, or an answer
-///   with act Dismiss;
+///   with act Dismiss, in the frame itself (a whole version's answers, a delta's set answers; no
+///   predecessor is folded to find one);
+/// - `plan_delta`: any PLAN of encoding 1 (`crate::codec::PLAN_DELTA_ENCODINGS`), whole or delta;
 /// - `dispute`: a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or
 ///   ResolveDispute;
 /// - `check_request`: a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or
@@ -1133,6 +1144,10 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
     // a kind's optional encoding is the foreign copy's alone, by its version
     if o.kind == kinds::FOREIGN || crate::codec::optional(o.kind) == Some(o.version) {
         add(FEATURE_FOREIGN_COPY);
+    }
+    // a plan delta encoding is the plan delta's, by its version, a whole version-1 plan too
+    if crate::codec::is_plan_delta_encoding(o.kind, o.version) {
+        add(FEATURE_PLAN_DELTA);
     }
     // a port encoding is the port's, by its version; a port with a foreign part needs both
     if crate::codec::is_port_encoding(o.kind, o.version) {
@@ -1188,12 +1203,18 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
         kinds::ASSESSMENT => add(FEATURE_ASSESSMENT),
         kinds::PLAN => {
             use rdy_model::plan::{PlanAct, PlanKind, PlanOutcome};
-            if let Ok(p) = crate::plan::decode_plan(o.body) {
+            // encoding 0 through its frozen reader, encoding 1 through its wire record: this
+            // frame only
+            if let Ok((p, _)) = crate::plan_record::decode_body(o.version, o.body) {
                 let sealed =
-                    p.seal.iter().flat_map(|s| &s.items).any(|i| {
+                    p.seal().iter().flat_map(|s| &s.items).any(|i| {
                         i.kind == PlanKind::Tension || i.outcome == PlanOutcome::Dismissed
                     });
-                if sealed || p.answers.iter().any(|a| a.act == PlanAct::Dismiss) {
+                if sealed
+                    || p.explicit_answers()
+                        .iter()
+                        .any(|a| a.act == PlanAct::Dismiss)
+                {
                     add(FEATURE_PLAN_TENSION);
                 }
             }

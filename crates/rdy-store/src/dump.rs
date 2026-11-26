@@ -1578,11 +1578,17 @@ pub fn feature_frame_kinds() -> &'static [(&'static str, u8)] {
 /// store's kinds, where a marked raw kind needs a kind that registers versioned encodings. In a
 /// dump of the latest store whose manifest names `foreign_copy` (`foreign`), the kinds and the
 /// optional encodings that feature adds may stand too; likewise SNAPSHOT_DELTA in one whose
-/// manifest names `snapshot_delta` (`delta`) ([`FEATURE_FRAME_KINDS`]).
+/// manifest names `snapshot_delta` (`delta`) ([`FEATURE_FRAME_KINDS`]), and the marked PLAN of
+/// the plan delta encoding (`crate::codec::PLAN_DELTA_ENCODINGS`) in one whose manifest names
+/// `plan_delta` (`plans`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FrameKinds {
     Legacy(&'static [u8]),
-    Current { foreign: bool, delta: bool },
+    Current {
+        foreign: bool,
+        delta: bool,
+        plans: bool,
+    },
 }
 
 impl FrameKinds {
@@ -1603,6 +1609,7 @@ impl FrameKinds {
         FrameKinds::Current {
             foreign: m.has(crate::format::FEATURE_FOREIGN_COPY),
             delta: m.has(crate::format::FEATURE_SNAPSHOT_DELTA),
+            plans: m.has(crate::format::FEATURE_PLAN_DELTA),
         }
     }
 
@@ -1610,7 +1617,11 @@ impl FrameKinds {
     pub(crate) fn allows(self, raw: u8) -> bool {
         match self {
             FrameKinds::Legacy(k) => k.contains(&raw),
-            FrameKinds::Current { foreign, delta } => {
+            FrameKinds::Current {
+                foreign,
+                delta,
+                plans,
+            } => {
                 let kind = crate::codec::logical_kind(raw);
                 let named = |f: &str| {
                     (foreign && f == crate::format::FEATURE_FOREIGN_COPY)
@@ -1621,7 +1632,11 @@ impl FrameKinds {
                     .any(|(f, k)| *k == kind && named(f));
                 let known = current_frame_kinds().contains(&kind) || featured;
                 let versioned = crate::codec::latest(kind) > 0
-                    || (foreign && crate::codec::optional(kind).is_some());
+                    || (foreign && crate::codec::optional(kind).is_some())
+                    || (plans
+                        && crate::codec::PLAN_DELTA_ENCODINGS
+                            .iter()
+                            .any(|(k, _)| *k == kind));
                 known && (raw == kind || versioned)
             }
         }

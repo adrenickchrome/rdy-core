@@ -1004,6 +1004,7 @@ fn store_row() -> Value {
             "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
             "hub_canon": "a holder's first move: a batch that writes canon, a view/, a held/ or a replaced/ ref",
             "object_encoding": "any frame of encoding 1 or more",
+            "plan_delta": "any PLAN of encoding 1, a whole version or a delta",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
             "ported_change": "the first stored CHANGE of encoding 3 or 4, or REDACTION_RESIDUE of encoding 2",
             "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",

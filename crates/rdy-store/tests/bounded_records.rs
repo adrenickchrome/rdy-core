@@ -827,6 +827,7 @@ fn plan_of(answers: Vec<rdy_model::plan::PlanAnswer>) -> rdy_model::plan::Plan {
             at_ms: 0,
         },
         seal: None,
+        read_identity: None,
     }
 }
 

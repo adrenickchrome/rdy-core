@@ -49,6 +49,14 @@
 //! frame to its value's own encoding (`Change::encoding`, `RedactionResidue::encoding`). These
 //! are not optional encodings: the repo-links rule ([`OPTIONAL`]) stays the foreign copy's.
 //!
+//! Plan deltas (store feature `plan_delta`) register one more value-chosen encoding
+//! ([`PLAN_DELTA_ENCODINGS`]): PLAN 1, a `rdy_model::plan_encoding::PlanRecordV1`, either a whole
+//! version or the difference from the version before it. PLAN's latest encoding stays 0: only
+//! the plan writer (`crate::Store::prepare_plan`) frames PLAN 1, and it chooses the form. A
+//! version-0 PLAN decodes through the frozen `PlanV0`. A typed read of a whole PLAN keeps its
+//! frame's identity; a delta hydrates only through the store's plan fold
+//! (`crate::plan_record`), never through this module.
+//!
 //! A typed read of a CHANGE or a LANDING keeps the identity of its frame
 //! (`Change::read_identity`, `LandingRecord::read_identity`). [`encode`] writes such a stored read
 //! in its own encoding and refuses it when its bytes do not hash to the identity: a caller that
@@ -62,15 +70,16 @@ use rdy_model::encoding::{
     ANSWER_FOREIGN_ENCODING, ASSESSMENT_FOREIGN_ENCODING, BLOCK_FOREIGN_ENCODING, CHANGE_ENCODING,
     CHANGE_FOREIGN_ENCODING, CHANGE_PORT_ENCODING, CHANGE_PORT_FOREIGN_ENCODING, EncodedIdentity,
     ForeignBlockV1, ForeignChangeV2, LegacyChangeV0, LegacyLandingV0, LegacyRedactionResidueV0,
-    PAIR_FOREIGN_ENCODING, PortChangeV3, PortForeignChangeV4, PortResidueV2,
+    PAIR_FOREIGN_ENCODING, PLAN_DELTA_ENCODING, PortChangeV3, PortForeignChangeV4, PortResidueV2,
     REDACTION_FOREIGN_ENCODING, RESIDUE_ENCODING, RESIDUE_PORT_ENCODING,
     TRANSITION_FOREIGN_ENCODING, encoded_hash,
 };
+use rdy_model::plan_encoding::{PlanRecordV1, PlanV0};
 use rdy_model::redaction::{Redaction, RedactionResidue};
 use rdy_model::review::ReviewV1;
 use rdy_model::semantic::SemanticTensionV1;
 use rdy_model::{
-    Answer, Block, Change, ChangeReadIdentity, Hash, LandingRecord, Review, SemanticTension,
+    Answer, Block, Change, ChangeReadIdentity, Hash, LandingRecord, Plan, Review, SemanticTension,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -209,6 +218,16 @@ pub const PORT_ENCODINGS: &[(u8, u16)] = &[
     (kinds::REDACTION_RESIDUE, RESIDUE_PORT_ENCODING),
 ];
 
+/// The plan delta encodings (store feature `plan_delta`): (logical kind, version). PLAN 1 is
+/// written only by the plan writer, which chooses a whole version or a delta by value; a frame of
+/// one needs `plan_delta` (`crate::format::required_features`). PLAN's latest encoding stays 0.
+pub const PLAN_DELTA_ENCODINGS: &[(u8, u16)] = &[(kinds::PLAN, PLAN_DELTA_ENCODING)];
+
+/// Whether `version` of logical kind `kind` is a plan delta encoding ([`PLAN_DELTA_ENCODINGS`]).
+pub fn is_plan_delta_encoding(kind: u8, version: u16) -> bool {
+    PLAN_DELTA_ENCODINGS.contains(&(kind, version))
+}
+
 /// Whether `version` of logical kind `kind` is a port encoding ([`PORT_ENCODINGS`]).
 pub fn is_port_encoding(kind: u8, version: u16) -> bool {
     PORT_ENCODINGS.contains(&(kind, version))
@@ -220,11 +239,12 @@ pub fn optional(kind: u8) -> Option<u16> {
 }
 
 /// The newest encoding of logical kind `kind` that this rdy reads: the highest of its latest
-/// encoding, its optional one and its port ones ([`PORT_ENCODINGS`]). A frame of a higher
-/// version is an unknown encoding.
+/// encoding, its optional one, its port ones ([`PORT_ENCODINGS`]) and its plan delta one
+/// ([`PLAN_DELTA_ENCODINGS`]). A frame of a higher version is an unknown encoding.
 pub fn newest(kind: u8) -> u16 {
     PORT_ENCODINGS
         .iter()
+        .chain(PLAN_DELTA_ENCODINGS)
         .filter(|(k, _)| *k == kind)
         .map(|(_, v)| *v)
         .fold(latest(kind).max(optional(kind).unwrap_or(0)), u16::max)
@@ -351,6 +371,24 @@ fn as_change(any: &dyn Any) -> Option<&Change> {
         .or_else(|| any.downcast_ref::<&'static Change>().copied())
 }
 
+/// The plan behind `any`: bare, boxed or a `'static` reference.
+fn as_plan(any: &dyn Any) -> Option<&Plan> {
+    any.downcast_ref::<Plan>()
+        .or_else(|| any.downcast_ref::<Box<Plan>>().map(|b| &**b))
+        .or_else(|| any.downcast_ref::<&'static Plan>().copied())
+}
+
+/// The body of plan `p` in encoding `version`: the frozen encoding-0 body, or the whole
+/// version-1 body. A delta is never rebuilt from a hydrated value: a stored delta has no form
+/// here, and its identity check refuses it.
+fn plan_body(p: &Plan, version: u16) -> Result<Vec<u8>, StoreError> {
+    match version {
+        0 => Ok(rdy_model::plan_encoding::v0_body(p)),
+        PLAN_DELTA_ENCODING => Ok(rdy_model::plan_encoding::full_body(p)),
+        _ => Err(mismatch()),
+    }
+}
+
 /// The landing behind `any`: bare, boxed or a `'static` reference.
 fn as_landing(any: &dyn Any) -> Option<&LandingRecord> {
     any.downcast_ref::<LandingRecord>()
@@ -378,6 +416,11 @@ fn change_body(c: &Change, version: u16) -> Result<Vec<u8>, StoreError> {
 fn shaped_body<T: Serialize + 'static>(kind: u8, value: &T) -> Option<(u16, Vec<u8>)> {
     let any: &dyn Any = value;
     let local = latest(kind);
+    // a new plan's own frame is its whole version-1 form; only the plan writer may choose a
+    // delta instead (`crate::Store::prepare_plan`)
+    if let Some(p) = as_plan(any) {
+        return Some((PLAN_DELTA_ENCODING, rdy_model::plan_encoding::full_body(p)));
+    }
     if let Some(b) = any.downcast_ref::<Block>() {
         return (!b.foreign.is_empty())
             .then(|| (BLOCK_FOREIGN_ENCODING, postcard_of(&ForeignBlockV1::of(b))));
@@ -588,6 +631,12 @@ pub fn encode<T: Serialize + 'static>(kind: u8, value: &T) -> Result<EncodedObje
         && let Some(id) = l.read_identity
     {
         return stored(kind, id, landing_body(l, id.version)?);
+    } else if let Some(p) = as_plan(any)
+        && let Some(id) = p.read_identity
+    {
+        // a stored whole version keeps its bytes; a stored delta's identity never matches a
+        // whole frame, so it is refused rather than written under that identity
+        return stored(kind, id, plan_body(p, id.version)?);
     }
     Ok(encode_new(kind, value))
 }
@@ -649,7 +698,10 @@ fn dispatches(kind: u8, t: TypeId) -> bool {
         REDACTION_RESIDUE => &[TypeId::of::<rdy_model::RedactionResidue>()],
         REDACTION_APPLY => &[TypeId::of::<rdy_model::RedactionApply>()],
         REDACTION_CARRIED => &[TypeId::of::<rdy_model::RedactionCarried>()],
-        PLAN => &[TypeId::of::<rdy_model::Plan>()],
+        PLAN => &[
+            TypeId::of::<rdy_model::Plan>(),
+            TypeId::of::<PlanRecordV1>(),
+        ],
         ASSESSMENT => &[TypeId::of::<rdy_model::assessment::Assessment>()],
         DISPUTE => &[TypeId::of::<rdy_model::dispute::Dispute>()],
         DISPUTE_RESOLUTION => &[TypeId::of::<rdy_model::dispute::DisputeResolution>()],
@@ -858,6 +910,22 @@ fn body_of<T: DeserializeOwned + 'static>(
             };
             cast(l).ok_or(wrong)
         }
+        // a PLAN: encoding 0 is the frozen body, encoding 1 a whole version or a delta. The wire
+        // type reads both; a runtime plan reads a whole version only (a delta hydrates through
+        // the store's plan fold)
+        (kinds::PLAN, version) => {
+            let record = match version {
+                0 => PlanRecordV1::Full(reader.read::<PlanV0>(o.body)?),
+                _ => reader.read::<PlanRecordV1>(o.body)?,
+            };
+            if TypeId::of::<T>() == TypeId::of::<PlanRecordV1>() {
+                return cast(record).ok_or(wrong);
+            }
+            match record {
+                PlanRecordV1::Full(p) => cast(p.into_current(Some(identity()))).ok_or(wrong),
+                PlanRecordV1::Delta(_) => Err(BodyError::Record(RecordError::Decode)),
+            }
+        }
         (kinds::REDACTION_RESIDUE, 0) => cast(
             reader
                 .read::<LegacyRedactionResidueV0>(o.body)?
@@ -1028,6 +1096,8 @@ pub fn is_canonical<T: Serialize + 'static>(o: &ObjectBytes<'_>, value: &T) -> b
         change_body(c, o.version).ok()
     } else if let Some(l) = as_landing(any) {
         landing_body(l, o.version).ok()
+    } else if let Some(p) = as_plan(any) {
+        plan_body(p, o.version).ok()
     } else if let Some(r) = any.downcast_ref::<RedactionResidue>() {
         residue_body(r, o.version)
     } else if let Some(ok) = shaped_canonical(o.kind, o.version, o.body, any) {

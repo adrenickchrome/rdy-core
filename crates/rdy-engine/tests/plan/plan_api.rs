@@ -461,6 +461,7 @@ fn cp8_all_four_selectors_have_closed_shapes() {
             decisions: vec![id(&s.a)],
             items: items.clone(),
         }),
+        read_identity: None,
     };
     let h = put_plan_frames(r.store_mut(), &seal);
     r.invalidate();
@@ -1342,6 +1343,7 @@ fn cp8_proposal_read_uses_recorded_canon_and_heads() {
         }],
         provenance: prov(),
         seal: None,
+        read_identity: None,
     };
     let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
@@ -1516,9 +1518,14 @@ fn cp8_plan_only_write_logs_no_transition() {
     );
     let frames: Vec<u8> = r.store().last_batch().iter().map(|(k, _)| *k).collect();
     assert_eq!(frames, [kinds::PLAN, kinds::REF_UPDATE]);
+    // (the log's raw kind: an encoding-1 PLAN frame carries the versioned flag)
     assert_eq!(
         walk(&r, end),
-        [kinds::PLAN, kinds::REF_UPDATE, kinds::BATCH_COMMIT],
+        [
+            kinds::PLAN | rdy_store::codec::VERSIONED,
+            kinds::REF_UPDATE,
+            kinds::BATCH_COMMIT
+        ],
         "one batch, its two frames and the marker"
     );
 }
@@ -1969,6 +1976,7 @@ fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
         }],
         provenance: prov(),
         seal: None,
+        read_identity: None,
     };
     let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();

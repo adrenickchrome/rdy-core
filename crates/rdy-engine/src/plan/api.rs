@@ -1259,6 +1259,7 @@ impl Rdy {
             heads: vp.heads,
             provenance: session.provenance(),
             seal: None,
+            read_identity: None,
         };
         drop(st);
         let id = self.store.put_plan(&plan)?;

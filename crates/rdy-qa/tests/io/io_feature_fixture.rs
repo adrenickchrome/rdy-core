@@ -498,7 +498,10 @@ struct FirstUse {
 /// `hpt5_` in the release area. `dedup_spans` (D-1ER84), the second feature a new store writes
 /// from its first batch that a complete set does not hold: the dump pair `v4-f1-dedup-spans`
 /// and the native store `store/dedup-spans-1` with its span map, whose own tests are `r5902_` in
-/// the io area.
+/// the io area. `plan_delta` (D-3PNRK), any PLAN of encoding 1 activates it: the dump pair
+/// `v4-f1-reduction`, the dump chain `v4-f1-reduction-chain`, the sync pair `sync4-reduction`
+/// and the native store `store/reduction-1`, whose own tests are `r5906_` in the io and release
+/// areas.
 const FIRST_USE: &[FirstUse] = &[
     FirstUse {
         name: "foreign_copy",
@@ -628,6 +631,47 @@ const FIRST_USE: &[FirstUse] = &[
         sync: &[],
         native: Some("fixtures/store/dedup-spans-1/expect.json"),
         baseline: true,
+    },
+    FirstUse {
+        name: "plan_delta",
+        dump: &[
+            (
+                "v4-f1-reduction.rdydump",
+                "f28b47c0aa917a437595414764d28c63da0555b7c5b48a1f3bbf27a2dc7a7f5e",
+            ),
+            (
+                "v4-f1-reduction.expect.json",
+                "a9f8cb83c0cf518679f0ad2d1dbef4fbb16d39669f73dc72587393ede0c45e39",
+            ),
+            (
+                "v4-f1-reduction-chain-full.rdydump",
+                "df6e09b996a596d872c0182a3473774ce982536a05153e8228ccecfd4f5d899c",
+            ),
+            (
+                "v4-f1-reduction-chain-1.rdydump",
+                "c6af8dfeeaf50d172551a22812d372bb7c0cc044642253918fa70ceb87cc78af",
+            ),
+            (
+                "v4-f1-reduction-chain-2.rdydump",
+                "6738a89812341f7a45c8c3b1fe825ef4ef0ce3bca7ae3b91628c1182af897cfd",
+            ),
+            (
+                "v4-f1-reduction-chain.expect.json",
+                "c8c3e52e9affa20779591bac9b1eb1497002b60152e6f7eff688efcc80adbe8c",
+            ),
+        ],
+        sync: &[
+            (
+                "sync4-reduction.bin",
+                "88826bbea0c7eba4df575915fec0b4cebd19ee840fdedfa1306a1e7712983b07",
+            ),
+            (
+                "sync4-reduction.expect.json",
+                "2d796533cf09c0faede758f5b41dfd6e3c49467953cb0f3d5ac72e1b1295c8ea",
+            ),
+        ],
+        native: Some("fixtures/store/reduction-1/expect.json"),
+        baseline: false,
     },
 ];
 

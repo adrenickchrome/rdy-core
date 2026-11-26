@@ -149,6 +149,28 @@ pub(crate) fn typed<T: serde::de::DeserializeOwned + 'static>(
     }
 }
 
+/// The seal of the PLAN record `key` of `source`, from its own frame (a whole version or a
+/// delta): None when it is absent, removed or seals nothing.
+fn plan_seal_of(
+    source: &mut dyn ObjectSource,
+    key: ObjectKey,
+) -> Result<Option<rdy_model::plan::PlanSeal>, StreamError> {
+    let Some(StreamRecord::Present {
+        key,
+        encoding,
+        payload,
+        ..
+    }) = source.record(key)?
+    else {
+        return Ok(None);
+    };
+    let raw = crate::codec::raw_kind(key.kind, encoding);
+    match crate::plan_record::decode(raw, &payload) {
+        Ok((r, _)) => Ok(r.seal().cloned()),
+        Err(e) => Err(StreamError::from_record(0, 0, &e).with_object(Some(key))),
+    }
+}
+
 /// Checks that every prerequisite is a record of the source: the first missing one, in key
 /// order, is E_UNRESOLVED_REF.
 pub(crate) fn check_prerequisites(
@@ -277,8 +299,8 @@ fn attachments(
                 }
             }
             kinds::PLAN => {
-                if let Some(seal) = typed::<rdy_model::plan::Plan>(source, k)?.and_then(|p| p.seal)
-                {
+                // a whole version or a delta: both hold their seal whole
+                if let Some(seal) = plan_seal_of(source, k)? {
                     a.seals.entry(seal.landing).or_default().push(k);
                 }
             }
@@ -781,11 +803,34 @@ pub(crate) fn check_typed_context(
         match k.kind {
             kinds::PLAN => {
                 let record = look.rec.get_mut().object_source().record(k)?;
-                let Some(StreamRecord::Present { payload, .. }) = record else {
+                let Some(StreamRecord::Present {
+                    encoding, payload, ..
+                }) = record
+                else {
                     continue;
                 };
-                let p = crate::plan::decode_plan(&payload)
-                    .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?;
+                let raw = crate::codec::raw_kind(k.kind, encoding);
+                // a whole version reads alone; a delta hydrates through the one plan fold over
+                // the incoming records and the holder's, before any check of its version
+                let p = match crate::plan_record::decode(raw, &payload)
+                    .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?
+                {
+                    (crate::plan_record::PlanRecord::Full(p), _) => Ok(p),
+                    (crate::plan_record::PlanRecord::Delta(_), _) => {
+                        crate::plan::hydrate_for_check(&k.hash, &look)
+                    }
+                };
+                let p = match p {
+                    Ok(p) => p,
+                    Err(e) => match e {
+                        crate::plan_record::FoldError::Broken { reason, .. } => {
+                            return Err(look.broken(k, &crate::plan::damage(&k.hash, reason)));
+                        }
+                        crate::plan_record::FoldError::Store(e) => {
+                            return Err(look.failure(e, k));
+                        }
+                    },
+                };
                 let rule = match crate::plan::invalid_record(&p) {
                     Some(rule) => Some(rule),
                     None => crate::plan::invalid_context(&k.hash, &p, &look)

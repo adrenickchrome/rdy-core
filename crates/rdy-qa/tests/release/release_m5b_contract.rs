@@ -443,14 +443,16 @@ fn tree_digest(dir: &Path) -> (usize, String) {
     }
     let mut files = vec![];
     walk(dir, "", &mut files);
-    // the first-use fixtures of `ported_change` (hub ports) and `dedup_spans` (span maps) came
-    // after this plan's release
+    // the first-use fixtures of `ported_change` (hub ports), `dedup_spans` (span maps) and
+    // `plan_delta` (plan deltas) came after this plan's release
     files.retain(|(path, _)| {
         ![
             "v4-f1-e1-ported-change",
             "ported-change-1",
             "v4-f1-dedup-spans",
             "dedup-spans-1",
+            "v4-f1-reduction",
+            "reduction-1",
         ]
         .iter()
         .any(|later| path.starts_with(later))
@@ -527,12 +529,13 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
     );
 
     // the store registry and the formats: no feature, store format or dump format is new, but
-    // the ones later plans registered (hub ports, `ported_change`; span maps, `dedup_spans`):
+    // the ones later plans registered (hub ports, `ported_change`; span maps, `dedup_spans`;
+    // plan deltas, `plan_delta`):
     // the registry less them is what this fixture lists, and they are the only additions
     let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
         .iter()
         .copied()
-        .filter(|n| *n != "ported_change" && *n != "dedup_spans")
+        .filter(|n| *n != "ported_change" && *n != "dedup_spans" && *n != "plan_delta")
         .collect();
     assert_eq!(
         now["store"]["registered_names"],
@@ -540,9 +543,9 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
         "the store registers what the contract lists, and the later additions"
     );
     assert_eq!(
-        live.len() + 2,
+        live.len() + 3,
         rdy_store::format::REGISTERED_FEATURES.len(),
-        "ported_change and dedup_spans are the only additions"
+        "ported_change, dedup_spans and plan_delta are the only additions"
     );
     assert_eq!(
         now["dump_load"]["dump_format"],

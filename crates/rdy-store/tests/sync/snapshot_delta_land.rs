@@ -492,6 +492,7 @@ fn sdl6_all_landing_paths_emit_one_delta_and_no_snapshot() {
         heads: vec![],
         provenance: approver(),
         seal: None,
+        read_identity: None,
     };
     let bound_id = f.s.bind_plan(&mut prepared, &bound).unwrap();
     let mut landing =

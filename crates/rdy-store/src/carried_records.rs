@@ -174,8 +174,10 @@ pub fn validate_local(raw: u8, payload: &[u8]) -> Result<(), &'static str> {
             Some(l) => landing_local(&l),
             None => Ok(()),
         },
-        kinds::PLAN => match crate::plan::decode_plan(o.body) {
-            Ok(p) => plan_local(&p),
+        // a whole version's answers, or a delta's set answers: an inherited Dismiss answer of a
+        // sealed delta is checked with its hydrated version (`validate_refs`)
+        kinds::PLAN => match crate::plan_record::decode_body(o.version, o.body) {
+            Ok((p, _)) => plan_local(&p.as_record_plan()),
             Err(_) => Ok(()),
         },
         _ => Ok(()),
@@ -310,6 +312,21 @@ fn key(kind: u8, hash: Hash) -> ObjectKey {
     ObjectKey { kind, hash }
 }
 
+/// The plan version `h` that `source` holds, hydrated through the one plan fold
+/// (`crate::plan_record::fold`); None when it is not held, does not decode or breaks its chain
+/// (the plan checks report that).
+fn hydrated_plan(source: &mut dyn CarriedSource, h: Hash) -> Result<Option<Plan>, StoreError> {
+    let source = std::cell::RefCell::new(source);
+    let read = |x: &Hash| source.borrow_mut().object(key(kinds::PLAN, *x));
+    match crate::plan_record::fold(&h, &read) {
+        Ok(p) => Ok(Some(p)),
+        Err(crate::plan_record::FoldError::Store(e)) if !matches!(e, StoreError::NotFound(_)) => {
+            Err(e)
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// Whether the BLOCK version `version` that `source` holds is a version of block `block`. An
 /// object `source` does not hold is the reference checks' to report.
 fn policy_block(
@@ -366,7 +383,7 @@ pub fn validate_refs(
                 let Some(r) = &t.answer else {
                     continue;
                 };
-                if let Some(plan) = read::<Plan>(source, key(kinds::PLAN, r.plan))?
+                if let Some(plan) = hydrated_plan(source, r.plan)?
                     && !plan.answers.iter().any(|x| x.item == r.item)
                 {
                     return Ok(Some(PLAN_ANSWER));
@@ -379,6 +396,23 @@ pub fn validate_refs(
                 return Ok(None);
             };
             answer_refs(source, &a)
+        }
+        // a sealed delta's Dismiss answers, inherited ones too, by its hydrated version
+        kinds::PLAN => {
+            let sealed_delta = match source.object(k)? {
+                Some((version, body)) => matches!(
+                    crate::plan_record::decode_body(version, &body),
+                    Ok((crate::plan_record::PlanRecord::Delta(d), _)) if d.seal.is_some()
+                ),
+                None => false,
+            };
+            if !sealed_delta {
+                return Ok(None);
+            }
+            match hydrated_plan(source, k.hash)? {
+                Some(p) => Ok(plan_local(&p).err()),
+                None => Ok(None),
+            }
         }
         kinds::REVIEW => {
             let Some(r) = read::<Review>(source, k)? else {

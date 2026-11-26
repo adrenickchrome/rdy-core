@@ -4,8 +4,10 @@
 //!
 //! 1. a CHANGE create or update's embedded block, against the earlier BLOCK frame of that same
 //!    block version, when the standalone BLOCK's bytes are exactly the embedded encoding;
-//! 2. a PLAN's encoded answers against its immediate `prev` in the same stable chain: equal
-//!    answers by item hash, joined only where they are adjacent in both payloads;
+//! 2. a PLAN's explicit encoded answers against its immediate `prev` in the same stable chain:
+//!    equal answers by item hash, joined only where they are adjacent in both payloads. A whole
+//!    version's answers (encoding 0 or 1) and a delta's set answers are explicit; a delta's
+//!    inherited answers are never hydrated for mapping;
 //! 3. a SNAPSHOT's encoded map entries against the preceding SNAPSHOT in sealed log order:
 //!    equal `(block id, version)` entries, joined only where they are adjacent in both.
 //!
@@ -15,8 +17,9 @@
 //! interior ([`align`]).
 use crate::dedup::{FrameSpan, JOIN_FLOOR};
 use crate::kinds;
+use crate::plan_record::PlanRecord;
 use crate::segment::{HEADER, Location};
-use rdy_model::{Change, Hash, Op, Plan, StateSnapshot};
+use rdy_model::{Change, Hash, Op, StateSnapshot};
 
 /// The most field ranges one payload offers.
 pub const MAX_FIELD_RANGES: usize = 100_000;
@@ -324,32 +327,65 @@ pub fn snapshot_runs(target: &FrameRef<'_>, source: &FrameRef<'_>) -> Vec<Run> {
     join_runs(Class::Snapshot, target, source, &t, &s)
 }
 
-/// The decoded PLAN of a frame (encoding 0), or None.
-pub fn plan_of(raw_kind: u8, payload: &[u8]) -> Option<Plan> {
-    if raw_kind != kinds::PLAN {
-        return None;
-    }
-    crate::codec::decode_record(kinds::PLAN, payload).ok()
+/// A PLAN frame as the candidate rule reads it: its `prev`, and its record (a whole version of
+/// encoding 0 or 1, or a delta).
+pub struct PlanFrame {
+    pub prev: Option<Hash>,
+    record: PlanRecord,
+    /// The encoding of the frame.
+    version: u16,
 }
 
-/// The encoded answers of a PLAN payload: each answer's item hash and range. None for a payload
-/// whose fields before its answers or whose answers it cannot place exactly.
-fn plan_fields(plan: &Plan, payload: &[u8]) -> Option<Vec<Field<Hash>>> {
-    if plan.answers.len() > MAX_FIELD_RANGES {
+/// The decoded PLAN of a frame (encoding 0 or 1), or None.
+pub fn plan_of(raw_kind: u8, payload: &[u8]) -> Option<PlanFrame> {
+    if crate::codec::logical_kind(raw_kind) != kinds::PLAN {
+        return None;
+    }
+    let (record, identity) = crate::plan_record::decode(raw_kind, payload).ok()?;
+    Some(PlanFrame {
+        prev: record.prev(),
+        record,
+        version: identity.version,
+    })
+}
+
+/// The encoded explicit answers of a PLAN payload: each answer's item hash and range (a whole
+/// version's answers, a delta's set answers). None for a payload whose fields before its
+/// answers or whose answers it cannot place exactly.
+fn plan_fields(plan: &PlanFrame, payload: &[u8]) -> Option<Vec<Field<Hash>>> {
+    let answers = plan.record.explicit_answers();
+    if answers.len() > MAX_FIELD_RANGES {
         return None;
     }
     let mut cur = Cursor {
         buf: payload,
         at: 0,
     };
-    cur.value(&plan.stable)?;
-    cur.value(&plan.prev)?;
-    cur.value(&plan.view)?;
-    cur.value(&plan.proposal)?;
-    cur.expect(&varint(plan.answers.len() as u64))?;
+    if plan.version != 0 {
+        cur.expect(&plan.version.to_le_bytes())?;
+    }
+    match &plan.record {
+        PlanRecord::Full(p) => {
+            if plan.version != 0 {
+                cur.expect(&[0])?;
+            }
+            cur.value(&p.stable)?;
+            cur.value(&p.prev)?;
+            cur.value(&p.view)?;
+            cur.value(&p.proposal)?;
+        }
+        PlanRecord::Delta(d) => {
+            cur.expect(&[1])?;
+            cur.value(&d.stable)?;
+            cur.value(&d.prev)?;
+            cur.value(&d.view)?;
+            cur.value(&d.proposal)?;
+        }
+    }
+    cur.expect(&varint(answers.len() as u64))?;
     let mut out = Vec::new();
-    out.try_reserve_exact(plan.answers.len()).ok()?;
-    for a in &plan.answers {
+    out.try_reserve_exact(answers.len()).ok()?;
+    for a in answers {
         let start = cur.value(a)?;
         out.push(Field {
             key: a.item,
@@ -372,7 +408,7 @@ pub fn plan_runs(target: &FrameRef<'_>, source: &FrameRef<'_>) -> Vec<Run> {
         return vec![];
     };
     // the same chain: the source is the target's `prev`, and both name the same first version
-    let first = |p: &Plan, own: Hash| p.stable.unwrap_or(own);
+    let first = |p: &PlanFrame, own: Hash| p.record.stable().unwrap_or(own);
     if tp.prev != Some(source.hash) || first(&tp, target.hash) != first(&sp, source.hash) {
         return vec![];
     }

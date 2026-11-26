@@ -619,5 +619,6 @@ pub(crate) fn card_seal(
             decisions: decisions.into_iter().collect(),
             items,
         }),
+        read_identity: None,
     })
 }

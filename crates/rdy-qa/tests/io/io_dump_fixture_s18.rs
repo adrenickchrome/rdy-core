@@ -454,8 +454,9 @@ pub(crate) fn reflects_facts(r: &Rdy, upto: Location) -> Value {
                     }
                 }
                 kinds::PLAN => {
-                    let p = rdy_store::plan::decode_plan(payload).unwrap();
-                    if let Some(s) = &p.seal
+                    // of either encoding: a delta keeps its seal whole
+                    let (p, _) = rdy_store::plan_record::decode(kind, payload).unwrap();
+                    if let Some(s) = p.seal()
                         && s.decisions.iter().any(|d| delegated.contains(d))
                     {
                         seals.push(json!({

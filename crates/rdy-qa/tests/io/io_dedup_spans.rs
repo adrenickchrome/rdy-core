@@ -176,6 +176,7 @@ fn plan_chain(r: &mut Rdy, view: &str, parent: &str) -> Vec<String> {
         heads: vec![],
         provenance: agent(),
         seal: None,
+        read_identity: None,
     };
     r.store_mut()
         .write_guarded_for_tests(rdy_qa::every_kind::plan_frames(&bound))

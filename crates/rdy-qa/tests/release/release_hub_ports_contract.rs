@@ -2471,13 +2471,13 @@ fn hpt5_owned_leaves_hold_the_planned_values() {
         format::PORTED_CHANGE_REQUIRED_RDY
     );
     assert_eq!(format::PORTED_CHANGE_REQUIRED_RDY, "0.58.0");
-    // the registry less span maps' dedup_spans, which came later
+    // the registry less span maps' dedup_spans and plan deltas' plan_delta, which came later
     assert_eq!(
         fixture["store"]["registered_names"],
         json!(
             format::REGISTERED_FEATURES
                 .iter()
-                .filter(|n| **n != format::FEATURE_DEDUP_SPANS)
+                .filter(|n| **n != format::FEATURE_DEDUP_SPANS && **n != format::FEATURE_PLAN_DELTA)
                 .collect::<Vec<_>>()
         )
     );
@@ -3104,13 +3104,14 @@ fn open_refused(root: &Path, what: &str) -> RdyError {
 }
 
 /// The minimum rdy a store's manifest asks for: the highest `required_rdy` of its features.
-/// The minimum rdy of `r`'s features as this plan knew them: span maps' `dedup_spans` came later.
+/// The minimum rdy of `r`'s features as this plan knew them: span maps' `dedup_spans` and plan
+/// deltas' `plan_delta` came later.
 fn minimum_rdy(r: &Rdy) -> (u32, u32, u32) {
     r.store()
         .features()
         .features
         .iter()
-        .filter(|f| f.name != format::FEATURE_DEDUP_SPANS)
+        .filter(|f| f.name != format::FEATURE_DEDUP_SPANS && f.name != format::FEATURE_PLAN_DELTA)
         .map(|f| version_of(&f.required_rdy))
         .max()
         .expect("a feature")
@@ -3146,9 +3147,10 @@ fn hpt5_formats_stay_fixed_and_first_use_is_required() {
         "the stream formats"
     );
     assert_eq!(rdy_store::sync_stream::READ_FORMATS, [2, 3, 4]);
-    // span maps' dedup_spans came later
-    assert_eq!(format::REGISTERED_FEATURES.len(), 14);
+    // span maps' dedup_spans and plan deltas' plan_delta came later
+    assert_eq!(format::REGISTERED_FEATURES.len(), 15);
     assert!(format::REGISTERED_FEATURES.contains(&format::FEATURE_DEDUP_SPANS));
+    assert!(format::REGISTERED_FEATURES.contains(&format::FEATURE_PLAN_DELTA));
     let (was, now) = (read(PREDECESSOR), read(CURRENT));
     // a new store starts with the features it did, and not with this one
     for member in [

@@ -1379,14 +1379,16 @@ fn tree_digest(dir: &Path) -> (usize, String) {
     }
     let mut files = vec![];
     walk(dir, "", &mut files);
-    // the first-use fixtures of `ported_change` (hub ports) and `dedup_spans` (span maps) came
-    // after this plan's release
+    // the first-use fixtures of `ported_change` (hub ports), `dedup_spans` (span maps) and
+    // `plan_delta` (plan deltas) came after this plan's release
     files.retain(|(path, _)| {
         ![
             "v4-f1-e1-ported-change",
             "ported-change-1",
             "v4-f1-dedup-spans",
             "dedup-spans-1",
+            "v4-f1-reduction",
+            "reduction-1",
         ]
         .iter()
         .any(|later| path.starts_with(later))
@@ -1480,17 +1482,18 @@ fn hfp5_no_format_or_feature_moves() {
     );
     assert_eq!(rdy_store::sync_stream::READ_FORMATS, [2, 3, 4]);
     // the registry less the features later plans registered (hub ports, `ported_change`; span
-    // maps, `dedup_spans`) is the 12 features of this plan, and those are the only additions
+    // maps, `dedup_spans`; plan deltas, `plan_delta`) is the 12 features of this plan, and those
+    // are the only additions
     let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
         .iter()
         .copied()
-        .filter(|n| *n != "ported_change" && *n != "dedup_spans")
+        .filter(|n| *n != "ported_change" && *n != "dedup_spans" && *n != "plan_delta")
         .collect();
     assert_eq!(live.len(), 12);
     assert_eq!(
         rdy_store::format::REGISTERED_FEATURES.len(),
-        live.len() + 2,
-        "ported_change and dedup_spans are the only additions"
+        live.len() + 3,
+        "ported_change, dedup_spans and plan_delta are the only additions"
     );
     assert!(rdy_store::format::REGISTERED_FEATURES.contains(&"hub_canon"));
     let (was, now) = (read(PREDECESSOR), read(CURRENT));

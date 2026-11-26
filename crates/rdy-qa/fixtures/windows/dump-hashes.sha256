@@ -88,6 +88,12 @@ d62fc15d86805b7974caea2859bf9fc80bc698712b9d88c59b84999b3c3f90f5  fixture/v4-f1-
 24b270fa27eb22d61e019039e3270491660c4245026353fcfbcf7e4ebdf1b7a8  fixture/v4-f1-e1-snapshot-delta.rdydump
 d4dbd862f5b60e9657be91f89725a8da0aa96aecc5a00585fad384dc78646433  fixture/v4-f1-e1.expect.json
 cd9272c447982e714ce5cd2431ec4b95861cb58296fc16ad798ccece5bbeff24  fixture/v4-f1-e1.rdydump
+243add27149b0101b21fcff8ea94711411a07c2ee32286e935372e583f046c43  fixture/v4-f1-reduction-chain-1.rdydump
+b514ba08e30abf06a20f9713b91e2c79acac5fecbe7b59cf3fcea85870ae7e14  fixture/v4-f1-reduction-chain-2.rdydump
+0b6f0969fd896eba77fc98ed51dcd4a9ad5bcdaceaad8314f1a181208a0fbce5  fixture/v4-f1-reduction-chain-full.rdydump
+64ac7cf4acf935aeff13d04909dde78fef53518ae69ca66bd4b6c9935fed4db4  fixture/v4-f1-reduction-chain.expect.json
+ed00177eaf1788aed82d3a50bf1df95c1116b94e7226595db7034475ee4d9ffc  fixture/v4-f1-reduction.expect.json
+a2fe102711c7dc2d8e9193efcac99aa6a51843938d9f0b86393001d96f8ba29d  fixture/v4-f1-reduction.rdydump
 -  redump/v1-s10
 -  redump/v1-s11
 f08698943ecfadbfef3be72766940b3eca36320642a1a09c6d68a3d6c80fd1dc  redump/v1-s12
@@ -110,3 +116,5 @@ e371520e23dbe51b9b4610a8bdd96e1151254e0b4558492e59b6389cba2583b8  redump/v4-f1-e
 648efe42ce7a7e4ef0e1b04ccb49287868b8ba456b7750c23f122a145571140b  redump/v4-f1-e1-ported-change
 e83a0e0fd61fd1ffa84ece4a24a22c4ee21f33a70e998caca9031e606f8c34fa  redump/v4-f1-e1-snapshot-delta
 d0da1e965a755f38a8ced5d75c8c930d28f892e20a4c1c47391054c8e80f0fd0  redump/v4-f1-e1
+01defe596245d58cf626e6adad66b77c1f8ba149aa2973452f7ca4384cc4c651  redump/v4-f1-reduction-chain
+01defe596245d58cf626e6adad66b77c1f8ba149aa2973452f7ca4384cc4c651  redump/v4-f1-reduction

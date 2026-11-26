@@ -20,6 +20,7 @@ mod release_package;
 mod release_package_unix;
 mod release_readme;
 mod release_readme_contract;
+mod release_reduction_fixture;
 mod release_repo_links_contract;
 mod release_repo_links_formats;
 mod release_sample;

@@ -42,9 +42,10 @@ fn enc<T: serde::Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).unwrap()
 }
 
+/// The PLAN frame of `p` (a whole version of encoding 1, named by `p.id()`) and its ref.
 fn plan_frames(p: &Plan) -> Vec<(u8, Vec<u8>)> {
     vec![
-        (kinds::PLAN, enc(p)),
+        rdy_store::codec::item_new(kinds::PLAN, p),
         (
             kinds::REF_UPDATE,
             enc(&RefUpdate {
@@ -141,6 +142,7 @@ fn land_deferring_many(
         heads: vec![],
         provenance: agent_w(),
         seal: None,
+        read_identity: None,
     };
     s.write_guarded_for_tests(plan_frames(&v1)).unwrap();
     s.seal(vec![]).unwrap();

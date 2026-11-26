@@ -92,6 +92,11 @@ pub const ASSESSMENT_FOREIGN_ENCODING: u16 = 2;
 /// target list may then hold one.
 pub const REDACTION_FOREIGN_ENCODING: u16 = 1;
 
+/// The encoding of a PLAN written by this rdy: a `crate::plan_encoding::PlanRecordV1`, either a
+/// whole version or the difference from the version before it. Chosen by the plan writer, never
+/// by the kind's latest encoding, which stays 0 (store feature `plan_delta`).
+pub const PLAN_DELTA_ENCODING: u16 = 1;
+
 /// The identity of a stored object: the hash of its stored payload and its encoding version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EncodedIdentity {

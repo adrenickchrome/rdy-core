@@ -3745,7 +3745,8 @@ impl Rdy {
             store.hash(),
             store.landed_version(),
             store.writes_final_version(),
-        );
+            |b| self.store.prepare_landing_plan_id(&store, b),
+        )?;
         self.store
             .plan_landing(&mut store, bound.as_ref(), seal.as_ref())?;
         Ok(PreparedApproval {
@@ -4259,6 +4260,7 @@ fn adopt_seal(
             decisions: computed.decisions,
             items,
         }),
+        read_identity: None,
     })
 }
 

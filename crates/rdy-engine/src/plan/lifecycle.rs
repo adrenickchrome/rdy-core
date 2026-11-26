@@ -163,6 +163,7 @@ impl ProposalPlan {
             heads: self.heads.clone(),
             provenance: by,
             seal: None,
+            read_identity: None,
         }
     }
 }
@@ -577,12 +578,16 @@ impl LandingPlan {
     /// The landing's plans: the plan bound to the final version `landed` when the landing
     /// writes one (`final_version`) and the approved version was bound, then the seal of
     /// `landing`, which lands `landed`, unless the version has no item and re-affirms nothing.
-    pub(crate) fn plans(
+    /// The seal follows the bound plan by the id `bound_id` gives it: the id the store prepares
+    /// it under in the landing's batch (a delta's frame hash, not the draft's), so the seal's
+    /// `prev` names the stored version.
+    pub(crate) fn plans<E>(
         &self,
         landing: Hash,
         landed: Hash,
         final_version: bool,
-    ) -> (Option<Plan>, Option<Plan>) {
+        bound_id: impl FnOnce(&Plan) -> Result<Hash, E>,
+    ) -> Result<(Option<Plan>, Option<Plan>), E> {
         let bound = match self.chain {
             Some((stable, prev)) if final_version => Some(Plan {
                 stable: Some(stable),
@@ -593,14 +598,15 @@ impl LandingPlan {
                 heads: self.heads.clone(),
                 provenance: self.by.clone(),
                 seal: None,
+                read_identity: None,
             }),
             _ => None,
         };
         if !self.seals {
-            return (bound, None);
+            return Ok((bound, None));
         }
         let (stable, prev) = match (&self.chain, &bound) {
-            (Some((stable, _)), Some(b)) => (Some(*stable), Some(b.id())),
+            (Some((stable, _)), Some(b)) => (Some(*stable), Some(bound_id(b)?)),
             (Some((stable, prev)), None) => (Some(*stable), Some(*prev)),
             (None, _) => (None, None),
         };
@@ -618,8 +624,9 @@ impl LandingPlan {
                 decisions: self.decisions.clone(),
                 items: self.items.clone(),
             }),
+            read_identity: None,
         };
-        (bound, Some(seal))
+        Ok((bound, Some(seal)))
     }
 }
 
