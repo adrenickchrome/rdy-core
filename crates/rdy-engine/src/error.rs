@@ -661,6 +661,11 @@ pub struct RdyError {
     /// step; the caller that rewraps the error names it again. Never serialized.
     #[serde(skip)]
     pub upstream_status: Option<u16>,
+    /// The hub's structured over-cap marker on a refused get: the bytes its get cap allows, read
+    /// from the error object's `args.get_batch_bytes` of the hub's validation refusal. A fetch
+    /// splits its key group on it. Never serialized.
+    #[serde(skip)]
+    pub hub_get_cap: Option<u64>,
 }
 
 impl RdyError {
@@ -674,6 +679,7 @@ impl RdyError {
             briefing: None,
             warnings: None,
             upstream_status: None,
+            hub_get_cap: None,
         }
     }
 

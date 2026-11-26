@@ -2981,3 +2981,134 @@ fn upfast_restore_puts_follow_the_state_reply_zstd_member() {
         }
     }
 }
+
+/// The hub's history of a store that lacks `later` landings of it: the project, the hub's
+/// fake serving the longer store, the keys the pull must fetch, and the new tip.
+struct Lacking {
+    e: Env,
+    hub: Hub,
+    tip: Hash,
+    want: Vec<ObjectKey>,
+    _dir: tempfile::TempDir,
+    _hub_store: Local,
+}
+
+fn lacking(later: usize) -> Lacking {
+    let e = env(2);
+    let (dir, hub_store) = copy_project(&e);
+    let mut tip = e.landings[1];
+    for i in 0..later {
+        tip = land_in(&hub_store, &format!("r59023-{i}"));
+    }
+    let hub = Hub::new();
+    hub.serve(hub_store.read());
+    hub.state.lock().unwrap().canon = Some(tip);
+    let read = e.engine.read();
+    let want: Vec<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .filter(|k| !read.reader().has_kind(k.kind, &k.hash).unwrap())
+        .collect();
+    drop(read);
+    Lacking {
+        e,
+        hub,
+        tip,
+        want,
+        _dir: dir,
+        _hub_store: hub_store,
+    }
+}
+
+/// A get that the hub refuses over its cap, with the structured marker, is split in two as a
+/// get over `batch_bytes` is: each refused group's front half is asked next, the halves are
+/// fetched in turn, and the fetch completes with the hub's history.
+#[test]
+fn r59023_get_refused_over_the_cap_halves_and_completes() {
+    const CAP: u64 = 8_192;
+    let l = lacking(20);
+    let (e, hub) = (&l.e, &l.hub);
+    *hub.refuse_get_over.lock().unwrap() = Some((CAP, true));
+    Sync::new(e, hub).pull(PullRequest::default()).unwrap();
+    let gets = hub.gets.lock().unwrap().clone();
+    let replies = hub.get_replies.lock().unwrap().clone();
+    assert_eq!(gets.len(), replies.len());
+    let refused: Vec<usize> = (0..gets.len()).filter(|&i| replies[i].0 > CAP).collect();
+    assert!(!refused.is_empty(), "{replies:?}");
+    for &i in &refused {
+        let group = &gets[i].keys;
+        assert!(group.len() >= 2, "{group:?}");
+        let (front, _) = group.split_at(group.len() / 2);
+        assert_eq!(gets[i + 1].keys, front, "get {i}");
+        assert_eq!(gets[i + 1].purpose, gets[i].purpose);
+        assert_eq!(gets[i + 1].root, gets[i].root);
+    }
+    // the gets that were served ask for every wanted key once, in the hub's order
+    let kept: Vec<ObjectKey> = (0..gets.len())
+        .filter(|&i| replies[i].0 <= CAP)
+        .flat_map(|i| gets[i].keys.clone())
+        .collect();
+    assert_eq!(kept, l.want);
+    assert!(gets.len() < 2 * l.want.len(), "{}", gets.len());
+    let read = e.engine.read();
+    for k in &l.want {
+        assert!(read.reader().has_kind(k.kind, &k.hash).unwrap(), "{k:?}");
+    }
+    assert!(read.reader().has_kind(kinds::LANDING, &l.tip).unwrap());
+    drop(read);
+    assert_eq!(canon_of(e, "shared").unwrap().fetched, Some(l.tip));
+}
+
+/// The same refusal with no marker ends the fetch after one get with the hub's code, message and
+/// fix, and nothing of the history is stored. A refusal with the marker of a one-key group ends
+/// it with the hub's error unchanged, after the halving has reached that key.
+#[test]
+fn r59023_refusal_without_the_marker_ends_the_fetch() {
+    const CAP: u64 = 8_192;
+    let l = lacking(20);
+    let (e, hub) = (&l.e, &l.hub);
+    *hub.refuse_get_over.lock().unwrap() = Some((CAP, false));
+    let x = err(Sync::new(e, hub).pull(PullRequest::default()));
+    assert_eq!(x.code, "E_HUB_VALIDATION");
+    assert_eq!(
+        x.message,
+        format!("the records you asked for are larger than {CAP} bytes")
+    );
+    assert_eq!(x.fix, "ask for fewer records in each get");
+    assert_eq!(x.hub_get_cap, None);
+    assert_eq!(hub.gets.lock().unwrap().len(), 1);
+    // nothing was fetched: the tip is not held and no fetched tip is recorded
+    let read = e.engine.read();
+    assert!(!read.reader().has_kind(kinds::LANDING, &l.tip).unwrap());
+    drop(read);
+    assert_eq!(canon_of(e, "shared").and_then(|c| c.fetched), None);
+
+    // with the marker, every get is refused: the halving reaches one key and the hub's error
+    // ends the fetch, unchanged
+    *hub.refuse_get_over.lock().unwrap() = Some((1, true));
+    hub.gets.lock().unwrap().clear();
+    hub.get_replies.lock().unwrap().clear();
+    let x = err(Sync::new(e, hub).pull(PullRequest::default()));
+    assert_eq!(x.code, "E_HUB_VALIDATION");
+    assert_eq!(
+        x.message,
+        "the records you asked for are larger than 1 bytes"
+    );
+    assert_eq!(x.fix, "ask for fewer records in each get");
+    assert_eq!(x.hub_get_cap, Some(1));
+    let gets = hub.gets.lock().unwrap().clone();
+    // each refusal asks next for the front half of its group, down to one key
+    let mut n = gets[0].keys.len();
+    assert!(n >= 2, "{n}");
+    let mut steps = 1;
+    while n > 1 {
+        n /= 2;
+        steps += 1;
+    }
+    assert_eq!(gets.len(), steps);
+    assert_eq!(gets.last().unwrap().keys.len(), 1);
+    let read = e.engine.read();
+    assert!(!read.reader().has_kind(kinds::LANDING, &l.tip).unwrap());
+    drop(read);
+    assert_eq!(canon_of(e, "shared").and_then(|c| c.fetched), None);
+}

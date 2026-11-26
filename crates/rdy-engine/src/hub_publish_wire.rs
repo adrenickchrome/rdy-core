@@ -888,6 +888,28 @@ struct ErrorDto {
     retry_after: Option<u64>,
     #[serde(default, rename = "corrected", deserialize_with = "present_object")]
     _corrected: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The catalog's variables of the error (the hub's copy catalog). Any JSON value is kept:
+    /// the body is already bounded by [`decode_bounded_json`], and the one member read from it
+    /// is `get_batch_bytes` (see [`get_cap_marker`]).
+    #[serde(default)]
+    args: Option<serde_json::Value>,
+}
+
+/// The hub's code of a get refused over its cap.
+const GET_CAP_CODE: &str = "E_HUB_VALIDATION";
+
+/// The structured over-cap marker of a refusal: for code `E_HUB_VALIDATION`, an `args` object
+/// whose `get_batch_bytes` member is a decimal string of a u64 from 1. Any other shape is no
+/// marker, and no message text is read.
+fn get_cap_marker(code: &str, args: Option<&serde_json::Value>) -> Option<u64> {
+    if code != GET_CAP_CODE {
+        return None;
+    }
+    let text = args?.as_object()?.get("get_batch_bytes")?.as_str()?;
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<u64>().ok().filter(|n| *n >= 1)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1419,6 +1441,7 @@ fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyE
         Some(code) => RdyError::new(code, dto.message, dto.fix),
         None => upstream_refused(),
     };
+    e.hub_get_cap = get_cap_marker(&dto.code, dto.args.as_ref());
     e.issues = dto.issues.into_iter().map(issue).collect();
     e.issues.push(notice(
         format!("{REQUEST_ID_NOTICE}{}", dto.request_id),
