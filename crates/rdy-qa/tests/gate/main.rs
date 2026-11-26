@@ -32,6 +32,7 @@ mod gate_policy_verdict;
 mod gate_presented_answers;
 mod gate_readiness;
 mod gate_reaffirm_cards;
+mod gate_reaffirm_own_landing;
 mod gate_replay_test;
 mod gate_rule_checks;
 mod gate_rule_lifecycle;
