@@ -256,7 +256,7 @@ fn cres1_a_conflict_with_a_frozen_side_cannot_be_resolved_by_an_edit() {
         assert_eq!(e.code, E_FROZEN, "base {base}: {e}");
         assert!(
             e.message.contains("cannot be resolved by an edit")
-                && e.fix.contains("rdy view exclude"),
+                && e.fix.contains("rdy_view resolve and landed true"),
             "{e}"
         );
     }

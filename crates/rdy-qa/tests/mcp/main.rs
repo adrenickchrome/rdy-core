@@ -75,6 +75,7 @@ mod mcp_redaction;
 mod mcp_ref;
 mod mcp_reflects;
 mod mcp_reflects_history;
+mod mcp_refusal_recovery;
 mod mcp_repo_id;
 mod mcp_repo_links;
 mod mcp_repo_links_journey;

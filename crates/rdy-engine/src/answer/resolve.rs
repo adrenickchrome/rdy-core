@@ -44,7 +44,7 @@ pub(crate) fn act(
         (_, option) => Err(RdyError::new(
             E_BAD_INPUT,
             format!("{option} is not an option of {}", b.item.r#ref),
-            "answer with one of the card's options",
+            super::option_fix(&b.item),
         )),
     }
 }

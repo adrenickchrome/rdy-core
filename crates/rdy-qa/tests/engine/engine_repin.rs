@@ -119,10 +119,14 @@ fn sus3_a_superseded_decision_stays_suspect_after_repin() {
     .unwrap();
     land(&mut r, "work").unwrap();
     // the citation did not change, so a repin has nothing to do: it is refused, and the
-    // suspect stays (a superseded or revoked suspect clears only when the citation changes)
+    // suspect stays (a superseded or revoked target needs a changed citation)
     let e = write(&mut r, "work", json!([{"op": "repin", "id": c2}])).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
-    assert!(e.fix.contains("only when the citation changes"), "{e}");
+    assert!(
+        e.fix
+            .contains("A superseded or revoked target needs a changed citation"),
+        "{e}"
+    );
     let sus: Vec<_> = r
         .read()
         .suspects(&Scope::Canon)
@@ -158,7 +162,11 @@ fn sus3_a_repin_that_changes_no_pin_is_refused() {
         "{e}"
     );
     assert!(e.message.contains(&c), "{e}");
-    assert!(e.fix.contains("only when the citation changes"), "{e}");
+    assert!(
+        e.fix
+            .contains("A superseded or revoked target needs a changed citation"),
+        "{e}"
+    );
     // cites nothing
     let e = write(&mut r, "work", json!([{"op": "repin", "id": t}])).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");

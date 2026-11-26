@@ -1380,14 +1380,13 @@ fn own_decisions(
 /// names each exception and carries its card in `corrected.exceptions` (O21). A version with no
 /// summary never gets here: readiness refuses it first (D-ME2HD).
 fn exceptions_open(pref: &ProposalRef, open: &[Item]) -> RdyError {
-    let refs: Vec<&str> = open.iter().map(|i| i.r#ref.as_str()).collect();
+    let (refs, more) = crate::error::fix_list(open.iter().map(|i| i.r#ref.as_str()), open.len());
     let cards: Vec<_> = open.iter().map(card_of).collect();
     RdyError::new(
         E_EXCEPTION_OPEN,
         format!("{} exceptions of {pref} have no answer", open.len()),
         format!(
-            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
-            refs.join(", ")
+            "answer these exception cards first, in order: {refs}. Then relay the approval.{more}"
         ),
     )
     .with_corrected(serde_json::json!({ "exceptions": cards }))
@@ -1400,7 +1399,7 @@ fn deferrals_open(pref: &ProposalRef, card: &Item, n: usize) -> RdyError {
         E_DEFERRAL_OPEN,
         format!("{n} deferrals of {pref} have no answer"),
         format!(
-            "answer the card below with the person's words, then relay the approval again. Answer the deferral card first: {}",
+            "answer the deferral card first: {}. Then relay the approval.",
             card.r#ref
         ),
     )

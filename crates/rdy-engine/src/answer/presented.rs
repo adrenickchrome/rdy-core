@@ -242,7 +242,10 @@ pub fn answered_in_view(
     let Some(decision) = decision else {
         return Ok(None);
     };
-    if st.block(&Scope::View(view.clone()), &decision).is_err() {
+    if st
+        .held_block(&Scope::View(view.clone()), &decision)
+        .is_none()
+    {
         return Ok(None);
     }
     Ok(Some(AnsweredInView {

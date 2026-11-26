@@ -42,7 +42,7 @@ fn finish_reply(engine: &dyn Engine, view: &str, mut v: Value) -> Value {
         .filter_map(|w| w["block"].as_str())
         .filter_map(|id| {
             let bid = rdy_model::BlockId::parse(id).ok()?;
-            let label = match st.block(&scope, &bid).ok().and_then(|b| {
+            let label = match st.held_block(&scope, &bid).and_then(|b| {
                 b.field_str("title")
                     .or(b.field_str("name"))
                     .map(str::to_string)

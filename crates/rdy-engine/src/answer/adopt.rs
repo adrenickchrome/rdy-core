@@ -74,7 +74,7 @@ pub(crate) fn act(
         other => Err(RdyError::new(
             E_BAD_INPUT,
             format!("{other} is not an option of {}", b.item.r#ref),
-            "answer with one of: adopt, keep, later",
+            super::option_fix(&b.item),
         )),
     }
 }

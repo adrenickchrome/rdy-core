@@ -630,7 +630,7 @@ fn df2_a_person_does_not_relay_for_an_agent() {
     );
     assert_eq!(
         v["fix"],
-        "drop --relayed-by to approve yourself, or let the agent run rdy approve with RDY_ACTOR set to its actor",
+        "if you are the person, drop the relay flags. If you relay for the person, set RDY_ACTOR=agent:<name> to your own actor and pass that actor in --relayed-by with the person's words in --evidence",
         "{v}"
     );
     let (ok, v) = s.json(&["--json", "approve", &pref]);

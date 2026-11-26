@@ -244,7 +244,8 @@ pub(crate) fn reaffirmable(st: &ReadState, scope: &Scope, id: &BlockId) -> bool 
 /// An `E_FROZEN` fix, with [`FROZEN_REAFFIRM_HINT`] appended when `reaffirmable`.
 pub(crate) fn frozen_fix(fix: String, reaffirmable: bool) -> String {
     if reaffirmable {
-        format!("{fix}. {FROZEN_REAFFIRM_HINT}")
+        let sep = if fix.ends_with('.') { " " } else { ". " };
+        format!("{fix}{sep}{FROZEN_REAFFIRM_HINT}")
     } else {
         fix
     }

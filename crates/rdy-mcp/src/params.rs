@@ -5,7 +5,7 @@
 //! `Result`, and a failure is an `E_BAD_INPUT` that names the parameter and the shape the tool's
 //! published input schema asks for. The rmcp macro finds the input schema by the identifier
 //! `Parameters`, so this type keeps that name.
-use rdy_engine::did_you_mean::{nearest, unknown_field_error};
+use rdy_engine::did_you_mean::{suggest, unknown_field_error};
 use rdy_engine::{E_BAD_INPUT, RdyError};
 use rmcp::handler::server::common::{FromContextPart, schema_for_input};
 use rmcp::handler::server::tool::ToolCallContext;
@@ -112,6 +112,8 @@ pub fn parse_params_strict<P: DeserializeOwned + JsonSchema + 'static>(
         Some(Miss::Unknown { path, near, known }) => {
             let all = known.join(", ");
             let fix = match (near, known.is_empty()) {
+                // W-core-9: a block id on the links tool asks for a block's relations
+                _ if tool == "rdy_links" && path == "id" => RDY_LINKS_ID_HINT.to_string(),
                 (Some(y), _) => format!("did you mean \"{y}\"? the parameters here are {all}"),
                 (None, true) => format!("remove \"{path}\"; {tool} takes no parameters"),
                 (None, false) => format!("remove \"{path}\"; the parameters here are {all}"),
@@ -123,14 +125,32 @@ pub fn parse_params_strict<P: DeserializeOwned + JsonSchema + 'static>(
             )
         }
         None => unknown_field_error(tool, &e.to_string()).unwrap_or_else(|| {
+            // W-core-1: the one act an agent often tries, which no plan answer takes
+            let hint = if e.to_string().starts_with(REAFFIRM_ACT_REFUSAL) {
+                format!(" {REAFFIRM_ACT_HINT}")
+            } else {
+                String::new()
+            };
             RdyError::new(
                 E_BAD_INPUT,
                 format!("{tool}: the parameters do not parse: {e}"),
-                "check each parameter against the tool's input schema (tools/list)",
+                format!("check each parameter against the tool's input schema (tools/list){hint}"),
             )
         }),
     })
 }
+
+/// The fix of an `id` argument to `rdy_links`: the tool reads links between projects, and a
+/// block's relations have other tools. `{id}` is example syntax, not the bad value.
+const RDY_LINKS_ID_HINT: &str = "rdy_links reads links between projects. To read a block, use rdy_context {id}; use rdy_trace {id} for its decision links, or rdy_impact {id} for its dependents.";
+
+/// What serde says of the act `reaffirm`: a plan answer takes confirm, defer, done or dismiss.
+const REAFFIRM_ACT_REFUSAL: &str =
+    "unknown variant `reaffirm`, expected one of `confirm`, `defer`, `done`, `dismiss`";
+
+/// The sentence a plan answer whose act is `reaffirm` gets after the usual fix: no such act
+/// exists, and the item closes with a write.
+const REAFFIRM_ACT_HINT: &str = "A reaffirm item closes with an rdy_write reaffirm op.";
 
 /// The refusal of a wrong-typed parameter, in the words every tool gives (mparm1).
 fn wrong_type(tool: &str, path: &str, expected: &str, actual: &str) -> RdyError {
@@ -408,7 +428,7 @@ fn locate(value: &Value, schema: &Value, root: &Value, path: &str) -> Option<Mis
             let names: Vec<&str> = known.iter().map(String::as_str).collect();
             return Some(Miss::Unknown {
                 path: join(path, key),
-                near: nearest(key, &names).map(str::to_string),
+                near: suggest(key, &names).map(str::to_string),
                 known,
             });
         }

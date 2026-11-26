@@ -196,9 +196,10 @@ fn delta(was: &str, now: &str) -> BTreeMap<String, (String, Value)> {
 
 /// This release's closed contract delta so far, from its predecessor: span maps' (`dedup_spans`)
 /// leaves, and plan deltas' (`plan_delta`): the feature, its activation by a PLAN of encoding 1,
-/// its rule and its first-use dump and sync fixtures. The integrated agent text adds none. A
+/// its rule and its first-use dump and sync fixtures; and the refusal texts of the recovery task:
+/// four error rows and two templates (`r5909_successor_contract_changes_only_refusal_text`). A
 /// later task of the release adds its own rows.
-const RELEASE_DELTA: [&str; 22] = [
+const RELEASE_DELTA: [&str; 28] = [
     "added /cli/runtime/probes/compact/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/fsck/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/status/stdout/deduplicated_bytes",
@@ -221,6 +222,12 @@ const RELEASE_DELTA: [&str; 22] = [
     "changed /store/registered_names",
     "added /sync/fixture_digests/sync4-reduction.bin",
     "added /sync/fixture_digests/sync4-reduction.expect.json",
+    "changed /errors_warnings/error_rows/row=E_CONFLICT_UNRESOLVED",
+    "changed /errors_warnings/error_rows/row=E_DEFERRAL_OPEN",
+    "changed /errors_warnings/error_rows/row=E_EXCEPTION_OPEN",
+    "changed /errors_warnings/error_rows/row=E_PLAN_ITEM",
+    "changed /errors_warnings/templates/HUMAN_RELAY_FIX",
+    "changed /errors_warnings/templates/PLAN_ITEM_FIX",
 ];
 
 /// r5901: M5a's fixture is the predecessor of this plan's fixture. It keeps M5a's frozen bytes,
@@ -435,4 +442,140 @@ fn r5901_agent_delta_is_descriptive_only() {
     for leaf in &text {
         assert!(descriptive(leaf), "{leaf} is words");
     }
+}
+
+/// The exact refusal text the fixture holds now where it differs from the predecessor: four
+/// error rows (code, then fix) and two templates. The tool descriptions and the fixes that the
+/// engine builds with their values are not in the fixture; their texts are pinned where they are
+/// made (`r5909_*` in rdy-engine, the mcp and cli areas).
+const REFUSAL_TEXT: [(&str, &str); 6] = [
+    (
+        "/errors_warnings/error_rows/row=E_CONFLICT_UNRESOLVED/2",
+        "read the conflict with rdy_context; update an editable block with base, or take the landed side of a frozen decision with rdy_view resolve and landed true",
+    ),
+    (
+        "/errors_warnings/error_rows/row=E_DEFERRAL_OPEN/2",
+        "answer the deferral card first: <ref>. Then relay the approval.",
+    ),
+    (
+        "/errors_warnings/error_rows/row=E_EXCEPTION_OPEN/2",
+        "answer these exception cards first, in order: <refs>. Then relay the approval.",
+    ),
+    (
+        "/errors_warnings/error_rows/row=E_PLAN_ITEM/2",
+        "read the plan again after each write. Check counts.open and read every page before answering. An already_written consequence may have no item. One unmatched item or group refuses the whole call.",
+    ),
+    (
+        "/errors_warnings/templates/HUMAN_RELAY_FIX",
+        "\"if you are the person, drop the relay flags. If you relay for the person, set RDY_ACTOR=agent:<name> to your own actor and pass that actor in --relayed-by with the person's words in --evidence\"",
+    ),
+    (
+        "/errors_warnings/templates/PLAN_ITEM_FIX",
+        "\"read the plan again after each write. Check counts.open and read every page before answering. An already_written consequence may have no item. One unmatched item or group refuses the whole call.\"",
+    ),
+];
+
+/// The value at `path` of the keyed fixture `v`.
+fn at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('/')
+        .filter(|p| !p.is_empty())
+        .try_fold(v, |cur, k| match cur {
+            Value::Array(items) => k.parse::<usize>().ok().and_then(|i| items.get(i)),
+            other => other.get(k),
+        })
+}
+
+/// r5909: against the frozen predecessor, the successor keeps every tool name, every argument and
+/// required set and every error code, and its result fields differ only by the compact report's
+/// `deduplicated_bytes`. The text that changed is the exact table above; the plan-delta and
+/// span-map rows are those of [`RELEASE_DELTA`]. Every predecessor digest stays (checked by
+/// `r5901_successor_keeps_every_frozen_fixture`).
+#[test]
+fn r5909_successor_contract_changes_only_refusal_text() {
+    let (was, now) = (keyed(&read(PREDECESSOR)), keyed(&read(SELECTED)));
+    // the tool names, the argument names and required sets of every tool
+    assert_eq!(at(&was, "/mcp/tool_names"), at(&now, "/mcp/tool_names"));
+    let (tools_was, tools_now) = (
+        at(&was, "/mcp/tools").unwrap(),
+        at(&now, "/mcp/tools").unwrap(),
+    );
+    assert_eq!(
+        tools_was.as_object().unwrap().keys().collect::<Vec<_>>(),
+        tools_now.as_object().unwrap().keys().collect::<Vec<_>>()
+    );
+    for (name, tool) in tools_was.as_object().unwrap() {
+        let other = &tools_now[name];
+        let args = |t: &Value| -> Vec<String> {
+            t["input_schema"]["properties"]
+                .as_object()
+                .map(|p| p.keys().cloned().collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(args(tool), args(other), "{name}: argument names");
+        assert_eq!(
+            tool["input_schema"]["required"], other["input_schema"]["required"],
+            "{name}: required set"
+        );
+    }
+    // every error code
+    assert_eq!(
+        at(&was, "/errors_warnings/codes"),
+        at(&now, "/errors_warnings/codes")
+    );
+    assert_eq!(
+        at(&was, "/mcp/refusal_error_rows"),
+        at(&now, "/mcp/refusal_error_rows")
+    );
+    // the result fields: only the compact report's span-map byte count is new
+    let fields: Vec<String> = delta(PREDECESSOR, SELECTED)
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("/mcp/result_fields"))
+        .map(|(path, (kind, _))| format!("{kind} {path}"))
+        .collect();
+    assert_eq!(
+        fields,
+        ["added /mcp/result_fields/rdy_compact/ok/deduplicated_bytes"]
+    );
+    // the text that changed is exactly the table, and every other leaf of the three subtrees
+    // that differs is one the release's own rows name
+    let changed: Vec<(String, Value)> = delta(PREDECESSOR, SELECTED)
+        .into_iter()
+        .filter(|(path, (kind, _))| kind == "changed" && path.starts_with("/errors_warnings"))
+        .map(|(path, (_, value))| (path, value))
+        .collect();
+    let rows: Vec<&str> = changed.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(
+        rows,
+        [
+            "/errors_warnings/error_rows/row=E_CONFLICT_UNRESOLVED",
+            "/errors_warnings/error_rows/row=E_DEFERRAL_OPEN",
+            "/errors_warnings/error_rows/row=E_EXCEPTION_OPEN",
+            "/errors_warnings/error_rows/row=E_PLAN_ITEM",
+            "/errors_warnings/templates/HUMAN_RELAY_FIX",
+            "/errors_warnings/templates/PLAN_ITEM_FIX",
+        ]
+    );
+    for (path, want) in REFUSAL_TEXT {
+        let got = at(&now, path).unwrap_or_else(|| panic!("{path}"));
+        assert_eq!(got, &Value::String(want.into()), "{path}");
+        // the message of a row, and the code, are the predecessor's
+        if path.ends_with("/2") {
+            let row = path.trim_end_matches("/2");
+            assert_eq!(at(&was, &format!("{row}/0")), at(&now, &format!("{row}/0")));
+            assert_eq!(at(&was, &format!("{row}/1")), at(&now, &format!("{row}/1")));
+        }
+    }
+    // the plan-delta and span-map rows are the release's own: the fixture's delta is the list
+    let mut ours: Vec<String> = delta(PREDECESSOR, SELECTED)
+        .into_iter()
+        .map(|(path, (kind, _))| format!("{kind} {path}"))
+        .collect();
+    ours.sort();
+    let mut want: Vec<String> = RELEASE_DELTA.iter().map(|s| s.to_string()).collect();
+    want.sort();
+    assert_eq!(ours, want);
+    assert!(
+        RELEASE_DELTA.iter().any(|d| d.contains("plan_delta"))
+            && RELEASE_DELTA.iter().any(|d| d.contains("dedup_spans"))
+    );
 }

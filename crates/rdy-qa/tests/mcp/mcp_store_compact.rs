@@ -289,7 +289,7 @@ fn mh7_compact_role_and_input_guards_precede_io() {
     assert_eq!(e.message, "no session");
     assert_eq!(
         e.fix,
-        "state rdy/actor and rdy/run in _meta, or call rdy_session"
+        "state rdy/actor and rdy/run in _meta, or call rdy_session with your actor, run and role, then resend the call"
     );
     // a reader: refused with a dry run too
     let mut reader = McpState::new(engine.clone());

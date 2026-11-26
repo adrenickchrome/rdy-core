@@ -213,7 +213,13 @@ fn cf1_a_conflict_with_nothing_frozen_is_refused_pointing_to_a_write() {
         e.message.contains("no accepted or rejected decision"),
         "{e}"
     );
-    assert!(e.fix.contains("base="), "{e}");
+    assert_eq!(
+        e.fix,
+        format!(
+            "read {c} with rdy_context. Update the block with base set to the base or side version you choose."
+        ),
+        "{e}"
+    );
     assert_eq!(r.read().conflicts(&view("a")).unwrap().len(), 1);
 }
 
@@ -250,13 +256,10 @@ fn cf1_e_frozen_names_the_resolution_first() {
         e.message.contains("cannot be resolved by an edit"),
         "the message is kept: {e}"
     );
-    let first = format!(
-        "take the landed side (rdy view resolve b {d} --landed; rdy_view {{op: \"resolve\", view: \"b\", block: \"{d}\", landed: true}})"
-    );
-    assert!(e.fix.starts_with(&first), "{e}");
-    assert!(
-        e.fix.contains("rdy view exclude") && e.fix.contains("supersedes or revokes"),
-        "the other ways out follow: {e}"
+    assert_eq!(
+        e.fix,
+        "take the landed side with rdy_view resolve and landed true, or exclude a colliding reaffirm change. Then read the new plan before reaffirming.",
+        "{e}"
     );
 }
 

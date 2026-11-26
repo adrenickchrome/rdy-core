@@ -689,6 +689,43 @@ impl RdyError {
     }
 }
 
+/// The most entries a recovery fix lists.
+pub const FIX_LIST_MAX: usize = 32;
+/// The most Unicode scalar values one listed entry shows.
+pub const FIX_ENTRY_MAX: usize = 256;
+
+/// `entry`, cut to [`FIX_ENTRY_MAX`] Unicode scalar values: a longer one keeps 255 and ends with
+/// `…`.
+pub fn fix_entry(entry: &str) -> String {
+    if entry.chars().nth(FIX_ENTRY_MAX).is_none() {
+        return entry.to_string();
+    }
+    let mut cut: String = entry.chars().take(FIX_ENTRY_MAX - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// The entries of `entries` (`total` of them), at most [`FIX_LIST_MAX`], each cut by
+/// [`fix_entry`], joined with `, `; and the sentence to append to the fix when `total` is over
+/// the limit (else empty). The iterator is read for its first entries only.
+pub fn fix_list<I>(entries: I, total: usize) -> (String, String)
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let shown: Vec<String> = entries
+        .into_iter()
+        .take(FIX_LIST_MAX)
+        .map(|e| fix_entry(e.as_ref()))
+        .collect();
+    let more = if total > FIX_LIST_MAX {
+        format!(" First {FIX_LIST_MAX} of {total}; read the full list before retrying.")
+    } else {
+        String::new()
+    };
+    (shown.join(", "), more)
+}
+
 impl fmt::Display for RdyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {} (fix: {})", self.code, self.message, self.fix)
