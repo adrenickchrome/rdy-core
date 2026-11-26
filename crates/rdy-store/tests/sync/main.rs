@@ -26,6 +26,7 @@ mod hub_canon;
 mod hub_ports;
 mod ingest_chain;
 mod link_delivery_stream;
+mod partial_history;
 mod port_merge;
 mod reflects_stream;
 mod snapshot_delta;

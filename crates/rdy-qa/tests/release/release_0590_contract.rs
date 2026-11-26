@@ -197,9 +197,9 @@ fn delta(was: &str, now: &str) -> BTreeMap<String, (String, Value)> {
 /// This release's closed contract delta so far, from its predecessor: span maps' (`dedup_spans`)
 /// leaves, and plan deltas' (`plan_delta`): the feature, its activation by a PLAN of encoding 1,
 /// its rule and its first-use dump and sync fixtures; and the refusal texts of the recovery task:
-/// four error rows and two templates (`r5909_successor_contract_changes_only_refusal_text`). A
-/// later task of the release adds its own rows.
-const RELEASE_DELTA: [&str; 28] = [
+/// four error rows and two templates (`r5909_successor_contract_changes_only_refusal_text`); and
+/// a partial history's codes ([`HISTORY_CODES`]). A later task of the release adds its own rows.
+const RELEASE_DELTA: [&str; 36] = [
     "added /cli/runtime/probes/compact/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/fsck/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/status/stdout/deduplicated_bytes",
@@ -228,7 +228,23 @@ const RELEASE_DELTA: [&str; 28] = [
     "changed /errors_warnings/error_rows/row=E_PLAN_ITEM",
     "changed /errors_warnings/templates/HUMAN_RELAY_FIX",
     "changed /errors_warnings/templates/PLAN_ITEM_FIX",
+    "added /errors_warnings/codes/E_HISTORY_PENDING",
+    "added /errors_warnings/codes/W_HISTORY_PENDING",
+    "added /errors_warnings/error_rows/row=E_HISTORY_PENDING",
+    "added /errors_warnings/error_rows/row=W_HISTORY_PENDING",
+    "added /errors_warnings/templates/HISTORY_PENDING_FIX",
+    "changed /mcp/refusal_error_rows",
+    "added /mcp/result_fields/rdy_schema/ok/errors?/E_HISTORY_PENDING",
+    "added /mcp/result_fields/rdy_schema/ok/errors?/W_HISTORY_PENDING",
 ];
+
+/// The codes a partial history adds (D-GGTYA): E_HISTORY_PENDING and W_HISTORY_PENDING, each with
+/// its code, its error row and its `rdy_schema` entry, and their one fix template. These are the
+/// only codes the release adds.
+const HISTORY_CODES: [&str; 2] = ["E_HISTORY_PENDING", "W_HISTORY_PENDING"];
+
+/// The shared fix of [`HISTORY_CODES`].
+const HISTORY_FIX: &str = "wait for the clone to finish, or run rdy pull to resume it";
 
 /// r5901: M5a's fixture is the predecessor of this plan's fixture. It keeps M5a's frozen bytes,
 /// it follows the fixture this plan's fixture started from, every earlier fixture keeps its
@@ -369,8 +385,18 @@ fn descriptive(path: &str) -> bool {
 }
 
 /// The shape leaves later tasks of the release add to the agent subtrees: span maps' byte count
-/// in the compact report. Nothing else may move.
-const ADDED_LEAVES: &[&str] = &["member /mcp/result_fields/rdy_compact/ok/deduplicated_bytes"];
+/// in the compact report, and a partial history's two codes (their refusal rows, `rdy_schema`
+/// entries, codes, error rows and fix template). Nothing else may move.
+const ADDED_LEAVES: &[&str] = &[
+    "length /mcp/refusal_error_rows",
+    "member /mcp/result_fields/rdy_compact/ok/deduplicated_bytes",
+    "member /mcp/result_fields/rdy_schema/ok/errors?/E_HISTORY_PENDING",
+    "member /mcp/result_fields/rdy_schema/ok/errors?/W_HISTORY_PENDING",
+    "member /errors_warnings/codes/E_HISTORY_PENDING",
+    "member /errors_warnings/codes/W_HISTORY_PENDING",
+    "length /errors_warnings/error_rows",
+    "member /errors_warnings/templates/HISTORY_PENDING_FIX",
+];
 
 /// Every difference between `was` and `now` below `path`: a changed string leaf, or a change of
 /// shape (a missing member, another type, another list length, a changed non-string leaf).
@@ -517,16 +543,39 @@ fn r5909_successor_contract_changes_only_refusal_text() {
             "{name}: required set"
         );
     }
-    // every error code
+    // every error code stays, and the only new ones are a partial history's two
+    let mut codes = at(&was, "/errors_warnings/codes").unwrap().clone();
+    for code in HISTORY_CODES {
+        codes[code] = Value::String(format!("{code:?}"));
+    }
+    assert_eq!(Some(&codes), at(&now, "/errors_warnings/codes"));
+    let mut refusals: Vec<Value> = at(&was, "/mcp/refusal_error_rows")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
+    let after = refusals
+        .iter()
+        .position(|c| c == "E_STORE_READ_ONLY")
+        .expect("the read-only row")
+        + 1;
+    for (i, code) in HISTORY_CODES.iter().enumerate() {
+        refusals.insert(after + i, Value::String(code.to_string()));
+    }
     assert_eq!(
-        at(&was, "/errors_warnings/codes"),
-        at(&now, "/errors_warnings/codes")
-    );
-    assert_eq!(
-        at(&was, "/mcp/refusal_error_rows"),
+        Some(&Value::Array(refusals)),
         at(&now, "/mcp/refusal_error_rows")
     );
-    // the result fields: only the compact report's span-map byte count is new
+    for code in HISTORY_CODES {
+        let row = at(&now, &format!("/errors_warnings/error_rows/row={code}")).unwrap();
+        assert_eq!(row[2], HISTORY_FIX, "{code}");
+    }
+    assert_eq!(
+        at(&now, "/errors_warnings/templates/HISTORY_PENDING_FIX"),
+        Some(&Value::String(format!("{HISTORY_FIX:?}")))
+    );
+    // the result fields: the compact report's span-map byte count and the two codes' schema
+    // entries are new
     let fields: Vec<String> = delta(PREDECESSOR, SELECTED)
         .into_iter()
         .filter(|(path, _)| path.starts_with("/mcp/result_fields"))
@@ -534,7 +583,11 @@ fn r5909_successor_contract_changes_only_refusal_text() {
         .collect();
     assert_eq!(
         fields,
-        ["added /mcp/result_fields/rdy_compact/ok/deduplicated_bytes"]
+        [
+            "added /mcp/result_fields/rdy_compact/ok/deduplicated_bytes",
+            "added /mcp/result_fields/rdy_schema/ok/errors?/E_HISTORY_PENDING",
+            "added /mcp/result_fields/rdy_schema/ok/errors?/W_HISTORY_PENDING",
+        ]
     );
     // the text that changed is exactly the table, and every other leaf of the three subtrees
     // that differs is one the release's own rows name

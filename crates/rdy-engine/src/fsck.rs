@@ -47,6 +47,29 @@ pub struct FsckReport {
     /// current mask. Present only when not empty. A warning is not damage: fsck still succeeds.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<crate::CarriedWarning>,
+    /// The project's history (D-GGTYA): absent for a store with no history ref; while it is
+    /// incomplete, `held` is the exact count a full recheck of the staged batches finds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history: Option<FsckHistory>,
+}
+
+/// How much of the project's history the store holds, as fsck counted it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct FsckHistory {
+    pub complete: bool,
+    pub held: u64,
+    pub total: u64,
+}
+
+impl FsckHistory {
+    /// The text line: `history: partial (<n> of <m>)`, or `history: complete (<m> records)`.
+    pub fn line(&self) -> String {
+        if self.complete {
+            format!("history: complete ({} records)", self.total)
+        } else {
+            format!("history: partial ({} of {})", self.held, self.total)
+        }
+    }
 }
 
 /// What an active redaction removed, and the payloads fsck hashed, counted apart (D-3M81W).
@@ -102,7 +125,36 @@ impl Rdy {
                 checked_payloads: c.checked_payloads,
             }),
             warnings: self.read().carried_warnings()?,
+            history: self.fsck_history()?,
         })
+    }
+
+    /// The full check: [`Rdy::fsck`] of a project whose history is complete. While the history
+    /// is still arriving it is E_HISTORY_PENDING: the records behind the frontier are missing.
+    pub fn fsck_full(&self) -> Result<FsckReport, RdyError> {
+        self.read().require_complete_history()?;
+        self.fsck()
+    }
+
+    /// The history member of the report: each staged batch rechecked whole (every payload
+    /// hashed), then the listed keys held counted once each.
+    fn fsck_history(&self) -> Result<Option<FsckHistory>, RdyError> {
+        let st = self.read();
+        let reader = st.reader();
+        let all = reader.histories()?;
+        let Some((remote, h)) = all
+            .iter()
+            .find(|(_, h)| !h.complete)
+            .or_else(|| all.first())
+        else {
+            return Ok(None);
+        };
+        let p = crate::partial_history::checked_progress_of(reader, st.root(), remote, h)?;
+        Ok(Some(FsckHistory {
+            complete: p.complete,
+            held: p.held,
+            total: p.total,
+        }))
     }
 }
 
@@ -154,6 +206,7 @@ impl Rdy {
                 checked_payloads: c.checked_payloads,
             }),
             warnings: self.read().carried_warnings()?,
+            history: None,
         })
     }
 
@@ -281,6 +334,7 @@ mod tests {
             foreign_signatures: 0,
             redaction,
             warnings: Vec::new(),
+            history: None,
         }
     }
 

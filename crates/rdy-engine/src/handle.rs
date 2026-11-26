@@ -472,6 +472,7 @@ impl Rdy {
             lease_ttl_ms,
             coverage_memo: Default::default(),
             memo: Default::default(),
+            history: Arc::new(crate::partial_history::HistoryCell::default()),
             detectors: &tensions::DETECTORS,
             error: None,
         });

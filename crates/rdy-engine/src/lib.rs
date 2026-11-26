@@ -97,6 +97,7 @@ mod materialize;
 pub mod mention_review;
 pub mod neighbors;
 mod pack_load;
+pub mod partial_history;
 mod paths;
 pub use paths::{logical_of, native_join};
 pub mod pending;
@@ -246,7 +247,7 @@ pub use config::{
     serve_config,
 };
 pub use engine::{Engine, Local, ReadFn, WriteFn};
-pub use fsck::FsckReport;
+pub use fsck::{FsckHistory, FsckReport};
 pub use pack_load::{
     FileStamp, PackFingerprint, ReloadOutcome, pack_fingerprint, pack_source_reads,
     pack_source_reads_on_this_thread, project_pack, project_pack_compiled, resolve_pack,

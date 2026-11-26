@@ -185,6 +185,7 @@ impl StoreReader {
             crate::sync_state::check_sync_refs(&sync, self.mode()?, listed, |k, h| {
                 self.has_kind(k, h)
             })?;
+            crate::sync_state::check_history_refs(self)?;
         }
         let Some(r) = self.repo_id()? else {
             return Err(bad(NO_REPO_ID));
@@ -253,6 +254,7 @@ impl Store {
                     Some(
                         crate::sync_state::SyncRefName::Canon { .. }
                             | crate::sync_state::SyncRefName::View { .. }
+                            | crate::sync_state::SyncRefName::History { .. }
                     )
                 );
             if !value.is_empty() && !keep {

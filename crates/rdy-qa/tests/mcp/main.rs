@@ -55,6 +55,7 @@ mod mcp_m3_gate_reads;
 mod mcp_mentions;
 mod mcp_neighbors_plan;
 mod mcp_params;
+mod mcp_partial_history;
 mod mcp_people;
 mod mcp_plan;
 mod mcp_plan_contract;

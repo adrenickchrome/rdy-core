@@ -20321,6 +20321,7 @@
       "E_HAS_CHILDREN": "\"E_HAS_CHILDREN\"",
       "E_HAS_DEPENDENTS": "\"E_HAS_DEPENDENTS\"",
       "E_HELD_BY_READER": "\"E_HELD_BY_READER\"",
+      "E_HISTORY_PENDING": "\"E_HISTORY_PENDING\"",
       "E_HUB_ACTOR_CLAIM": "\"E_HUB_ACTOR_CLAIM\"",
       "E_INSTRUCTION_LOCKED": "\"E_INSTRUCTION_LOCKED\"",
       "E_INTENT_EXPIRED": "\"E_INTENT_EXPIRED\"",
@@ -20418,6 +20419,7 @@
       "W_DIAGRAM_FAILED": "\"W_DIAGRAM_FAILED\"",
       "W_DIAGRAM_INVALID": "\"W_DIAGRAM_INVALID\"",
       "W_DIAGRAM_UNSUPPORTED": "\"W_DIAGRAM_UNSUPPORTED\"",
+      "W_HISTORY_PENDING": "\"W_HISTORY_PENDING\"",
       "W_HOOK_CONFLICT": "\"W_HOOK_CONFLICT\"",
       "W_HOOK_DIRECT_EDIT": "\"W_HOOK_DIRECT_EDIT\"",
       "W_HOOK_NO_CITATION": "\"W_HOOK_NO_CITATION\"",
@@ -20672,6 +20674,16 @@
         "E_STORE_READ_ONLY",
         "an unsupported feature allows reads only, or its store has no lock file",
         "open the project with the rdy build named by the refusal"
+      ],
+      [
+        "E_HISTORY_PENDING",
+        "history is incomplete and the call needs records behind its frontier",
+        "wait for the clone to finish, or run rdy pull to resume it"
+      ],
+      [
+        "W_HISTORY_PENDING",
+        "history is incomplete and the reply leaves out records behind its frontier",
+        "wait for the clone to finish, or run rdy pull to resume it"
       ],
       [
         "E_UPGRADE_MOVED",
@@ -21431,6 +21443,7 @@
       "GROUP_FIX": "\"give the entities distinct names and aliases\"",
       "HAS_POLICY_FIX": "\"change it with rdy_write / rdy edit, with implements a decision\"",
       "HELD_BY_READER_FIX": "\"release the earlier read state, then try again\"",
+      "HISTORY_PENDING_FIX": "\"wait for the clone to finish, or run rdy pull to resume it\"",
       "HOLDER_FIX": "\"Ask the uploader to send the removal again, and take the upload that carries it.\"",
       "HOLDER_LOAD_REDACTION_LIMIT_FIX": "\"Keep the dump chain and the holder it came from. This rdy cannot load this chain.\"",
       "HOOK_CONFLICT_FIX": "\"Review the existing file, then install or remove the rdy hook explicitly.\"",
@@ -22072,6 +22085,8 @@
       "E_STORE_FORMAT",
       "E_STORE_FOLLOWER",
       "E_STORE_READ_ONLY",
+      "E_HISTORY_PENDING",
+      "W_HISTORY_PENDING",
       "E_UPGRADE_MOVED",
       "E_UPGRADE_BACKUP",
       "E_UPGRADE_FAILED",
@@ -25786,6 +25801,10 @@
               "fix": "string",
               "when": "string"
             },
+            "E_HISTORY_PENDING": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_INSTRUCTION_LOCKED": {
               "fix": "string",
               "when": "string"
@@ -26067,6 +26086,10 @@
               "when": "string"
             },
             "W_DIAGRAM_UNSUPPORTED": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_HISTORY_PENDING": {
               "fix": "string",
               "when": "string"
             },

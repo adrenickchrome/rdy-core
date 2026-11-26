@@ -248,6 +248,8 @@ impl ReadState {
         prev: &ChainEnd,
         out: &Path,
     ) -> Result<DumpSummary, RdyError> {
+        // a dump holds the whole history: none is written while it is still arriving
+        self.require_complete_history()?;
         self.ensure_current_epoch()?;
         let repo_id = repo_id_of(self)?;
         if prev.repo_id != repo_id {
@@ -370,6 +372,8 @@ impl ReadState {
     /// Writes the dump (`prev` None) or the increment after `prev` to `out`, through the
     /// output guards and [`place`].
     fn dump_to(&self, out: &Path, prev: Option<&ChainEnd>) -> Result<DumpSummary, RdyError> {
+        // a dump holds the whole history: none is written while it is still arriving
+        self.require_complete_history()?;
         self.check_dump_out(out)?;
         let files = self.dump_files()?;
         let store = store_of(self)?;
@@ -474,7 +478,7 @@ impl ReadState {
         let mut failed = None;
         let mut facts = RemovalTally::default();
         let mut written = 0u64;
-        let read = reader.for_each_batch_after(base, self.seq(), &mut |b| {
+        let read = reader.for_each_dump_batch_after(base, self.seq(), &mut |b| {
             // the source walker's applies; their spans are resolved by the store below
             facts.observe(&b)?;
             w.batch(&b).map_err(|e| {

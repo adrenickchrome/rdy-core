@@ -770,6 +770,9 @@ pub struct ReadState {
     pub(crate) coverage_memo: CoverageMemo,
     /// The gate's landing reads on this state ([`memo`]), memoised; never carried.
     pub(crate) memo: memo::ReadMemo,
+    /// The history ref as this state was published, and its progress, read once on first use
+    /// ([`crate::partial_history`]); never stored.
+    pub(crate) history: Arc<crate::partial_history::HistoryCell>,
     /// The tension detectors: the registry, unless a test set others.
     pub(crate) detectors: &'static [&'static dyn Detector],
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
@@ -1366,6 +1369,7 @@ impl ReadState {
             lease_ttl_ms: self.lease_ttl_ms,
             coverage_memo: Default::default(),
             memo: Default::default(),
+            history: Arc::clone(&self.history),
             detectors: self.detectors,
             error: self.error.clone(),
         }

@@ -90,6 +90,11 @@ pub const E_ITEM_MOVED: &str = "E_ITEM_MOVED";
 pub const E_ELICITATION_UNAVAILABLE: &str = "E_ELICITATION_UNAVAILABLE";
 /// Changes in the view depend on the change being excluded (each one is an issue).
 pub const E_HAS_DEPENDENTS: &str = "E_HAS_DEPENDENTS";
+/// The project's history is incomplete (a clone took its canon state first) and the call needs
+/// records behind its frontier (D-GGTYA).
+pub const E_HISTORY_PENDING: &str = "E_HISTORY_PENDING";
+/// A read omits history behind an incomplete history's frontier (D-GGTYA).
+pub const W_HISTORY_PENDING: &str = "W_HISTORY_PENDING";
 /// A subset leaves out changes its members depend on (each one is an issue).
 pub const E_DEPS_MISSING: &str = "E_DEPS_MISSING";
 /// The version being landed carries conflicts it has not resolved (each one is an issue).
@@ -1396,7 +1401,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 119] = [
+const CORE_ERROR_CODES: [&str; 120] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1514,6 +1519,7 @@ const CORE_ERROR_CODES: [&str; 119] = [
     E_UPGRADE_FAILED,
     E_STORE_FOLLOWER,
     E_STORE_READ_ONLY,
+    E_HISTORY_PENDING,
     crate::brief::E_BRIEF_REQUIRED,
     crate::brief::E_BRIEF_STALE,
 ];

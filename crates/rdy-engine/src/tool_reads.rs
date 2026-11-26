@@ -440,6 +440,12 @@ fn entries_in(
     } else {
         Default::default()
     };
+    // a history still arriving leaves out the markers behind its frontier, said once, last
+    if format == "compact"
+        && let Some(w) = st_.history_warning()?
+    {
+        warnings.push(json!({"code": w.code, "message": w.message, "fix": w.fix}));
+    }
     // a /regex/ read is refused, before any regex runs, when the text it would match exceeds
     // READ_REGEX_HAYSTACK_MAX. A first pass counts every candidate line (no short-circuit) and
     // matches nothing; the second pass matches.

@@ -367,7 +367,7 @@ fn attachments(
 
 /// The objects a request names, as the index's request entry names them: its spans' objects,
 /// its versions and its blobs.
-fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
+pub(crate) fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
     let m = &r.manifest;
     m.spans
         .iter()
@@ -867,6 +867,54 @@ pub(crate) fn check_typed_context(
                 }
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The PLAN records of a canon state's take (D-4PV25): each whole version or delta decodes, a
+/// delta folds over its carried chain, and each keeps its record rules
+/// (`crate::plan::invalid_record`). Its links to records behind the frontier (`stable`,
+/// `proposal`, its seal's version) are not checked here: the completion's full check checks them.
+pub(crate) fn check_state_plans(
+    rec: &mut dyn Records,
+    incoming: &[ObjectKey],
+) -> Result<(), StreamError> {
+    let look = ContextLookup {
+        rec: RefCell::new(rec),
+        holder: None,
+        incoming,
+        bound: HashMap::new(),
+        sealed: HashMap::new(),
+        landings: RefCell::new(None),
+        failed: RefCell::new(None),
+    };
+    for k in incoming.iter().copied().filter(|k| k.kind == kinds::PLAN) {
+        let record = look.rec.borrow_mut().object_source().record(k)?;
+        let Some(StreamRecord::Present {
+            encoding, payload, ..
+        }) = record
+        else {
+            continue;
+        };
+        let raw = crate::codec::raw_kind(k.kind, encoding);
+        let p = match crate::plan_record::decode(raw, &payload)
+            .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?
+        {
+            (crate::plan_record::PlanRecord::Full(p), _) => Ok(p),
+            (crate::plan_record::PlanRecord::Delta(_), _) => {
+                crate::plan::hydrate_for_check(&k.hash, &look)
+            }
+        };
+        let p = match p {
+            Ok(p) => p,
+            Err(crate::plan_record::FoldError::Broken { reason, .. }) => {
+                return Err(look.broken(k, &crate::plan::damage(&k.hash, reason)));
+            }
+            Err(crate::plan_record::FoldError::Store(e)) => return Err(look.failure(e, k)),
+        };
+        if let Some(rule) = crate::plan::invalid_record(&p) {
+            return Err(look.broken(k, &crate::plan::damage(&k.hash, rule)));
         }
     }
     Ok(())

@@ -1002,6 +1002,8 @@ impl<'a> SyncService<'a> {
         request: PushRequest,
     ) -> Result<PushOutcome, RdyError> {
         check_view_names(&request.views)?;
+        // a push sends history the project does not hold yet: refused before any capture
+        engine.read().require_complete_history()?;
         self.with_target(session, request.remote.as_deref(), |t| {
             self.push_exchange(engine, t, &request)
         })
@@ -1018,6 +1020,10 @@ impl<'a> SyncService<'a> {
             return Err(take_and_strict());
         }
         check_view_names(&request.views)?;
+        // a view's changes sit on history behind the frontier: refused before any fetch
+        if !request.views.is_empty() {
+            engine.read().require_complete_history()?;
+        }
         self.with_target(session, request.remote.as_deref(), |t| {
             self.pull_exchange(engine, session, t, &request)
         })

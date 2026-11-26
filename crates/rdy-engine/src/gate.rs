@@ -4396,13 +4396,16 @@ impl ReadState {
         for v in self.versions()? {
             tags.entry(v.landing).or_default().push(v.name);
         }
+        // an incomplete history's frontier is the state the clone took: its proposal is behind
+        // it, so the log ends before it (the reply says so with W_HISTORY_PENDING)
+        let frontier = self.history_frontier()?;
         let mut rows = vec![];
         for item in walk {
             if limit.is_some_and(|n| rows.len() >= n) {
                 break;
             }
             let (id, rec) = item?;
-            if Some(id) == stop {
+            if Some(id) == stop || Some(id) == frontier {
                 break;
             }
             let tags = tags.remove(&id.to_string()).unwrap_or_default();

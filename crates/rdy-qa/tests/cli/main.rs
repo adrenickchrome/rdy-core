@@ -43,6 +43,7 @@ mod cli_mcp_http;
 mod cli_name_case;
 mod cli_neighbors_plan;
 mod cli_output;
+mod cli_partial_history;
 mod cli_plan;
 mod cli_plan_group;
 mod cli_plan_propose;

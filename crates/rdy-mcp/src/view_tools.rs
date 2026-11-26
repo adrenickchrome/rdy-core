@@ -184,6 +184,14 @@ pub fn rdy_log(st: &mut McpState, p: LogParams) -> Result<Value, RdyError> {
             "report this as a bug in rdy",
         )
     })?;
+    // the log stops at an incomplete history's frontier and says so once
+    let rows = match st_.history_warning()? {
+        Some(w) => serde_json::json!({
+            "items": rows,
+            "warnings": [{"code": w.code, "message": w.message, "fix": w.fix}],
+        }),
+        None => rows,
+    };
     Ok(budget(rows, p.max_tokens))
 }
 

@@ -104,6 +104,9 @@ impl Rdy {
                     lease_ttl_ms: prev.lease_ttl_ms,
                     coverage_memo: Default::default(),
                     memo: Default::default(),
+                    history: Arc::new(crate::partial_history::HistoryCell::capture(
+                        &self.store.reader(),
+                    )),
                     detectors: self.detectors,
                     error: Some(e.clone()),
                 }));
@@ -693,6 +696,9 @@ impl Rdy {
             lease_ttl_ms,
             coverage_memo,
             memo: Default::default(),
+            history: Arc::new(crate::partial_history::HistoryCell::capture(
+                &self.store.reader(),
+            )),
             detectors: self.detectors,
             error: None,
         })
@@ -995,6 +1001,7 @@ impl Rdy {
             propose_changes: cfg.propose_changes(),
             decisions_home: cfg.decisions_home(),
             site_base_path: cfg.site.base_path.clone(),
+            history: Arc::new(crate::partial_history::HistoryCell::capture(&reader)),
             reader,
             as_of: caches.as_of,
             vpos: caches.vpos,
@@ -1163,6 +1170,9 @@ impl Rdy {
             lease_ttl_ms: prev.lease_ttl_ms,
             coverage_memo: Default::default(),
             memo: Default::default(),
+            history: Arc::new(crate::partial_history::HistoryCell::capture(
+                &self.store.reader(),
+            )),
             detectors: self.detectors,
             error: Some(e),
         }));

@@ -180,6 +180,10 @@ pub fn clone_at(
     fork: bool,
     at: Option<&str>,
 ) -> Result<CloneSummary, RdyError> {
+    // a source whose history is still arriving is never copied: the copy would lack it
+    if let CloneSource::State(st) = &source {
+        st.require_complete_history()?;
+    }
     let (load, origin, repo_id) = match (at, source) {
         (Some(_), _) if !fork => return Err(at_needs_fork()),
         (Some(_), CloneSource::File(_)) => return Err(at_needs_project()),

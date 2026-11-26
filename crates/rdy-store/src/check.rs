@@ -159,9 +159,16 @@ impl StoreReader {
             ));
         }
         let landings = self.landings()?;
+        // an incomplete history's frontier: its edges behind the frontier may be absent (the
+        // canon state link table, D-4PV25); every held record is still checked
+        let frontier = self.history_frontier()?;
         let mut landed_changes = 0;
         let mut relayed = 0;
         for (l, rec) in &landings {
+            if frontier == Some(*l) {
+                landed_changes += rec.changes.len();
+                continue;
+            }
             self.check_landing_fields(l, rec)?;
             if rec.relayed_by.is_some() {
                 relayed += 1;

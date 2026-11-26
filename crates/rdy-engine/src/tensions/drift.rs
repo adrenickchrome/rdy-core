@@ -708,7 +708,10 @@ impl RestatementDrift {
             if cx.landing_writes(&b.id) && before.get(&b.id).is_none() {
                 continue;
             }
-            let s = steps.current(&b.id)?;
+            // a block last written behind an incomplete history's frontier has no steps here
+            let Some(s) = steps.current(&b.id)? else {
+                continue;
+            };
             let (c, step) = (s.0, &s.1);
             if text_of_len(&b.body) >= DRIFT_MIN_WORDS {
                 landings.push(step.landed_at);

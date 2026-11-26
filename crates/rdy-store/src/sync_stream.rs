@@ -2092,6 +2092,39 @@ pub fn batch_binding(header: &StreamHeader, totals: &StreamTotals) -> Hash {
 /// The domain of [`batch_binding`].
 const BINDING_TAG: &[u8] = b"rdy-checked-batch-1\0";
 
+/// The totals the trailer of the batch file `f` states, read from its last frame with no payload
+/// read or hashed: what a count of a staged file's records needs before its full check. The frame
+/// must be a `TRAILER` of [`TRAILER_LEN`] bytes whose `bytes` end exactly where the frame starts;
+/// anything else is E_BAD_RECORD. The full check of the file stays [`check_batch`]'s.
+pub fn read_trailer_totals(f: &mut std::fs::File) -> Result<StreamTotals, StreamError> {
+    use std::io::{Seek, SeekFrom};
+    let io = |e: std::io::Error| StreamError::io(None, 0, &e);
+    let len = f.metadata().map_err(io)?.len();
+    let frame = FRAME_HEADER + TRAILER_LEN as u64;
+    let bad = |at: u64| StreamError::bad_record(0, at, Reason::InvalidHeader);
+    if len < frame {
+        return Err(bad(0));
+    }
+    let at = len - frame;
+    f.seek(SeekFrom::Start(at)).map_err(io)?;
+    let mut b = [0u8; (FRAME_HEADER as usize) + TRAILER_LEN];
+    f.read_exact(&mut b).map_err(io)?;
+    let n = u32::from_le_bytes(b[0..4].try_into().expect("four bytes")) as usize;
+    if n != TRAILER_LEN || b[4] != rec::TRAILER {
+        return Err(bad(at));
+    }
+    let p = &b[FRAME_HEADER as usize..];
+    let totals = StreamTotals {
+        records: u64::from_le_bytes(p[0..8].try_into().expect("eight bytes")),
+        bytes: u64::from_le_bytes(p[8..16].try_into().expect("eight bytes")),
+        digest: Hash(p[16..48].try_into().expect("32 bytes")),
+    };
+    if totals.bytes != at {
+        return Err(bad(at));
+    }
+    Ok(totals)
+}
+
 /// The exact length of a batch whose trailer states `totals`: its bytes and its trailer frame.
 fn input_len(totals: &StreamTotals) -> u64 {
     totals.bytes + FRAME_HEADER + TRAILER_LEN as u64

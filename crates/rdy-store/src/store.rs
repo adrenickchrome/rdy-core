@@ -5867,7 +5867,48 @@ impl Store {
             &crate::take_batch::FetchFacts,
         ) -> Result<(), E>,
     ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
-        self.take_fetched_core(files, None, target, check)
+        self.take_fetched_core(files, None, None, target, check)
+    }
+
+    /// A project's take of a canon state (D-GGTYA, D-4PV25): the canon state batches `files`
+    /// of remote `target.remote` at `target.url`, rooted at the landing `target.root` (purpose
+    /// `canon_state`), checked over the project with the closed state link table
+    /// (`crate::take_batch::prepare_state_checked`), then one sealed batch of its own with the
+    /// state's records, `canon` at the root, the remote's canon state with the root fetched and
+    /// applied, the incomplete history ref `history` (`meta/sync/<remote>/history`) and the
+    /// first use of `partial_history`, so an rdy without the feature refuses the store before
+    /// it reads it. `history` names the stream's repo, the target's URL and root, is not
+    /// complete and counts at most 1,000,000 records; the caller checks that count against its
+    /// checked key file first. A project with another canon, or with another incomplete
+    /// history, is refused; a retry of a take already made writes nothing.
+    pub fn take_canon_state<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::FetchTarget,
+        history: &crate::sync_state::SyncHistory,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        self.take_fetched_core(files, None, Some(history), target, check)
+    }
+
+    /// [`Store::take_canon_state`] of files that a canon state check of this operation already
+    /// checked: `checked` holds one checked batch for each file, in file order, as
+    /// [`Store::take_fetched_checked`] takes them.
+    pub fn take_canon_state_checked<E>(
+        &mut self,
+        files: &[File],
+        checked: &[&crate::sync_stream::CheckedBatch],
+        target: &crate::take_batch::FetchTarget,
+        history: &crate::sync_state::SyncHistory,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        self.take_fetched_core(files, Some(checked), Some(history), target, check)
     }
 
     /// [`Store::take_fetched`] of files that a batch check of this operation already checked:
@@ -5889,14 +5930,16 @@ impl Store {
             &crate::take_batch::FetchFacts,
         ) -> Result<(), E>,
     ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
-        self.take_fetched_core(files, Some(checked), target, check)
+        self.take_fetched_core(files, Some(checked), None, target, check)
     }
 
-    /// [`Store::take_fetched`] and [`Store::take_fetched_checked`]: one prepare core.
+    /// [`Store::take_fetched`], [`Store::take_fetched_checked`] and the canon state's takes
+    /// (with `history`): one prepare core.
     fn take_fetched_core<E>(
         &mut self,
         files: &[File],
         checked: Option<&[&crate::sync_stream::CheckedBatch]>,
+        history: Option<&crate::sync_state::SyncHistory>,
         target: &crate::take_batch::FetchTarget,
         check: impl FnOnce(
             &mut dyn crate::sync_proof::ObjectSource,
@@ -5941,21 +5984,38 @@ impl Store {
             .repo_id()?
             .ok_or_else(|| StoreError::Decode("the project has no meta/repo_id".into()))?;
         let reader = self.reader();
+        if history.is_some() {
+            // a canon state opens a project with no canon of its own, once (D-GGTYA)
+            let head = reader.canon_head()?;
+            if head.is_some_and(|h| h != target.root) {
+                return Err(TakeError::Store(StoreError::Refused(
+                    "a canon state is taken only into a project with no canon".into(),
+                )));
+            }
+            if let Some(h) = reader.partial_history_named()?
+                && (h.0 != target.remote || h.1.frontier != target.root)
+            {
+                return Err(TakeError::Store(StoreError::Refused(format!(
+                    "the project's history from remote {} is still arriving",
+                    h.0
+                ))));
+            }
+        }
         let auth = Arc::clone(self.log.authorization());
-        let plan = crate::take_batch::prepare_fetch_checked(
-            &Receiver {
-                reader: &reader,
-                log: self.log.readers(),
-                auth: &auth,
-                end: self.log.end(),
-                repo,
-                features: &self.features,
-            },
-            files,
-            checked,
-            target,
-            check,
-        )?;
+        let rx = Receiver {
+            reader: &reader,
+            log: self.log.readers(),
+            auth: &auth,
+            end: self.log.end(),
+            repo,
+            features: &self.features,
+        };
+        let plan = match history {
+            Some(h) => {
+                crate::take_batch::prepare_state_checked(&rx, files, checked, target, h, check)?
+            }
+            None => crate::take_batch::prepare_fetch_checked(&rx, files, checked, target, check)?,
+        };
         drop(reader);
         // the fetch is one sealed batch of its own (as a move): no held batch is open here
         let held = std::mem::replace(&mut self.held, false);

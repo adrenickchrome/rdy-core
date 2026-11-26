@@ -2959,6 +2959,25 @@ impl StoreReader {
         self.for_each_batch_after(BatchMarker::ZERO.start, upto, &mut f)
     }
 
+    /// [`StoreReader::for_each_batch_after`] for a dump: refused while the project's history is
+    /// incomplete (a dump holds the whole history, so none is written with part of it), before
+    /// any batch is visited.
+    pub fn for_each_dump_batch_after(
+        &self,
+        base: Location,
+        end: Location,
+        visit: &mut dyn FnMut(DumpBatch) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        if let Some(h) = self.partial_history()? {
+            return Err(StoreError::Refused(format!(
+                "the project's history is still arriving ({} records at frontier {}); a dump \
+                 holds the whole history",
+                h.records, h.frontier
+            )));
+        }
+        self.for_each_batch_after(base, end, visit)
+    }
+
     /// [`StoreReader::for_each_batch`] of the sealed batches of `[base, end)`: the suffix of the
     /// log after the batch that ends at `base`. The first batch starts at `base`, or at offset
     /// zero of the next segment when the log rolled there.

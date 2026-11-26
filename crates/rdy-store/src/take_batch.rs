@@ -713,6 +713,7 @@ fn index_files(
     expected: RepoId,
     files: &[File],
     checked: Option<&[&CheckedBatch]>,
+    state: bool,
     union: &mut BTreeMap<ObjectKey, Entry>,
     prerequisites: &mut BTreeSet<ObjectKey>,
 ) -> Result<StreamHeader, IndexError> {
@@ -730,6 +731,7 @@ fn index_files(
         let capsule = checked.map(|c| c[i]);
         let report = match capsule {
             Some(c) => c.report().clone(),
+            None if state => crate::sync_stream::check_canon_state_batch(handle)?,
             None => check_batch(handle)?,
         };
         match &first {
@@ -1314,6 +1316,13 @@ pub(crate) enum Intake<'a, E> {
     Upload(&'a UploadTarget, UploadCheck<'a, E>),
     Fetch(&'a FetchTarget, FetchCheck<'a, E>),
     History(&'a HistoryTarget),
+    /// A project's take of a canon state (D-GGTYA, D-4PV25): its records, canon at the root,
+    /// the remote's sync state with the root fetched and applied, and the incomplete history ref.
+    State(
+        &'a FetchTarget,
+        &'a crate::sync_state::SyncHistory,
+        FetchCheck<'a, E>,
+    ),
 }
 
 /// A pushed canon or view history a holder takes (D-FNRXT): its purpose and its root (a
@@ -1417,6 +1426,31 @@ pub(crate) fn prepare_fetch_checked<'a, E>(
     )
 }
 
+/// Prepares a project's take of a canon state (D-GGTYA, D-4PV25): the fetch's checks, with the
+/// closed state link table in place of the history closure. Each file is a canon state batch
+/// (`crate::sync_stream::check_canon_state_batch`) of the target's root; a prerequisite neither
+/// the union nor the project holds is a frontier edge, and every other link is checked as the
+/// table says (`check_state_union`). `history` names the same repo, URL and root, is
+/// incomplete, and counts at most [`crate::sync_state::MAX_HISTORY_RECORDS`] records. The plan
+/// writes the records, `canon` at the root, the remote's canon state with the root fetched and
+/// applied, and the history ref, in one batch.
+pub(crate) fn prepare_state_checked<'a, E>(
+    rx: &Receiver,
+    files: &[File],
+    checked: Option<&[&CheckedBatch]>,
+    target: &'a FetchTarget,
+    history: &'a crate::sync_state::SyncHistory,
+    check: impl FnOnce(&mut dyn ObjectSource, &FetchFacts) -> Result<(), E> + 'a,
+) -> Result<Plan, TakeError<E>> {
+    prepare_intake(
+        rx,
+        files,
+        checked,
+        rx.repo,
+        Intake::State(target, history, Box::new(check)),
+    )
+}
+
 /// [`prepare`], [`prepare_fetch_checked`], [`prepare_history`] and [`prepare_fork_history`]. The
 /// stream's repo must be `expected`: the receiver's own, except on a fresh fork's path.
 fn prepare_intake<E>(
@@ -1426,7 +1460,8 @@ fn prepare_intake<E>(
     expected: RepoId,
     intake: Intake<'_, E>,
 ) -> Result<Plan, TakeError<E>> {
-    let fetch = matches!(intake, Intake::Fetch(..));
+    let fetch = matches!(intake, Intake::Fetch(..) | Intake::State(..));
+    let state = matches!(intake, Intake::State(..));
     if checked.is_some_and(|c| c.len() != files.len()) {
         return Err(TakeError::Store(StoreError::Refused(
             "a checked take needs one checked batch for each file".into(),
@@ -1435,7 +1470,14 @@ fn prepare_intake<E>(
     // 1. every file alone, and the union's index
     let mut union: BTreeMap<ObjectKey, Entry> = BTreeMap::new();
     let mut prerequisites: BTreeSet<ObjectKey> = BTreeSet::new();
-    let header = match index_files(expected, files, checked, &mut union, &mut prerequisites) {
+    let header = match index_files(
+        expected,
+        files,
+        checked,
+        state,
+        &mut union,
+        &mut prerequisites,
+    ) {
         Ok(h) => h,
         Err(IndexError::Repo(source)) => {
             return Err(TakeError::RepoMismatch {
@@ -1450,6 +1492,7 @@ fn prepare_intake<E>(
         Intake::Upload(..) => header.purpose == crate::sync_stream::StreamPurpose::TagHistory,
         Intake::Fetch(t, _) => header.purpose == t.purpose,
         Intake::History(t) => header.purpose == t.purpose && t.purpose.is_history(),
+        Intake::State(..) => header.purpose == crate::sync_stream::StreamPurpose::CanonState,
     };
     if !expected {
         let want = match &intake {
@@ -1457,6 +1500,7 @@ fn prepare_intake<E>(
             Intake::Fetch(t, _) => t.purpose,
             Intake::History(t) if t.purpose.is_history() => t.purpose,
             Intake::History(_) => crate::sync_stream::StreamPurpose::CanonHistory,
+            Intake::State(..) => crate::sync_stream::StreamPurpose::CanonState,
         };
         return Err(
             StreamError::purpose_for(Some(0), 0, header.purpose.byte(), want.name()).into(),
@@ -1490,8 +1534,11 @@ fn prepare_intake<E>(
         features: rx.features,
     };
     // 2. every prerequisite, from the union or the holder. A placeholder's proof that names a
-    // carried record of the holder is no removal proof (D-0VG72): the placeholder is refused
-    if let Err(e) = stream_source::check_prerequisites(&mut source, &prerequisites) {
+    // carried record of the holder is no removal proof (D-0VG72): the placeholder is refused. A
+    // canon state's prerequisites are its frontier edges: they may be absent (D-4PV25), and its
+    // never-absent links are checked within the union (step 5)
+    if state {
+    } else if let Err(e) = stream_source::check_prerequisites(&mut source, &prerequisites) {
         if let Some(p) = e.object.filter(|_| e.code == "E_UNRESOLVED_REF")
             && let Some(placeholder) = names_carried(rx, &union, &p)?
         {
@@ -1522,6 +1569,16 @@ fn prepare_intake<E>(
             if header.purpose != target.purpose || root_key.hash != target.root {
                 return Err(fetch_mismatch(root_key).into());
             }
+            None
+        }
+        Intake::State(target, history, _) => {
+            if target.purpose != crate::sync_stream::StreamPurpose::CanonState
+                || target.view.is_some()
+                || root_key.hash != target.root
+            {
+                return Err(fetch_mismatch(root_key).into());
+            }
+            check_state_history(history, target, header.repo_id)?;
             None
         }
     };
@@ -1556,8 +1613,12 @@ fn prepare_intake<E>(
         items.push((raw, payload));
         reader.check_new_signatures(&items)?;
     }
-    // 5. the closure
-    stream_source::check_closure(&mut source, root_key, root.as_ref(), &objects)?;
+    // 5. the closure: a canon state's is the closed state link table (D-4PV25)
+    if state {
+        check_state_union(&mut source, &union, &header.features, root_key.hash)?;
+    } else {
+        stream_source::check_closure(&mut source, root_key, root.as_ref(), &objects)?;
+    }
     // 5. and each landing's delta across every file, which an early closure end never skips
     stream_source::check_snapshot_deltas(&mut source, &header.features, &objects)?;
     // 5. and the typed context of the new plans and plan answers, over the union and the holder
@@ -1571,6 +1632,12 @@ fn prepare_intake<E>(
         if !rx.holds(k)? {
             new_keys.push(*k);
         }
+    }
+    if state {
+        // a canon state's plans keep their record rules; their links behind the frontier are
+        // the completion's full check's
+        check_state_plans(&mut source, &new_keys)?;
+        new_keys.retain(|k| k.kind != kinds::PLAN);
     }
     stream_source::check_typed_context(&mut source, Some(reader), &new_keys)?;
     drop(new_keys);
@@ -1906,6 +1973,28 @@ fn prepare_intake<E>(
         }
         // a pushed history: its records and removals, and no ref
         Intake::History(_) => (root_key.hash, None),
+        Intake::State(target, history, check) => {
+            let facts = FetchFacts {
+                repo_id: header.repo_id,
+                purpose: header.purpose,
+                root: root_key.hash,
+                objects: objects.clone(),
+                features: header.features.clone(),
+            };
+            check(&mut source, &facts).map_err(TakeError::Validation)?;
+            let relayed = stream_source::relay_answers(&mut source, &objects)?;
+            fetch_tag_refs(
+                reader,
+                &mut source,
+                &objects,
+                &relayed,
+                &mut refs,
+                &mut tags_taken,
+                &mut tags_kept,
+            )?;
+            state_refs(reader, target, history, header.repo_id, &mut refs)?;
+            (root_key.hash, None)
+        }
     };
     // the manifest the holder would hold keeps the manifest's bounds, whichever parts make it up
     merged
@@ -1998,4 +2087,274 @@ fn prepare_intake<E>(
         generated,
         index_links,
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// the take of a canon state (D-GGTYA, D-4PV25)
+
+/// What a record of a canon state's union attaches to, when nothing links to it: the closed
+/// state link table's attachments (D-4PV25).
+enum Attach {
+    None,
+    /// A TAG of this landing.
+    Tag(Hash),
+    /// A SIGNATURE of this subject.
+    Signature(Hash),
+    /// An ANSWER of these targets.
+    Answer(Vec<Hash>),
+    /// A PLAN whose seal names this landing.
+    Seal(Hash),
+    /// A CHECK_REQUEST of this change and proposal version.
+    Check(Option<Hash>, Option<Hash>),
+    /// A REVIEW of this check request.
+    Review(Hash),
+    /// A DISPUTE of this landing.
+    Dispute(Hash),
+    /// A DISPUTE_RESOLUTION of this dispute.
+    Resolution(Hash),
+    /// A REDACTION_APPLY of this request.
+    Apply(Hash),
+    /// A SNAPSHOT_DELTA of this landing.
+    Delta(Hash),
+}
+
+/// The checks of a canon state's union over the receiver (D-4PV25): the root landing, its
+/// canonical SNAPSHOT, its one delta and the map's block ids, every never-absent link resolved
+/// within the union (`crate::canon_state::StateUnion`), and every record of the union carried by
+/// the closed table: reached from the root through its never-absent links, or attached to the
+/// root, a carried tag, a carried request or dispute, or carried content. Any other record is
+/// `object is outside the sync closure`: the missing-link exception covers the table only.
+fn check_state_union(
+    source: &mut UploadSource,
+    union: &BTreeMap<ObjectKey, Entry>,
+    features: &StoreFeatures,
+    root: Hash,
+) -> Result<(), StreamError> {
+    use crate::decoded_record::DecodedRecord;
+    let mut checked = crate::canon_state::StateUnion::new(root, features);
+    let mut by_hash: HashMap<Hash, Vec<ObjectKey>> = HashMap::new();
+    for k in union.keys() {
+        by_hash.entry(k.hash).or_default().push(*k);
+    }
+    let mut required: HashMap<ObjectKey, Vec<ObjectKey>> = HashMap::new();
+    let mut attach: HashMap<ObjectKey, Attach> = HashMap::new();
+    let mut named: HashMap<Hash, BTreeSet<ObjectKey>> = HashMap::new();
+    let mut root_landing: Option<rdy_model::LandingRecord> = None;
+    for (key, e) in union {
+        let (record, (n, offset)) = match (&e.present, e.dropped.first()) {
+            (Some(at), _) => (
+                source.union_record(key)?.expect("a present record"),
+                (at.record, at.offset),
+            ),
+            (None, Some((at, d))) => (
+                StreamRecord::Dropped {
+                    key: *key,
+                    encoding: d.encoding,
+                    original_len: d.original_len,
+                    apply: d.apply,
+                    residue: d.residue,
+                },
+                (at.record, at.offset),
+            ),
+            (None, None) => unreachable!("a union key has a representation"),
+        };
+        let d = DecodedRecord::decode(&record)
+            .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
+        checked.add(n, offset, features, &record, &d)?;
+        let refs = record
+            .refs_decoded(features, &d)
+            .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
+        let mut targets = Vec::new();
+        for r in refs {
+            let candidates: Vec<ObjectKey> = match r.kind {
+                Some(kind) => vec![ObjectKey { kind, hash: r.hash }],
+                None => by_hash.get(&r.hash).cloned().unwrap_or_default(),
+            };
+            for t in candidates {
+                if crate::canon_state::state_link_required(root, *key, &d, t) {
+                    targets.push(t);
+                }
+            }
+        }
+        targets.extend(record.proof());
+        required.insert(*key, targets);
+        let a = match &d {
+            DecodedRecord::Landing(l) if key.hash == root => {
+                root_landing = Some((**l).clone());
+                Attach::None
+            }
+            DecodedRecord::Tag(t) => Attach::Tag(t.landing),
+            DecodedRecord::Signature(g) => Attach::Signature(g.subject),
+            DecodedRecord::Answer(a) => Attach::Answer(a.targets.clone()),
+            DecodedRecord::Plan(p) => match p.seal() {
+                Some(s) => Attach::Seal(s.landing),
+                None => Attach::None,
+            },
+            DecodedRecord::CheckRequest(c) => Attach::Check(c.subject.change, c.subject.version),
+            DecodedRecord::Review(r) => match &r.subject {
+                rdy_model::review::ReviewSubjectV1::Check { request } => Attach::Review(*request),
+                _ => Attach::None,
+            },
+            DecodedRecord::Dispute(x) => Attach::Dispute(x.landing),
+            DecodedRecord::DisputeResolution(x) => Attach::Resolution(x.dispute),
+            DecodedRecord::RedactionApply(x) => Attach::Apply(x.request),
+            DecodedRecord::Redaction(x) => {
+                named.insert(key.hash, stream_source::named_objects(x));
+                Attach::None
+            }
+            DecodedRecord::SnapshotDelta(x) => Attach::Delta(x.landing),
+            _ => Attach::None,
+        };
+        attach.insert(*key, a);
+    }
+    checked.finish()?;
+    let root_key = ObjectKey {
+        kind: kinds::LANDING,
+        hash: root,
+    };
+    let Some(landing) = root_landing else {
+        return Err(StreamError::unresolved(0, 0, root_key));
+    };
+    let versions: HashSet<Hash> = std::iter::once(landing.proposal)
+        .chain(landing.approved_version)
+        .collect();
+    let changes: HashSet<Hash> = landing.changes.iter().copied().collect();
+    let mut reached: HashSet<ObjectKey> = HashSet::new();
+    let mut queue: Vec<ObjectKey> = Vec::new();
+    let reach = |k: ObjectKey, reached: &mut HashSet<ObjectKey>, queue: &mut Vec<ObjectKey>| {
+        if union.contains_key(&k) && reached.insert(k) {
+            queue.push(k);
+        }
+    };
+    reach(root_key, &mut reached, &mut queue);
+    reach(
+        ObjectKey {
+            kind: kinds::SNAPSHOT,
+            hash: landing.state,
+        },
+        &mut reached,
+        &mut queue,
+    );
+    loop {
+        while let Some(k) = queue.pop() {
+            for t in required.get(&k).into_iter().flatten() {
+                reach(*t, &mut reached, &mut queue);
+            }
+        }
+        let tags: HashSet<Hash> = reached
+            .iter()
+            .filter(|k| k.kind == kinds::TAG)
+            .map(|k| k.hash)
+            .collect();
+        let has = |kind: u8, h: &Hash| reached.contains(&ObjectKey { kind, hash: *h });
+        let mut joined: Vec<ObjectKey> = Vec::new();
+        for (k, a) in &attach {
+            if reached.contains(k) {
+                continue;
+            }
+            let subject = |h: &Hash| *h == root || tags.contains(h);
+            let yes = match a {
+                Attach::None => false,
+                Attach::Tag(l) | Attach::Seal(l) | Attach::Dispute(l) | Attach::Delta(l) => {
+                    *l == root
+                }
+                Attach::Signature(s) => subject(s),
+                Attach::Answer(t) => t.iter().any(subject),
+                Attach::Check(c, v) => {
+                    c.is_some_and(|c| changes.contains(&c))
+                        || v.is_some_and(|v| versions.contains(&v))
+                }
+                Attach::Review(r) => has(kinds::CHECK_REQUEST, r),
+                Attach::Resolution(x) => has(kinds::DISPUTE, x),
+                Attach::Apply(r) => named
+                    .get(r)
+                    .is_some_and(|n| n.iter().any(|o| reached.contains(o))),
+            };
+            if yes {
+                joined.push(*k);
+            }
+        }
+        if joined.is_empty() {
+            break;
+        }
+        for k in joined {
+            reach(k, &mut reached, &mut queue);
+        }
+    }
+    match union.keys().find(|k| !reached.contains(k)) {
+        Some(k) => Err(bad(Reason::OutsideSyncClosure, *k)),
+        None => Ok(()),
+    }
+}
+
+/// The new PLAN records of a canon state: each whole version or delta decodes, a delta folds
+/// over its carried chain, and the plan keeps its own record rules (`crate::plan::invalid_record`).
+/// Its `stable`, `proposal` and seal version are frontier edges (D-4PV25): the history's take
+/// and the completion's full check check them.
+fn check_state_plans(source: &mut UploadSource, keys: &[ObjectKey]) -> Result<(), StreamError> {
+    stream_source::check_state_plans(source, keys)
+}
+
+/// The history ref a canon state's take writes: it names the stream's repo, the target's URL
+/// and root, is incomplete, and counts at most [`crate::sync_state::MAX_HISTORY_RECORDS`]
+/// records. Anything else is `history does not match the canon state`.
+fn check_state_history(
+    history: &crate::sync_state::SyncHistory,
+    target: &FetchTarget,
+    repo: RepoId,
+) -> Result<(), StreamError> {
+    let ok = history.repo_id == repo
+        && history.url == target.url
+        && history.frontier == target.root
+        && !history.complete
+        && history.records <= crate::sync_state::MAX_HISTORY_RECORDS;
+    if ok {
+        return Ok(());
+    }
+    Err(StreamError {
+        code: "E_BAD_RECORD",
+        message: "history does not match the canon state".into(),
+        fix: "fetch the history the remote named".into(),
+        record: Some(0),
+        offset: 0,
+        object: Some(ObjectKey {
+            kind: kinds::LANDING,
+            hash: target.root,
+        }),
+    })
+}
+
+/// The refs of a canon state's take beside its records (D-GGTYA): `canon` at the root, the
+/// remote's canon state with the root fetched and applied, and the incomplete history ref. A ref
+/// that holds its value already is not written again (a retry).
+fn state_refs(
+    reader: &StoreReader,
+    target: &FetchTarget,
+    history: &crate::sync_state::SyncHistory,
+    repo_id: RepoId,
+    refs: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), StreamError> {
+    use crate::sync_state::{SyncCanon, SyncValue, canon_ref, history_ref};
+    let store = |e: StoreError| store_error(e, None);
+    let root = target.root;
+    let canon = SyncCanon {
+        repo_id,
+        url: target.url.clone(),
+        fetched: Some(root),
+        applied: Some(root),
+        held: None,
+    };
+    for (name, value) in [
+        ("canon".to_string(), root.0.to_vec()),
+        (canon_ref(&target.remote), SyncValue::Canon(canon).encode()),
+        (
+            history_ref(&target.remote),
+            SyncValue::History(history.clone()).encode(),
+        ),
+    ] {
+        if reader.get_ref(&name).map_err(store)?.as_deref() != Some(&value[..]) {
+            refs.push((name, value));
+        }
+    }
+    Ok(())
 }

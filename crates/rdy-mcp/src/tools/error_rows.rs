@@ -216,6 +216,16 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "open the project with the rdy build named by the refusal",
     ),
     (
+        rdy_engine::E_HISTORY_PENDING,
+        "history is incomplete and the call needs records behind its frontier",
+        rdy_engine::partial_history::HISTORY_PENDING_FIX,
+    ),
+    (
+        rdy_engine::W_HISTORY_PENDING,
+        "history is incomplete and the reply leaves out records behind its frontier",
+        rdy_engine::partial_history::HISTORY_PENDING_FIX,
+    ),
+    (
         E_UPGRADE_MOVED,
         "the store changed after the upgrade was planned",
         "run rdy_upgrade with dry_run true, or rdy upgrade --dry-run, then retry",

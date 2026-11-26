@@ -1977,6 +1977,7 @@ fn build_ops(
     selection: &crate::reaffirm::Selection,
     reflects: Option<&ReflectsInput>,
     foreign: &ForeignCite<'_>,
+    history_pending: Option<&RdyError>,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
     ov.conflicted = conflicts.list.iter().map(|c| c.block.clone()).collect();
@@ -2062,6 +2063,14 @@ fn build_ops(
                                     def.prefix
                                 ),
                             ));
+                        }
+                        // D-GGTYA: while the history is still arriving, an id the view does not
+                        // hold may name a block deleted behind the frontier; its re-creation
+                        // cannot be told apart from a new block, so it waits
+                        if ov.get(&g).is_none()
+                            && let Some(e) = history_pending
+                        {
+                            return Err(e.clone());
                         }
                         created.insert(format!("op{i}"), g.to_string());
                         g
@@ -3724,6 +3733,7 @@ impl Rdy {
                 &selection,
                 reflects.as_ref(),
                 &ForeignCite::new(&st, &m),
+                st.require_complete_history().err().as_ref(),
             )?;
         let no_code = BTreeSet::new();
         // D-01QX5: the code state of each reflects block this write creates, re-globs or

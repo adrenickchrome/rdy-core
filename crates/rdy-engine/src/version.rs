@@ -795,10 +795,15 @@ impl ReadState {
     }
 
     /// `landings`, each record read only when the walk reaches it; the walk ends after an error.
+    /// While the history is incomplete the walk ends at its frontier, the oldest landing held:
+    /// it never stops at another landing whose `prev` is missing.
     pub(crate) fn landing_walk(
         &self,
     ) -> impl Iterator<Item = Result<(Hash, LandingRecord), RdyError>> + '_ {
-        let mut failed = self.error.clone();
+        let (mut failed, frontier) = match self.history_frontier() {
+            Ok(f) => (self.error.clone(), f),
+            Err(e) => (Some(e), None),
+        };
         let mut cur = self.canon_head;
         std::iter::from_fn(move || {
             if let Some(e) = failed.take() {
@@ -808,7 +813,7 @@ impl ReadState {
             let h = cur.take()?;
             Some(match self.reader.landing(&h) {
                 Ok(rec) => {
-                    cur = rec.prev;
+                    cur = if frontier == Some(h) { None } else { rec.prev };
                     Ok((h, rec))
                 }
                 Err(e) => Err(e.into()),
@@ -926,6 +931,8 @@ impl ReadState {
                     found.insert(request);
                     continue;
                 }
+                // the frontier's changes are behind an incomplete history's frontier
+                Err(StoreError::NotFound(_)) if self.history_frontier()?.is_some() => continue,
                 Err(e) => return Err(e.into()),
             };
             for op in &change.ops {
@@ -983,6 +990,18 @@ impl ReadState {
     /// In a holder, which has no canon, a landing in the chain of one of its tags.
     pub fn resolve_landing(&self, text: &str) -> Result<Hash, RdyError> {
         match_prefix(&self.landing_ids()?, text)
+    }
+
+    /// `e`, a version or landing that this state does not hold, as E_HISTORY_PENDING while the
+    /// history is incomplete: it may be behind the frontier.
+    pub(crate) fn behind_frontier(&self, e: RdyError) -> RdyError {
+        if e.code != E_NOT_FOUND {
+            return e;
+        }
+        match self.require_complete_history() {
+            Err(pending) if pending.code == E_HISTORY_PENDING => pending,
+            _ => e,
+        }
     }
 
     /// The landings a landing id can name: canon's chain, head first. In a holder, which has no
@@ -1060,10 +1079,14 @@ impl ReadState {
                         format!("no version {name}"),
                         "list versions with rdy tags",
                     )
-                });
+                })
+                .map_err(|e| self.behind_frontier(e));
         }
         if let Some(id) = text.strip_prefix("landing:") {
-            return Ok(Scope::At(self.resolve_landing(id)?));
+            return Ok(Scope::At(
+                self.resolve_landing(id)
+                    .map_err(|e| self.behind_frontier(e))?,
+            ));
         }
         // ls8: a proposal version reads as its base plus its changes
         if let Some(r) = text.strip_prefix("proposal:") {

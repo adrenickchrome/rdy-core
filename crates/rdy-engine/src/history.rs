@@ -186,6 +186,9 @@ struct Memo<'a> {
     landings: HashMap<Hash, LandingRef>,
     /// The state's log end: the bound of the carriers it reads.
     end: Location,
+    /// Whether the history is incomplete: a version with no producer held is behind the
+    /// frontier, so its entry is left out (W_HISTORY_PENDING), never index damage.
+    partial: bool,
 }
 
 fn no_writer(version: &Hash, id: &BlockId) -> RdyError {
@@ -225,6 +228,7 @@ impl<'a> Memo<'a> {
             landed: HashMap::new(),
             landings: HashMap::new(),
             end: state.seq(),
+            partial: state.history_frontier()?.is_some(),
         })
     }
 
@@ -240,6 +244,9 @@ impl<'a> Memo<'a> {
     ) -> Result<Option<Hash>, RdyError> {
         let all = self.reader.producers(version)?;
         if all.is_empty() {
+            if self.partial {
+                return Ok(None);
+            }
             return Err(no_writer(version, id));
         }
         let free: Vec<Hash> = all.into_iter().filter(|c| !used.contains(c)).collect();
@@ -404,12 +411,15 @@ impl<'a> Memo<'a> {
         )))
     }
 
-    /// The newest entry for `version` of `id`.
-    fn last(&mut self, version: &Hash, id: &BlockId) -> Result<HistoryEntry, RdyError> {
-        let c = self
-            .writer_of(version, id, &HashSet::new())?
-            .ok_or_else(|| no_writer(version, id))?;
-        Ok(self.entry(c, version, id)?.0)
+    /// The newest entry for `version` of `id`; None when the change that wrote it is behind an
+    /// incomplete history's frontier.
+    fn last(&mut self, version: &Hash, id: &BlockId) -> Result<Option<HistoryEntry>, RdyError> {
+        let c = match self.writer_of(version, id, &HashSet::new())? {
+            Some(c) => c,
+            None if self.partial => return Ok(None),
+            None => return Err(no_writer(version, id)),
+        };
+        Ok(Some(self.entry(c, version, id)?.0))
     }
 
     /// Follows each update's base from `start`, never taking a change twice: a block written back
@@ -419,9 +429,16 @@ impl<'a> Memo<'a> {
         let mut entries = Vec::new();
         let mut used = HashSet::new();
         let mut version = start;
-        let mut c = self
-            .writer_of(&version, id, &used)?
-            .ok_or_else(|| no_writer(&version, id))?;
+        let mut c = match self.writer_of(&version, id, &used)? {
+            Some(c) => c,
+            None if self.partial => {
+                return Ok(History {
+                    entries,
+                    more: false,
+                });
+            }
+            None => return Err(no_writer(&version, id)),
+        };
         loop {
             used.insert(c);
             let (entry, prev) = self.entry(c, &version, id)?;
@@ -462,7 +479,8 @@ fn version_in(m: &Materialized, id: &BlockId) -> Result<Hash, RdyError> {
 
 impl ReadState {
     /// `id`'s versions in `scope`, newest first, at most `limit` (1..=`HISTORY_MAX`). The walk
-    /// follows each update's base and ends at the block's create.
+    /// follows each update's base and ends at the block's create, or, while the history is
+    /// incomplete, at the first version whose change is behind the frontier.
     pub fn history(&self, scope: &Scope, id: &BlockId, limit: usize) -> Result<History, RdyError> {
         if !(1..=HISTORY_MAX).contains(&limit) {
             return Err(RdyError::new(
@@ -482,7 +500,9 @@ impl ReadState {
         Memo::new(self, scope)?.walk(version, id, limit)
     }
 
-    /// For each distinct id, the entry `history(scope, id, 1)` gives, sharing one memo.
+    /// For each distinct id, the entry `history(scope, id, 1)` gives, sharing one memo. While
+    /// the history is incomplete an id whose last change is behind the frontier has no entry;
+    /// the reply carries [`ReadState::history_warning`].
     pub fn last_changes(
         &self,
         scope: &Scope,
@@ -496,7 +516,9 @@ impl ReadState {
                 continue;
             }
             let version = version_in(&m, id)?;
-            out.insert(id.clone(), memo.last(&version, id)?);
+            if let Some(entry) = memo.last(&version, id)? {
+                out.insert(id.clone(), entry);
+            }
         }
         Ok(out)
     }
@@ -661,11 +683,15 @@ impl Drop for CanonSteps<'_> {
 }
 
 impl CanonSteps<'_> {
-    /// The step for `id`'s canon version and the change that wrote it.
-    pub(crate) fn current(&mut self, id: &BlockId) -> Result<Step, RdyError> {
+    /// The step for `id`'s canon version and the change that wrote it; None when that change is
+    /// behind an incomplete history's frontier.
+    pub(crate) fn current(&mut self, id: &BlockId) -> Result<Option<Step>, RdyError> {
         let version = version_in(&self.m, id)?;
-        self.step(&version, id, &HashSet::new())?
-            .ok_or_else(|| no_writer(&version, id))
+        match self.step(&version, id, &HashSet::new())? {
+            Some(s) => Ok(Some(s)),
+            None if self.memo.partial => Ok(None),
+            None => Err(no_writer(&version, id)),
+        }
     }
 
     /// The step for `version` of `id` and the change that wrote it, never one in `used`; `None`

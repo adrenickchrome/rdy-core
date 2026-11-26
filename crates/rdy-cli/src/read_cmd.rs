@@ -560,11 +560,28 @@ fn as_built_line(s: &Value) -> String {
 }
 
 fn log_text(v: &Value) -> String {
+    // a history still arriving: the rows under `items`, its warning last
+    let mut out = String::new();
+    if let Some(items) = v.get("items") {
+        out.push_str(&log_text(items));
+        for w in v["warnings"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            out.push_str(&format!(
+                "\nwarning {}: {}; {}",
+                text(&w["code"]),
+                text(&w["message"]),
+                text(&w["fix"])
+            ));
+        }
+        return out;
+    }
     let rows = v.as_array().map(Vec::as_slice).unwrap_or_default();
     if rows.is_empty() {
         return "no landings".to_string();
     }
-    let mut out = String::new();
     for row in rows {
         out.push_str(&history_text::log_head_line(row));
         out.push('\n');
