@@ -45,10 +45,11 @@
 //! code `E_TAG_EXISTS` with the hub's words (rdyhub-design i-B40VF).
 use crate::engine::{Engine, with_writer_result};
 use crate::error::{
-    E_BAD_INPUT, E_DIVERGED, E_STORE_FORMAT, E_TAG_EXISTS, E_UPSTREAM_ACTOR_CLAIM,
-    E_UPSTREAM_UNCERTAIN, RdyError, SYNC_DIVERGED_FIX, SYNC_DIVERGED_MESSAGE, SYNC_MIN_RDY_FIX,
-    SYNC_MIN_RDY_MESSAGE, UPSTREAM_HELD_LOOKUP_FIX, UPSTREAM_HELD_LOOKUP_MESSAGE,
-    W_UPSTREAM_HELD_LOOKUP, sync_uncertain, upstream_auth, upstream_protocol,
+    E_BAD_INPUT, E_DIVERGED, E_INTERNAL, E_IO, E_STORE_FORMAT, E_TAG_EXISTS,
+    E_UPSTREAM_ACTOR_CLAIM, E_UPSTREAM_UNCERTAIN, RdyError, SYNC_DIVERGED_FIX,
+    SYNC_DIVERGED_MESSAGE, SYNC_MIN_RDY_FIX, SYNC_MIN_RDY_MESSAGE, UPSTREAM_HELD_LOOKUP_FIX,
+    UPSTREAM_HELD_LOOKUP_MESSAGE, W_UPSTREAM_HELD_LOOKUP, sync_uncertain, upstream_auth,
+    upstream_protocol,
 };
 use crate::formats::formats;
 use crate::hub_config::{BAD_REMOTE_NAME_FIX, BAD_REMOTE_NAME_MESSAGE, HubConfig, RemoteMode};
@@ -56,8 +57,8 @@ use crate::hub_credentials::HubCredentials;
 use crate::hub_http::UPLOAD_BUFFER_BYTES;
 use crate::hub_publish::{PublishRenderer, not_share_remote, repo_mismatch};
 use crate::hub_publish_stream::{
-    BatchLimits, HistorySent, ObjectWire, PreparedHistory, PushId, missing_with, scratch_error,
-    send_objects, send_root,
+    BatchLimits, HistorySent, ObjectWire, PreparedHistory, PreparedObjectBody, PushId, WorkerMark,
+    missing_with, scratch_error, send_objects, send_root, upload_probe, upload_worker_setup,
 };
 use crate::hub_publish_wire::{MAX_KNOWN_KEYS, ObjectPut, PublishState, UploadContext};
 use crate::hub_sync_wire::{
@@ -405,6 +406,49 @@ pub(crate) struct Target {
     account: String,
 }
 
+/// The message of [`capture_start_error`].
+pub const CAPTURE_START_MESSAGE: &str = "the canon input check could not start";
+/// The fix of [`capture_start_error`].
+pub const CAPTURE_START_FIX: &str = "retry the push";
+/// The message of [`capture_failed_error`].
+pub const CAPTURE_FAILED_MESSAGE: &str = "the canon input check failed";
+/// The fix of [`capture_failed_error`].
+pub const CAPTURE_FAILED_FIX: &str = "retry the push; report the error if it repeats";
+
+/// E_IO: the push's canon capture worker could not be started.
+fn capture_start_error() -> RdyError {
+    RdyError::new(E_IO, CAPTURE_START_MESSAGE, CAPTURE_START_FIX)
+}
+
+/// E_INTERNAL: the push's canon capture worker panicked. Its payload is never shown.
+fn capture_failed_error() -> RdyError {
+    RdyError::new(E_INTERNAL, CAPTURE_FAILED_MESSAGE, CAPTURE_FAILED_FIX)
+}
+
+/// A test's hook at the start of a push's canon walk, on the thread that walks.
+type WalkHook = Arc<dyn Fn() + Send + Sync>;
+
+thread_local! {
+    static WALK_HOOK: std::cell::RefCell<Option<WalkHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `hook` called when a push on this thread starts its canon walk, while the
+/// canon capture may run (a test hook; production installs none). The prior hook comes back
+/// when `f` returns or panics.
+#[doc(hidden)]
+pub fn with_canon_walk_hook_for_tests<T>(hook: WalkHook, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<WalkHook>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prior = self.0.take();
+            WALK_HOOK.with(|c| *c.borrow_mut() = prior);
+        }
+    }
+    let prior = WALK_HOOK.with(|c| c.borrow_mut().replace(hook));
+    let _restore = Restore(prior);
+    f()
+}
+
 /// The render inputs a push captured once, with the gate settings of the same read state, and
 /// the head whose scope they hold.
 struct Capture {
@@ -419,6 +463,20 @@ enum Slot {
     Canon(PushId),
     View(String, PushId),
     Foreign,
+}
+
+/// What canon's part of a push found before its upload: its end (with whether a forced push
+/// found force not needed), or the history to send and what its write needs.
+enum CanonPrep {
+    End(WriteEnd, bool),
+    Send {
+        head: Hash,
+        base: Option<Hash>,
+        tip: Option<Hash>,
+        holds: bool,
+        history: PreparedHistory,
+        force_not_needed: bool,
+    },
 }
 
 /// One canon or view upload and its write.
@@ -444,7 +502,8 @@ pub struct SyncService<'a> {
     api: &'a dyn HubTransport,
     clock: &'a dyn HubClock,
     pub(crate) wire: &'a dyn SyncWire,
-    pub(crate) renderer: &'a dyn PublishRenderer,
+    /// Shared with a push's one capture worker, so it is `Sync`.
+    pub(crate) renderer: &'a (dyn PublishRenderer + Sync),
     /// Where a restore makes its temporary store: the system temp root when None.
     pub(crate) scratch: Option<PathBuf>,
 }
@@ -470,6 +529,15 @@ impl ObjectWire for SyncObjects<'_> {
         len: u64,
     ) -> Result<ObjectPut, RdyError> {
         self.0.put(cx, push, body, len)
+    }
+
+    fn put_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        self.0.put_prepared(cx, push, body)
     }
 }
 
@@ -499,7 +567,7 @@ impl<'a> SyncService<'a> {
         api: &'a dyn HubTransport,
         clock: &'a dyn HubClock,
         wire: &'a dyn SyncWire,
-        renderer: &'a dyn PublishRenderer,
+        renderer: &'a (dyn PublishRenderer + Sync),
     ) -> SyncService<'a> {
         SyncService {
             project: project.to_path_buf(),
@@ -521,7 +589,7 @@ impl<'a> SyncService<'a> {
         api: &'a dyn HubTransport,
         clock: &'a dyn HubClock,
         wire: &'a dyn SyncWire,
-        renderer: &'a dyn PublishRenderer,
+        renderer: &'a (dyn PublishRenderer + Sync),
     ) -> SyncService<'a> {
         SyncService {
             projectless: true,
@@ -1067,12 +1135,50 @@ impl<'a> SyncService<'a> {
 
     /// The render inputs at the scope of local canon's head and the gate settings, from `read`.
     fn capture(&self, read: &ReadState) -> Result<Capture, RdyError> {
-        let head = read.canon_head();
-        let scope = head.map_or(Scope::Canon, Scope::At);
-        let inputs = self.renderer.capture(read, &scope)?;
-        validate_inputs(&inputs)?;
-        let gate = gate_settings(read, &inputs);
-        Ok(Capture { inputs, gate, head })
+        capture_with(self.renderer, read)
+    }
+
+    /// The push's capture and canon's walk (`walk`), from the one captured `read`: with a local
+    /// canon head, the capture runs on one scoped worker while this thread walks, and both end
+    /// before anything is sent or recorded; with none, they run here in turn. When both fail,
+    /// the capture's error is returned, as when the capture ran first; the worker is always
+    /// joined. On success the read's epoch is checked again.
+    fn capture_and_walk<T>(
+        &self,
+        read: &Arc<ReadState>,
+        walk: impl FnOnce() -> Result<T, RdyError>,
+    ) -> Result<(Capture, T), RdyError> {
+        if read.canon_head().is_none() {
+            let capture = self.capture(read)?;
+            return Ok((capture, walk()?));
+        }
+        let renderer = self.renderer;
+        let setup = upload_worker_setup();
+        let probe = upload_probe();
+        let hook = WALK_HOOK.with(|c| c.borrow().clone());
+        let both = std::thread::scope(|s| {
+            let worker = std::thread::Builder::new()
+                .name("rdy-canon-capture".into())
+                .spawn_scoped(s, move || {
+                    let _guards = setup.as_ref().map(|f| f());
+                    let _mark = WorkerMark::new(probe);
+                    capture_with(renderer, read)
+                })
+                .map_err(|_| capture_start_error())?;
+            if let Some(hook) = &hook {
+                hook();
+            }
+            let walked = walk();
+            let captured = worker
+                .join()
+                .unwrap_or_else(|_| Err(capture_failed_error()));
+            match (captured, walked) {
+                (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+                (Ok(c), Ok(w)) => Ok((c, w)),
+            }
+        })?;
+        read.ensure_current_epoch()?;
+        Ok(both)
     }
 
     /// The tags a write carries that the hub lacks: the TAG records of `pool` (the keys known
@@ -1140,9 +1246,10 @@ impl<'a> SyncService<'a> {
         let lookup = self.lookup(engine, t, &base_url, &state)?;
 
         let read = engine.read();
-        let capture = self.capture(&read)?;
+        let (capture, prep) =
+            self.capture_and_walk(&read, || self.canon_prepare(t, &read, &state, request))?;
         let (canon, force_not_needed) =
-            self.push_canon(engine, t, &base_url, &read, &state, &capture, request)?;
+            self.push_canon(engine, t, &base_url, &read, &state, &capture, request, prep)?;
         let mut views = Vec::new();
         if !request.views.is_empty() {
             for plan in push_plan(&read, &request.views, &hub_views)? {
@@ -1193,19 +1300,15 @@ impl<'a> SyncService<'a> {
         })
     }
 
-    /// Canon's part of a push: the held rule, the base rule (or force), then its upload and
-    /// write. Returns its end and whether a forced push found force not needed.
-    #[allow(clippy::too_many_arguments)]
-    fn push_canon(
+    /// Canon's part of a push before its upload: the held rule, the base rule (or force), then
+    /// the history's walk from the captured `read`. Nothing is sent or recorded.
+    fn canon_prepare(
         &self,
-        engine: &dyn Engine,
         t: &Target,
-        base_url: &str,
         read: &Arc<ReadState>,
         state: &SyncState,
-        capture: &Capture,
         request: &PushRequest,
-    ) -> Result<(WriteEnd, bool), RdyError> {
+    ) -> Result<CanonPrep, RdyError> {
         let repo_id = read.repo_id()?;
         let head = read.canon_head();
         let tip = state.canon;
@@ -1222,7 +1325,7 @@ impl<'a> SyncService<'a> {
         let force_not_needed = request.force && holds;
         let Some(head) = head else {
             // both are empty: the base rule refused any hub tip
-            return Ok((WriteEnd::UpToDate { tip }, force_not_needed));
+            return Ok(CanonPrep::End(WriteEnd::UpToDate { tip }, force_not_needed));
         };
         // the held rule: at the held head, no write (D-QCE8M)
         let held = read
@@ -1238,11 +1341,46 @@ impl<'a> SyncService<'a> {
                 head,
                 request: h.request,
             };
-            return Ok((end, force_not_needed));
+            return Ok(CanonPrep::End(end, force_not_needed));
         }
         let base = if holds { tip } else { None };
         // at the hub tip, the history is the attachments made since (D-KE83X)
         let history = PreparedHistory::canon(Arc::clone(read), head, base)?;
+        Ok(CanonPrep::Send {
+            head,
+            base,
+            tip,
+            holds,
+            history,
+            force_not_needed,
+        })
+    }
+
+    /// Canon's part of a push after [`SyncService::canon_prepare`]: its upload and write.
+    /// Returns its end and whether a forced push found force not needed.
+    #[allow(clippy::too_many_arguments)]
+    fn push_canon(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+        read: &Arc<ReadState>,
+        state: &SyncState,
+        capture: &Capture,
+        request: &PushRequest,
+        prep: CanonPrep,
+    ) -> Result<(WriteEnd, bool), RdyError> {
+        let (head, base, tip, holds, history, force_not_needed) = match prep {
+            CanonPrep::End(end, force_not_needed) => return Ok((end, force_not_needed)),
+            CanonPrep::Send {
+                head,
+                base,
+                tip,
+                holds,
+                history,
+                force_not_needed,
+            } => (head, base, tip, holds, history, force_not_needed),
+        };
         let at_tip = tip == Some(head);
         let nothing = at_tip && history.keys().is_empty();
         let resumed = match self.slot(engine, t, &request.views)? {
@@ -1313,7 +1451,20 @@ impl<'a> SyncService<'a> {
             self.context(t, read, Some(base_url))
                 .map(|cx| UploadContext { zstd, ..cx })
         };
-        let missing = missing_with(&keys, &push, &wire, &mut context)?;
+        // a new canon push to a hub repo that holds nothing (no repo id, no canon, no view
+        // head) lacks every key: the known step is skipped, and the first put opens the
+        // quarantine (r-H7H64). The final write's compare still decides a racing seed.
+        let empty_hub = job.kind != WriteKind::View
+            && !was_resumed
+            && state.repo_id.is_none()
+            && state.canon.is_none()
+            && state.views.iter().all(|v| v.head.is_none())
+            && !keys.is_empty();
+        let missing = if empty_hub {
+            keys.clone()
+        } else {
+            missing_with(&keys, &push, &wire, &mut context)?
+        };
         let limits = BatchLimits {
             bytes: state.batch_bytes,
             records: state.batch_records,
@@ -1958,4 +2109,18 @@ impl Write for Capped<'_> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.out.flush()
     }
+}
+
+/// The render inputs at the scope of `read`'s canon head through `renderer`, checked, with the
+/// gate settings of the same read state.
+fn capture_with(
+    renderer: &(dyn PublishRenderer + Sync),
+    read: &ReadState,
+) -> Result<Capture, RdyError> {
+    let head = read.canon_head();
+    let scope = head.map_or(Scope::Canon, Scope::At);
+    let inputs = renderer.capture(read, &scope)?;
+    validate_inputs(&inputs)?;
+    let gate = gate_settings(read, &inputs);
+    Ok(Capture { inputs, gate, head })
 }

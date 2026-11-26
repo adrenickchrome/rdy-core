@@ -4290,7 +4290,45 @@ impl StoreReader {
             .index()
             .typed(kind, h)?
             .ok_or(StoreError::NotFound(*h))?;
-        if let Some(request) = self.mask_at(&loc)? {
+        let mask = self.mask_at(&loc)?;
+        self.kind_raw_at(kind, h, loc, mask)
+    }
+
+    /// One read transaction of this reader's index, which a closure walk owns to its return.
+    pub(crate) fn read_for_closure(&self) -> Result<crate::index::IndexRead, StoreError> {
+        self.index().read_for_closure()
+    }
+
+    /// [`StoreReader::get_kind_raw`] of the frame at `loc`, which `read` found for `kind` and
+    /// `h`: the same pending check, mask (read in `read`, then this reader's preview),
+    /// frame-read count, hashed read and kind match. The location saves only the lookup.
+    pub(crate) fn get_kind_raw_in(
+        &self,
+        read: &crate::index::IndexRead,
+        kind: u8,
+        h: &Hash,
+        loc: Location,
+    ) -> Result<(u8, Vec<u8>), StoreError> {
+        self.refuse_pending()?;
+        let mask = match read.redaction_span_at(&loc)? {
+            Some(s) => Some(s.request),
+            // a preview reader's own masks: read as `mask_at` reads them
+            None if self.preview().is_some() => self.mask_at(&loc)?,
+            None => None,
+        };
+        self.kind_raw_at(kind, h, loc, mask)
+    }
+
+    /// The tail of [`StoreReader::get_kind_raw`]: the frame at `loc` unless `mask` names the
+    /// request that removed it, checked against `h` and `kind`.
+    fn kind_raw_at(
+        &self,
+        kind: u8,
+        h: &Hash,
+        loc: Location,
+        mask: Option<Hash>,
+    ) -> Result<(u8, Vec<u8>), StoreError> {
+        if let Some(request) = mask {
             return Err(StoreError::Redacted { request });
         }
         let (raw, payload) = self.read_object(h, loc)?;
@@ -4301,6 +4339,31 @@ impl StoreReader {
             )));
         }
         Ok((raw, payload))
+    }
+
+    /// The store's features ([`StoreReader::store_features`]), its ref read in `read`.
+    pub(crate) fn store_features_in(
+        &self,
+        read: &crate::index::IndexRead,
+    ) -> Result<crate::format::StoreFeatures, StoreError> {
+        match read.get_ref(crate::format::REF_STORE_FEATURES)? {
+            Some(v) => crate::format::decode_features(&v),
+            None => Err(crate::format::ManifestError("invalid JSON".into()).store_error()),
+        }
+    }
+
+    /// The store's mode ([`StoreReader::mode`]), its ref read in `read`.
+    pub(crate) fn mode_in(
+        &self,
+        read: &crate::index::IndexRead,
+    ) -> Result<crate::holder::StoreMode, StoreError> {
+        crate::holder::decode_mode(read.get_ref(crate::holder::REF_STORE_MODE)?.as_deref())
+    }
+
+    /// Counts one walk of the typed table ([`StoreReader::kind_walks`]) that a closure read
+    /// made in its own transaction.
+    pub(crate) fn note_kind_walk(&self) {
+        self.shared.kind_walks.fetch_add(1, Ordering::Relaxed);
     }
 
     /// The body of the object of logical kind `kind` with hash `h`: its stored payload less a
@@ -4454,6 +4517,12 @@ impl StoreReader {
         self.shared
             .carried_frames_read
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read transactions this reader's index has begun so far (a test hook).
+    #[doc(hidden)]
+    pub fn index_read_transactions(&self) -> u64 {
+        self.index().read_transactions()
     }
 
     /// Object frames read so far by `get_raw` and `get_kind`.

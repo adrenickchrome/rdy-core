@@ -22,3 +22,4 @@ mod hub_publish_stream;
 mod hub_remotes;
 mod hub_types;
 mod hub_upload_http;
+mod upload_pipeline;

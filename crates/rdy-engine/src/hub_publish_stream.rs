@@ -40,6 +40,7 @@
 //! nothing is missing, no batch is sent; a push or restore whose write still moves canon or a
 //! view then sends one batch of no record that names the root ([`send_root`]).
 use crate::error::{E_BAD_INPUT, E_INTERNAL, E_IO, E_LIMIT, RdyError, upstream_protocol};
+use crate::hub_http::{BodyEncoding, zstd_frame};
 use crate::hub_publish_wire::{
     CORE_BATCH_BYTES, CORE_BATCH_RECORDS, MAX_KNOWN_KEYS, ObjectPut, PUSH_ID_CHARS, PublishWire,
     UploadContext,
@@ -49,7 +50,7 @@ use crate::stream_error::{StreamError, to_rdy};
 use crate::stream_export;
 use crate::stream_take::uncovered_change;
 use rdy_model::{CROCKFORD, Hash, RepoId};
-use rdy_store::closure::{StoreSource, history_closure_before};
+use rdy_store::closure::{StoreSource, prepared_history_closure_before};
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::stream_error::{LIMIT_OBJECT_RECORDS, LIMIT_PREREQUISITES, LIMIT_TOTAL_BYTES};
@@ -60,10 +61,13 @@ use rdy_store::sync_stream::{
     MAX_RECORDS, MAX_STREAM_BYTES, StreamHeader, StreamPurpose, StreamRecord, StreamWriter,
     TRAILER_LEN,
 };
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The bytes of a stream frame's own header: length, kind and hash.
 const FRAME_HEADER: u64 = 4 + 1 + 32;
@@ -136,9 +140,19 @@ pub struct HistorySent {
 
 /// Where a prepared history's records are read: the checked export of a tag, or the captured
 /// state a canon history's closure was taken from.
+///
+/// The checked stream reads through a `RefCell`, so it sits behind a mutex: the upload's one
+/// preparation worker and the caller may both read the history. Its lock is held only for one
+/// read of its facts or one checked, positioned record read; a poisoned lock is recovered for
+/// those reads alone (a worker's panic still fails the upload).
 enum Source {
-    Checked(Box<CheckedStream<File>>),
+    Checked(Mutex<Box<CheckedStream<File>>>),
     State(Arc<ReadState>),
+}
+
+/// The checked stream behind `m`, a poisoned lock recovered (see [`Source`]).
+fn checked(m: &Mutex<Box<CheckedStream<File>>>) -> MutexGuard<'_, Box<CheckedStream<File>>> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// One tag's complete history, exported and checked, or one canon history's closure, ready to
@@ -312,7 +326,7 @@ impl PreparedHistory {
         let manifest = features.to_json().len() as u64;
         read.ensure_current_epoch()?;
         Ok(PreparedHistory {
-            source: Source::Checked(Box::new(stream)),
+            source: Source::Checked(Mutex::new(Box::new(stream))),
             purpose: StreamPurpose::TagHistory,
             externals: 0,
             features,
@@ -363,10 +377,22 @@ impl PreparedHistory {
         read.ensure_current_epoch()?;
         let repo_id = read.repo_id()?;
         let end = read.seq();
-        let found =
-            history_closure_before(read.reader(), purpose, head, &BTreeSet::new(), base, end)
-                .map_err(to_rdy)?;
+        // the walk's own facts of each record: no record is read or decoded again here
+        let found = prepared_history_closure_before(
+            read.reader(),
+            purpose,
+            head,
+            &BTreeSet::new(),
+            base,
+            end,
+        )
+        .map_err(to_rdy)?;
+        let facts = found.records;
+        let found = found.history;
         let records = found.records.len();
+        if facts.len() != records {
+            return Err(inconsistent());
+        }
         let mut order = found.records;
         order.extend(found.prerequisites.iter().copied());
         let place: HashMap<ObjectKey, u32> = order
@@ -386,46 +412,24 @@ impl PreparedHistory {
         if root as usize >= records && base != Some(head) {
             return Err(inconsistent());
         }
-        let mut source = StoreSource {
-            reader: read.reader(),
-            end,
-        };
         let mut len = Vec::with_capacity(order.len());
         let mut starts = Vec::with_capacity(order.len() + 1);
         let mut deps: Vec<u32> = Vec::new();
         let mut seeds: Vec<u32> = Vec::new();
-        for (i, key) in order[..records].iter().enumerate() {
-            let record = source
-                .record(*key)
-                .map_err(from_stream)?
-                .ok_or_else(inconsistent)?;
-            let refs = record.refs(&found.features).map_err(|e| {
-                to_rdy(StreamError::from_record(i as u64 + 1, 0, &e).with_object(Some(*key)))
-            })?;
-            let mut mine = Vec::with_capacity(refs.len() + 1);
-            for r in refs {
-                let target = match r.kind {
-                    Some(kind) => ObjectKey { kind, hash: r.hash },
-                    None => {
-                        let mut found = rdy_store::sync_stream::sync_kinds()
-                            .iter()
-                            .map(|&kind| ObjectKey { kind, hash: r.hash })
-                            .filter(|k| place.contains_key(k));
-                        let one = found.next().ok_or_else(inconsistent)?;
-                        if found.next().is_some() {
-                            return Err(inconsistent());
-                        }
-                        one
-                    }
-                };
+        for (i, fact) in facts.into_iter().enumerate() {
+            if fact.key != order[i] || fact.frame_len < FRAME_HEADER {
+                return Err(inconsistent());
+            }
+            let mut mine = Vec::with_capacity(fact.refs.len() + 1);
+            for target in &fact.refs {
                 // a record's need comes before it, or is a prerequisite
-                let p = at(&target)?;
+                let p = at(target)?;
                 if (p as usize) >= i && (p as usize) < records {
                     return Err(inconsistent());
                 }
                 mine.push(p);
             }
-            if let Some(proof) = record.proof() {
+            if let Some(proof) = fact.proof {
                 mine.push(at(&proof)?);
                 seeds.push(i as u32);
                 seeds.extend(mine.iter().copied());
@@ -434,7 +438,7 @@ impl PreparedHistory {
             mine.dedup();
             starts.push(deps.len());
             deps.extend(mine);
-            len.push(record.frame_len());
+            len.push(fact.frame_len - FRAME_HEADER);
         }
         for _ in records..order.len() {
             starts.push(deps.len());
@@ -482,7 +486,7 @@ impl PreparedHistory {
     /// The history's record keys in key order.
     pub fn keys(&self) -> Vec<ObjectKey> {
         match &self.source {
-            Source::Checked(stream) => stream.facts().objects.clone(),
+            Source::Checked(stream) => checked(stream).facts().objects.clone(),
             Source::State(_) => {
                 let mut keys = self.order[..self.records()].to_vec();
                 keys.sort_unstable();
@@ -494,7 +498,7 @@ impl PreparedHistory {
     /// The record of `key`, from the checked export or the captured state.
     fn read(&self, key: ObjectKey) -> Result<StreamRecord, RdyError> {
         let found = match &self.source {
-            Source::Checked(stream) => stream.read(key),
+            Source::Checked(stream) => checked(stream).read(key),
             Source::State(read) => StoreSource {
                 reader: read.reader(),
                 end: read.seq(),
@@ -502,6 +506,15 @@ impl PreparedHistory {
             .record(key),
         };
         found.map_err(from_stream)?.ok_or_else(inconsistent)
+    }
+
+    /// The captured read's epoch is still the store's, for a canon or view history; a tag
+    /// history's checked export no longer reads the store.
+    fn ensure_epoch(&self) -> Result<(), RdyError> {
+        match &self.source {
+            Source::State(read) => read.ensure_current_epoch(),
+            Source::Checked(_) => Ok(()),
+        }
     }
 
     fn deps_of(&self, p: u32) -> &[u32] {
@@ -737,11 +750,13 @@ fn plan(
 }
 
 /// Writes the batch `batch` of `history` to `scratch` from its start and rewinds it; returns its
-/// bytes.
+/// bytes. `stop` is checked before each record: once it is set, the write ends with
+/// [`stopped`].
 fn write_batch(
     history: &PreparedHistory,
     batch: &Planned,
     scratch: &mut File,
+    stop: &AtomicBool,
 ) -> Result<u64, RdyError> {
     scratch.set_len(0).map_err(|_| scratch_error())?;
     scratch
@@ -773,6 +788,9 @@ fn write_batch(
     let mut out = BufWriter::new(&mut *scratch);
     let mut w = StreamWriter::new(&mut out, &header).map_err(from_stream)?;
     for &p in &batch.places {
+        if stop.load(Ordering::Acquire) {
+            return Err(stopped());
+        }
         let record = history.read(history.order[p as usize])?;
         w.record(&record).map_err(from_stream)?;
     }
@@ -814,6 +832,17 @@ pub trait ObjectWire {
         body: &mut dyn Read,
         len: u64,
     ) -> Result<ObjectPut, RdyError>;
+    /// One prepared batch into the quarantine of push `push`. The default sends the batch's
+    /// own bytes through [`ObjectWire::put`].
+    fn put_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        let (raw, len) = body.identity()?;
+        self.put(cx, push, raw, len)
+    }
 }
 
 /// The publication upload's wire as an [`ObjectWire`].
@@ -837,6 +866,15 @@ impl ObjectWire for PublishObjects<'_> {
         len: u64,
     ) -> Result<ObjectPut, RdyError> {
         self.0.put_objects(cx, push, body, len)
+    }
+
+    fn put_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        self.0.put_objects_prepared(cx, push, body)
     }
 }
 
@@ -944,7 +982,380 @@ pub fn send_root(
     put_batches(history, &batches, push, wire, context, before_put, sent)
 }
 
+/// E_INTERNAL: a preparation that the upload stopped. The upload has already failed, and that
+/// failure is the one returned.
+fn stopped() -> RdyError {
+    RdyError::new(
+        E_INTERNAL,
+        "the upload preparation stopped",
+        "retry the push; report the error if it repeats",
+    )
+}
+
+/// The message of [`upload_start_error`].
+pub const UPLOAD_START_MESSAGE: &str = "the upload preparation could not start";
+/// The fix of [`upload_start_error`].
+pub const UPLOAD_START_FIX: &str = "retry the push";
+/// The message of [`upload_failed_error`].
+pub const UPLOAD_FAILED_MESSAGE: &str = "the upload preparation failed";
+/// The fix of [`upload_failed_error`].
+pub const UPLOAD_FAILED_FIX: &str = "retry the push; report the error if it repeats";
+
+/// E_IO: the upload's preparation worker could not be started.
+fn upload_start_error() -> RdyError {
+    RdyError::new(E_IO, UPLOAD_START_MESSAGE, UPLOAD_START_FIX)
+}
+
+/// E_INTERNAL: the upload's preparation worker panicked. Its payload is never shown.
+fn upload_failed_error() -> RdyError {
+    RdyError::new(E_INTERNAL, UPLOAD_FAILED_MESSAGE, UPLOAD_FAILED_FIX)
+}
+
+/// What a worker thread of an upload runs first: a test's registrations, made again on the
+/// worker (a thread-local registration does not cross threads). Its guards stay on the worker
+/// until it ends.
+pub type UploadWorkerSetup = Arc<dyn Fn() -> Box<dyn std::any::Any> + Send + Sync>;
+
+thread_local! {
+    static WORKER_SETUP: RefCell<Option<UploadWorkerSetup>> = const { RefCell::new(None) };
+    static PROBE: RefCell<Option<Arc<UploadProbe>>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` with `setup` installed for the upload workers this thread starts: the canon
+/// capture of a push and the batch preparation of an upload each run `setup` before their work
+/// and keep what it returns until they end. The prior setup comes back when `f` returns or
+/// panics. Production installs none.
+#[doc(hidden)]
+pub fn with_upload_worker_setup_for_tests<T>(setup: UploadWorkerSetup, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<UploadWorkerSetup>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prior = self.0.take();
+            WORKER_SETUP.with(|c| *c.borrow_mut() = prior);
+        }
+    }
+    let prior = WORKER_SETUP.with(|c| c.borrow_mut().replace(setup));
+    let _restore = Restore(prior);
+    f()
+}
+
+/// The setup a worker started by this thread runs first, if a test installed one.
+pub(crate) fn upload_worker_setup() -> Option<UploadWorkerSetup> {
+    WORKER_SETUP.with(|c| c.borrow().clone())
+}
+
+/// A point in one batch's preparation that [`UploadProbe::on_stage`] sees.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadStage {
+    /// The batch is written and checked.
+    Built,
+    /// The batch is framed (or kept as identity when the frame is not smaller).
+    Compressed,
+}
+
+/// What a test sees of the uploads this thread runs ([`with_upload_probe_for_tests`]): the
+/// bodies, scratch files and workers live at once (now and at most), the workers started, and
+/// each prepared and compressed body. `on_stage` runs on the thread that prepares a batch, with
+/// the stage and the batch's place in the upload; its error fails that preparation as a build
+/// or compression error would.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct UploadProbe {
+    pub live_bodies: AtomicUsize,
+    pub max_bodies: AtomicUsize,
+    pub live_scratch: AtomicUsize,
+    pub max_scratch: AtomicUsize,
+    pub live_workers: AtomicUsize,
+    pub max_workers: AtomicUsize,
+    pub workers_started: AtomicUsize,
+    pub prepared: AtomicUsize,
+    pub compressed: AtomicUsize,
+    #[allow(clippy::type_complexity)]
+    pub on_stage: Mutex<Option<Box<dyn Fn(UploadStage, usize) -> Result<(), RdyError> + Send>>>,
+}
+
+impl UploadProbe {
+    fn up(now: &AtomicUsize, max: &AtomicUsize, by: usize) {
+        let n = now.fetch_add(by, Ordering::SeqCst) + by;
+        max.fetch_max(n, Ordering::SeqCst);
+    }
+
+    fn down(now: &AtomicUsize, by: usize) {
+        now.fetch_sub(by, Ordering::SeqCst);
+    }
+
+    /// Runs the test's stage hook of `probe`, if any.
+    fn stage(
+        probe: &Option<Arc<UploadProbe>>,
+        stage: UploadStage,
+        place: usize,
+    ) -> Result<(), RdyError> {
+        let Some(p) = probe else {
+            return Ok(());
+        };
+        let hook = p.on_stage.lock().unwrap_or_else(|e| e.into_inner());
+        match hook.as_ref() {
+            Some(f) => f(stage, place),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Runs `f` with `probe` counting the uploads this thread runs (a test hook).
+#[doc(hidden)]
+pub fn with_upload_probe_for_tests<T>(probe: Arc<UploadProbe>, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Arc<UploadProbe>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prior = self.0.take();
+            PROBE.with(|c| *c.borrow_mut() = prior);
+        }
+    }
+    let prior = PROBE.with(|c| c.borrow_mut().replace(probe));
+    let _restore = Restore(prior);
+    f()
+}
+
+/// The probe of this thread's uploads, if a test installed one.
+pub(crate) fn upload_probe() -> Option<Arc<UploadProbe>> {
+    PROBE.with(|c| c.borrow().clone())
+}
+
+/// A live worker thread of an upload, as the probe counts it (nothing without a probe).
+pub(crate) struct WorkerMark(Option<Arc<UploadProbe>>);
+
+impl WorkerMark {
+    pub(crate) fn new(probe: Option<Arc<UploadProbe>>) -> WorkerMark {
+        if let Some(p) = &probe {
+            p.workers_started.fetch_add(1, Ordering::SeqCst);
+            UploadProbe::up(&p.live_workers, &p.max_workers, 1);
+        }
+        WorkerMark(probe)
+    }
+}
+
+impl Drop for WorkerMark {
+    fn drop(&mut self) {
+        if let Some(p) = &self.0 {
+            UploadProbe::down(&p.live_workers, 1);
+        }
+    }
+}
+
+/// One batch of a history upload, written by the stream writer, checked as its purpose checks
+/// it and, when the push negotiated zstd, framed once ([`zstd_frame`]): its raw scratch file and
+/// length, and the framed file and length when the frame is smaller. The raw file stays, so a
+/// fresh context that cannot take the frame sends the raw bytes. Only an upload makes one: no
+/// caller supplies its bytes or a report. Every read starts from its file's start.
+pub struct PreparedObjectBody {
+    raw: File,
+    raw_len: u64,
+    framed: Option<File>,
+    wire_len: u64,
+    encoding: BodyEncoding,
+    probe: Option<Arc<UploadProbe>>,
+}
+
+impl std::fmt::Debug for PreparedObjectBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedObjectBody")
+            .field("raw_len", &self.raw_len)
+            .field("wire_len", &self.wire_len)
+            .field("encoding", &self.encoding)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedObjectBody {
+    /// Writes and checks batch `batch` of `history` ([`write_batch`]), then frames it when
+    /// `zstd`. `place` is the batch's place in the upload, for the probe.
+    fn prepare(
+        history: &PreparedHistory,
+        batch: &Planned,
+        zstd: bool,
+        stop: &AtomicBool,
+        probe: Option<Arc<UploadProbe>>,
+        place: usize,
+    ) -> Result<PreparedObjectBody, RdyError> {
+        let raw = tempfile::tempfile().map_err(|_| scratch_error())?;
+        if let Some(p) = &probe {
+            UploadProbe::up(&p.live_bodies, &p.max_bodies, 1);
+            UploadProbe::up(&p.live_scratch, &p.max_scratch, 1);
+        }
+        let mut body = PreparedObjectBody {
+            raw,
+            raw_len: 0,
+            framed: None,
+            wire_len: 0,
+            encoding: BodyEncoding::Identity,
+            probe,
+        };
+        body.raw_len = write_batch(history, batch, &mut body.raw, stop)?;
+        body.wire_len = body.raw_len;
+        if let Some(p) = &body.probe {
+            p.prepared.fetch_add(1, Ordering::SeqCst);
+        }
+        UploadProbe::stage(&body.probe, UploadStage::Built, place)?;
+        if zstd {
+            if stop.load(Ordering::Acquire) {
+                return Err(stopped());
+            }
+            body.compress(place)?;
+        }
+        Ok(body)
+    }
+
+    /// Frames the raw bytes once, at level 3 with their checksum and size: the frame is kept
+    /// when it is smaller, else the raw bytes stay the body. The unused output is closed here.
+    fn compress(&mut self, place: usize) -> Result<(), RdyError> {
+        debug_assert!(self.framed.is_none(), "a body is framed once");
+        self.raw
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| scratch_error())?;
+        if let Some(p) = &self.probe {
+            // the frame and the copy that zstd_frame writes
+            UploadProbe::up(&p.live_scratch, &p.max_scratch, 2);
+        }
+        let framed = zstd_frame(&mut (&self.raw).take(self.raw_len), self.raw_len);
+        if let Some(p) = &self.probe {
+            UploadProbe::down(&p.live_scratch, 2);
+            p.compressed.fetch_add(1, Ordering::SeqCst);
+        }
+        let (file, len, encoding) = framed?;
+        if encoding == BodyEncoding::Zstd {
+            if let Some(p) = &self.probe {
+                UploadProbe::up(&p.live_scratch, &p.max_scratch, 1);
+            }
+            self.framed = Some(file);
+            self.wire_len = len;
+            self.encoding = BodyEncoding::Zstd;
+        }
+        UploadProbe::stage(&self.probe, UploadStage::Compressed, place)
+    }
+
+    /// The batch's bytes before any compression.
+    pub fn raw_len(&self) -> u64 {
+        self.raw_len
+    }
+
+    /// The bytes it sends as [`PreparedObjectBody::encoding`].
+    pub fn wire_len(&self) -> u64 {
+        self.wire_len
+    }
+
+    /// Its encoding when the context takes zstd: the frame when it is smaller, else identity.
+    pub fn encoding(&self) -> BodyEncoding {
+        self.encoding
+    }
+
+    /// The raw bytes from their start and their length, for an identity send.
+    pub fn identity(&mut self) -> Result<(&mut dyn Read, u64), RdyError> {
+        self.raw
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| scratch_error())?;
+        Ok((&mut self.raw, self.raw_len))
+    }
+
+    /// What goes on the wire for a context that takes zstd (`zstd`) or not: the frame, its
+    /// length and [`BodyEncoding::Zstd`] when it has one and the context takes it, else the raw
+    /// bytes as identity; from its start.
+    pub fn wire(&mut self, zstd: bool) -> Result<(&mut File, u64, BodyEncoding), RdyError> {
+        match &mut self.framed {
+            Some(framed) if zstd => {
+                framed
+                    .seek(SeekFrom::Start(0))
+                    .map_err(|_| scratch_error())?;
+                Ok((framed, self.wire_len, BodyEncoding::Zstd))
+            }
+            _ => {
+                self.raw
+                    .seek(SeekFrom::Start(0))
+                    .map_err(|_| scratch_error())?;
+                Ok((&mut self.raw, self.raw_len, BodyEncoding::Identity))
+            }
+        }
+    }
+}
+
+impl Drop for PreparedObjectBody {
+    fn drop(&mut self) {
+        if let Some(p) = &self.probe {
+            UploadProbe::down(&p.live_bodies, 1);
+            UploadProbe::down(&p.live_scratch, 1 + usize::from(self.framed.is_some()));
+        }
+    }
+}
+
+// the one preparation worker borrows the history while the caller sends
+const _: fn() = || {
+    fn shared<T: Send + Sync>() {}
+    fn sent<T: Send>() {}
+    shared::<PreparedHistory>();
+    sent::<PreparedObjectBody>();
+    sent::<RdyError>();
+};
+
+/// One batch of [`serial_bodies_for_tests`]: its raw bytes, and its frame when the frame is
+/// smaller.
+#[doc(hidden)]
+pub type SerialBody = (Vec<u8>, Option<Vec<u8>>);
+
+/// The bodies of `batches` of `history` as the serial upload before the pipeline wrote them:
+/// one scratch file rewritten per batch, each framed once when `zstd`. Each is (raw bytes,
+/// framed bytes when the frame is smaller). A test hook: the reference a pipelined upload's
+/// bytes are compared with.
+#[doc(hidden)]
+pub fn serial_bodies_for_tests(
+    history: &PreparedHistory,
+    missing: &[ObjectKey],
+    limits: BatchLimits,
+    zstd: bool,
+) -> Result<Vec<SerialBody>, RdyError> {
+    let send: Vec<u32> = (0..history.records() as u32)
+        .filter(|&p| {
+            history.retained[p as usize]
+                || missing.binary_search(&history.order[p as usize]).is_ok()
+        })
+        .collect();
+    let batches = plan(history, &send, limits)?;
+    let mut scratch = tempfile::tempfile().map_err(|_| scratch_error())?;
+    let never = AtomicBool::new(false);
+    let mut out = Vec::new();
+    for batch in &batches {
+        let len = write_batch(history, batch, &mut scratch, &never)?;
+        let mut raw = Vec::new();
+        (&scratch)
+            .take(len)
+            .read_to_end(&mut raw)
+            .map_err(|_| scratch_error())?;
+        let framed = if zstd {
+            scratch
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| scratch_error())?;
+            let (mut file, _, encoding) = zstd_frame(&mut (&scratch).take(len), len)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|_| scratch_error())?;
+            (encoding == BodyEncoding::Zstd).then_some(bytes)
+        } else {
+            None
+        };
+        out.push((raw, framed));
+    }
+    Ok(out)
+}
+
 /// Writes and puts each batch of `batches` in order (see [`send_objects`]).
+///
+/// The first batch is written and checked here; `before_put` then runs, and the first fresh
+/// context tells whether the push sends zstd (its negotiated state), so the first batch is
+/// framed then. With more batches, one scoped worker prepares the next batch (write, check and
+/// frame) while this thread sends the current one: two batch slots, never more. The worker gets
+/// a job only once this thread took the batch before it and released the one before that; it
+/// holds no token and asks for no context. Before every put the captured epoch is checked
+/// again. On any failure the job channel closes, the next body is dropped and the worker is
+/// joined; an earlier batch's failure wins over a later preparation's, and nothing after a
+/// failed batch is sent.
 fn put_batches(
     history: &PreparedHistory,
     batches: &[Planned],
@@ -954,33 +1365,160 @@ fn put_batches(
     before_put: &mut dyn FnMut() -> Result<(), RdyError>,
     sent: &mut HistorySent,
 ) -> Result<(), RdyError> {
-    let mut scratch = tempfile::tempfile().map_err(|_| scratch_error())?;
+    let Some(first) = batches.first() else {
+        return Ok(());
+    };
+    let probe = upload_probe();
+    let never = AtomicBool::new(false);
+    let mut current = PreparedObjectBody::prepare(history, first, false, &never, probe.clone(), 0)?;
+    before_put()?;
+    let cx = context()?;
+    let zstd = cx.zstd;
+    if zstd {
+        current.compress(0)?;
+    }
     let mut last = ObjectPut {
         records: 0,
         bytes: 0,
     };
-    let mut first = true;
-    for batch in batches {
-        let len = write_batch(history, batch, &mut scratch)?;
-        if std::mem::replace(&mut first, false) {
-            before_put()?;
-        }
-        let cx = context()?;
-        let mut body = (&scratch).take(len);
-        let put = wire.put(&cx, push.as_str(), &mut body, len)?;
-        // the quarantine's distinct records and bytes so far: they never shrink and stay
-        // within one upload's caps
-        if put.records < last.records
-            || put.bytes < last.bytes
-            || put.records > MAX_RECORDS
-            || put.bytes > MAX_STREAM_BYTES
-        {
-            return Err(upstream_protocol());
-        }
-        last = put;
-        sent.batches += 1;
-        sent.records += batch.places.len() as u64;
-        sent.bytes += len;
+    if batches.len() == 1 {
+        return put_one(history, first, push, wire, &cx, current, &mut last, sent);
     }
+    let setup = upload_worker_setup();
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let (jobs, job_rx) = sync_channel::<usize>(1);
+        let (results_tx, results) = sync_channel::<Result<PreparedObjectBody, RdyError>>(0);
+        let worker = {
+            let (stop, probe, setup) = (&stop, probe.clone(), setup.clone());
+            std::thread::Builder::new()
+                .name("rdy-upload-prepare".into())
+                .spawn_scoped(s, move || {
+                    let _guards = setup.as_ref().map(|f| f());
+                    let _mark = WorkerMark::new(probe.clone());
+                    produce(history, batches, zstd, stop, probe, job_rx, results_tx);
+                })
+                .map_err(|_| upload_start_error())?
+        };
+        let outcome = drive(
+            history, batches, push, wire, context, cx, current, &jobs, &results, &mut last, sent,
+        );
+        // close the job channel, drop the next body, and wait for the worker
+        stop.store(true, Ordering::Release);
+        drop(jobs);
+        drop(results);
+        let joined = worker.join();
+        match (outcome, joined) {
+            (Err(Drive::Failed(e)), _) => Err(e),
+            (Err(Drive::WorkerGone), _) | (Ok(()), Err(_)) => Err(upload_failed_error()),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    })
+}
+
+/// How the caller's part of a pipelined upload ended early: an error of its own (or one the
+/// worker returned), or a worker that ended without a result.
+enum Drive {
+    Failed(RdyError),
+    WorkerGone,
+}
+
+impl From<RdyError> for Drive {
+    fn from(e: RdyError) -> Drive {
+        Drive::Failed(e)
+    }
+}
+
+/// The preparation worker: each job names the next batch; its body (or its error) goes back
+/// on the rendezvous channel. It ends when the job channel closes, the caller stops it, a
+/// result cannot be handed over, or a preparation fails.
+fn produce(
+    history: &PreparedHistory,
+    batches: &[Planned],
+    zstd: bool,
+    stop: &AtomicBool,
+    probe: Option<Arc<UploadProbe>>,
+    jobs: Receiver<usize>,
+    results: SyncSender<Result<PreparedObjectBody, RdyError>>,
+) {
+    for i in jobs {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let body = PreparedObjectBody::prepare(history, &batches[i], zstd, stop, probe.clone(), i);
+        let failed = body.is_err();
+        if results.send(body).is_err() || failed {
+            break;
+        }
+    }
+}
+
+/// The caller's part of a pipelined upload: each batch in order, the first already prepared and
+/// its context `cx` taken.
+#[allow(clippy::too_many_arguments)]
+fn drive(
+    history: &PreparedHistory,
+    batches: &[Planned],
+    push: &PushId,
+    wire: &dyn ObjectWire,
+    context: &mut dyn FnMut() -> Result<UploadContext, RdyError>,
+    cx: UploadContext,
+    current: PreparedObjectBody,
+    jobs: &SyncSender<usize>,
+    results: &Receiver<Result<PreparedObjectBody, RdyError>>,
+    last: &mut ObjectPut,
+    sent: &mut HistorySent,
+) -> Result<(), Drive> {
+    let mut cx = Some(cx);
+    let mut current = Some(current);
+    for (i, batch) in batches.iter().enumerate() {
+        let body = match current.take() {
+            Some(b) => b,
+            None => match results.recv() {
+                Ok(b) => b?,
+                Err(_) => return Err(Drive::WorkerGone),
+            },
+        };
+        let cx = match cx.take() {
+            Some(cx) => cx,
+            None => context()?,
+        };
+        // the next batch is prepared while this one is sent
+        if i + 1 < batches.len() && jobs.send(i + 1).is_err() {
+            return Err(Drive::WorkerGone);
+        }
+        put_one(history, batch, push, wire, &cx, body, last, sent)?;
+    }
+    Ok(())
+}
+
+/// Puts `body`, batch `batch` of `history`, under push `push` with the fresh context `cx`,
+/// after the epoch check, and counts it in `sent`. The body is released when it returns.
+#[allow(clippy::too_many_arguments)]
+fn put_one(
+    history: &PreparedHistory,
+    batch: &Planned,
+    push: &PushId,
+    wire: &dyn ObjectWire,
+    cx: &UploadContext,
+    mut body: PreparedObjectBody,
+    last: &mut ObjectPut,
+    sent: &mut HistorySent,
+) -> Result<(), RdyError> {
+    history.ensure_epoch()?;
+    let put = wire.put_prepared(cx, push.as_str(), &mut body)?;
+    // the quarantine's distinct records and bytes so far: they never shrink and stay
+    // within one upload's caps
+    if put.records < last.records
+        || put.bytes < last.bytes
+        || put.records > MAX_RECORDS
+        || put.bytes > MAX_STREAM_BYTES
+    {
+        return Err(upstream_protocol());
+    }
+    *last = put;
+    sent.batches += 1;
+    sent.records += batch.places.len() as u64;
+    sent.bytes += body.raw_len;
     Ok(())
 }

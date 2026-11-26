@@ -28,6 +28,7 @@
 use crate::error::{E_BAD_INPUT, E_UPSTREAM_UNCERTAIN, RdyError, actor_unbound, upstream_protocol};
 use crate::formats::formats;
 use crate::hub_http::{HttpHubTransport, ReplyEncoding};
+use crate::hub_publish_stream::PreparedObjectBody;
 use crate::hub_publish_wire::{
     Discovery, Effect, HttpPublishWire, KNOWN_REPLY_BYTES, KNOWN_REQUEST_BYTES, KeyWire,
     MAX_JSON_VALUES, MAX_KNOWN_KEYS, ObjectPut, PostError, PublishState, PublishWire, REPLY_BYTES,
@@ -696,6 +697,17 @@ pub trait SyncWire: Send + Sync {
         body: &mut dyn Read,
         len: u64,
     ) -> Result<ObjectPut, RdyError>;
+    /// `POST <base>/objects/put?push=<push>`: one prepared batch. The default sends the batch's
+    /// own bytes through [`SyncWire::put`].
+    fn put_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        let (raw, len) = body.identity()?;
+        self.put(cx, push, raw, len)
+    }
     /// `POST <base>/known`, pull form: one page.
     fn known_pull(&self, cx: &UploadContext, request: &KnownPull) -> Result<KnownPage, RdyError>;
     /// `POST <base>/objects/get`: the batch streamed to `sink`, at most `limit` bytes. Returns
@@ -847,6 +859,15 @@ impl SyncWire for HttpSyncWire {
         len: u64,
     ) -> Result<ObjectPut, RdyError> {
         self.inner.put_objects(cx, push, body, len)
+    }
+
+    fn put_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        self.inner.put_objects_prepared(cx, push, body)
     }
 
     fn known_pull(&self, cx: &UploadContext, request: &KnownPull) -> Result<KnownPage, RdyError> {

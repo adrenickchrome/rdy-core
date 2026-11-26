@@ -658,8 +658,21 @@ impl StoreReader {
         f: &mut dyn FnMut(CarriedAt) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
         self.refuse_pending()?;
-        let upto = end.min(self.index().indexed_upto()?);
-        self.index().for_each_carried_place(upto, |loc, hash| {
+        let read = self.read_for_closure()?;
+        self.visit_carried_in(&read, end, f)
+    }
+
+    /// [`StoreReader::visit_carried`] with every index query in `read` (a closure walk's read
+    /// transaction): the same places, frame, length, end, hash and decode checks.
+    pub(crate) fn visit_carried_in(
+        &self,
+        read: &crate::index::IndexRead,
+        end: Location,
+        f: &mut dyn FnMut(CarriedAt) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.refuse_pending()?;
+        let upto = end.min(read.indexed_upto()?);
+        read.for_each_carried_place(upto, |loc, hash| {
             let bad = || StoreError::corrupt_at(loc);
             let corrupt = |e: std::io::Error| match e.kind() {
                 std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => bad(),
