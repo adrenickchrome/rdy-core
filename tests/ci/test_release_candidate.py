@@ -97,14 +97,18 @@ def release_archive(target, binary=b'\x7fELF rdy release binary /rdy/crates/rdy-
     return tar_gz(members)
 
 
+def gate_report_value():
+    return {'revision': S[:9], 'dirty': False, 'pass': True, 'mode': 'skip-perf',
+            'gates': [{'name': 'fmt', 'pass': True, 'detail': ''},
+                      {'name': 'workspace tests', 'pass': True,
+                       'detail': '120 passed, 0 failed, 3 ignored, 0 skipped'},
+                      {'name': 'lib', 'pass': True, 'detail': '40 passed, 0 failed, 0 ignored, 0 skipped'}],
+            'areas': [{'name': 'cli', 'passed': 30, 'failed': 0, 'ignored': 1, 'skipped': 0},
+                      {'name': 'release', 'passed': 10, 'failed': 0, 'ignored': 0, 'skipped': 0}]}
+
+
 def gate_report(**change):
-    report = {'revision': S[:9], 'dirty': False, 'pass': True, 'mode': 'skip-perf',
-              'gates': [{'name': 'fmt', 'pass': True, 'detail': ''},
-                        {'name': 'workspace tests', 'pass': True,
-                         'detail': '120 passed, 0 failed, 3 ignored, 0 skipped'},
-                        {'name': 'lib', 'pass': True, 'detail': '40 passed, 0 failed, 0 ignored, 0 skipped'}],
-              'areas': [{'name': 'cli', 'passed': 30, 'failed': 0, 'ignored': 1, 'skipped': 0},
-                        {'name': 'release', 'passed': 10, 'failed': 0, 'ignored': 0, 'skipped': 0}]}
+    report = gate_report_value()
     report.update(change)
     return json.dumps(report).encode()
 
@@ -340,6 +344,60 @@ class rsig4_Candidate(Fixture):
         with self.assertRaises(ControllerError) as caught:
             self.assemble({MAC: self.build_input(MAC), LINUX: self.build_input(LINUX)}, out)
         self.assertEqual(str(caught.exception), 'the output directory already exists')
+
+    def test_r59022_gate_counts_accepts_a_linked_retried_pass(self):
+        """A pass that needed a retry counts when each retried binary has a flake issue link: the
+        failed test of the first run moves to passed, and nothing is skipped."""
+        workspace = {'name': 'workspace tests', 'pass': False,
+                     'detail': '120 passed, 1 failed, 3 ignored, 0 skipped'}
+        gates = gate_report_value()['gates'][:1] + [workspace] + gate_report_value()['gates'][2:]
+        retried = [{'binary': 'rdy-store/test/sync', 'ok': True, 'exit': 'exit 0', 'passed': 9,
+                    'failed': 0, 'secs': 2.5, 'flake_issue': 'flake-7'},
+                   {'binary': 'rdy-qa/test/cli', 'ok': True, 'exit': 'exit 0', 'passed': 4,
+                    'failed': 0, 'secs': 1.5, 'flake_issue': 'f.8_a-b'}]
+        counts = CANDIDATE.fast_gate_counts(gate_report(gates=gates, retried=retried), S)
+        self.assertEqual(counts, {'passed': FAST_GATE['passed'] + 1, 'failed': 0,
+                                  'ignored': FAST_GATE['ignored'], 'prerequisite_skipped': 0})
+        # an empty or absent retried list changes nothing
+        self.assertEqual(CANDIDATE.fast_gate_counts(gate_report(retried=[]), S), FAST_GATE)
+        self.assertEqual(CANDIDATE.fast_gate_counts(gate_report(), S), FAST_GATE)
+        # a retry never hides a prerequisite skip
+        skipped = [{'name': 'cli', 'passed': 3, 'failed': 0, 'ignored': 0, 'skipped': 2}]
+        with self.assertRaises(ControllerError) as caught:
+            CANDIDATE.fast_gate_counts(gate_report(gates=gates, retried=retried, areas=skipped), S)
+        self.assertEqual(str(caught.exception), 'the native fast gate did not pass with every prerequisite')
+        # a first-run failure with no retry still refuses, as before
+        with self.assertRaises(ControllerError) as caught:
+            CANDIDATE.fast_gate_counts(gate_report(gates=gates), S)
+        self.assertEqual(str(caught.exception), 'the native fast gate did not pass with every prerequisite')
+
+    def test_r59022_gate_counts_refuses_a_retried_pass_without_a_link(self):
+        link = 'the native fast gate passed only on a retry, and a retried binary has no flake issue link'
+        good = {'binary': 'rdy-qa/test/cli', 'ok': True, 'exit': 'exit 0', 'passed': 4, 'failed': 0,
+                'secs': 1.5, 'flake_issue': 'flake-7'}
+        missing = {k: v for k, v in good.items() if k != 'flake_issue'}
+        for row in [dict(good, flake_issue=None), dict(good, flake_issue=''), missing,
+                    dict(good, flake_issue='-flake'), dict(good, flake_issue='a b'),
+                    dict(good, flake_issue='x' * 65), dict(good, flake_issue=7),
+                    dict(good, flake_issue='flake-7\n')]:
+            # one linked row does not cover a second, unlinked one
+            for retried in ([row], [good, row]):
+                with self.subTest(row=row, rows=len(retried)):
+                    with self.assertRaises(ControllerError) as caught:
+                        CANDIDATE.fast_gate_counts(gate_report(retried=retried), S)
+                    self.assertEqual(str(caught.exception), link)
+        # a row that did not pass is no pass
+        for row in [dict(good, ok=False), dict(good, failed=1)]:
+            with self.subTest(row=row):
+                with self.assertRaises(ControllerError) as caught:
+                    CANDIDATE.fast_gate_counts(gate_report(retried=[row]), S)
+                self.assertEqual(str(caught.exception), 'the native fast gate did not pass')
+        # a malformed list is the malformed report
+        for retried in ('cli', {'binary': 'x'}, ['cli'], [None], [dict(good, ok='yes')], [dict(good, failed='0')]):
+            with self.subTest(retried=retried):
+                with self.assertRaises(ControllerError) as caught:
+                    CANDIDATE.fast_gate_counts(gate_report(retried=retried), S)
+                self.assertEqual(str(caught.exception), 'the native fast gate report is malformed')
 
     def test_rsig4_native_jobs_are_required_and_report_counts(self):
         counts = CANDIDATE.fast_gate_counts(gate_report(), S)
