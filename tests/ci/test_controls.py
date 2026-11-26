@@ -1866,10 +1866,7 @@ class NightlyPolicy(unittest.TestCase):
     def test_whole_suite_lines(self):
         lines = [line.strip() for line in self.text.splitlines() if 'cargo qa' in line]
         suite = 'run: cargo qa --tier nightly --skip-perf --require-all'
-        self.assertEqual(lines, [suite, suite, suite, 'cargo qa --deep --require-all'])
-        # The bench's deep run keeps its temporary files on its disk, not its small /tmp tmpfs.
-        deep = step_named({'jobs': {'b': self.doc['jobs']['bench']}}, 'Deep gate with perf')
-        self.assertIn('export TMPDIR="$HOME/qt"', deep['run'])
+        self.assertEqual(lines, [suite, suite, suite, 'run: cargo qa --deep --require-all'])
         # The nightly run meets the real disk: no RAM disk and no budget.
         code = '\n'.join(line for line in self.text.splitlines() if not line.lstrip().startswith('#'))
         for word in ('--tmp-root', '--budget-secs', '/dev/shm', 'hdiutil', 'RDY_GATE_BUDGET_SECS'):

@@ -154,11 +154,15 @@ fn spawn1_a_spawned_serve_child_detaches_into_a_session_of_its_own() {
     const PROBE: &str = "SPAWN1_DETACH_PROBE";
     if std::env::var(PROBE).is_ok() {
         detach().unwrap();
-        eprintln!(
-            "probe pid={} sid={}",
+        // one write of the whole line: eprintln! may write its pieces apart, and the parent
+        // reads the log while the child writes it
+        use std::io::Write as _;
+        let line = format!(
+            "probe pid={} sid={}\n",
             std::process::id(),
             rdy_daemon::spawn::own_sid()
         );
+        std::io::stderr().write_all(line.as_bytes()).unwrap();
         return;
     }
     let dir = short_tempdir();
@@ -180,8 +184,12 @@ fn spawn1_a_spawned_serve_child_detaches_into_a_session_of_its_own() {
     let t0 = std::time::Instant::now();
     let line = loop {
         let text = std::fs::read_to_string(run.log_file()).unwrap_or_default();
-        if let Some(l) = text.lines().find(|l| l.starts_with("probe pid=")) {
-            break l.to_string();
+        // only a whole line: a read may meet the line before its end is written
+        if let Some(l) = text
+            .split_inclusive('\n')
+            .find(|l| l.starts_with("probe pid=") && l.ends_with('\n'))
+        {
+            break l.trim_end().to_string();
         }
         assert!(
             t0.elapsed() < std::time::Duration::from_secs(60),

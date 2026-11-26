@@ -278,17 +278,9 @@ jobs:
           CARGO_NET_OFFLINE: "true"
         run: cargo build --release --locked -p rdy-cli
       - name: Deep gate with perf
-        # The bench's /tmp is a 15 GB tmpfs, which the 50k-block perf trees fill, so the run's temporary
-        # files go to a short folder on its disk (short, for the socket paths under it).
         env:
           CARGO_NET_OFFLINE: "true"
-        run: |
-          export TMPDIR="$HOME/qt"
-          rm -rf "$TMPDIR" && mkdir "$TMPDIR"
-          cargo qa --deep --require-all
-      - name: Clear the temporary folder
-        if: always()
-        run: rm -rf "$HOME/qt"
+        run: cargo qa --deep --require-all
       - name: Failing tests
         if: failure()
         run: |
