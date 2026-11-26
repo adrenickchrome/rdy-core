@@ -2456,7 +2456,11 @@ fn cli_links_probes(seen: &mut Seen, env: &[(String, String)]) {
 /// m4a3: the world of the `rdy hook` probes (C29): a project with a landed decision and the
 /// linked code repo `app`, whose local checkout anchors `src/anchored.rs` to the decision and
 /// leaves `src/plain.rs` unanchored. Every run is direct, so no daemon holds the store, and
-/// reads no Git configuration of the machine.
+/// reads no Git configuration of the machine. Every process gets the long hook deadline of the
+/// end-to-end hook tests: a host run is a worker and several Git processes, and on a loaded
+/// machine (a hosted Windows runner) the product's 2 s ran out, so a probe that warns about a
+/// path gave the `deadline` warning instead and the shapes changed. No probe here is about the
+/// deadline.
 struct HookWorld {
     w: rdy_qa::instructions::World,
     project: rdy_qa::instructions::Dir,
@@ -2471,7 +2475,7 @@ struct HookWorld {
 
 impl HookWorld {
     fn new() -> HookWorld {
-        let w = rdy_qa::instructions::World::new();
+        let w = rdy_qa::instructions::World::new().with_long_hook_deadline();
         let project = w.project();
         let root = std::fs::canonicalize(project.path()).expect("the project root");
         let decision = hook_decision(&root);
