@@ -1046,6 +1046,18 @@ const FEATURE_FIRST_USE: &[(&str, &str)] = &[
         rdy_store::format::FEATURE_FIGURE_DARK,
         "first writes a figure with a dark image (in any view)",
     ),
+    (
+        rdy_store::format::FEATURE_PORTED_CHANGE,
+        "first stores a ported change or a removed port's residue",
+    ),
+    (
+        rdy_store::format::FEATURE_PLAN_DELTA,
+        "first writes a plan with this rdy (every plan version it writes uses it)",
+    ),
+    (
+        rdy_store::format::FEATURE_PARTIAL_HISTORY,
+        "first takes a canon state in a URL clone, before its history arrives",
+    ),
 ];
 
 /// The sync stream formats added after Release 1, each with the first rdy that writes it and
@@ -1101,6 +1113,13 @@ fn move_lines(
                 .iter()
                 .find(|(n, _)| n == name)
                 .map_or("first uses it", |(_, u)| u);
+            if name == rdy_store::format::FEATURE_DEDUP_SPANS {
+                // the optional upgrade step runs at rdy's own opens (OpenPolicy::AutoUpgrade)
+                out.push(format!(
+                    "- **Breaking for older rdy: rdy {version} adds the store feature `{name}` (class {class}, minimum rdy {need}); store format {ps} and dump format {cd} stay.** Every store rdy {version} creates uses `{name}` from the start. The first time rdy {version} opens a store made by rdy {prev}, even to read it, it upgrades the store to use `{name}`, after a backup beside the store, and maps the repeated byte runs already in it. From then on rdy {prev} refuses that store, and a dump of it, with `E_STORE_FORMAT` and names rdy {need}. The way back is a dump made with rdy {prev} before the first rdy {version} open. rdy {version} loads every earlier dump."
+                ));
+                continue;
+            }
             if name == rdy_store::format::FEATURE_SNAPSHOT_DELTA {
                 // no first-use step: any open upgrades a store of the release before
                 out.push(format!(
@@ -2762,6 +2781,44 @@ mod tests {
             "## Try it\n\nSteps.\n\n{}## Feedback\n\nTell us.\n\n{part}\n<details>\n<summary><b>About this preview</b></summary>\n\nText.\n\n</details>\n\n<details>\n<summary><b>Verify the download (optional)</b></summary>\n\nMore.\n\n</details>\n",
             changes_part()
         )
+    }
+
+    /// r5900: 0.59.0's feature-move lines after 0.57.0 say when each new feature starts. A
+    /// 0.57.0 store takes `dedup_spans` at its first 0.59.0 open (the optional upgrade step,
+    /// after a backup), so its line names that open and the way back; the other three name the
+    /// project's first use. No line falls back to the bare "first uses it".
+    #[test]
+    fn r5900_feature_moves_say_when_each_0590_feature_starts() {
+        let features = rdy_store::format::registered_features();
+        let got = move_lines("0.59.0", ("0.57.0", 4, 19), current_store(), &features);
+        let line = |name: &str| {
+            got.iter()
+                .find(|l| l.contains(&format!("adds the store feature `{name}`")))
+                .unwrap_or_else(|| panic!("no line for {name}: {got:#?}"))
+                .clone()
+        };
+        let dedup = line("dedup_spans");
+        for part in [
+            "Every store rdy 0.59.0 creates uses `dedup_spans` from the start.",
+            "The first time rdy 0.59.0 opens a store made by rdy 0.57.0, even to read it, it upgrades the store to use `dedup_spans`, after a backup beside the store",
+            "The way back is a dump made with rdy 0.57.0 before the first rdy 0.59.0 open.",
+        ] {
+            assert!(dedup.contains(part), "{dedup}");
+        }
+        assert!(!dedup.contains("only when its project"), "{dedup}");
+        assert!(
+            line("plan_delta").contains("only when its project first writes a plan with this rdy")
+        );
+        assert!(
+            line("partial_history")
+                .contains("only when its project first takes a canon state in a URL clone")
+        );
+        assert!(
+            line("ported_change").contains("only when its project first stores a ported change")
+        );
+        for l in &got {
+            assert!(!l.contains("first uses it"), "{l}");
+        }
     }
 
     /// rpl33: the first release that carries `foreign_copy` and sync stream format 3 names both
