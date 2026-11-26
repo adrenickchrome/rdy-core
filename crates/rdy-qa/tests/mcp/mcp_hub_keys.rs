@@ -411,6 +411,7 @@ impl Side {
         let home = self.home.path().to_string_lossy().into_owned();
         let o = rdy_qa::fixtures::rdy_command()
             .env_clear()
+            .envs(rdy_qa::fixtures::coverage_env())
             .env("XDG_CONFIG_HOME", &home)
             .env("HOME", &home)
             .env("USER", "qa")
@@ -445,6 +446,7 @@ impl Drop for Side {
     fn drop(&mut self) {
         let _ = rdy_qa::fixtures::rdy_command()
             .env_clear()
+            .envs(rdy_qa::fixtures::coverage_env())
             .arg("--project")
             .arg(self.proj.path())
             .args(["serve", "--stop"])
@@ -460,6 +462,7 @@ fn cli(side: &Side, args: &[&str]) -> Value {
     let home = side.home.path().to_string_lossy().into_owned();
     let o: Output = rdy_qa::fixtures::rdy_command()
         .env_clear()
+        .envs(rdy_qa::fixtures::coverage_env())
         // Windows sockets do not start in a process without it; no other platform has it
         .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
         .env("XDG_CONFIG_HOME", &home)
