@@ -783,9 +783,15 @@ pub fn set_nightly_tier() {
 }
 
 /// The Cargo arguments of the run's tier: `--features nightly-tests` in the nightly tier, none
-/// in the release tier.
+/// in the release tier. The gate knows its tier from [`set_nightly_tier`]; a test binary of the
+/// gate's build knows it from the feature it was built with. A test's Cargo call without the
+/// feature in a nightly run builds a second variant of the workspace's units into the same
+/// target directory, and on Windows (MSVC), where an executable's file name has no hash, that
+/// variant replaces the gate build's executables, so the fresh check finds them stale.
 pub fn tier_feature_args() -> Vec<&'static str> {
-    feature_args_for(NIGHTLY_TIER.load(std::sync::atomic::Ordering::SeqCst))
+    feature_args_for(
+        NIGHTLY_TIER.load(std::sync::atomic::Ordering::SeqCst) || cfg!(feature = "nightly-tests"),
+    )
 }
 
 /// The Cargo arguments of the nightly tier (`nightly`) or the release tier.
@@ -1782,6 +1788,11 @@ mod tests {
         assert_eq!(feature_args_for(false), Vec::<&str>::new());
         assert_eq!(feature_args_for(true), ["--features", NIGHTLY_FEATURE]);
         assert_eq!(NIGHTLY_FEATURE, "nightly-tests");
+        // a test's own Cargo calls build in the tier its binary was built in
+        assert_eq!(
+            tier_feature_args(),
+            feature_args_for(cfg!(feature = "nightly-tests"))
+        );
         // every workspace crate declares the feature, so `--features` reaches each one
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         for entry in std::fs::read_dir(&root).unwrap() {
