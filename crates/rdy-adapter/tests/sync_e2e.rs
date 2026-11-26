@@ -12,9 +12,11 @@
 
 #[path = "sync_e2e/mock.rs"]
 mod mock;
+#[path = "sync_e2e/speed.rs"]
+mod speed;
 
-use mock::{Fault, Hub, Verdict};
-use rdy_adapter::stream::StreamPurpose;
+use mock::{Fault, Hub, Peer, Verdict};
+use rdy_adapter::stream::{ObjectKey, StreamPurpose, StreamReader, StreamRecord};
 use rdy_adapter::{Hash, StoreHandle};
 use rdy_engine::hub_config::{
     Credential, CredentialFile, ReadyCredential, RemoteMode, encode_credentials,
@@ -27,7 +29,7 @@ use rdy_model::signature::{Signature, StatementSource, parse_statement, statemen
 use rdy_model::{Provenance, Role};
 use rdy_store::LandRequest;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -1766,4 +1768,285 @@ fn clone_and_pull_of_a_history_with_an_intent_and_an_alternative_set_pass_fsck()
             .expect("B's upgrade and its full check");
     assert!(report.changed && report.checked, "{report:?}");
     hub.finish();
+}
+
+// ---------------------------------------------------------------------------------------------
+// r59011: checked puts, prepared first pulls and compressed gets
+// ---------------------------------------------------------------------------------------------
+
+/// What a store holds of its canon history: its landings (oldest first), its tags (name to
+/// landing), and every key the canon history reaches. The store's own check passes.
+type Held = (Vec<Hash>, BTreeMap<String, Hash>, BTreeSet<ObjectKey>);
+
+fn held_of(snap: &rdy_adapter::Snapshot) -> Held {
+    let mut landings: Vec<Hash> = snap
+        .canon_history()
+        .unwrap()
+        .iter()
+        .map(|l| l.hash)
+        .collect();
+    landings.reverse();
+    let tags = snap
+        .tags()
+        .unwrap()
+        .into_iter()
+        .map(|(_, t)| (t.name, t.landing))
+        .collect();
+    let tip = snap.canon().expect("a canon tip");
+    let report = snap
+        .write_history(
+            StreamPurpose::CanonHistory,
+            tip,
+            None,
+            &BTreeSet::new(),
+            std::io::sink(),
+        )
+        .expect("export");
+    (landings, tags, report.keys.into_iter().collect())
+}
+
+/// [`Held`] of the project at `dir` (its daemon stopped), after its fsck.
+fn held_at(dir: &Path) -> Held {
+    let h = StoreHandle::open(dir).expect("open the store");
+    h.fsck().expect("fsck passes");
+    let held = held_of(&h.snapshot().expect("a snapshot"));
+    h.close().unwrap();
+    held
+}
+
+/// Lands a sealed plan with answer versions in the project: an edit of a claim that another
+/// claim references opens a plan item, answered twice, then landed.
+fn land_sealed_plan(r: &mut Rdy) {
+    let w = r
+        .write(
+            &session(Role::Writer),
+            WriteRequest {
+                view: "w-seed".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Rules", "doc_type": "page"}},
+                    {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+                    {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds 30 days."},
+                    {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}}."}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: "plan seed".into(),
+            },
+        )
+        .expect("the plan seed");
+    land(r, "w-seed");
+    let claim = w.created["$a"].clone();
+    r.write(
+        &session(Role::Writer),
+        WriteRequest {
+            view: "w-plan".into(),
+            ops: serde_json::from_value(
+                json!([{"op": "update", "id": claim, "body": "A holds 40 days."}]),
+            )
+            .unwrap(),
+            justification: None,
+            message: "an edit with a plan item".into(),
+        },
+    )
+    .expect("the edit");
+    let items: Vec<String> = r
+        .read()
+        .view_plan("w-plan")
+        .expect("the view's plan")
+        .items
+        .iter()
+        .filter_map(|row| match row {
+            rdy_engine::plan::api::PlanRow::Live(i) => Some(i.id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!items.is_empty(), "the edit opens a plan item");
+    for reason in ["it still holds", "it still holds, checked again"] {
+        let answers: Vec<rdy_engine::plan::PlanAnswerInput> = items
+            .iter()
+            .map(|i| rdy_engine::plan::PlanAnswerInput {
+                item: i.clone(),
+                act: rdy_model::plan::PlanAct::Confirm,
+                reason: Some(reason.into()),
+            })
+            .collect();
+        r.answer_plan(&session(Role::Writer), "w-plan", &answers)
+            .expect("answer the plan");
+    }
+    land(r, "w-plan");
+}
+
+/// The seed project of the r59011 cases: two landed docs, a tag, and a landed sealed plan with
+/// answer versions. Its canon history holds frames of encoding 0 and versioned frames.
+fn r59011_seed(hub: &Hub) -> Machine {
+    let m = Machine::new("seed", hub);
+    m.init();
+    m.land_doc("alpha", "Alpha is landed.");
+    m.land_doc("beta", "Beta is landed.");
+    tag_at(&m, "v1.0.0");
+    m.with(land_sealed_plan);
+    m.stop();
+    let h = StoreHandle::open(m.path()).expect("open the seed");
+    let snap = h.snapshot().unwrap();
+    let mut out = Vec::new();
+    snap.write_history(
+        StreamPurpose::CanonHistory,
+        snap.canon().unwrap(),
+        None,
+        &BTreeSet::new(),
+        &mut out,
+    )
+    .unwrap();
+    let (mut reader, _) = StreamReader::open_history(&out[..]).unwrap();
+    let mut encodings = BTreeSet::new();
+    let mut kinds = BTreeSet::new();
+    while let Some(rec) = reader.next().unwrap() {
+        if let StreamRecord::Present { key, encoding, .. } = rec {
+            encodings.insert(encoding > 0);
+            kinds.insert(key.kind);
+        }
+    }
+    assert_eq!(encodings.len(), 2, "encoding 0 and versioned frames");
+    for kind in [
+        rdy_store::kinds::PROPOSAL,
+        rdy_store::kinds::PLAN,
+        rdy_store::kinds::SNAPSHOT_DELTA,
+    ] {
+        assert!(
+            kinds.contains(&kind),
+            "the seed's history holds kind {kind}"
+        );
+    }
+    drop(snap);
+    h.close().unwrap();
+    m
+}
+
+/// How a case pushes and clones.
+#[derive(Clone, Copy, Debug)]
+enum Way {
+    /// `rdy_push` through the stdio MCP client, then `rdy clone <url>` on the command line.
+    McpPushCliClone,
+    /// `rdy push` on the command line, then `rdy_clone {url}` through the stdio MCP client.
+    CliPushMcpClone,
+}
+
+/// r59011 (D-D2NPN, D-DZDB7, D-H0BZN, D-D5J18): a push of a small history of mixed encodings
+/// seeds the hub from its puts' own checks, and a URL clone takes it through one prepared first
+/// pull, on each surface. The clone holds the source's canon, tags, proposals, sealed plan and
+/// every reachable key, and each store passes fsck. A hub and a client of this build use
+/// compressed gets; with an older hub or an older client every get is identity. A compressed get
+/// that is no zstd frame leaves the clone's target absent.
+#[test]
+fn r59011_seed_clone_and_old_peers_preserve_history() {
+    let seed_hub = Hub::start();
+    let seed = r59011_seed(&seed_hub);
+    let source = held_at(seed.path());
+    for (peer, way) in [
+        (Peer::New, Way::McpPushCliClone),
+        (Peer::New, Way::CliPushMcpClone),
+        (Peer::OldHub, Way::McpPushCliClone),
+        (Peer::OldClient, Way::McpPushCliClone),
+    ] {
+        let case = format!("{peer:?} {way:?}");
+        let hub = Hub::start_as(peer);
+        let a = copy_of("a", &seed, &hub);
+        a.remote(&hub.url());
+        // the push: each put checked once, the checks gone with the write
+        let (ok, v) = {
+            let _scope = hub.scope("push");
+            match way {
+                Way::McpPushCliClone => a.chat().call("rdy_push", json!({})),
+                Way::CliPushMcpClone => a.cli(&["push"]),
+            }
+        };
+        assert!(ok, "{case}: push {v}");
+        assert_eq!(v["canon"]["status"], "taken", "{case}: {v}");
+        assert_eq!(
+            hub.held_checks(),
+            0,
+            "{case}: the push's checks are dropped"
+        );
+        assert_eq!(hub.prepared(), 0, "{case}: a push prepares no pull");
+        assert_eq!(
+            hub.with_snapshot(held_of).unwrap(),
+            source,
+            "{case}: the hub"
+        );
+        hub.fsck();
+
+        // the clone: one prepared first pull
+        let c = Machine::new("c", &hub);
+        let target = c.path().join("clone");
+        let (ok, v) = {
+            let _scope = hub.scope("clone");
+            match way {
+                Way::McpPushCliClone => {
+                    let mut cmd = c.command(
+                        c.path(),
+                        &["--json", "clone", &hub.url(), target.to_str().unwrap()],
+                    );
+                    cmd.stdin(Stdio::null());
+                    run_json(cmd)
+                }
+                Way::CliPushMcpClone => a.chat().call(
+                    "rdy_clone",
+                    json!({"dir": target.to_str().unwrap(), "url": hub.url()}),
+                ),
+            }
+        };
+        assert!(ok, "{case}: clone {v}");
+        assert_eq!(hub.prepared(), 1, "{case}: one first-pull closure");
+        assert_eq!(held_at(&target), source, "{case}: the clone");
+        let gets: Vec<mock::Served> = hub
+            .served()
+            .into_iter()
+            .filter(|s| s.operation == "clone" && s.route == "objects/get")
+            .collect();
+        assert!(!gets.is_empty(), "{case}: the clone gets batches");
+        match peer {
+            Peer::New => {
+                assert!(gets.iter().all(|g| g.offered_zstd), "{case}: {gets:?}");
+                assert!(gets.iter().any(|g| g.zstd_reply), "{case}: {gets:?}");
+            }
+            Peer::OldHub => {
+                assert!(gets.iter().all(|g| g.offered_zstd), "{case}: {gets:?}");
+                assert!(!gets.iter().any(|g| g.zstd_reply), "{case}: {gets:?}");
+            }
+            Peer::OldClient => {
+                assert!(!gets.iter().any(|g| g.offered_zstd), "{case}: {gets:?}");
+                assert!(!gets.iter().any(|g| g.zstd_reply), "{case}: {gets:?}");
+            }
+        }
+        hub.finish();
+    }
+
+    // a compressed get that is no zstd frame: the clone refuses and writes no target
+    let hub = Hub::start();
+    let a = copy_of("a", &seed, &hub);
+    a.remote(&hub.url());
+    let v = a.cli_ok(&["push"]);
+    assert_eq!(v["canon"]["status"], "taken", "{v}");
+    hub.fault(Fault::BadZstdGet);
+    let c = Machine::new("c", &hub);
+    let target = c.path().join("clone");
+    let (ok, v) = {
+        let _scope = hub.scope("clone");
+        let mut cmd = c.command(
+            c.path(),
+            &["--json", "clone", &hub.url(), target.to_str().unwrap()],
+        );
+        cmd.stdin(Stdio::null());
+        run_json(cmd)
+    };
+    assert!(!ok, "a clone of a bad compressed get: {v}");
+    assert!(!target.exists(), "the clone's target is absent: {v}");
+    assert!(
+        hub.served()
+            .iter()
+            .any(|s| s.route == "objects/get" && s.zstd_reply),
+        "the bad get was served"
+    );
+    hub.finish();
+    seed_hub.finish();
 }

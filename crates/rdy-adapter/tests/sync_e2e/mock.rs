@@ -10,6 +10,15 @@
 //! mock serves those with the shapes of the hub design (i-B40VF, i-6YB7Y) as the client decodes
 //! them.
 //!
+//! A put is checked once when it arrives, after a bounded zstd decode when it is sent
+//! compressed, and the push keeps that check with its file ([`CheckedBatchFile`]); its write
+//! checks the push from those checks. The test driver may open a first-pull scope around one
+//! client command ([`Hub::scope`]): the scope's first known pull with no base prepares the pull
+//! once ([`rdy_adapter::Snapshot::prepare_pull_reply`]), and its pages and gets read that
+//! preparation. A get that offers zstd may come back as one zstd frame. Requests outside a scope
+//! keep their one-request snapshot reads. A scope is test-driver ownership, not a hub session.
+//! [`Peer`] plays an older hub or client for the encoding checks.
+//!
 //! All requests and faults are in memory. A request holds the hub's state lock for its whole run,
 //! so two requests never interleave. Nothing sleeps: each connection runs on its own thread, and
 //! [`Hub::finish`] stops the listener and joins every thread.
@@ -20,8 +29,8 @@
 mod hub_tls;
 
 use hub_tls::{Ca, LOOPBACK};
-use rdy_adapter::stream::{ObjectKey, StreamPurpose, check_batch};
-use rdy_adapter::sync::{CanonMove, Moved};
+use rdy_adapter::stream::{BodyEncoding, ObjectKey, PullReply, StreamPurpose};
+use rdy_adapter::sync::{CanonMove, CheckedBatchFile, Moved, check_batch_file};
 use rdy_adapter::{Hash, RdyError, RepoId, StoreHandle};
 use rdy_engine::readiness::assessment::pack_digest;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -34,6 +43,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 /// The remote's path on the hub, and the sync base discovery names under it.
 pub const REMOTE_PATH: &str = "/acme/docs";
@@ -41,6 +51,9 @@ pub const SYNC_BASE: &str = "/sync/acme/docs";
 const REQUEST_ID: &str = "req_00000000000000000000000009";
 const LANDING: u8 = 4;
 const VIEW_OP: u8 = 13;
+/// The most bytes of one batch, as the state step names it: a put's decoded body is read to at
+/// most this many bytes.
+const BATCH_BYTES: u64 = 104_857_600;
 
 /// What the hub's gate does with the next write (scripted, one verdict per write, in order).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +75,40 @@ pub enum Fault {
     LoseWriteReply,
     /// The next get reply stops after this many body bytes.
     CutGet(usize),
+    /// The next get that offers zstd comes back as `Content-Encoding: zstd` with bytes that are
+    /// no zstd frame.
+    BadZstdGet,
+}
+
+/// Which side of a sync the hub plays older than this build, for the reply encodings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Peer {
+    /// This build's hub and client: a get that offers zstd may come back compressed.
+    New,
+    /// A hub that knows no compressed get: it ignores `Accept-Encoding` and names no `zstd` in
+    /// its state reply.
+    OldHub,
+    /// A client that offers no compressed get: the hub reads each request without its
+    /// `Accept-Encoding`.
+    OldClient,
+}
+
+/// One request as the hub served it, for the speed report: the command it served, its route,
+/// its bytes on the wire and as batches, and the hub's time on it.
+#[derive(Clone, Debug)]
+pub struct Served {
+    /// The scope's operation (`push`, `clone`), or empty outside a scope.
+    pub operation: String,
+    pub route: String,
+    /// The request's and the reply's body bytes on the wire.
+    pub wire_bytes: u64,
+    /// The same bodies with each batch counted at its decoded bytes.
+    pub raw_bytes: u64,
+    pub server_ms: f64,
+    /// Whether the request offered zstd, as the hub read it.
+    pub offered_zstd: bool,
+    /// Whether the reply body was one zstd frame.
+    pub zstd_reply: bool,
 }
 
 /// One request the hub read.
@@ -111,11 +158,21 @@ struct Kept {
     render_inputs: Value,
 }
 
-/// The records of one push: its batch files and the keys they hold.
+/// The records of one push: its batch files, the keys they hold, and the check of each file
+/// made when its put arrived (one per file, in order). The checks live until the push's write
+/// ends; a write that finds none checks the files itself.
 #[derive(Default)]
 struct Push {
     files: Vec<PathBuf>,
     keys: BTreeSet<ObjectKey>,
+    checked: Vec<CheckedBatchFile>,
+}
+
+/// One client command's first-pull scope: the pull it prepared, by purpose and root.
+#[derive(Default)]
+struct Scope {
+    operation: String,
+    reply: Option<(StreamPurpose, Hash, PullReply)>,
 }
 
 /// The hub repo's state.
@@ -131,6 +188,15 @@ struct Repo {
     requests_opened: u64,
     /// The gate's own refusal of a state step, when scripted.
     min_rdy: Option<String>,
+    peer: Peer,
+    scope: Option<Scope>,
+    /// The first pulls prepared so far.
+    prepared: u64,
+    served: Vec<Served>,
+    /// The wire and decoded bytes of the batch of the request being served.
+    batch: Option<(u64, u64)>,
+    /// Whether the reply being served is one zstd frame.
+    zstd_reply: bool,
 }
 
 pub struct Shared {
@@ -151,6 +217,11 @@ pub struct Hub {
 
 impl Hub {
     pub fn start() -> Hub {
+        Hub::start_as(Peer::New)
+    }
+
+    /// A hub that plays `peer` (see [`Peer`]).
+    pub fn start_as(peer: Peer) -> Hub {
         let ca = Ca::new();
         let (chain, key) = ca.leaf(&[LOOPBACK]);
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -177,6 +248,12 @@ impl Hub {
                 kept: None,
                 requests_opened: 0,
                 min_rdy: None,
+                peer,
+                scope: None,
+                prepared: 0,
+                served: Vec::new(),
+                batch: None,
+                zstd_reply: false,
             }),
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -233,6 +310,50 @@ impl Hub {
             .unwrap_or_else(|e| e.into_inner())
             .faults
             .push_back(fault);
+    }
+
+    /// Opens the first-pull scope of one client command, named `operation` in the served
+    /// requests; dropping the guard, when the command returns or fails, releases the scope and
+    /// what it prepared. A new command gets a new scope.
+    pub fn scope(&self, operation: &str) -> ScopeGuard {
+        self.shared.repo.lock().unwrap().scope = Some(Scope {
+            operation: operation.to_string(),
+            reply: None,
+        });
+        ScopeGuard {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    /// The first pulls the hub prepared so far.
+    pub fn prepared(&self) -> u64 {
+        self.shared
+            .repo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .prepared
+    }
+
+    /// Every request the hub served so far, in order.
+    pub fn served(&self) -> Vec<Served> {
+        self.shared
+            .repo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .served
+            .clone()
+    }
+
+    /// The pushes whose files still hold their put's checks.
+    pub fn held_checks(&self) -> usize {
+        self.shared
+            .repo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pushes
+            .values()
+            .map(|p| p.checked.len())
+            .sum()
     }
 
     /// Hub canon's tip now.
@@ -353,6 +474,21 @@ impl Hub {
     }
 }
 
+/// An open first-pull scope ([`Hub::scope`]).
+pub struct ScopeGuard {
+    shared: Arc<Shared>,
+}
+
+impl Drop for ScopeGuard {
+    fn drop(&mut self) {
+        self.shared
+            .repo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .scope = None;
+    }
+}
+
 impl Drop for Hub {
     fn drop(&mut self) {
         self.stop_threads();
@@ -422,6 +558,7 @@ fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
+        413 => "Content Too Large",
         404 => "Not Found",
         409 => "Conflict",
         422 => "Unprocessable Entity",
@@ -430,8 +567,19 @@ fn reason(status: u16) -> &'static str {
 }
 
 fn head_bytes(status: u16, content_type: &str, len: usize) -> Vec<u8> {
+    head_bytes_encoded(status, content_type, len, None)
+}
+
+/// A reply head whose body of `len` wire bytes has `encoding` (`Content-Encoding`), if any.
+fn head_bytes_encoded(
+    status: u16,
+    content_type: &str,
+    len: usize,
+    encoding: Option<&str>,
+) -> Vec<u8> {
+    let encoding = encoding.map_or(String::new(), |e| format!("content-encoding: {e}\r\n"));
     format!(
-        "HTTP/1.1 {status} {}\r\ncontent-type: {content_type}\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {}\r\ncontent-type: {content_type}\r\ncontent-length: {len}\r\n{encoding}connection: close\r\n\r\n",
         reason(status)
     )
     .into_bytes()
@@ -475,10 +623,14 @@ fn serve(stream: TcpStream, shared: &Shared) {
         return;
     };
     let mut tls = StreamOwned::new(conn, stream);
-    let Some(req) = read_request(&mut tls) else {
+    let Some(mut req) = read_request(&mut tls) else {
         let _ = tls.sock.shutdown(Shutdown::Both);
         return;
     };
+    // a client older than this build offers no compressed reply
+    if shared.repo.lock().unwrap().peer == Peer::OldClient {
+        req.headers.retain(|(n, _)| n != "accept-encoding");
+    }
     shared.log.lock().unwrap().push(req.clone());
     match answer(&req, shared) {
         Answer::Whole(bytes) => {
@@ -537,17 +689,62 @@ fn refusal(e: &RdyError) -> Answer {
     hub_error(422, code, &e.message, &e.fix)
 }
 
+/// The body bytes of a reply's whole bytes.
+fn body_len(bytes: &[u8]) -> u64 {
+    (bytes.len() - find(bytes, b"\r\n\r\n").map_or(bytes.len(), |i| i + 4)) as u64
+}
+
+/// Whether the request offers a zstd reply.
+fn offers_zstd(req: &Req) -> bool {
+    req.headers.iter().any(|(n, v)| {
+        n == "accept-encoding" && v.split(',').any(|e| e.trim().eq_ignore_ascii_case("zstd"))
+    })
+}
+
 fn answer(req: &Req, shared: &Shared) -> Answer {
+    let start = Instant::now();
     let mut repo = shared.repo.lock().unwrap();
+    repo.batch = None;
+    repo.zstd_reply = false;
+    let out = route(req, &mut repo);
+    let reply_bytes = match &out {
+        Answer::Whole(b) | Answer::Cut(b, _) => body_len(b),
+        Answer::Nothing => 0,
+    };
+    let wire = req.body.len() as u64 + reply_bytes;
+    let raw = match repo.batch.take() {
+        Some((w, r)) => wire - w + r,
+        None => wire,
+    };
+    let served = Served {
+        operation: repo
+            .scope
+            .as_ref()
+            .map_or(String::new(), |s| s.operation.clone()),
+        route: match req.route() {
+            "" => "discovery".to_string(),
+            r => r.trim_start_matches('/').to_string(),
+        },
+        wire_bytes: wire,
+        raw_bytes: raw,
+        server_ms: start.elapsed().as_secs_f64() * 1000.0,
+        offered_zstd: offers_zstd(req),
+        zstd_reply: repo.zstd_reply,
+    };
+    repo.served.push(served);
+    out
+}
+
+fn route(req: &Req, repo: &mut Repo) -> Answer {
     match (req.method.as_str(), req.path.as_str(), req.route()) {
         ("GET", REMOTE_PATH, _) => reply(200, &json!({"sync_base": SYNC_BASE, "protocols": [1]})),
-        ("POST", _, "/state") => state(req, &repo),
-        ("POST", _, "/known") => known(req, &repo),
-        ("POST", _, "/objects/put") => put(req, &mut repo),
-        ("POST", _, "/objects/get") => get(req, &mut repo),
-        ("POST", _, "/write") => write(req, &mut repo),
-        ("POST", _, "/settings") => settings(&repo),
-        ("POST", _, "/outcome") => outcome(req, &repo),
+        ("POST", _, "/state") => state(req, repo),
+        ("POST", _, "/known") => known(req, repo),
+        ("POST", _, "/objects/put") => put(req, repo),
+        ("POST", _, "/objects/get") => get(req, repo),
+        ("POST", _, "/write") => write(req, repo),
+        ("POST", _, "/settings") => settings(repo),
+        ("POST", _, "/outcome") => outcome(req, repo),
         _ => reply(404, &json!({})),
     }
 }
@@ -591,11 +788,21 @@ fn state(req: &Req, repo: &Repo) -> Answer {
             "min_rdy": min_rdy, "batch_bytes": 104_857_600u64,
             "batch_records": 100_000, "quarantine_seconds": 86_400,
             "profile": null, "audience": null, "artifact_bytes": 1_073_741_824u64,
-            "artifact_files": 32_000, "views": views}),
+            "artifact_files": 32_000, "views": views})
+        .as_object()
+        .cloned()
+        .map(|mut m| {
+            // a hub of this build takes compressed puts; an older one names no such member
+            if repo.peer != Peer::OldHub {
+                m.insert("zstd".into(), json!(true));
+            }
+            Value::Object(m)
+        })
+        .unwrap(),
     )
 }
 
-fn known(req: &Req, repo: &Repo) -> Answer {
+fn known(req: &Req, repo: &mut Repo) -> Answer {
     let r = req.json();
     if let Some(push) = r["push"].as_str() {
         // the push form: the keys that neither the holder nor this push's quarantine holds
@@ -633,39 +840,110 @@ fn known(req: &Req, repo: &Repo) -> Answer {
     };
     let base = key_of(&r["base"]).map(|b| b.hash);
     let purpose = purpose_of(r["purpose"].as_str().unwrap_or("canon_history"));
-    match snap.history_page(purpose, root.hash, base, after, 100_000) {
-        Ok(page) => {
-            let keys: Vec<Value> = page
-                .keys
-                .iter()
-                .map(|k| key_json(k.kind, &k.hash.to_string()))
-                .collect();
-            let next = page.next.map(|k| key_json(k.kind, &k.hash.to_string()));
-            reply(200, &json!({"keys": keys, "next": next}))
+    // a first pull in a scope: prepared once, on its first page
+    if base.is_none()
+        && let Some(scope) = repo.scope.as_mut()
+    {
+        if scope.reply.is_none() {
+            match snap.prepare_pull_reply(purpose, root.hash) {
+                Ok(reply) => {
+                    scope.reply = Some((purpose, root.hash, reply));
+                    repo.prepared += 1;
+                }
+                Err(_) => return not_found(&format!("{}:{}", root.kind, root.hash)),
+            }
         }
+        if let Some((p, h, reply)) = repo.scope.as_ref().and_then(|s| s.reply.as_ref())
+            && (*p, *h) == (purpose, root.hash)
+        {
+            return match reply.page(after, 100_000) {
+                Ok(page) => page_reply(&page.keys, page.next),
+                Err(_) => not_found(&format!("{}:{}", root.kind, root.hash)),
+            };
+        }
+    }
+    match snap.history_page(purpose, root.hash, base, after, 100_000) {
+        Ok(page) => page_reply(&page.keys, page.next),
         Err(_) => not_found(&format!("{}:{}", root.kind, root.hash)),
     }
 }
 
+/// A known pull's page reply.
+fn page_reply(keys: &[ObjectKey], next: Option<ObjectKey>) -> Answer {
+    let keys: Vec<Value> = keys
+        .iter()
+        .map(|k| key_json(k.kind, &k.hash.to_string()))
+        .collect();
+    let next = next.map(|k| key_json(k.kind, &k.hash.to_string()));
+    reply(200, &json!({"keys": keys, "next": next}))
+}
+
 fn put(req: &Req, repo: &mut Repo) -> Answer {
     let push = req.query.get("push").cloned().unwrap_or_default();
-    let report = match check_batch(&req.body[..], repo.repo_id) {
-        Ok(r) => r,
-        Err(e) => return hub_error(422, "E_BAD_INPUT", &e.message, &e.fix),
+    let compressed = req
+        .headers
+        .iter()
+        .any(|(n, v)| n == "content-encoding" && v.eq_ignore_ascii_case("zstd"));
+    // a compressed body is decoded to at most the batch bytes the state step names
+    let body = if compressed {
+        let mut out = Vec::new();
+        let decoded = zstd::stream::read::Decoder::new(&req.body[..])
+            .and_then(|d| d.take(BATCH_BYTES + 1).read_to_end(&mut out));
+        if decoded.is_err() {
+            return hub_error(
+                422,
+                "E_HUB_BAD_INPUT",
+                "the put body is not one zstd frame",
+                "push again with rdy push from the project",
+            );
+        }
+        if out.len() as u64 > BATCH_BYTES {
+            return hub_error(
+                413,
+                "E_HUB_LIMIT",
+                "the put body is over the batch bytes",
+                "push again with rdy push from the project",
+            );
+        }
+        out
+    } else {
+        req.body.clone()
+    };
+    repo.batch = Some((req.body.len() as u64, body.len() as u64));
+    let n = repo.pushes.get(&push).map_or(0, |p| p.files.len());
+    if n >= rdy_store::sync_stream::MAX_BATCH_FILES {
+        return hub_error(
+            422,
+            "E_HUB_LIMIT",
+            "a push holds at most 1024 batch files",
+            "push again with rdy push from the project",
+        );
+    }
+    let path = repo.dir.path().join(format!("{push}-{n}.rdysync"));
+    std::fs::write(&path, &body).expect("a batch file");
+    // the put's one check of the file, kept with the push until its write
+    let checked = match check_batch_file(
+        File::open(&path).expect("a batch file"),
+        repo.repo_id,
+        |_, _, _| {},
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            return hub_error(422, "E_BAD_INPUT", &e.message, &e.fix);
+        }
     };
     if repo.holder.is_none() {
-        let id = report.header.repo_id;
+        let id = checked.report().header.repo_id;
         repo.holder = Some(
             StoreHandle::create_holder(&repo.dir.path().join("holder"), id).expect("the holder"),
         );
         repo.repo_id = Some(id);
     }
-    let n = repo.pushes.get(&push).map_or(0, |p| p.files.len());
-    let path = repo.dir.path().join(format!("{push}-{n}.rdysync"));
-    std::fs::write(&path, &req.body).expect("a batch file");
     let p = repo.pushes.entry(push).or_default();
     p.files.push(path);
-    p.keys.extend(report.keys.iter().copied());
+    p.keys.extend(checked.report().keys.iter().copied());
+    p.checked.push(checked);
     reply(
         200,
         &json!({"records": p.keys.len(), "bytes": req.body.len()}),
@@ -687,14 +965,52 @@ fn get(req: &Req, repo: &mut Repo) -> Answer {
         .flatten()
         .filter_map(key_of)
         .collect();
-    let mut out = Vec::new();
-    if snap
-        .write_history_keys(purpose, root.hash, &keys, &mut out)
-        .is_err()
-    {
-        return not_found("of one of those keys");
+    // a hub older than this build ignores the offer
+    let accept = offers_zstd(req) && repo.peer != Peer::OldHub;
+    if accept && repo.faults.front() == Some(&Fault::BadZstdGet) {
+        repo.faults.pop_front();
+        let body = b"these bytes are no zstd frame";
+        let mut bytes =
+            head_bytes_encoded(200, "application/octet-stream", body.len(), Some("zstd"));
+        bytes.extend_from_slice(body);
+        repo.zstd_reply = true;
+        return Answer::Whole(bytes);
     }
-    let bytes = reply_bytes(200, "application/octet-stream", &out);
+    let scoped = repo
+        .scope
+        .as_ref()
+        .and_then(|s| s.reply.as_ref())
+        .filter(|(p, h, _)| (*p, *h) == (purpose, root.hash))
+        .map(|(_, _, reply)| reply);
+    let bytes = if let Some(reply) = scoped {
+        // the scope's prepared pull, as the wire bytes: one zstd frame only when offered
+        let Ok(mut enc) = reply.write_keys_encoded(&keys, accept) else {
+            return not_found("of one of those keys");
+        };
+        let mut body = Vec::new();
+        enc.body.read_to_end(&mut body).expect("the reply body");
+        assert_eq!(body.len() as u64, enc.wire_bytes);
+        let zstd = enc.encoding == BodyEncoding::Zstd;
+        let mut bytes = head_bytes_encoded(
+            200,
+            "application/octet-stream",
+            body.len(),
+            zstd.then_some("zstd"),
+        );
+        bytes.extend_from_slice(&body);
+        repo.batch = Some((enc.wire_bytes, enc.report.bytes));
+        repo.zstd_reply = zstd;
+        bytes
+    } else {
+        let mut out = Vec::new();
+        if snap
+            .write_history_keys(purpose, root.hash, &keys, &mut out)
+            .is_err()
+        {
+            return not_found("of one of those keys");
+        }
+        reply_bytes(200, "application/octet-stream", &out)
+    };
     match repo.faults.front() {
         Some(Fault::CutGet(n)) => {
             let n = *n;
@@ -710,6 +1026,12 @@ fn write(req: &Req, repo: &mut Repo) -> Answer {
     let push = r["push"].as_str().unwrap_or_default().to_string();
     let kind = r["kind"].as_str().unwrap_or("landings").to_string();
     let expected = key_of(&r["expected"]).map(|k| k.hash);
+    // the put checks end with this write, whatever its outcome
+    let checks = repo
+        .pushes
+        .get_mut(&push)
+        .map(|p| std::mem::take(&mut p.checked))
+        .unwrap_or_default();
     let Some(p) = repo.pushes.get(&push) else {
         return hub_error(
             422,
@@ -750,7 +1072,14 @@ fn write(req: &Req, repo: &mut Repo) -> Answer {
     }
     let holder = repo.holder.as_ref().expect("a holder after a put");
     let snap = holder.snapshot().expect("a snapshot");
-    let checked = match snap.check_quarantine(&files) {
+    // the put checks when every file has one; else (a write sent again) each file is checked
+    let checked = if checks.len() == files.len() {
+        snap.check_quarantine_checked(&checks)
+    } else {
+        snap.check_quarantine(&files)
+    };
+    drop(checks);
+    let checked = match checked {
         Ok(c) => c,
         Err(e) => return refusal(&e),
     };

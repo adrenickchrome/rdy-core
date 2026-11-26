@@ -23,6 +23,7 @@
 //! another remote name's refs, and it removes nothing.
 use crate::Rdy;
 use crate::error::{E_BAD_INPUT, E_REPO_MISMATCH, RdyError};
+use crate::stream_check::CheckedBatchFile;
 use crate::stream_error::to_rdy;
 use crate::stream_take::{StorePosition, republish};
 use rdy_model::{Hash, RepoId};
@@ -64,6 +65,41 @@ pub fn fetch(
     batches: &[File],
     target: &FetchTarget,
 ) -> Result<FetchOutcome, RdyError> {
+    fetch_core(rdy, batches, None, target)
+}
+
+/// [`fetch`] of batch files that this operation's own check passed
+/// ([`crate::stream_check::check_batch_file`]): the files are not checked again. The take reads
+/// each file's bytes once more and keeps its check's result only for the exact bytes that check
+/// read (`input changed during take` otherwise); the take's checks over the project, its
+/// outcome and its refusals are [`fetch`]'s.
+pub fn fetch_checked(
+    rdy: &mut Rdy,
+    batches: &[CheckedBatchFile],
+    target: &FetchTarget,
+) -> Result<FetchOutcome, RdyError> {
+    let mut files = Vec::with_capacity(batches.len());
+    for b in batches {
+        files.push(
+            b.file()
+                .try_clone()
+                .map_err(|e| to_rdy(rdy_store::stream_error::StreamError::io(Some(0), 0, &e)))?,
+        );
+    }
+    let checked: Vec<&rdy_store::sync_stream::CheckedBatch> = batches
+        .iter()
+        .map(CheckedBatchFile::store_checked)
+        .collect();
+    fetch_core(rdy, &files, Some(&checked), target)
+}
+
+/// [`fetch`] and [`fetch_checked`]: one take, with the files' checked batches when there are.
+fn fetch_core(
+    rdy: &mut Rdy,
+    batches: &[File],
+    checked: Option<&[&rdy_store::sync_stream::CheckedBatch]>,
+    target: &FetchTarget,
+) -> Result<FetchOutcome, RdyError> {
     if rdy.is_holder() {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -74,9 +110,14 @@ pub fn fetch(
     // a fetch is a batch of its own: one a raw write left open is sealed and published first
     rdy.seal_open()?;
     let epoch = rdy.store.redaction_epoch();
-    let taken = rdy
-        .store
-        .take_fetched::<Infallible>(batches, target, |_, _| Ok(()));
+    let taken = match checked {
+        Some(c) => rdy
+            .store
+            .take_fetched_checked::<Infallible>(batches, c, target, |_, _| Ok(())),
+        None => rdy
+            .store
+            .take_fetched::<Infallible>(batches, target, |_, _| Ok(())),
+    };
     match taken {
         Ok(t) => {
             if t.frames > 0 {

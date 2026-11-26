@@ -84,14 +84,16 @@ use crate::stream_error::{
 use crate::stream_source::{self, Drop, Records, bad};
 use crate::sync_proof::{ObjectSource, PortableRemoval, RemovalObject};
 use crate::sync_stream::{
-    LIMIT_BATCH_FILES, MAX_BATCH_FILES, MAX_EDGES, MAX_PENDING_DROPPED_BYTES, MAX_PENDING_DROPS,
-    MAX_RECORDS, MAX_STREAM_BYTES, StreamHeader, StreamReader, StreamRecord, check_batch, rec,
+    CheckedBatch, LIMIT_BATCH_FILES, MAX_BATCH_FILES, MAX_EDGES, MAX_PENDING_DROPPED_BYTES,
+    MAX_PENDING_DROPS, MAX_RECORDS, MAX_STREAM_BYTES, StreamHeader, StreamReader, StreamRecord,
+    check_batch, read_checked, rec,
 };
 use rdy_model::redaction::RedactionResidue;
 use rdy_model::signature::Signature;
 use rdy_model::{Change, Hash, RepoId, Tag};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
@@ -353,6 +355,33 @@ struct Entry {
     dropped: Vec<(At, Drop)>,
     /// The features its present record uses (`format::required_features`).
     needs: Vec<StoreFeature>,
+    /// Its present record's index link count, as a batch check of its exact bytes found it
+    /// (`CheckedFrame::index_links`); None when no checked batch gave it.
+    index_links: Option<u64>,
+}
+
+/// The index link counts a batch check found (`sync_stream::CheckedFrame::index_links`), each
+/// keyed by the raw kind and payload hash of the frame it counts: the index reads a count only
+/// for the frame of that key, so a count never moves to another record when a write drops a
+/// duplicate. A frame with no count here is indexed by its own decode (`links_entry`).
+pub(crate) type IndexLinks = HashMap<(u8, Hash), u64>;
+
+thread_local! {
+    /// The index link counts this thread derived from a frame's bytes (`links_entry`).
+    static LINK_DECODES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Notes one index link count derived from a frame's bytes.
+pub(crate) fn count_index_link_decode() {
+    LINK_DECODES.with(|c| c.set(c.get() + 1));
+}
+
+/// For tests: how many index link counts this thread derived from a frame's own bytes so far
+/// (each one decodes the record). A frame whose count a batch check found is not counted. A test
+/// reads the difference over a call.
+#[doc(hidden)]
+pub fn index_link_decodes_for_tests() -> u64 {
+    LINK_DECODES.with(Cell::get)
 }
 
 /// How a planned write is checked again at the append.
@@ -428,6 +457,8 @@ pub(crate) struct Plan {
     pub(crate) features: Option<StoreFeatures>,
     /// The bytes of each [`Write::Generated`] delta, by its key.
     pub(crate) generated: BTreeMap<ObjectKey, Vec<u8>>,
+    /// The index link counts of the present writes that a batch check found ([`IndexLinks`]).
+    pub(crate) index_links: IndexLinks,
 }
 
 /// The holder as the take reads it: its reader, its log's segment files and authorization, the
@@ -673,9 +704,15 @@ impl From<StreamError> for IndexError {
 
 /// Checks every file and indexes the union: its records by key, and every file's
 /// prerequisites. The first header must name repo `expected`. Returns the first header.
+///
+/// With `checked` (one checked batch per file, in file order), a file is not checked again: its
+/// bytes are read once more ([`read_checked`]), and only when they are the exact bytes its
+/// checked batch checked are that check's links, features and index link counts indexed. The
+/// header rules, the counts and the union stay this function's.
 fn index_files(
     expected: RepoId,
     files: &[File],
+    checked: Option<&[&CheckedBatch]>,
     union: &mut BTreeMap<ObjectKey, Entry>,
     prerequisites: &mut BTreeSet<ObjectKey>,
 ) -> Result<StreamHeader, IndexError> {
@@ -690,7 +727,11 @@ fn index_files(
         }
         let mut handle = f;
         handle.seek(SeekFrom::Start(0)).map_err(io)?;
-        let report = check_batch(handle)?;
+        let capsule = checked.map(|c| c[i]);
+        let report = match capsule {
+            Some(c) => c.report().clone(),
+            None => check_batch(handle)?,
+        };
         match &first {
             None => {
                 if report.header.repo_id != expected {
@@ -722,97 +763,149 @@ fn index_files(
         }
         // the index pass: each record's place and frame, its links and its descriptor
         handle.seek(SeekFrom::Start(0)).map_err(io)?;
-        let (mut reader, header) = StreamReader::open(handle)?;
-        while let Some(r) = reader.next()? {
-            let (n, offset) = reader.position();
-            let key = r.key();
-            let proof = usize::from(r.proof().is_some());
-            let entry = match union.get_mut(&key) {
-                Some(e) => e,
-                None => union.entry(key).or_default(),
-            };
-            match r {
-                StreamRecord::Present { ref payload, .. } => {
-                    let raw = r.raw_kind();
+        let header = match capsule {
+            Some(c) => read_checked(handle, c, |j, frame, r, (n, offset)| {
+                let facts = match &r {
+                    StreamRecord::Present { .. } => Some((
+                        c.refs(j),
+                        c.features(j).cloned().collect(),
+                        frame.index_links(),
+                    )),
+                    StreamRecord::Dropped { .. } => None,
+                };
+                index_record(&mut counts, union, i, r, n, offset, None, facts)
+                    .map_err(IndexError::from)
+            })?,
+            None => {
+                let (mut reader, header) = StreamReader::open(handle)?;
+                while let Some(r) = reader.next()? {
+                    let (n, offset) = reader.position();
+                    index_record(
+                        &mut counts,
+                        union,
+                        i,
+                        r,
+                        n,
+                        offset,
+                        Some(&header.features),
+                        None,
+                    )?;
+                }
+                reader.finish()?;
+                header
+            }
+        };
+        prerequisites.extend(header.prerequisites.iter().copied());
+    }
+    Ok(first.expect("at least one file"))
+}
+
+/// Indexes record `r` (number `n`, frame at `offset`) of file `file` into `union`, and counts it.
+/// A present record's links, features and index link count are `checked`'s when a batch check
+/// of its exact bytes found them; else its links follow `features`, the features its stream
+/// declares, and it has no checked count.
+#[allow(clippy::too_many_arguments)]
+fn index_record(
+    counts: &mut Counts,
+    union: &mut BTreeMap<ObjectKey, Entry>,
+    file: usize,
+    r: StreamRecord,
+    n: u64,
+    offset: u64,
+    features: Option<&crate::format::StoreFeatures>,
+    checked: Option<(Vec<ObjectRef>, Vec<StoreFeature>, u64)>,
+) -> Result<(), StreamError> {
+    let key = r.key();
+    let proof = usize::from(r.proof().is_some());
+    let entry = match union.get_mut(&key) {
+        Some(e) => e,
+        None => union.entry(key).or_default(),
+    };
+    match r {
+        StreamRecord::Present { ref payload, .. } => {
+            let raw = r.raw_kind();
+            let (refs, needs, index_links) = match (checked, features) {
+                (Some((refs, needs, links)), _) => (refs, needs, Some(links)),
+                (None, Some(features)) => {
                     // an incoming record's links follow the features its stream declares
-                    let refs = portable_refs_of(&header.features, raw, payload)
+                    let refs = portable_refs_of(features, raw, payload)
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
                     // the reader checked the frame splits
                     let needs = crate::codec::split(raw, payload)
                         .map(|_| crate::format::required_features(raw, payload))
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
-                    counts.edges += refs.len() as u64;
-                    if entry.present.is_none() {
-                        entry.present = Some(At {
-                            file: i,
-                            record: n,
-                            offset,
-                            kind: raw,
-                            len: payload.len() as u32,
-                            hash: key.hash,
-                        });
-                        entry.refs = refs;
-                        entry.needs = needs;
-                    }
+                    (refs, needs, None)
                 }
-                StreamRecord::Dropped {
-                    encoding,
-                    original_len,
-                    apply,
-                    residue,
-                    ..
-                } => {
-                    counts.edges += u64::from(residue.is_some()) + proof as u64;
-                    counts.drops += 1;
-                    counts.dropped_bytes += u64::from(original_len);
-                    if counts.drops > MAX_PENDING_DROPS {
-                        return Err(StreamError::limit(Some(n), offset, LIMIT_PENDING_DROPS).into());
-                    }
-                    if counts.dropped_bytes > MAX_PENDING_DROPPED_BYTES {
-                        return Err(StreamError::limit(
-                            Some(n),
-                            offset,
-                            LIMIT_PENDING_DROPPED_BYTES,
-                        )
-                        .into());
-                    }
-                    let body = encoded_dropped_payload(
-                        key.kind,
-                        encoding,
-                        &key.hash,
-                        original_len,
-                        &apply,
-                        residue.as_ref(),
-                    );
-                    let d = Drop {
-                        encoding,
-                        original_len,
-                        apply,
-                        residue,
-                    };
-                    if !entry.dropped.iter().any(|(_, x)| *x == d) {
-                        entry.dropped.push((
-                            At {
-                                file: i,
-                                record: n,
-                                offset,
-                                kind: rec::DROPPED,
-                                len: ENCODED_DROPPED_LEN as u32,
-                                hash: Hash::of(&body),
-                            },
-                            d,
-                        ));
-                    }
-                }
-            }
-            if counts.edges > MAX_EDGES {
-                return Err(StreamError::limit(Some(n), offset, LIMIT_GRAPH_EDGES).into());
+                (None, None) => unreachable!("an unchecked record has its stream's features"),
+            };
+            counts.edges += refs.len() as u64;
+            if entry.present.is_none() {
+                entry.present = Some(At {
+                    file,
+                    record: n,
+                    offset,
+                    kind: raw,
+                    len: payload.len() as u32,
+                    hash: key.hash,
+                });
+                entry.refs = refs;
+                entry.needs = needs;
+                entry.index_links = index_links;
             }
         }
-        reader.finish()?;
-        prerequisites.extend(header.prerequisites.iter().copied());
+        StreamRecord::Dropped {
+            encoding,
+            original_len,
+            apply,
+            residue,
+            ..
+        } => {
+            counts.edges += u64::from(residue.is_some()) + proof as u64;
+            counts.drops += 1;
+            counts.dropped_bytes += u64::from(original_len);
+            if counts.drops > MAX_PENDING_DROPS {
+                return Err(StreamError::limit(Some(n), offset, LIMIT_PENDING_DROPS));
+            }
+            if counts.dropped_bytes > MAX_PENDING_DROPPED_BYTES {
+                return Err(StreamError::limit(
+                    Some(n),
+                    offset,
+                    LIMIT_PENDING_DROPPED_BYTES,
+                ));
+            }
+            let body = encoded_dropped_payload(
+                key.kind,
+                encoding,
+                &key.hash,
+                original_len,
+                &apply,
+                residue.as_ref(),
+            );
+            let d = Drop {
+                encoding,
+                original_len,
+                apply,
+                residue,
+            };
+            if !entry.dropped.iter().any(|(_, x)| *x == d) {
+                entry.dropped.push((
+                    At {
+                        file,
+                        record: n,
+                        offset,
+                        kind: rec::DROPPED,
+                        len: ENCODED_DROPPED_LEN as u32,
+                        hash: Hash::of(&body),
+                    },
+                    d,
+                ));
+            }
+        }
     }
-    Ok(first.expect("at least one file"))
+    if counts.edges > MAX_EDGES {
+        return Err(StreamError::limit(Some(n), offset, LIMIT_GRAPH_EDGES));
+    }
+    Ok(())
 }
 
 /// The residue `r`, from the union's present bytes or the holder's, and the encoding its frame
@@ -1255,7 +1348,7 @@ pub(crate) fn prepare_history<E>(
     files: &[File],
     target: &HistoryTarget,
 ) -> Result<Plan, TakeError<E>> {
-    prepare_intake(rx, files, rx.repo, Intake::History(target))
+    prepare_intake(rx, files, None, rx.repo, Intake::History(target))
 }
 
 /// Prepares a fresh fork's take of its source's history (D-99CWC): the steps of
@@ -1273,7 +1366,7 @@ pub(crate) fn prepare_fork_history<E>(
             "a fork of repo {source} needs a new repo id"
         ))));
     }
-    prepare_intake(rx, files, source, Intake::History(target))
+    prepare_intake(rx, files, None, source, Intake::History(target))
 }
 
 /// Prepares a take (module docs, steps 1 to 9): every check before anything is written, the
@@ -1284,7 +1377,13 @@ pub(crate) fn prepare<'a, E>(
     target: &'a UploadTarget,
     check: impl FnOnce(&mut dyn ObjectSource, &UploadFacts) -> Result<TagChoice, E> + 'a,
 ) -> Result<Plan, TakeError<E>> {
-    prepare_intake(rx, files, rx.repo, Intake::Upload(target, Box::new(check)))
+    prepare_intake(
+        rx,
+        files,
+        None,
+        rx.repo,
+        Intake::Upload(target, Box::new(check)),
+    )
 }
 
 /// Prepares a project's fetch: the take's steps 1, 2 and 4 to 7 over the project, then the
@@ -1298,28 +1397,45 @@ pub(crate) fn prepare<'a, E>(
 /// is written as a drop, and the project's own copies of what it approves are erased once the
 /// batch is durable. A local change that embeds an approved version and that no approval covers
 /// keeps its bytes: it is no refusal here, and the project's reads warn of it.
-pub(crate) fn prepare_fetch<'a, E>(
+///
+/// With `checked` (one checked batch per file, in file order), the files are not checked again:
+/// a file whose bytes are not the ones its checked batch checked is `input changed during
+/// take`, and every other check keeps its order. None checks each file here.
+pub(crate) fn prepare_fetch_checked<'a, E>(
     rx: &Receiver,
     files: &[File],
+    checked: Option<&[&CheckedBatch]>,
     target: &'a FetchTarget,
     check: impl FnOnce(&mut dyn ObjectSource, &FetchFacts) -> Result<(), E> + 'a,
 ) -> Result<Plan, TakeError<E>> {
-    prepare_intake(rx, files, rx.repo, Intake::Fetch(target, Box::new(check)))
+    prepare_intake(
+        rx,
+        files,
+        checked,
+        rx.repo,
+        Intake::Fetch(target, Box::new(check)),
+    )
 }
 
-/// [`prepare`], [`prepare_fetch`], [`prepare_history`] and [`prepare_fork_history`]. The
+/// [`prepare`], [`prepare_fetch_checked`], [`prepare_history`] and [`prepare_fork_history`]. The
 /// stream's repo must be `expected`: the receiver's own, except on a fresh fork's path.
 fn prepare_intake<E>(
     rx: &Receiver,
     files: &[File],
+    checked: Option<&[&CheckedBatch]>,
     expected: RepoId,
     intake: Intake<'_, E>,
 ) -> Result<Plan, TakeError<E>> {
     let fetch = matches!(intake, Intake::Fetch(..));
+    if checked.is_some_and(|c| c.len() != files.len()) {
+        return Err(TakeError::Store(StoreError::Refused(
+            "a checked take needs one checked batch for each file".into(),
+        )));
+    }
     // 1. every file alone, and the union's index
     let mut union: BTreeMap<ObjectKey, Entry> = BTreeMap::new();
     let mut prerequisites: BTreeSet<ObjectKey> = BTreeSet::new();
-    let header = match index_files(expected, files, &mut union, &mut prerequisites) {
+    let header = match index_files(expected, files, checked, &mut union, &mut prerequisites) {
         Ok(h) => h,
         Err(IndexError::Repo(source)) => {
             return Err(TakeError::RepoMismatch {
@@ -1854,6 +1970,15 @@ fn prepare_intake<E>(
         rx.features.min_rdy(),
         features.as_ref().unwrap_or(rx.features).min_rdy(),
     );
+    // the checked index link count of each present write, by its frame's key
+    let mut index_links = IndexLinks::new();
+    for (w, _) in writes.values() {
+        if let Write::Present { key, at } = w
+            && let Some(n) = union[key].index_links
+        {
+            index_links.insert((at.kind, at.hash), n);
+        }
+    }
     Ok(Plan {
         tags_taken,
         tags_kept,
@@ -1871,5 +1996,6 @@ fn prepare_intake<E>(
         tag,
         features,
         generated,
+        index_links,
     })
 }

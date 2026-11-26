@@ -223,6 +223,10 @@ pub struct Store {
     /// While set, a sealed write runs no threshold span-mapping pass: a project seed and the
     /// receiving operations that write through the ordinary path map nothing (D-1ER84).
     no_map_pass: bool,
+    /// While a move writes its checked objects (`Store::write_move_checked`): the index link
+    /// counts a batch check found for them, by raw kind and hash, which their index entries
+    /// read instead of a decode. None for every other write.
+    checked_links: Option<crate::take_batch::IndexLinks>,
     /// The held batch not yet sealed, if any.
     open: Option<OpenBatch>,
     /// Set by a failed seal: the index holds entries of frames the log no longer holds, so no
@@ -736,7 +740,22 @@ fn entries_for_frame(
     payload: &[u8],
     r: &mut Resolver<'_>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
-    let out = frame_entries(kind, hash, loc, payload, r)?;
+    entries_for_checked_frame(kind, hash, loc, payload, r, None)
+}
+
+/// [`entries_for_frame`] of a frame whose index link count a batch check of its exact bytes
+/// found (`checked`, keyed by the frame's raw kind and hash, `take_batch::IndexLinks`): that
+/// count stands for [`links_entry`]'s decode. Every other entry is read from the frame as
+/// [`entries_for_frame`] reads it.
+fn entries_for_checked_frame(
+    kind: u8,
+    hash: Hash,
+    loc: Location,
+    payload: &[u8],
+    r: &mut Resolver<'_>,
+    checked: Option<u64>,
+) -> Result<Vec<IndexEntry>, StoreError> {
+    let out = frame_entries(kind, hash, loc, payload, r, checked)?;
     r.note(crate::codec::logical_kind(kind), hash, loc)?;
     Ok(out)
 }
@@ -823,6 +842,7 @@ pub(crate) fn links_entry(raw: u8, hash: Hash, payload: &[u8]) -> Option<IndexEn
     if !crate::object_refs::is_portable(kind) || kind == kinds::BLOB_CHUNK {
         return None;
     }
+    crate::take_batch::count_index_link_decode();
     let links = crate::object_refs::portable_refs_of(
         &crate::format::StoreFeatures::of(vec![]),
         raw,
@@ -833,13 +853,26 @@ pub(crate) fn links_entry(raw: u8, hash: Hash, payload: &[u8]) -> Option<IndexEn
     (links > 0).then_some(IndexEntry::Links { kind, hash, links })
 }
 
-/// `entries_for_frame` before the frame is noted.
+/// [`links_entry`] of a frame of raw kind `raw` and hash `hash` whose link count `links` a
+/// batch check of its exact bytes found (`sync_stream::CheckedFrame::index_links`): the same
+/// entry, with no decode.
+fn checked_links_entry(raw: u8, hash: Hash, links: u64) -> Option<IndexEntry> {
+    let kind = crate::codec::logical_kind(raw);
+    if !crate::object_refs::is_portable(kind) || kind == kinds::BLOB_CHUNK {
+        return None;
+    }
+    (links > 0).then_some(IndexEntry::Links { kind, hash, links })
+}
+
+/// `entries_for_frame` before the frame is noted; `checked` is the frame's checked index link
+/// count, if a batch check found one ([`entries_for_checked_frame`]).
 fn frame_entries(
     kind: u8,
     hash: Hash,
     loc: Location,
     payload: &[u8],
     r: &Resolver<'_>,
+    checked: Option<u64>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
     if kind == kinds::BATCH_COMMIT {
         // a marker is neither an object nor a dedupe candidate
@@ -848,7 +881,10 @@ fn frame_entries(
     // the logical kind and the body of the frame's encoding (`crate::codec`): an index, a
     // dependency and a redaction identity know objects by their logical kind
     let o = crate::codec::split_stored(kind, payload)?;
-    let links = links_entry(kind, hash, payload);
+    let links = match checked {
+        Some(n) => checked_links_entry(kind, hash, n),
+        None => links_entry(kind, hash, payload),
+    };
     let (kind, payload) = (o.kind, o.body);
     let mut out = vec![IndexEntry::Object { kind, hash, loc }];
     out.extend(links);
@@ -2072,6 +2108,7 @@ impl Store {
             last_batch_end: ORIGIN,
             held: false,
             no_map_pass: false,
+            checked_links: None,
             open: None,
             stale_index: false,
             creation,
@@ -2285,6 +2322,7 @@ impl Store {
             last_batch_end: ORIGIN,
             held: false,
             no_map_pass: false,
+            checked_links: None,
             open: None,
             stale_index: false,
             creation,
@@ -2957,7 +2995,13 @@ impl Store {
         let mut r = Resolver::new(&reader);
         let mut out = vec![];
         for ((kind, payload), (at, hash)) in frames.iter().zip(placed) {
-            out.extend(entries_for_frame(*kind, *hash, *at, payload, &mut r)?);
+            let checked = self
+                .checked_links
+                .as_ref()
+                .and_then(|c| c.get(&(*kind, *hash)).copied());
+            out.extend(entries_for_checked_frame(
+                *kind, *hash, *at, payload, &mut r, checked,
+            )?);
         }
         Ok(out)
     }
@@ -3307,6 +3351,22 @@ impl Store {
         let held = std::mem::replace(&mut self.held, false);
         let result = self.write_refs(items, RefWrite::Move);
         self.held = held;
+        result
+    }
+
+    /// [`Store::write_move`] of objects whose index link counts a batch check of their exact
+    /// bytes found (`links`, by raw kind and hash): each object's links entry is that count,
+    /// with no decode. A frame with no count, and the move's refs, are indexed as any write's.
+    /// The counts go with the frames by key, so a duplicate the write leaves out moves no count
+    /// onto another record.
+    pub(crate) fn write_move_checked(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+        links: crate::take_batch::IndexLinks,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.checked_links = Some(links);
+        let result = self.write_move(items);
+        self.checked_links = None;
         result
     }
 
@@ -5793,7 +5853,7 @@ impl Store {
     }
 
     /// The fetch of a canon or view history into a project (D-3RSCW): the take's checks over
-    /// the project (`crate::take_batch::prepare_fetch`), then one sealed batch of its own, held
+    /// the project (`crate::take_batch::prepare_fetch_checked`), then one sealed batch of its own, held
     /// batches on or off, with the new records, the free tag refs with their free relay answer
     /// refs, and the remote's sync state, which activates `sync_state` when it is the first. It moves no canon or view ref. A
     /// holder is `TakeError::ModeMismatch`; an open held batch is refused; a retry of a fetch
@@ -5801,6 +5861,42 @@ impl Store {
     pub fn take_fetched<E>(
         &mut self,
         files: &[File],
+        target: &crate::take_batch::FetchTarget,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        self.take_fetched_core(files, None, target, check)
+    }
+
+    /// [`Store::take_fetched`] of files that a batch check of this operation already checked:
+    /// `checked` holds one checked batch for each file, in file order
+    /// ([`crate::sync_stream::CheckedBatch`], made only by a whole batch check). A file is not
+    /// checked again: its bytes are read once more, and only the exact bytes its checked batch
+    /// checked keep that check's links, features and index link counts (anything else is
+    /// `input changed during take`). The union, closure, typed context, snapshot chains,
+    /// removal, capacity and fetch checks over the project, the seal's re-read and its
+    /// durability are [`Store::take_fetched`]'s. The inputs, outcome and refusals are
+    /// [`Store::take_fetched`]'s; a count of checked batches other than the files' is refused.
+    pub fn take_fetched_checked<E>(
+        &mut self,
+        files: &[File],
+        checked: &[&crate::sync_stream::CheckedBatch],
+        target: &crate::take_batch::FetchTarget,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        self.take_fetched_core(files, Some(checked), target, check)
+    }
+
+    /// [`Store::take_fetched`] and [`Store::take_fetched_checked`]: one prepare core.
+    fn take_fetched_core<E>(
+        &mut self,
+        files: &[File],
+        checked: Option<&[&crate::sync_stream::CheckedBatch]>,
         target: &crate::take_batch::FetchTarget,
         check: impl FnOnce(
             &mut dyn crate::sync_proof::ObjectSource,
@@ -5846,7 +5942,7 @@ impl Store {
             .ok_or_else(|| StoreError::Decode("the project has no meta/repo_id".into()))?;
         let reader = self.reader();
         let auth = Arc::clone(self.log.authorization());
-        let plan = crate::take_batch::prepare_fetch(
+        let plan = crate::take_batch::prepare_fetch_checked(
             &Receiver {
                 reader: &reader,
                 log: self.log.readers(),
@@ -5856,6 +5952,7 @@ impl Store {
                 features: &self.features,
             },
             files,
+            checked,
             target,
             check,
         )?;
@@ -6307,7 +6404,11 @@ impl Store {
                     // logical kind of its key
                     let (loc, hash) = self.log.append_unrolled(at.kind, &buf)?;
                     if !plan.redaction {
-                        entries.extend(entries_for_frame(at.kind, hash, loc, &buf, &mut r)?);
+                        // the count a batch check of these exact bytes found, by the frame's key
+                        let checked = plan.index_links.get(&(at.kind, hash)).copied();
+                        entries.extend(entries_for_checked_frame(
+                            at.kind, hash, loc, &buf, &mut r, checked,
+                        )?);
                     }
                     frames.push((at.kind, hash));
                 }
