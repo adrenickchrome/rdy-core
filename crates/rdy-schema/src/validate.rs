@@ -328,7 +328,7 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
                 format!("field {name:?} must be {:?}", fd.kind),
                 if *v == FieldValue::Null {
                     format!(
-                        "null does not clear a field: to clear {name}, list it in the update op's unset: [\"{name}\"]"
+                        "null does not clear a field; list it in the update op's unset: [\"{name}\"]"
                     )
                 } else {
                     format!("write {name} as a {} value", kind_word(fd.kind))

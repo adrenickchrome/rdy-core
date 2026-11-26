@@ -213,7 +213,9 @@ pub use query::{RedactionRef, source_body};
 pub use rdy_store::Relay;
 pub use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpKind};
 pub use read_state::{
-    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState, inflight_builds,
+    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, MISSING_BLOCK_BYTES,
+    MISSING_BLOCK_FRAMES, MISSING_BLOCK_OPS, MISSING_BLOCK_VIEWS, OpenIntent, ReadState,
+    SearchLimits, inflight_builds,
 };
 pub use search::{SearchInput, SearchQuery, SearchResult, SearchSource};
 pub use session::{

@@ -33,7 +33,7 @@ pub(crate) fn act(
         RdyError::new(
             E_BAD_INPUT,
             format!("{id} is not an option of {}", b.item.r#ref),
-            "pass an option the card shows",
+            super::option_fix(&b.item),
         )
     };
     let (review, version) = parse_accept_option(&id).ok_or_else(not_option)?;

@@ -1264,7 +1264,7 @@ impl Rdy {
         }
         let scope = Scope::View(view.to_string());
         let m = st.materialized(&scope)?;
-        if let Ok(cur) = st.block(&scope, &edited.id)
+        if let Some(cur) = st.held_block(&scope, &edited.id)
             && let Some(show) = ForeignShow::of(&st, &m)?
         {
             if edited.body == show.text(&cur.body, RefMode::for_body(&cur.block_type)) {

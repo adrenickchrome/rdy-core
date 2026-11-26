@@ -98,7 +98,7 @@ impl PlanGroup {
             return Err(RdyError::new(
                 E_PLAN_ITEM,
                 format!("the group matches no open item of the change plan for {scope}"),
-                "read the plan again with rdy_plan / rdy plan (a write can close items, and counts.open 0 means nothing is left to answer), read every page, and pass a group it holds",
+                super::api::open_items_fix(open.len()),
             ));
         }
         Ok(matched)

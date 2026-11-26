@@ -32,7 +32,7 @@ const NO_CITATION: &str =
 const DIRECT_EDIT: &str = "An agent edited rdy working-copy files directly.";
 const HOST_ABSENT: &str = "This host cannot install local hooks.";
 const HOST_ABSENT_FIX: &str = "Use rdy setup on the machine that holds the checkout.";
-const NO_SESSION_FIX: &str = "state rdy/actor and rdy/run in _meta, or call rdy_session";
+const NO_SESSION_FIX: &str = "state rdy/actor and rdy/run in _meta, or call rdy_session with your actor, run and role, then resend the call";
 
 const NOT_LOADED: &str = "This call has no kungfu value: you have not loaded this ruleset.";
 const LOST: &str = "This call has no kungfu value: you may have lost your instructions.";

@@ -60,6 +60,7 @@ mod cli_quarantine;
 mod cli_query;
 mod cli_redaction;
 mod cli_ref;
+mod cli_refusal_recovery;
 mod cli_relay;
 mod cli_render_stream;
 mod cli_render_stream_native;

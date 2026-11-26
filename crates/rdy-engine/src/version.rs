@@ -144,16 +144,25 @@ pub fn new_version_name_ok(name: &str) -> Result<(), RdyError> {
     Ok(())
 }
 
+/// The fix of a version name that is a 64-character lowercase hex string: a pin hash names
+/// content, not a release or a landing.
+const PIN_HASH_NAME_HINT: &str = "a pin hash names content, not a release or landing. Read the block with rdy_context; choose a version name or a landing hash from rdy_log.";
+
 /// Parses a version name: one optional leading `v`, then a SemVer 2.0.0 version without build
 /// metadata (SemVer ignores build metadata when ordering, so two versions would share a position).
 /// It has no length bound: it judges stored tags too, which keep every name the release that
 /// wrote them accepted (ruling final (1)).
 pub fn parse_version(name: &str) -> Result<semver::Version, RdyError> {
     let bad = |why: String| {
+        let hash = name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
         RdyError::new(
             E_BAD_TAG_NAME,
             format!("{name:?} is not a version: {why}"),
-            "name versions like v1.2.0 or 2.0.0-rc.1 (Semantic Versioning, one optional leading v, no +build metadata)",
+            if hash {
+                PIN_HASH_NAME_HINT
+            } else {
+                "name versions like v1.2.0 or 2.0.0-rc.1 (Semantic Versioning, one optional leading v, no +build metadata)"
+            },
         )
     };
     // the grammar and order are rdy-schema's (D-WJ0SJ), shared with the as-built fields

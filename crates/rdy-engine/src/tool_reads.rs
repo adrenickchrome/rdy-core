@@ -401,7 +401,7 @@ fn entries_in(
         RdyError::new(
             E_UNKNOWN_BLOCK,
             format!("no block {id}"),
-            "list docs with rdy_overview",
+            st_.missing_block_fix(&scope, &id, "list docs with rdy_overview"),
         )
     })?;
     if let Some(slug) = slug {

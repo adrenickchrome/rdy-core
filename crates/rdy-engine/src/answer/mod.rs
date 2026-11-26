@@ -775,11 +775,10 @@ fn bind(
             .iter()
             .find(|o| o.id == id)
             .ok_or_else(|| {
-                let ids: Vec<&str> = item.options.iter().map(|o| o.id.as_str()).collect();
                 RdyError::new(
                     E_BAD_INPUT,
                     format!("{id} is not an option of {r}"),
-                    format!("answer with one of: {}", ids.join(", ")),
+                    option_fix(&item),
                 )
             })?
             .clone(),
@@ -901,6 +900,22 @@ pub(crate) fn changed(code: &'static str, r: &str) -> RdyError {
 
 /// The fix of an answer to a card that changed since the person saw it.
 pub(crate) const FRESH_CARD_HINT: &str = "when corrected holds the fresh card and its facts and Exceptions match the card the person saw, relay the same words once with its card_hash; otherwise show the person the fresh card and ask again. Read rdy_pending again before you answer the next card";
+
+/// The fix of an answer whose option the card does not hold: the options the card shows now, in
+/// display order, each as `{id} ({label})` (an acceptance option of an approve card too), and how
+/// the answer is made.
+pub fn option_fix(item: &Item) -> String {
+    let (list, more) = crate::error::fix_list(
+        item.options
+            .iter()
+            .map(|o| format!("{} ({})", o.id, o.label)),
+        item.options.len(),
+    );
+    format!(
+        "this {} card takes: {list}. Copy an option id from the current card; put the person's exact words in evidence.{more}",
+        item.kind.word()
+    )
+}
 
 /// The labels the card shows, in order.
 pub(crate) fn labels(i: &Item) -> Vec<String> {

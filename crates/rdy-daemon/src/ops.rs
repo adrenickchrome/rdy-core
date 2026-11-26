@@ -229,7 +229,7 @@ const HUMAN_RELAY: &str =
     "a person approves as themselves; only the relaying agent records a relay";
 
 /// How that refusal is fixed.
-const HUMAN_RELAY_FIX: &str = "drop --relayed-by to approve yourself, or let the agent run rdy approve with RDY_ACTOR set to its actor";
+const HUMAN_RELAY_FIX: &str = "if you are the person, drop the relay flags. If you relay for the person, set RDY_ACTOR=agent:<name> to your own actor and pass that actor in --relayed-by with the person's words in --evidence";
 
 /// The session a tag runs as: a human session as an approver; an agent session
 /// is refused with `E_PERMISSION`.

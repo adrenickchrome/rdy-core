@@ -59,7 +59,7 @@ impl Rdy {
                     "conflict {cid} on {id} holds no accepted or rejected decision, so it has no landed side to take"
                 ),
                 format!(
-                    "resolve it with a write of {id} from the version you want: pass base=<its base or a side's version> (rdy_context shows them)"
+                    "read {id} with rdy_context. Update the block with base set to the base or side version you choose."
                 ),
             ));
         }

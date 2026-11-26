@@ -714,12 +714,12 @@ fn cp14_guidance_and_error_rows_match_the_live_contract() {
         (
             "E_PLAN_ITEM",
             "<id> is not an item of the change plan for <scope>",
-            "read the plan with rdy_plan / rdy plan and pass an item id it lists",
+            "read the plan again after each write. Check counts.open and read every page before answering. An already_written consequence may have no item. One unmatched item or group refuses the whole call.",
         ),
         (
             "E_DEFERRAL_OPEN",
             "<n> deferrals of P-x@n have no answer",
-            "answer the deferral card first: defer:P-x@n",
+            "answer the deferral card first: <ref>. Then relay the approval.",
         ),
         (
             "W_PLAN_OPEN",
@@ -789,7 +789,7 @@ fn cp14_guidance_matches_the_engine_in_a_live_project() {
         "pi-zz is not an item of the change plan for view:w"
     );
     let row = ERROR_ROWS.iter().find(|r| r.0 == "E_PLAN_ITEM").unwrap();
-    assert_eq!(e.fix, row.2);
+    assert_eq!(e.fix, format!("{} Open items: 3.", row.2));
 
     // E_PLAN_OPEN: the items are on stable content, so the version is not ready and no
     // W_PLAN_OPEN warns; the issue counts the three items and has the row's fix (the row's

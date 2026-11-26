@@ -203,7 +203,7 @@ pub(crate) fn no_session() -> RdyError {
     RdyError::new(
         E_NO_SESSION,
         "no session",
-        "state rdy/actor and rdy/run in _meta, or call rdy_session",
+        "state rdy/actor and rdy/run in _meta, or call rdy_session with your actor, run and role, then resend the call",
     )
 }
 

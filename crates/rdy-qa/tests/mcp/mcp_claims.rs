@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
-const NO_SESSION_FIX: &str = "state rdy/actor and rdy/run in _meta, or call rdy_session";
+const NO_SESSION_FIX: &str = "state rdy/actor and rdy/run in _meta, or call rdy_session with your actor, run and role, then resend the call";
 const MISMATCH: &str = "this stdio connection is bound to another actor or run";
 const MISMATCH_FIX: &str = "use the connection's actor and run, or open another stdio connection";
 const KEYS: &str = "the parameters here are rdy/actor, rdy/dedupe, rdy/role, rdy/run";

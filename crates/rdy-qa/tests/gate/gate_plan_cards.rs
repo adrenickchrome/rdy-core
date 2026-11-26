@@ -216,9 +216,7 @@ fn deferral_open(e: &RdyError, pref: &str, n: usize, card: &Item) {
     assert_eq!(e.message, format!("{n} deferrals of {pref} have no answer"));
     assert_eq!(
         e.fix,
-        format!(
-            "answer the card below with the person's words, then relay the approval again. Answer the deferral card first: defer:{pref}"
-        )
+        format!("answer the deferral card first: defer:{pref}. Then relay the approval.")
     );
     assert_eq!(e.corrected, Some(json!({"deferral": card_json(card)})));
 }
@@ -606,9 +604,7 @@ fn cp12_every_approval_path_waits_for_deferral_answer() {
         );
         assert_eq!(
             e["fix"],
-            format!(
-                "answer the card below with the person's words, then relay the approval again. Answer the deferral card first: defer:{pref}"
-            ),
+            format!("answer the deferral card first: defer:{pref}. Then relay the approval."),
             "{e}"
         );
         assert_eq!(
@@ -944,7 +940,7 @@ fn cp12_one_way_reaffirm_has_its_own_exception() {
     assert_eq!(
         e.fix,
         format!(
-            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+            "answer these exception cards first, in order: {}. Then relay the approval.",
             ex.r#ref
         )
     );
@@ -1480,7 +1476,7 @@ fn cp12_repeated_reaffirm_reason_still_needs_confirmation() {
     assert_eq!(
         e.fix,
         format!(
-            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+            "answer these exception cards first, in order: {}. Then relay the approval.",
             ex2[0].r#ref
         )
     );

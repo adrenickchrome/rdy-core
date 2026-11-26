@@ -637,8 +637,10 @@ impl Norm<'_> {
         const MARKERS: [(&str, &str); 3] = [
             (" new: ", ", "),
             (" omitted: ", "; "),
-            (" card first: ", ", "),
+            (" cards first, in order: ", ", "),
         ];
+        // the sentence that ends the exceptions' fix, after the list
+        const THEN_RELAY: &str = ". Then relay the approval.";
         s.split('\n')
             .map(|line| {
                 let Some((marker, sep)) = MARKERS.iter().find(|(m, _)| line.contains(m)) else {
@@ -646,6 +648,10 @@ impl Norm<'_> {
                 };
                 let at = line.find(marker).unwrap() + marker.len();
                 let (head, list) = line.split_at(at);
+                let (list, tail) = match list.find(THEN_RELAY) {
+                    Some(i) => list.split_at(i),
+                    None => (list, ""),
+                };
                 let starts: Vec<usize> = std::iter::once(0)
                     .chain(self.list_start.captures_iter(list).filter_map(|c| {
                         let m = c.get(0).unwrap();
@@ -661,7 +667,7 @@ impl Norm<'_> {
                     })
                     .collect();
                 entries.sort_by_cached_key(|e| self.sort_key(e));
-                format!("{head}{}", entries.join(sep))
+                format!("{head}{}{tail}", entries.join(sep))
             })
             .collect::<Vec<_>>()
             .join("\n")

@@ -73,7 +73,7 @@ fn exception_open(e: &RdyError, pref: &str, ex: &[Item]) {
     assert_eq!(
         e.fix,
         format!(
-            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+            "answer these exception cards first, in order: {}. Then relay the approval.",
             refs.join(", ")
         )
     );
@@ -123,7 +123,7 @@ fn di17_rdy_approve_refuses_an_open_exception_too() {
     assert_eq!(
         e["fix"],
         format!(
-            "answer each card below on its own, with the person's words, then relay the approval again. Answer each exception card first: {}",
+            "answer these exception cards first, in order: {}. Then relay the approval.",
             ex.r#ref
         ),
         "{e}"

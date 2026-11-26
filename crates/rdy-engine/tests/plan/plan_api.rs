@@ -1781,7 +1781,7 @@ fn cp8_input_limits_have_exact_text() {
             e,
             E_PLAN_ITEM,
             &format!("{item} is not an item of the change plan for view:w"),
-            "read the plan with rdy_plan / rdy plan and pass an item id it lists",
+            &format!("{} Open items: 4.", rdy_engine::plan::PLAN_ITEM_FIX),
         )
     };
     let gone = pi(&s.c, &s.b, PlanKind::Confirm);

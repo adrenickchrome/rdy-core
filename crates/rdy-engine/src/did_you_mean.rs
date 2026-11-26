@@ -62,13 +62,38 @@ fn strip_position(msg: &str) -> &str {
     }
 }
 
+/// The names a caller often gives for a field of another name, as (given, field): a hint only,
+/// used before edit distance and only when the field is among the known ones (W-core-3). No name
+/// here is ever accepted in place of the field.
+pub const KNOWN_WRONG_NAMES: [(&str, &str); 9] = [
+    ("action", "op"),
+    ("id", "alias"),
+    ("proposal", "ref"),
+    ("card", "ref"),
+    ("token", "brief"),
+    ("type", "block_type"),
+    ("text", "evidence"),
+    ("answer", "evidence"),
+    ("words", "evidence"),
+];
+
+/// The field of `known` to suggest for the unknown `word`: its entry of [`KNOWN_WRONG_NAMES`]
+/// when that field is known here, else [`nearest`].
+pub fn suggest<'a>(word: &str, known: &[&'a str]) -> Option<&'a str> {
+    KNOWN_WRONG_NAMES
+        .iter()
+        .filter(|(given, _)| *given == word)
+        .find_map(|(_, field)| known.iter().copied().find(|k| k == field))
+        .or_else(|| nearest(word, known))
+}
+
 /// The fix for unknown field `field` of a struct whose fields are `known`.
 pub fn fields_fix(field: &str, known: &[&str]) -> String {
     if known.is_empty() {
         return format!("remove \"{field}\"; it takes no fields");
     }
     let all = known.join(", ");
-    match nearest(field, known) {
+    match suggest(field, known) {
         Some(y) => format!("did you mean \"{y}\"? the fields are {all}"),
         None => format!("remove \"{field}\"; the fields are {all}"),
     }

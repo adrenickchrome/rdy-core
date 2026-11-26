@@ -1532,7 +1532,7 @@ async fn kfu4_claim_and_early_refusals_stay_unchanged() {
         assert_eq!(
             got,
             json!({"code": "E_NO_SESSION", "message": "no session",
-                "fix": "state rdy/actor and rdy/run in _meta, or call rdy_session", "issues": []})
+                "fix": "state rdy/actor and rdy/run in _meta, or call rdy_session with your actor, run and role, then resend the call", "issues": []})
         );
     }
     // a claim that is not valid
