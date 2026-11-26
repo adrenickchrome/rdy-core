@@ -200,8 +200,10 @@ fn delta(was: &str, now: &str) -> BTreeMap<String, (String, Value)> {
 /// four error rows and two templates (`r5909_successor_contract_changes_only_refusal_text`); and
 /// a partial history's codes ([`HISTORY_CODES`]); and the eight new templates of the overlapped
 /// upload preparation and the canon input check, whose start or worker failures a push reports
-/// (`UPLOAD_*` and `CAPTURE_*`). A later task of the release adds its own rows.
-const RELEASE_DELTA: [&str; 44] = [
+/// (`UPLOAD_*` and `CAPTURE_*`); and a partial history's store feature (`partial_history`, in
+/// the feature list and the registered names) and its sync history format 5: the canon-state
+/// purpose, its root, its read format, its wire fixture v6 and its first-use stream fixture.
+const RELEASE_DELTA: [&str; 51] = [
     "added /cli/runtime/probes/compact/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/fsck/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/status/stdout/deduplicated_bytes",
@@ -246,6 +248,13 @@ const RELEASE_DELTA: [&str; 44] = [
     "changed /mcp/refusal_error_rows",
     "added /mcp/result_fields/rdy_schema/ok/errors?/E_HISTORY_PENDING",
     "added /mcp/result_fields/rdy_schema/ok/errors?/W_HISTORY_PENDING",
+    "added /store/features/name=partial_history",
+    "added /sync/fixture_digests/sync-client-wire-v6.json",
+    "added /sync/fixture_digests/sync5-canon-state.bin",
+    "added /sync/fixture_digests/sync5-canon-state.expect.json",
+    "changed /sync/history/read_formats",
+    "changed /sync/history/roots",
+    "changed /sync/purposes",
 ];
 
 /// The codes a partial history adds (D-GGTYA): E_HISTORY_PENDING and W_HISTORY_PENDING, each with

@@ -33837,6 +33837,11 @@
       },
       {
         "class": "incompatible",
+        "name": "partial_history",
+        "required_rdy": "0.59.0"
+      },
+      {
+        "class": "incompatible",
         "name": "plan_delta",
         "required_rdy": "0.59.0"
       },
@@ -34233,6 +34238,7 @@
       "foreign_copy",
       "hub_canon",
       "object_encoding",
+      "partial_history",
       "plan_delta",
       "plan_tension",
       "ported_change",
@@ -34356,12 +34362,15 @@
       "sync-client-wire-v2.json": "492422 b4f05b31ed8d4ea0628e4c2b35c621be448d68483ae0eab09d7c191456877a85",
       "sync-client-wire-v3a.json": "45913 daa8ff3fbb04526f1374eb089de5d9b0f6fbf40873828f6426e614fa954c9ea5",
       "sync-client-wire-v5.json": "17925 ea42701656fe0c0c09d067d4b3b0659b4f8390ff1014203c7739036b9b153b26",
+      "sync-client-wire-v6.json": "18482 476f6d49dc7609c6c9088e539a8004d7621101a863db75180f559c921c91dfd2",
       "sync4-canon-history.bin": "5884 8d51365e1d9bd84bf9c00526e672d401298d0128cdf3590d1c09f50eb5f746e4",
       "sync4-canon-history.expect.json": "4641 19bd7fd90178c3883d3d9cd018577877a7aaa6eadfb6d1da99355a9693574e5c",
       "sync4-reduction.bin": "15331 88826bbea0c7eba4df575915fec0b4cebd19ee840fdedfa1306a1e7712983b07",
       "sync4-reduction.expect.json": "5048 2d796533cf09c0faede758f5b41dfd6e3c49467953cb0f3d5ac72e1b1295c8ea",
       "sync4-view-history.bin": "6699 0abb9333ec131aa4f87c78e0a549322d053c49048c0c7ab15dd309ec96f7dace",
       "sync4-view-history.expect.json": "5338 3c4a8147ee8439998f41895ed2905165f7f3461dac089e8069b7e7dfa326eff4",
+      "sync5-canon-state.bin": "1403 bdd142ebcf05c1d9ad83303718f45bf199f545cffa4f60caf961c654f8d5b8af",
+      "sync5-canon-state.expect.json": "4332 4ab5dea998333f1ae3426497d7c055ecc097dbca19dc632691a0e7f07831784c",
       "v1-s15.expect.json": "24439 1b288d272891be45291c7fb77a059cded97ae2c69354b6d2c1c10b6fa68b435d",
       "v1-s15.rdysync": "8436 b4e977c6b5fbf6d90b23ab4a9e8727ab10e2852699e8de94e8fb572eeb87a0cf",
       "v2-f1-e0.expect.json": "25539 41c739398eff4112f85e8b86bfd324110a4d8e9d97280dcdcaee62164156989c",
@@ -34393,7 +34402,8 @@
       "read_formats": [
         2,
         3,
-        4
+        4,
+        5
       ],
       "roots": [
         [
@@ -34415,6 +34425,11 @@
           3,
           4,
           13
+        ],
+        [
+          4,
+          5,
+          4
         ]
       ]
     },
@@ -34442,6 +34457,10 @@
       [
         3,
         "view_history"
+      ],
+      [
+        4,
+        "canon_state"
       ]
     ],
     "record_kinds": {
