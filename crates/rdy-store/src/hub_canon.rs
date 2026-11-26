@@ -51,10 +51,10 @@
 //! `StoreError::Refused` (E_BAD_INPUT) with D-47HVF's one reason for the move. The hub chooses
 //! the move; core checks the move it is given and never chooses between them.
 use crate::error::StoreError;
-use crate::format::StoreFeatures;
+use crate::format::{StoreFeature, StoreFeatures};
 use crate::holder::StoreMode;
 use crate::kinds;
-use crate::object_refs::{ObjectKey, portable_kinds, portable_refs_of};
+use crate::object_refs::{ObjectKey, ObjectRef, portable_kinds, portable_refs_of};
 use crate::segment::Location;
 use crate::snapshot::{FoldRefusal, SnapshotSource};
 use crate::store::{Store, StoreReader};
@@ -349,6 +349,73 @@ pub struct MoveBatch {
     /// takes it through the store's checked take, with the move's refs in the same batch
     /// ([`Store::move_canon_with`]); `records` then holds its present records only.
     history: Option<Arc<HistoryFiles>>,
+    /// What the batch checks of the push found of its records ([`MoveFacts`]), when the plan
+    /// was made from checked batches: a recheck reads them again, and the move's write indexes
+    /// each record's checked link count.
+    facts: Option<Arc<MoveFacts>>,
+}
+
+/// What batch checks found of a push's records, each keyed by its frame's raw kind and payload
+/// hash, so a fact is only ever read for the exact bytes it was found for: the record's links as
+/// it states them, when its batch lists `snapshot_delta` (a move's holder always does, so those
+/// are the links the move checks), the features it uses and its index link count. Made only
+/// from checked batches ([`MoveFacts::of`]); it holds no payload. The facts are the records'
+/// own: whether each link resolves, each landing's delta, the snapshot chains and the head are
+/// the move's checks, run over the holder each time the plan is checked.
+#[derive(Debug, Default)]
+pub struct MoveFacts {
+    by: HashMap<(u8, Hash), RecordFacts>,
+}
+
+/// One record's facts in [`MoveFacts`].
+#[derive(Debug)]
+struct RecordFacts {
+    refs: Option<Vec<ObjectRef>>,
+    features: Vec<StoreFeature>,
+    index_links: u64,
+}
+
+impl MoveFacts {
+    /// The facts of the present records of `checked`, batches a whole batch check passed
+    /// (`crate::sync_stream::check_batch_prepared_with`). A record that two batches hold keeps
+    /// its first facts: the same bytes give the same facts.
+    pub fn of(checked: &[&crate::sync_stream::CheckedBatch]) -> MoveFacts {
+        let mut by = HashMap::new();
+        for c in checked {
+            let deltas = c
+                .report()
+                .header
+                .features
+                .has(crate::format::FEATURE_SNAPSHOT_DELTA);
+            for (i, f) in c.frames().iter().enumerate() {
+                if f.is_dropped() {
+                    continue;
+                }
+                by.entry((f.raw_kind(), f.key().hash))
+                    .or_insert_with(|| RecordFacts {
+                        refs: deltas.then(|| c.refs(i)),
+                        features: c.features(i).cloned().collect(),
+                        index_links: f.index_links(),
+                    });
+            }
+        }
+        MoveFacts { by }
+    }
+
+    fn get(&self, raw: u8, hash: &Hash) -> Option<&RecordFacts> {
+        self.by.get(&(raw, *hash))
+    }
+
+    /// The checked index link counts of `records` that these facts hold.
+    fn index_links(&self, records: &[(u8, Vec<u8>)]) -> crate::take_batch::IndexLinks {
+        records
+            .iter()
+            .filter_map(|(raw, p)| {
+                let h = Hash::of(p);
+                self.get(*raw, &h).map(|f| ((*raw, h), f.index_links))
+            })
+            .collect()
+    }
 }
 
 /// The batch files of a pushed history that carries a removal, and its target.
@@ -690,12 +757,19 @@ fn head_and_set(
 struct OverlaySnapshots<'o, 'a> {
     overlay: &'o Overlay<'a>,
     deltas: BTreeMap<Hash, Hash>,
+    /// The plan's landings and deltas as the move's record checks decoded them, by hash: read
+    /// here before a decode of their bytes.
+    landings: HashMap<Hash, &'o LandingRecord>,
+    decoded: HashMap<Hash, SnapshotDelta>,
 }
 
 impl SnapshotSource for OverlaySnapshots<'_, '_> {
     type Error = StoreError;
 
     fn landing(&mut self, landing: &Hash) -> Result<Option<LandingRecord>, StoreError> {
+        if let Some(l) = self.landings.get(landing) {
+            return Ok(Some((*l).clone()));
+        }
         self.overlay.landing(landing)
     }
 
@@ -732,6 +806,9 @@ impl SnapshotSource for OverlaySnapshots<'_, '_> {
     }
 
     fn delta(&mut self, delta: &Hash) -> Result<SnapshotDelta, StoreError> {
+        if let Some(d) = self.decoded.get(delta) {
+            return Ok(d.clone());
+        }
         self.overlay
             .typed(kinds::SNAPSHOT_DELTA, delta)?
             .ok_or(StoreError::NotFound(*delta))
@@ -762,6 +839,31 @@ impl StoreReader {
         records: Vec<(u8, Vec<u8>)>,
         head: Hash,
     ) -> Result<MoveBatch, StoreError> {
+        self.check_move_batch_with(records, head, None)
+    }
+
+    /// [`StoreReader::check_move_batch`] of records that batch checks of this operation read
+    /// (`facts`, [`MoveFacts::of`] those checked batches): each record's links, features and
+    /// index link count are its facts when they hold its exact bytes, and are derived as
+    /// [`StoreReader::check_move_batch`] derives them otherwise. Every check over the holder, in
+    /// the same order and with the same refusals, is [`StoreReader::check_move_batch`]'s, and a
+    /// move made after the holder moved runs them again ([`Store::move_canon_with`]).
+    pub fn check_move_batch_checked(
+        &self,
+        records: Vec<(u8, Vec<u8>)>,
+        head: Hash,
+        facts: MoveFacts,
+    ) -> Result<MoveBatch, StoreError> {
+        self.check_move_batch_with(records, head, Some(Arc::new(facts)))
+    }
+
+    /// [`StoreReader::check_move_batch`] with the plan's facts, if any.
+    fn check_move_batch_with(
+        &self,
+        records: Vec<(u8, Vec<u8>)>,
+        head: Hash,
+        facts: Option<Arc<MoveFacts>>,
+    ) -> Result<MoveBatch, StoreError> {
         if self.mode()? != StoreMode::Holder {
             return Err(refused("a move needs a holder store"));
         }
@@ -775,7 +877,7 @@ impl StoreReader {
             )));
         }
         let checked_at = self.index().indexed_upto()?;
-        self.check_move_records(&features, &records)?;
+        self.check_move_records(&features, &records, facts.as_deref())?;
         let overlay = Overlay::new(self, &records);
         let is_landing = overlay.has(kinds::LANDING, &head)?;
         let is_op = overlay.has(kinds::VIEW_OP, &head)?;
@@ -794,6 +896,7 @@ impl StoreReader {
             head_kind,
             checked_at,
             history: None,
+            facts,
         })
     }
 
@@ -854,6 +957,7 @@ impl StoreReader {
                     root: head,
                 },
             })),
+            facts: None,
         })
     }
 
@@ -862,20 +966,29 @@ impl StoreReader {
         &self,
         features: &StoreFeatures,
         records: &[(u8, Vec<u8>)],
+        facts: Option<&MoveFacts>,
     ) -> Result<(), StoreError> {
+        let hashes: Vec<Hash> = records.iter().map(|(_, p)| Hash::of(p)).collect();
+        let fact = |i: usize| facts.and_then(|f| f.get(records[i].0, &hashes[i]));
         // the links of each object follow every feature the batch uses
         let mut used = features.clone();
-        for (raw, payload) in records {
-            used = used.merged(&crate::format::required_features(*raw, payload));
+        for (i, (raw, payload)) in records.iter().enumerate() {
+            used = match fact(i) {
+                Some(f) => used.merged(&f.features),
+                None => used.merged(&crate::format::required_features(*raw, payload)),
+            };
         }
         let overlay = Overlay::new(self, records);
         let mut deltas: BTreeMap<Hash, Hash> = BTreeMap::new();
+        // each landing and delta of the plan, decoded once: the delta rules and the snapshot
+        // chains below read these values
         let mut landings: Vec<(Hash, LandingRecord)> = vec![];
-        for (raw, payload) in records {
+        let mut decoded: HashMap<Hash, SnapshotDelta> = HashMap::new();
+        for (i, (raw, payload)) in records.iter().enumerate() {
             let kind = crate::codec::logical_kind(*raw);
             let key = ObjectKey {
                 kind,
-                hash: Hash::of(payload),
+                hash: hashes[i],
             };
             if !crate::sync_stream::is_sync_kind(kind)
                 || matches!(
@@ -887,8 +1000,13 @@ impl StoreReader {
                     "a move batch cannot hold object {key}: its kind is not a pushed object"
                 )));
             }
-            let refs = portable_refs_of(&used, *raw, payload)
-                .map_err(|e| refused(format!("object {key}: {e}")))?;
+            // the links the batch check found of these exact bytes, under `snapshot_delta` as
+            // `used` lists it; else the record's own decode
+            let refs = match fact(i).and_then(|f| f.refs.clone()) {
+                Some(refs) if used.has(crate::format::FEATURE_SNAPSHOT_DELTA) => refs,
+                _ => portable_refs_of(&used, *raw, payload)
+                    .map_err(|e| refused(format!("object {key}: {e}")))?,
+            };
             for r in refs {
                 match r.kind {
                     Some(k) => {
@@ -935,6 +1053,7 @@ impl StoreReader {
                             deltas.insert(d.landing, key.hash);
                         }
                     }
+                    decoded.insert(key.hash, d);
                 }
                 _ => {}
             }
@@ -958,6 +1077,8 @@ impl StoreReader {
         let mut source = OverlaySnapshots {
             overlay: &overlay,
             deltas,
+            landings: landings.iter().map(|(h, r)| (*h, r)).collect(),
+            decoded,
         };
         crate::snapshot::check_snapshot_chains(
             &mut source,
@@ -1523,7 +1644,13 @@ impl Store {
         {
             batch
         } else {
-            rechecked = reader.check_move_batch(batch.records.clone(), batch.head)?;
+            // the holder moved since the check: its context checks run again, over the holder as
+            // it is now; the records' own facts stay theirs
+            rechecked = reader.check_move_batch_with(
+                batch.records.clone(),
+                batch.head,
+                batch.facts.clone(),
+            )?;
             &rechecked
         };
         let (mut refs, carried) = match plan_move(&reader, batch, mv, expected, at_ms)? {
@@ -1541,7 +1668,15 @@ impl Store {
             None => {
                 let mut items = batch.records.clone();
                 items.extend(self.ref_items_pub(refs));
-                self.write_move(items)?;
+                match &batch.facts {
+                    Some(f) => {
+                        let links = f.index_links(&batch.records);
+                        self.write_move_checked(items, links)?;
+                    }
+                    None => {
+                        self.write_move(items)?;
+                    }
+                }
             }
             Some(h) => {
                 self.take_history_move(&h.files, &h.target, &batch.records, refs)?;

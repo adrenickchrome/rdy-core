@@ -27,25 +27,25 @@
 use crate::store::{Snapshot, StoreHandle};
 use rdy_engine::engine::with_writer_result;
 use rdy_engine::stream_error::to_rdy;
-use rdy_engine::{E_BAD_INPUT, E_INTERNAL, E_IO, RdyError, ReadState, stream_check};
+use rdy_engine::{E_BAD_INPUT, E_INTERNAL, E_IO, RdyError, ReadState};
 use rdy_model::{Hash, LandingRecord, RepoId, Tag};
-use rdy_store::format::{FEATURE_HUB_CANON, StoreFeatures, registered_features, required_features};
-use rdy_store::hub_canon::MoveBatch;
+use rdy_store::format::{FEATURE_HUB_CANON, StoreFeatures, registered_features};
+use rdy_store::hub_canon::{MoveBatch, MoveFacts};
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::stream_error::{Reason, StreamError};
 use rdy_store::sync_stream::{
-    self, MAX_BATCH_FILES, MAX_HISTORY_DEPTH, StreamHeader, StreamPurpose, StreamReader,
-    StreamRecord,
+    self, MAX_BATCH_FILES, MAX_HISTORY_DEPTH, StreamHeader, StreamPurpose, StreamRecord,
 };
 use rdy_store::view::ViewOp;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+pub use rdy_engine::stream_check::{CheckedBatchFile, check_batch_file};
 pub use rdy_store::format::RdyVersion;
 pub use rdy_store::hub_canon::{CanonMove, Moved};
 pub use rdy_store::view::Owner;
@@ -289,14 +289,56 @@ fn io(e: std::io::Error) -> RdyError {
     )
 }
 
+/// The header rules of one checked file `b` of a push for the holder of `repo`, in their order:
+/// its repo, a canon or view history's purpose, and the header of the push's first file
+/// (`first`, set by the first file).
+fn admit(
+    first: &mut Option<StreamHeader>,
+    b: &CheckedBatchFile,
+    repo: RepoId,
+) -> Result<(), RdyError> {
+    b.ensure_repo(repo)?;
+    let header = &b.report().header;
+    if !matches!(
+        header.purpose,
+        StreamPurpose::CanonHistory | StreamPurpose::ViewHistory
+    ) {
+        return Err(to_rdy(StreamError::purpose_for(
+            None,
+            0,
+            header.purpose.byte(),
+            StreamPurpose::CanonHistory.name(),
+        )));
+    }
+    match first {
+        None => *first = Some(header.clone()),
+        Some(h) => {
+            if (h.repo_id, h.purpose, h.tag, &h.features)
+                != (header.repo_id, header.purpose, header.tag, &header.features)
+            {
+                return Err(to_rdy(StreamError::bad_record(
+                    0,
+                    sync_stream::MAGIC.len() as u64 + 4,
+                    Reason::BatchHeaderDiffers,
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A push read: its header, its present records as (kind, bytes), the keys of its records,
 /// present or dropped, and whether it carries a removal (a dropped record or a removal record).
 type PushRead = (StreamHeader, Vec<(u8, Vec<u8>)>, Vec<ObjectKey>, bool);
 
 /// The checked header and present records of the push `batches` for the holder of `repo`: each
-/// file passes core's batch check, the headers agree, and every record is a canon or view
-/// history's present object. Repeated records are one.
-fn read_push(batches: &[File], repo: RepoId) -> Result<PushRead, RdyError> {
+/// file passed core's batch check (its [`CheckedBatchFile`]) for the holder's repo, the headers
+/// agree, and every record is a canon or view history's present object. Repeated records are
+/// one. Each file's bytes are read again before any of them is used, and must be the exact bytes
+/// its check read (`sync_stream::read_checked`): framing, payload hashes, raw encodings, the
+/// header, dropped records, the trailer and the end of the file; a changed file is `input changed
+/// during take`, and a malformed one keeps its own framing error. No record is decoded again.
+fn read_push(batches: &[CheckedBatchFile], repo: RepoId) -> Result<PushRead, RdyError> {
     if batches.is_empty() {
         return Err(to_rdy(StreamError::bad_record(0, 0, Reason::NoBatchFiles)));
     }
@@ -311,51 +353,23 @@ fn read_push(batches: &[File], repo: RepoId) -> Result<PushRead, RdyError> {
     let mut records: Vec<(u8, Vec<u8>)> = Vec::new();
     let mut keys: BTreeSet<ObjectKey> = BTreeSet::new();
     let mut removal = false;
-    for f in batches {
-        let mut f = f.try_clone().map_err(io)?;
+    for b in batches {
+        admit(&mut first, b, repo)?;
+        // the file passed its check: read its exact bytes again, with no typed decode
+        let mut f = b.file().try_clone().map_err(io)?;
         f.seek(SeekFrom::Start(0)).map_err(io)?;
-        let report = stream_check::check_batch(&mut f, Some(repo))?;
-        let header = report.header;
-        if !matches!(
-            header.purpose,
-            StreamPurpose::CanonHistory | StreamPurpose::ViewHistory
-        ) {
-            return Err(to_rdy(StreamError::purpose_for(
-                None,
-                0,
-                header.purpose.byte(),
-                StreamPurpose::CanonHistory.name(),
-            )));
-        }
-        match &first {
-            None => first = Some(header.clone()),
-            Some(h) => {
-                if (h.repo_id, h.purpose, h.tag, &h.features)
-                    != (header.repo_id, header.purpose, header.tag, &header.features)
-                {
-                    return Err(to_rdy(StreamError::bad_record(
-                        0,
-                        sync_stream::MAGIC.len() as u64 + 4,
-                        Reason::BatchHeaderDiffers,
-                    )));
-                }
-            }
-        }
-        // the file passed: read its records again, each checked again by the reader
-        f.seek(SeekFrom::Start(0)).map_err(io)?;
-        let (mut reader, _) = StreamReader::open_history(&mut f).map_err(to_rdy)?;
-        while let Some(r) = reader.next().map_err(to_rdy)? {
+        sync_stream::read_checked(BufReader::new(&mut f), b.store_checked(), |_, _, r, _| {
             let key = r.key();
             let raw = r.raw_kind();
             match r {
                 StreamRecord::Present { payload, .. } => {
                     if keys.insert(key) {
                         if records.len() as u64 >= sync_stream::MAX_RECORDS {
-                            return Err(to_rdy(StreamError::limit(
+                            return Err(StreamError::limit(
                                 None,
                                 0,
                                 rdy_store::stream_error::LIMIT_OBJECT_RECORDS,
-                            )));
+                            ));
                         }
                         records.push((raw, payload));
                     }
@@ -365,7 +379,9 @@ fn read_push(batches: &[File], repo: RepoId) -> Result<PushRead, RdyError> {
                     removal = true;
                 }
             }
-        }
+            Ok(())
+        })
+        .map_err(to_rdy)?;
     }
     removal |= keys.iter().any(|k| {
         matches!(
@@ -386,15 +402,54 @@ impl Snapshot {
     /// snapshot delta. The handles are cloned and read from their start; the files stay the
     /// caller's. Nothing is written.
     pub fn check_quarantine(&self, batches: &[File]) -> Result<CheckedQuarantine, RdyError> {
+        self.read_state().ensure_current_epoch()?;
+        let repo = self.identity().repo_id;
+        if batches.len() > MAX_BATCH_FILES {
+            return Err(to_rdy(StreamError::limit(
+                None,
+                0,
+                sync_stream::LIMIT_BATCH_FILES,
+            )));
+        }
+        // a file with no check of its own (a put of another process, a resumed push) is checked
+        // once here
+        // each file's header rules right after its check, as before any other file is checked
+        let mut checked = Vec::with_capacity(batches.len());
+        let mut first = None;
+        for f in batches {
+            let b = check_batch_file(f.try_clone().map_err(io)?, Some(repo), |_, _, _| {})?;
+            admit(&mut first, &b, repo)?;
+            checked.push(b);
+        }
+        self.check_quarantine_checked(&checked)
+    }
+
+    /// [`Snapshot::check_quarantine`] of batch files that core's batch check passed when the
+    /// hub received them ([`check_batch_file`], one [`CheckedBatchFile`] per put): no file is
+    /// checked again. Each file's bytes are read again first and must be the exact bytes its
+    /// check read; a changed file is `input changed during take` (E_BAD_RECORD), and a malformed
+    /// one keeps its own framing error. A batch of another repo than the holder's is
+    /// `E_REPO_MISMATCH`. Each check's result then stands for its file's records: their links,
+    /// their features and their index link counts. Every check of the push over the holder, the
+    /// headers, the purpose, the links of every object over the push and the holder, each
+    /// landing's one delta, the snapshot chains, removals and the head, are
+    /// [`Snapshot::check_quarantine`]'s, as is the result. Nothing is written.
+    pub fn check_quarantine_checked(
+        &self,
+        batches: &[CheckedBatchFile],
+    ) -> Result<CheckedQuarantine, RdyError> {
         let read = self.read_state();
         read.ensure_current_epoch()?;
         let repo = self.identity().repo_id;
         let (header, records, objects, removal) = read_push(batches, repo)?;
+        // the features the records use, as each check found them
         let mut need: Vec<rdy_store::format::StoreFeature> = Vec::new();
+        for b in batches {
+            need.extend(b.report().record_features.features.iter().cloned());
+        }
         let mut landings = BTreeMap::new();
         let mut ops: BTreeMap<Hash, ViewOp> = BTreeMap::new();
         for (raw, payload) in &records {
-            need.extend(required_features(*raw, payload));
             let kind = rdy_store::codec::logical_kind(*raw);
             let hash = Hash::of(payload);
             if kind == kinds::LANDING {
@@ -410,13 +465,18 @@ impl Snapshot {
             // closure are the take's checks, which the move runs over the holder under the
             // writer (`Store::move_canon_with`), on its own handles of the files
             let mut files = Vec::with_capacity(batches.len());
-            for f in batches {
-                files.push(f.try_clone().map_err(io)?);
+            for b in batches {
+                files.push(b.file().try_clone().map_err(io)?);
             }
             read.reader()
                 .check_history_move_batch(records, header.tag, files, header.purpose)?
         } else {
-            read.reader().check_move_batch(records, header.tag)?
+            let checked: Vec<&sync_stream::CheckedBatch> = batches
+                .iter()
+                .map(CheckedBatchFile::store_checked)
+                .collect();
+            read.reader()
+                .check_move_batch_checked(records, header.tag, MoveFacts::of(&checked))?
         };
         self.checked(batch, header.purpose, landings, &ops, objects, need)
     }

@@ -1883,6 +1883,9 @@ impl CheckedFrame {
 struct Facts {
     frames: Vec<CheckedFrame>,
     links: Vec<ObjectKey>,
+    /// The places in `links` (ascending) of the links whose own ref named no kind: the check
+    /// resolved them within the batch and its prerequisites only.
+    untyped: Vec<u32>,
     features: Vec<u16>,
     input_len: u64,
     binding: Hash,
@@ -1927,6 +1930,33 @@ impl CheckedBatch {
             .checked_sub(1)
             .map_or(0, |p| self.facts.frames[p].links_end as usize);
         &self.facts.links[start..self.facts.frames[i].links_end as usize]
+    }
+
+    /// The object links of frame `i` (in wire order) as the record states them
+    /// ([`StreamRecord::refs`] under the header's features): [`CheckedBatch::links`], with no
+    /// kind on a link whose own ref named none. A later stage that resolves links over more
+    /// records than the batch (an upload's union, a holder) reads these, so a link that the
+    /// batch alone resolved is resolved again there.
+    pub fn refs(&self, i: usize) -> Vec<ObjectRef> {
+        let start = i
+            .checked_sub(1)
+            .map_or(0, |p| self.facts.frames[p].links_end as usize);
+        let end = self.facts.frames[i].links_end as usize;
+        let from = self
+            .facts
+            .untyped
+            .partition_point(|u| (*u as usize) < start);
+        let mut untyped = self.facts.untyped[from..].iter().peekable();
+        (start..end)
+            .map(|j| {
+                let k = self.facts.links[j];
+                let none = untyped.next_if(|u| **u as usize == j).is_some();
+                ObjectRef {
+                    kind: (!none).then_some(k.kind),
+                    hash: k.hash,
+                }
+            })
+            .collect()
     }
 
     /// The features frame `i` (in wire order) needs (`format::required_features`), each one of
@@ -1976,6 +2006,75 @@ fn input_len(totals: &StreamTotals) -> u64 {
     totals.bytes + FRAME_HEADER + TRAILER_LEN as u64
 }
 
+thread_local! {
+    /// The batch checks (`check_inner`) this thread ran.
+    static CHECKS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn count_check() {
+    CHECKS.with(|c| c.set(c.get() + 1));
+}
+
+/// For tests: how many whole batch checks ([`check_batch_with`], [`check_batch_prepared_with`]
+/// and the calls over them) this thread ran so far. A test reads the difference over a call.
+#[doc(hidden)]
+pub fn batch_checks_for_tests() -> u64 {
+    CHECKS.with(Cell::get)
+}
+
+/// Reads `input` again as the exact bytes that `checked` checked, and gives each object record
+/// to `each` with its number in wire order, its checked frame and its place (record number and
+/// frame offset). It is no batch check: it makes no typed decode and keeps none of the batch's
+/// dependency rules. The reader ([`StreamReader`]) keeps the framing: the prelude, each frame's
+/// payload hash, a dropped record's descriptor, the trailer and the end of the input, each
+/// refused with its own error. Then the bytes must be the ones `checked` checked: the same
+/// header, each frame's kind, raw encoding, offset, length and payload hash, and the batch's
+/// binding ([`CheckedBatch::binding`], with its trailer and exact length). Anything else is
+/// `input changed during take`, at the first record that differs (at the header for a header,
+/// and at the last record for the trailer, a missing or an extra record). Path, length or time
+/// of a file are never read as proof: only matching bytes keep the earlier check's result.
+/// `each`'s error ends the read. Returns the header.
+pub fn read_checked<R: Read, E: From<StreamError>>(
+    input: R,
+    checked: &CheckedBatch,
+    mut each: impl FnMut(usize, &CheckedFrame, StreamRecord, (u64, u64)) -> Result<(), E>,
+) -> Result<StreamHeader, E> {
+    let changed =
+        |(n, at): (u64, u64)| StreamError::bad_record(n, at, Reason::InputChangedDuringTake);
+    let (mut reader, header) = StreamReader::open_history(input)?;
+    if header != checked.report.header {
+        return Err(changed((0, PRELUDE)).into());
+    }
+    let frames = checked.frames();
+    let mut i = 0usize;
+    while let Some(r) = reader.next()? {
+        let place = reader.position();
+        let (frame_kind, frame_hash) = reader.last_frame();
+        let same = frames.get(i).is_some_and(|f| {
+            f.key == r.key()
+                && f.raw_kind == r.raw_kind()
+                && f.offset == place.1
+                && u64::from(f.frame_len) == r.frame_len()
+                && f.frame_hash == frame_hash
+                && f.dropped == (frame_kind == rec::DROPPED)
+        });
+        if !same {
+            return Err(changed(place).with_object(Some(r.key())).into());
+        }
+        each(i, &frames[i], r, place)?;
+        i += 1;
+    }
+    let last = reader.position();
+    let totals = reader.finish()?;
+    if i != frames.len()
+        || totals.records != checked.report.records
+        || batch_binding(&header, &totals) != checked.binding()
+    {
+        return Err(changed(last).into());
+    }
+    Ok(header)
+}
+
 /// The check of [`check_batch_with`] and [`check_batch_prepared_with`], one loop for both; with
 /// `keep`, it also keeps the facts of a [`CheckedBatch`].
 fn check_inner<R: Read, E: From<StreamError>>(
@@ -1985,6 +2084,7 @@ fn check_inner<R: Read, E: From<StreamError>>(
     keep: bool,
 ) -> Result<(BatchReport, Option<Facts>), E> {
     let caps = caps();
+    count_check();
     let (mut reader, header) = StreamReader::open_history(input)?;
     on_header(&header)?;
     let deltas = header.features.has(FEATURE_SNAPSHOT_DELTA);
@@ -2085,8 +2185,9 @@ fn check_inner<R: Read, E: From<StreamError>>(
     depth
         .try_reserve_exact(keys.len())
         .map_err(|_| StreamError::allocation(Some(0), PRELUDE))?;
-    // a prepared check's resolved links, one per edge
+    // a prepared check's resolved links, one per edge, and the places of the untyped ones
     let mut links: Vec<ObjectKey> = Vec::new();
+    let mut untyped: Vec<u32> = Vec::new();
     if keep {
         links
             .try_reserve_exact(edges.len())
@@ -2123,6 +2224,12 @@ fn check_inner<R: Read, E: From<StreamError>>(
                 None => return Err(fail(Reason::UnlistedDependency(*e)).into()),
             }
             if keep {
+                if e.kind.is_none() {
+                    untyped
+                        .try_reserve(1)
+                        .map_err(|_| StreamError::allocation(Some(n), at[i]))?;
+                    untyped.push(links.len() as u32);
+                }
                 links.push(target);
             }
         }
@@ -2179,6 +2286,7 @@ fn check_inner<R: Read, E: From<StreamError>>(
         let facts = Facts {
             frames,
             links,
+            untyped,
             features: needs,
             input_len: input_len(&totals),
             binding: batch_binding(&header, &totals),

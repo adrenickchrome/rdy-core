@@ -19,7 +19,8 @@ use rdy_model::RepoId;
 use rdy_store::decoded_record::DecodedRecord;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_stream::{self, StreamHeader, StreamRecord};
-use std::io::Read;
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 
 pub use rdy_store::sync_stream::BatchReport;
 
@@ -108,6 +109,70 @@ pub fn check_batch_prepared_tally<R: Read>(
         sync_stream::check_batch_prepared_with(input, header, record)
     })
     .map(|store| CheckedBatch { store })
+}
+
+/// One batch file that the engine's check passed whole ([`CheckedBatch`]), with the open file it
+/// read: a capsule of one operation (a push's quarantine, a fetch's take), never stored or
+/// serialized. It is made only by [`check_batch_file`], so a report alone, or a check of
+/// other bytes, never stands for it; a later stage that reuses its check first reads the
+/// file's bytes again and compares them with the check's binding.
+///
+/// ```compile_fail
+/// use rdy_engine::stream_check::CheckedBatchFile;
+/// fn forge(file: std::fs::File, report: rdy_engine::stream_check::BatchReport) -> CheckedBatchFile {
+///     CheckedBatchFile { file, checked: report }
+/// }
+/// ```
+#[derive(Debug)]
+pub struct CheckedBatchFile {
+    file: File,
+    checked: CheckedBatch,
+}
+
+impl CheckedBatchFile {
+    /// The batch's report, as [`check_batch`] returns it.
+    pub fn report(&self) -> &BatchReport {
+        self.checked.report()
+    }
+
+    /// The file the check read. A reader of it seeks to its start.
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
+    /// What the store's check found, for the store stage that takes the file.
+    pub fn store_checked(&self) -> &sync_stream::CheckedBatch {
+        self.checked.store_checked()
+    }
+
+    /// `E_REPO_MISMATCH` unless the batch's repo is `repo`, as [`check_batch`] refuses a batch of
+    /// another repo than the expected one.
+    pub fn ensure_repo(&self, repo: RepoId) -> Result<(), RdyError> {
+        let source = self.report().header.repo_id;
+        if source != repo {
+            return Err(repo_mismatch(&source, &repo));
+        }
+        Ok(())
+    }
+}
+
+/// Checks the batch in `file`, read from its start, as [`check_batch_tally`] checks it (`tally`
+/// gets each record's kind, frame start and payload bytes), and keeps the open file with what
+/// the check found ([`CheckedBatchFile`]). The checks, their order and their refusals are
+/// [`check_batch_tally`]'s.
+pub fn check_batch_file(
+    mut file: File,
+    expected_repo: Option<RepoId>,
+    tally: impl FnMut(u8, u64, u64),
+) -> Result<CheckedBatchFile, RdyError> {
+    file.seek(SeekFrom::Start(0)).map_err(stream_io)?;
+    let checked = check_batch_prepared_tally(BufReader::new(&mut file), expected_repo, tally)?;
+    Ok(CheckedBatchFile { file, checked })
+}
+
+/// An I/O error of a batch file: the stream's own error at its start.
+fn stream_io(e: std::io::Error) -> RdyError {
+    to_rdy(StreamError::io(Some(0), 0, &e))
 }
 
 /// The engine's check of one batch through the store check `check`: the repo at the header,

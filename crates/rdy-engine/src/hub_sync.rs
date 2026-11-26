@@ -90,7 +90,7 @@ use rdy_store::take_batch::FetchTarget;
 use rdy_store::{StoreError, StoreReader};
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1965,19 +1965,18 @@ impl<'a> SyncService<'a> {
                 continue;
             }
             got?;
-            file.seek(SeekFrom::Start(0)).map_err(|_| scratch_error())?;
+            // the one check of this reply: the take reuses it for these exact bytes
             let mut records = Vec::new();
-            let report = crate::stream_check::check_batch_tally(
-                BufReader::new(&mut file),
-                Some(repo_id),
-                |kind, at, len| records.push((kind, at, len)),
-            )?;
+            let checked =
+                crate::stream_check::check_batch_file(file, Some(repo_id), |kind, at, len| {
+                    records.push((kind, at, len))
+                })?;
             sizer.taken(written, &records);
-            if report.header.purpose != purpose || report.header.root() != root_key {
+            let header = &checked.report().header;
+            if header.purpose != purpose || header.root() != root_key {
                 return Err(upstream_protocol());
             }
-            file.seek(SeekFrom::Start(0)).map_err(|_| scratch_error())?;
-            files.push(file);
+            files.push(checked);
         }
         let target = FetchTarget {
             remote: t.name.clone(),
@@ -1988,7 +1987,7 @@ impl<'a> SyncService<'a> {
         };
         drop(read);
         with_writer_result(engine, move |rdy| {
-            crate::sync_fetch::fetch(rdy, &files, &target)
+            crate::sync_fetch::fetch_checked(rdy, &files, &target)
         })
         .map(Some)
     }
