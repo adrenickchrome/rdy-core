@@ -176,3 +176,42 @@ fn r59018_daemon_yields_between_history_steps() {
     drop(rt);
     shared.shutdown().unwrap();
 }
+
+/// O17, D-GGTYA: the CLI clone's check once its history is complete
+/// (`check_after_history`, which `serve_clone_history` runs before the daemon stops) holds the
+/// writer only for its capture. Its frame walk, its tag rules and its state checks run on the
+/// calling thread: a person write that arrives at each of them is served while the check waits.
+#[test]
+fn r59019_clone_check_after_history_serves_queued_writes() {
+    let (_d, r) = project();
+    let shared = Shared::new(r);
+    let engine = shared.engine();
+    let served: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+    let hook = {
+        let engine = Arc::clone(&engine);
+        let served = Arc::clone(&served);
+        let n = AtomicUsize::new(0);
+        Box::new(move |point: &'static str| {
+            let name = format!("during-{point}-{}", n.fetch_add(1, Ordering::SeqCst));
+            let engine = Arc::clone(&engine);
+            let (tx, rx) = mpsc::channel::<()>();
+            let t = std::thread::spawn(move || {
+                write_typed(&*engine, move |r| doc(r, &name)).unwrap();
+                tx.send(()).unwrap();
+            });
+            // a check on the writer would hold this write until the check ends
+            if rx.recv_timeout(Duration::from_secs(60)).is_ok() {
+                served.lock().unwrap().push(point);
+            }
+            t.join().unwrap();
+        })
+    };
+    let report = rdy_engine::history_fetch::with_check_hook_for_tests(hook, || {
+        rdy_daemon::history_fetch::check_after_history(&*engine)
+    })
+    .unwrap();
+    assert_eq!(*served.lock().unwrap(), ["frames", "tags", "state"]);
+    assert!(report.frames > 0);
+    assert_eq!(engine.read().included("work").len(), 3);
+    shared.shutdown().unwrap();
+}

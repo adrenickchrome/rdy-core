@@ -548,18 +548,19 @@ pub fn serve(opts: ServeOptions) -> Result<ExitReason, ServeError> {
 /// served by a daemon inside this process, so every other client (a CLI command, an MCP
 /// session) connects to it and is served while its history arrives. Its history job fetches
 /// the history between calls (`crate::history_fetch`); `step` runs here with the progress after
-/// each step that leaves more to do, and once the history is complete `after` runs serialized
-/// with every write (its own result beside the progress). The daemon then stops and the store closes before this returns.
+/// each step that leaves more to do. Once the history is complete the clone's fsck runs while
+/// the daemon still serves (`crate::history_fetch::check_after_history`: only its capture holds
+/// the writer, so person calls queued meanwhile run), and its report comes back beside the
+/// progress. The daemon then stops and the store closes before this returns.
 ///
 /// SIGINT and SIGTERM stop the daemon, so the fetch ends at the next step boundary and keeps
 /// what arrived; a second one exits at once. Its log lines go to the run dir's `daemon.log`,
 /// never to this process's stderr. A project another rdy process holds is `E_LOCKED`.
-pub fn serve_clone_history<T: Send + 'static>(
+pub fn serve_clone_history(
     project: &Path,
     version: &str,
     step: &mut dyn FnMut(&HistoryProgress),
-    after: impl FnOnce(&Rdy) -> Result<T, RdyError> + Send + 'static,
-) -> Result<(HistoryProgress, Result<T, RdyError>), RdyError> {
+) -> Result<(HistoryProgress, Result<rdy_engine::FsckReport, RdyError>), RdyError> {
     let run_dir = RunDir::of_project(project);
     let sink = crate::spawn::open_log(&run_dir).map_err(|e| {
         RdyError::new(
@@ -588,22 +589,7 @@ pub fn serve_clone_history<T: Send + 'static>(
     let run = start_checked(opts, None, signals.as_mut()).map_err(clone_serve_error)?;
     let watch = signals.and_then(|s| s.stop_on_signal(run.handle()));
     let out = follow_history(&run, step).map(|p| {
-        let slot = Arc::new(Mutex::new(None));
-        let put = Arc::clone(&slot);
-        let ran = run.shared().engine().read_serialized(Box::new(move |r| {
-            *put.lock().unwrap_or_else(|e| e.into_inner()) = Some(after(r));
-            Ok(Value::Null)
-        }));
-        let v = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let checked = match (ran, v) {
-            (Err(e), _) => Err(e),
-            (Ok(_), Some(v)) => v,
-            (Ok(_), None) => Err(RdyError::new(
-                rdy_engine::E_INTERNAL,
-                "the check after the history fetch returned nothing",
-                "this is a bug in rdy; run rdy fsck in the clone",
-            )),
-        };
+        let checked = crate::history_fetch::check_after_history(&*run.shared().engine());
         (p, checked)
     });
     run.handle().stop();

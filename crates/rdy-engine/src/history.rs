@@ -254,7 +254,22 @@ impl<'a> Memo<'a> {
         id: &BlockId,
         used: &HashSet<Hash>,
     ) -> Result<Option<Hash>, RdyError> {
-        let all = self.reader.producers(version)?;
+        let mut all = self.reader.producers(version)?;
+        if self.partial {
+            // canon's rows stop at the frontier while the history is incomplete: a change held
+            // behind it (a completion's take holds the older landings' changes before the
+            // history ref is complete) that no canon landing carries and that the scope does not
+            // include is not canon's yet, so it reads as not held, as before the take
+            let mut kept = Vec::with_capacity(all.len());
+            for c in all {
+                if self.included.as_ref().is_some_and(|s| s.contains(&c))
+                    || self.reader.landing_of(&c)?.is_some()
+                {
+                    kept.push(c);
+                }
+            }
+            all = kept;
+        }
         if all.is_empty() {
             if self.partial {
                 return Ok(None);

@@ -910,6 +910,41 @@ impl Store {
         frontier: Hash,
         epoch: u64,
     ) -> Result<(), StoreError> {
+        let items = self.completion_items(remote, frontier, epoch)?;
+        self.write_sync_items(items)?;
+        self.reindex()
+    }
+
+    /// [`Store::complete_history`]'s ref write in a held batch that stays open: the caller
+    /// seals it with what the completion makes visible (a project logs the tension moves of
+    /// the older landings as the batch's last frame), so the completed ref and those moves are
+    /// durable together or not at all. The index applies the ref at once: canon's rows cover
+    /// the whole history for every read before the seal. After the seal the caller rebuilds the
+    /// derived state ([`Store::reindex`]), as [`Store::complete_history`] does. The same
+    /// refusals, and one more: held batches must be on (`set_held`).
+    pub fn complete_history_held(
+        &mut self,
+        remote: &str,
+        frontier: Hash,
+        epoch: u64,
+    ) -> Result<(), StoreError> {
+        if !self.held() {
+            return Err(StoreError::Refused(
+                "a held history completion needs held batches on".into(),
+            ));
+        }
+        let items = self.completion_items(remote, frontier, epoch)?;
+        self.write_refs_as(items, RefWrite::Sync).map(|_| ())
+    }
+
+    /// The refusals of a history completion, then its one ref item: the history ref of
+    /// `remote` with `complete` true.
+    fn completion_items(
+        &mut self,
+        remote: &str,
+        frontier: Hash,
+        epoch: u64,
+    ) -> Result<Vec<(u8, Vec<u8>)>, StoreError> {
         self.ensure_writable()?;
         if self.mode()? == StoreMode::Holder {
             return Err(StoreError::Refused(
@@ -946,9 +981,7 @@ impl Store {
             ));
         }
         h.complete = true;
-        let items = self.ref_items_pub(vec![(history_ref(remote), SyncValue::History(h).encode())]);
-        self.write_sync_items(items)?;
-        self.reindex()
+        Ok(self.ref_items_pub(vec![(history_ref(remote), SyncValue::History(h).encode())]))
     }
 
     /// Writes ref `items` that may hold sync refs (a sync state batch, a clone's origin batch),

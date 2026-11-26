@@ -5035,6 +5035,305 @@ fn transitions_logged(dir: &std::path::Path) -> usize {
     n
 }
 
+/// The sealed batches of the log of the project at `dir`, in log order: each data frame's
+/// logical kind and hash, and the ref name and value of each REF_UPDATE frame (the marker left
+/// out).
+type LogFrame = (u8, Hash, Option<(String, Vec<u8>)>);
+
+fn log_batches(dir: &std::path::Path) -> Vec<Vec<LogFrame>> {
+    let engine = Local::open(dir).unwrap();
+    let batches = engine
+        .inspect(|r| {
+            let reader = r.store().reader();
+            let mut out = Vec::new();
+            let mut cur = Vec::new();
+            reader.for_each_frame_from(ORIGIN, r.store().log_end(), |_, raw, h, _, _| {
+                let kind = rdy_store::codec::logical_kind(raw);
+                if kind == kinds::BATCH_COMMIT {
+                    out.push(std::mem::take(&mut cur));
+                } else {
+                    let r = (kind == kinds::REF_UPDATE).then(|| {
+                        let u: kinds::RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h).unwrap();
+                        (u.name, u.value)
+                    });
+                    cur.push((kind, h, r));
+                }
+                Ok(())
+            })?;
+            Ok(out)
+        })
+        .unwrap();
+    engine.close().unwrap();
+    batches
+}
+
+/// The batches of `dir`'s log that write remote `remote`'s history ref as complete.
+fn completion_batches(dir: &std::path::Path, remote: &str) -> Vec<Vec<LogFrame>> {
+    let name = rdy_store::sync_state::history_ref(remote);
+    log_batches(dir)
+        .into_iter()
+        .filter(|b| {
+            b.iter().any(|(_, _, r)| {
+                r.as_ref().is_some_and(|(n, v)| {
+                    *n == name
+                        && matches!(
+                            rdy_store::sync_state::check_ref(n, v),
+                            Ok(Some(rdy_store::sync_state::SyncValue::History(h))) if h.complete
+                        )
+                })
+            })
+        })
+        .collect()
+}
+
+/// The TRANSITION record that logged the opening of each open tension of the project at `dir`.
+fn opening_records(dir: &std::path::Path) -> Vec<Hash> {
+    let engine = Local::open(dir).unwrap();
+    let out = engine
+        .read()
+        .reader()
+        .open_tensions()
+        .unwrap()
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect();
+    engine.close().unwrap();
+    out
+}
+
+/// A copy of the directory tree `from` at `to` (a closed project).
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let p = entry.path();
+        if p.is_dir() {
+            copy_tree(&p, &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(&p, to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+/// The history fetch of `remote` in the project at `dest` over `hub`, driven past its take and
+/// its full check (every key of `want` held), then `arm` run on the writer's project and the
+/// completion step taken. Returns that step and the log's end before it. The engine is dropped
+/// with no clean close, as a cut process leaves it.
+fn complete_after(
+    e: &Env,
+    hub: &Hub,
+    dest: &std::path::Path,
+    remote: &str,
+    want: &BTreeSet<ObjectKey>,
+    arm: impl FnOnce(&mut Rdy) + Send + 'static,
+) -> (
+    Result<rdy_engine::history_fetch::HistoryFetchStep, RdyError>,
+    rdy_store::segment::Location,
+) {
+    use rdy_engine::history_fetch::HistoryFetchStep;
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    let renderer = Renderer::default();
+    let engine = Local::open(dest).unwrap();
+    let service = SyncService::new(dest, &e.user_file, &api, &clock, hub, &renderer);
+    let mut fetch = service.begin_history(&engine, &writer(), remote).unwrap();
+    let taken = |engine: &Local| {
+        let read = engine.read();
+        want.iter()
+            .all(|k| read.reader().has_kind(k.kind, &k.hash).unwrap())
+    };
+    while !taken(&engine) {
+        let st = service
+            .resume_history_step(&engine, &writer(), &mut fetch)
+            .unwrap();
+        assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+    }
+    // the full check
+    let st = service
+        .resume_history_step(&engine, &writer(), &mut fetch)
+        .unwrap();
+    assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+    assert!(!history_ref_in(&engine, remote).complete);
+    let end = engine.inspect(|r| Ok(r.store().log_end())).unwrap();
+    rdy_engine::engine::with_writer_result(&engine, move |r| {
+        arm(r);
+        Ok(())
+    })
+    .unwrap();
+    let st = service.resume_history_step(&engine, &writer(), &mut fetch);
+    drop(fetch);
+    drop(engine);
+    (st, end)
+}
+
+/// The history ref of `remote` in `engine`'s project.
+fn history_ref_in(engine: &Local, remote: &str) -> rdy_store::sync_state::SyncHistory {
+    engine
+        .read()
+        .reader()
+        .sync_history(remote)
+        .unwrap()
+        .unwrap()
+}
+
+/// D-GGTYA: while the history ref is incomplete, canon's rows stop at the frontier, so the
+/// older landings that a completion's take holds are not canon's yet. A fresh read after the
+/// take (a reopen before the completion) reads no tension of theirs, as before the take, and so
+/// logs none that the completion would re-key; the completion then opens the reference's drift.
+#[test]
+fn r59019_taken_history_stays_behind_the_frontier_until_complete() {
+    let e = drift_env(false);
+    let dir = private_dir();
+    let reference = dir.path().join("reference");
+    let full = clone_hub(&e, false, 100);
+    clone_ready(&e, &full, &reference).unwrap();
+    let want_drifts = drifts_at(&reference);
+    assert_eq!(want_drifts.len(), 1, "{want_drifts:?}");
+    let hub = clone_hub(&e, true, 100);
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let total = s.history.unwrap().total;
+    let remote = s.remote.clone();
+    let before = drifts_at(&dest);
+    assert!(before.is_empty(), "{before:?}");
+    // every key staged, then the take
+    let staged_all = |st: &rdy_engine::history_fetch::HistoryFetchStep| st.progress().held == total;
+    fetch_until(&e, &hub, &dest, &remote, &staged_all);
+    fetch_until(&e, &hub, &dest, &remote, &|_| true);
+    assert!(holds_all(&dest, &want));
+    assert!(!history_ref(&dest, &remote).complete);
+    assert_eq!(drifts_at(&dest), before);
+    // a write in a fresh process logs no move of the older landings
+    let engine = Local::open(&dest).unwrap();
+    land_in(&engine, "local");
+    engine.close().unwrap();
+    assert_eq!(transitions_logged(&dest), 0);
+    let (st, _) = fetch_until(&e, &hub, &dest, &remote, &|_| false);
+    assert!(
+        matches!(st, rdy_engine::history_fetch::HistoryFetchStep::Complete(_)),
+        "{st:?}"
+    );
+    assert_eq!(drifts_at(&dest), want_drifts);
+    assert_eq!(transitions_logged(&dest), 1);
+}
+
+/// D-GGTYA: the completion's moves are durable with the completed history ref, in its one
+/// batch. A cut at the append of the moves' TRANSITION frame (the frame a completion that
+/// published its moves in a later batch would write after its ref was durable) leaves the
+/// history incomplete with no move logged; the next completion logs the reference's move once,
+/// under cause recheck, in the batch that completes the ref, and a reindex keeps it.
+#[test]
+fn r59019_completion_cut_before_its_moves_never_completes_without_them() {
+    let e = drift_env(false);
+    let dir = private_dir();
+    let reference = dir.path().join("reference");
+    let full = clone_hub(&e, false, 100);
+    clone_ready(&e, &full, &reference).unwrap();
+    let want_drifts = drifts_at(&reference);
+    assert_eq!(want_drifts.len(), 1, "{want_drifts:?}");
+    let as_recheck = |m: &[u8]| {
+        let mut t: rdy_store::transition::TensionMove = serde_json::from_slice(m).unwrap();
+        t.why.cause = rdy_store::transition::Cause::Recheck;
+        serde_json::to_vec(&t).unwrap()
+    };
+    let reference_moves: Vec<Vec<u8>> = opened_moves(&reference)
+        .iter()
+        .map(|(m, _)| as_recheck(m))
+        .collect();
+    let hub = clone_hub(&e, true, 100);
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let remote = s.remote.clone();
+    let engine = Local::open(&dest).unwrap();
+    land_in(&engine, "local");
+    engine.close().unwrap();
+    // a dry run on a copy finds the frame the moves' TRANSITION takes after the completed ref
+    let dry = dir.path().join("dry");
+    copy_tree(&dest, &dry);
+    let (st, end) = complete_after(&e, &hub, &dry, &remote, &want, |_| {});
+    assert!(
+        matches!(
+            st,
+            Ok(rdy_engine::history_fetch::HistoryFetchStep::Complete(_))
+        ),
+        "{st:?}"
+    );
+    let engine = Local::open(&dry).unwrap();
+    let mut seen = Vec::new();
+    engine
+        .inspect(|r| {
+            r.store().reader().for_each_frame_from(
+                end,
+                r.store().log_end(),
+                |_, raw, _, _, _| {
+                    seen.push(rdy_store::codec::logical_kind(raw));
+                    Ok(())
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    engine.close().unwrap();
+    let completed = seen
+        .iter()
+        .position(|k| *k == kinds::REF_UPDATE)
+        .expect("the completion writes its ref");
+    let cut = completed
+        + seen[completed..]
+            .iter()
+            .position(|k| *k == kinds::TRANSITION)
+            .expect("the completion logs its moves");
+    // the cut: every frame before the moves' TRANSITION is written, that one fails
+    let (st, _) = complete_after(&e, &hub, &dest, &remote, &want, move |r| {
+        r.store_mut().fail_append_at_frame_for_tests(Some((cut, 0)));
+    });
+    assert!(st.is_err(), "{st:?}");
+    let after_cut = history_ref(&dest, &remote);
+    assert!(
+        !after_cut.complete,
+        "a completed history without its moves: {:?}",
+        opened_moves(&dest)
+    );
+    assert!(completion_batches(&dest, &remote).is_empty());
+    assert_eq!(transitions_logged(&dest), 0);
+    // the next completion logs the reference's move once, in the batch that completes the ref
+    let (st, _) = fetch_until(&e, &hub, &dest, &remote, &|_| false);
+    assert!(
+        matches!(st, rdy_engine::history_fetch::HistoryFetchStep::Complete(_)),
+        "{st:?}"
+    );
+    assert_eq!(drifts_at(&dest), want_drifts);
+    let moves = opened_moves(&dest);
+    assert_eq!(
+        moves.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>(),
+        reference_moves
+    );
+    let batches = completion_batches(&dest, &remote);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let opened = opening_records(&dest);
+    assert_eq!(opened.len(), 1);
+    assert!(
+        batches[0]
+            .iter()
+            .any(|(k, h, _)| *k == kinds::TRANSITION && *h == opened[0]),
+        "{batches:?}"
+    );
+    let engine = Local::open(&dest).unwrap();
+    rdy_engine::engine::with_writer_result(&engine, |r| r.reindex()).unwrap();
+    engine.close().unwrap();
+    assert_eq!(opened_moves(&dest), moves);
+}
+
 /// A completion whose take writes the fetched PLAN records of the older landings carries the
 /// fetched batch's sync state, though the state take already named that tip: the plans keep
 /// the holder's rules and move no `plan/` ref. The full check, the completion and a reindex
@@ -5073,6 +5372,7 @@ fn r59019_completion_logs_the_history_moves() {
     let hub = clone_hub(&e, true, 100);
     let dest = dir.path().join("clone");
     let s = clone_ready(&e, &hub, &dest).unwrap();
+    let s_remote = s.remote.clone();
     // local work before the history arrives: an unrelated landing and a draft
     let engine = Local::open(&dest).unwrap();
     let local = land_in(&engine, "local");
@@ -5107,6 +5407,17 @@ fn r59019_completion_logs_the_history_moves() {
         String::from_utf8_lossy(&moves[0].0)
     );
     assert_eq!(transitions_logged(&dest), 1);
+    // the causative batch: the one TRANSITION is the last data frame of the batch that writes
+    // the history ref complete, and that batch writes nothing else
+    let batches = completion_batches(&dest, &s_remote);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let kinds_in: Vec<u8> = batches[0].iter().map(|(k, _, _)| *k).collect();
+    assert_eq!(
+        kinds_in,
+        [kinds::REF_UPDATE, kinds::TRANSITION],
+        "{batches:?}"
+    );
+    assert_eq!(opening_records(&dest), [batches[0][1].1]);
     let engine = Local::open(&dest).unwrap();
     rdy_engine::engine::with_writer_result(&engine, |r| r.reindex()).unwrap();
     engine.close().unwrap();

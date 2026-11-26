@@ -106,13 +106,12 @@ pub(crate) fn take_state(
 /// landings made since the state take stay. Its batch carries the remote's sync state, so its
 /// plans read as fetched ones.
 ///
-/// The take logs no moves. The history ref is still incomplete, so the state after the take
-/// reads the older landings only in part (their canon membership is rebuilt by the
-/// completion's reindex): moves computed from it would name canon sides with no landing, and
-/// the completion would re-key them. The drift moves the older landings cause are logged once,
-/// under cause `recheck`, by the completion ([`complete_history`]), from the state logged here
-/// before the take: a handle that logged nothing since it opened logs what moved while no rdy
-/// ran first (`Rdy::reconcile_transitions`, as a daemon does after ready).
+/// The take logs no moves of the older landings. While the history ref is incomplete, canon's
+/// rows (which landing carried each change) stop at the frontier, so the older landings are
+/// not canon's yet: moves computed now would name canon sides with no landing, and the
+/// completion would re-key them. The completion's own batch logs them ([`complete_history`]),
+/// from the state logged before it: a handle that logged nothing since it opened logs what
+/// moved while no rdy ran first (`Rdy::reconcile_transitions`, as a daemon does after ready).
 pub(crate) fn take_history_checked(
     rdy: &mut Rdy,
     batches: &[CheckedBatchFile],
@@ -127,11 +126,15 @@ pub(crate) fn take_history_checked(
     fetch_core_with(rdy, &files, Some(&checked), None, target, false)
 }
 
-/// The second and last history ref write (D-GGTYA, R1, N1): `Store::complete_history` of
-/// remote `remote` at `frontier` while the redaction epoch is still `epoch` (the values the
-/// full check saw), then the state published again over the rebuilt index as a chain move,
-/// which logs the moves the older landings cause under cause `recheck` (a batch of its own,
-/// as `Rdy::invalidate` logs one). A refusal writes nothing.
+/// The second and last history ref write (D-GGTYA, R1, N1): the history ref of remote
+/// `remote` at `frontier` set complete while the redaction epoch is still `epoch` (the values
+/// the full check saw), in a held batch (`Store::complete_history_held`). That ref is what
+/// makes the older landings canon's: the index rebuilds canon's rows over the whole chain when
+/// it applies it. The state is then read whole over those rows and published as a chain move,
+/// and the batch is sealed with the moves the older landings cause, under cause `recheck`, as
+/// its last frame. So the completed ref and its moves are durable together: a cut before the
+/// seal leaves neither, and the next completion logs both. The derived state is then rebuilt
+/// from the log (`Rdy::reindex`), which logs nothing more. A refusal writes nothing.
 pub(crate) fn complete_history(
     rdy: &mut Rdy,
     remote: &str,
@@ -139,10 +142,12 @@ pub(crate) fn complete_history(
     epoch: u64,
 ) -> Result<(), RdyError> {
     rdy.seal_open()?;
-    // a recheck computes its moves from a logged state (see `take_history_checked`)
+    // the moves are computed from a logged state: a handle that logged nothing since it opened
+    // logs what moved while no rdy ran first, in a batch of its own
     rdy.reconcile_transitions()?;
-    rdy.store.complete_history(remote, frontier, epoch)?;
-    rdy.publish_chain_moved()
+    rdy.store.complete_history_held(remote, frontier, epoch)?;
+    rdy.publish_chain_moved()?;
+    rdy.reindex()
 }
 
 /// A second handle on each checked batch's file, for the take.

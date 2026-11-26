@@ -50,6 +50,32 @@ pub enum HistoryJob {
     Absent,
 }
 
+/// The clone's check once its history is complete (the CLI's foreground clone,
+/// `crate::serve::serve_clone_history`, before its daemon stops): the project fsck of
+/// `engine`'s project (`Rdy::fsck_full`, which is `Rdy::fsck` for a complete history), with
+/// only its capture (`Rdy::capture_full_check`: the published state, a reader, the log's end)
+/// in a serialized read. Its frame walk and every other check run on the calling thread, so the
+/// writer serves the person calls queued meanwhile (D-GGTYA: full validation never runs on the
+/// writer).
+pub fn check_after_history(engine: &dyn Engine) -> Result<rdy_engine::FsckReport, RdyError> {
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let put = Arc::clone(&slot);
+    let ran = engine.read_serialized(Box::new(move |r| {
+        *put.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.capture_full_check());
+        Ok(serde_json::Value::Null)
+    }));
+    let captured = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    match (ran, captured) {
+        (Err(e), _) => Err(e),
+        (Ok(_), Some(capture)) => capture?.finish(),
+        (Ok(_), None) => Err(RdyError::new(
+            E_INTERNAL,
+            "the check after the history fetch returned nothing",
+            "this is a bug in rdy; run rdy fsck in the clone",
+        )),
+    }
+}
+
 /// The remote whose history the project of `engine` still fetches, if any.
 fn pending_remote(engine: &dyn Engine) -> Result<Option<String>, RdyError> {
     let read = engine.read();

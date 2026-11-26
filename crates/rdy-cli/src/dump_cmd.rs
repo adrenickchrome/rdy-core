@@ -251,7 +251,6 @@ fn clone_url(
                 &project,
                 crate::conn::VERSION,
                 &mut step,
-                rdy_engine::Rdy::fsck,
             ));
         }
         s
