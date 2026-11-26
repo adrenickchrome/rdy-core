@@ -668,7 +668,7 @@ impl McpClient {
         cmd.args(["mcp", "--no-daemon", "--project"])
             .arg(project)
             .envs(env.iter().copied())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         McpClient::launch_with(cmd, false)
     }
 
@@ -685,7 +685,7 @@ impl McpClient {
         crate::fixtures::isolate_person(&mut cmd, home, &home.join(".config"));
         cmd.args(["mcp", "--no-daemon", "--project"])
             .arg(project)
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         cmd
     }
 
