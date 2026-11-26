@@ -1237,6 +1237,25 @@ pub const BINARY_JOBS: usize = 6;
 /// is [`BINARY_JOBS`]: no cap.
 pub const HEAVY_JOBS: usize = if cfg!(windows) { 2 } else { BINARY_JOBS };
 
+/// How many heavy test binaries run at once when their temporary files are on the real disk
+/// (a run with no `--tmp-root`, as the nightly tier runs). Every area writes and flushes its
+/// projects there, and six areas at once write faster than the disk takes the data: on the gate
+/// Mac a plain `pwrite` of one daemon stalled for whole seconds, daemons missed their 30 s start,
+/// and the 5,000-op writes and the 10,000-op port of `mcp2`, `conc1` and `hpr4` (under 5 s
+/// alone) got no reply in 60 s. Two at once is the cap that Windows already has for the same
+/// reason.
+pub const REAL_DISK_HEAVY_JOBS: usize = 2;
+
+/// The cap on heavy binaries of a run: [`REAL_DISK_HEAVY_JOBS`] when the tests' temporary files
+/// are on the real disk (`on_tmp_root` false), else [`HEAVY_JOBS`].
+pub fn heavy_jobs(on_tmp_root: bool) -> usize {
+    if on_tmp_root {
+        HEAVY_JOBS
+    } else {
+        HEAVY_JOBS.min(REAL_DISK_HEAVY_JOBS)
+    }
+}
+
 /// Whether the test binary `name` of `package` (a target of `kind`) is heavy for
 /// [`HEAVY_JOBS`]: an rdy-qa area binary.
 pub fn is_heavy(package: &str, kind: &str, _name: &str) -> bool {
@@ -1863,6 +1882,9 @@ mod tests {
         assert!(!is_heavy("rdy-qa", "lib", "rdy_qa"));
         assert!(!is_heavy("rdy-store", "test", "format"));
         const { assert!(HEAVY_JOBS <= BINARY_JOBS) };
+        // the real disk takes two heavy binaries at once; a temp root keeps the platform's cap
+        assert_eq!(heavy_jobs(false), 2);
+        assert_eq!(heavy_jobs(true), HEAVY_JOBS);
     }
 
     #[test]
