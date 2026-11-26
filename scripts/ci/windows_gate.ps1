@@ -15,6 +15,8 @@ $drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType = 3' |
 if (-not $drive) { throw 'No fixed NTFS drive for the CI root' }
 $root = Join-Path ($drive.DeviceID + '\') 'rdy-ci'
 Add-Content -Path $env:GITHUB_ENV -Value "RDY_CI_ROOT=$root"
+# This step reads it too (GATE_REPORT), and GITHUB_ENV reaches only the later steps.
+$env:RDY_CI_ROOT = $root
 Write-Output "CI root: $root"
 $diskReport = Join-Path $PSScriptRoot 'windows_disk_report.ps1'
 # A failed report is printed and never stops the gate.

@@ -341,6 +341,9 @@ jobs:
           ./scripts/ci/windows_gate.ps1
           $status = $LASTEXITCODE
           Add-Content -Path $env:GITHUB_ENV -Value "GATE_REPORT=$env:RDY_CI_ROOT\work\target\qa\report.json"
+          # The upload step reads the workspace only.
+          New-Item -ItemType Directory -Force -Path target\qa | Out-Null
+          Copy-Item -Path "$env:RDY_CI_ROOT\work\target\qa\report.*", "$env:RDY_CI_ROOT\logs\gate.*" -Destination target\qa -ErrorAction SilentlyContinue
           exit $status
       - name: Failing tests
         if: always() && (steps.gate.outputs.status != '0' || steps.hosted.outcome == 'failure')
@@ -361,14 +364,15 @@ jobs:
           overwrite: true
           retention-days: 90
       - name: Upload the qa report
+        # One root per upload (a path list across the workspace and the CI root is refused), so the
+        # hosted proof copies its reports into the workspace first.
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-report-x86_64-pc-windows-msvc-a${{ github.run_attempt }}
           path: |
             target/qa/report.*
-            ${{ env.RDY_CI_ROOT }}/work/target/qa/report.*
-            ${{ env.RDY_CI_ROOT }}/logs/gate.*
+            target/qa/gate.*
           if-no-files-found: warn
           retention-days: 90
       - name: Remove the temporary account
