@@ -12,6 +12,8 @@
 
 #[path = "sync_e2e/canon_state.rs"]
 mod canon_state;
+#[path = "sync_e2e/incremental_selection.rs"]
+mod incremental_selection;
 #[path = "sync_e2e/mock.rs"]
 mod mock;
 #[path = "sync_e2e/speed.rs"]

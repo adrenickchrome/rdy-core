@@ -196,7 +196,7 @@ pub fn history_page(
     };
     if base.is_none() {
         // the whole history: one captured closure, kept for this call only
-        return Selection::build(read, purpose, root)?.page(read, after, limit);
+        return Selection::build(read, purpose, root, None)?.page(read, after, limit);
     }
     // an incremental page keeps its own walk, which charges only what the pull holds; it
     // never builds the whole history's closure and key set
@@ -241,7 +241,7 @@ pub fn write_history_keys(
         return Err(key_limit());
     }
     read.ensure_current_epoch()?;
-    Selection::build(read, purpose, root)?.write_keys(read, keys, out)
+    Selection::build(read, purpose, root, None)?.write_keys(read, keys, out)
 }
 
 thread_local! {
@@ -298,30 +298,43 @@ pub(crate) fn batch_bytes(manifest: usize, prereqs: usize, frames: u64, payload:
 }
 
 /// One history, walked once as `read` captured it: its records in dependency order (the
-/// closure of its root with nothing known and no base), the features they need, and the index
-/// of each record's place. Nothing else of a record is kept. A pull reads pages and subsets
-/// from it, and writes the subsets' records from the store at the captured end.
+/// closure of its root with nothing known, less the link closure of the base when there is
+/// one), the features they need, and the index of each record's place. Nothing else of a record
+/// is kept. A pull reads pages and subsets from it, and writes the subsets' records from the
+/// store at the captured end.
 struct Selection {
     purpose: StreamPurpose,
     root: Hash,
     found: HistoryClosure,
     index: HashMap<ObjectKey, usize>,
+    /// Whether a base's link closure is left out: a link may then name a record of the history
+    /// that the selection does not hold.
+    incremental: bool,
 }
 
 impl Selection {
-    /// Walks the history of `root` as `read` holds it. The root and the purpose are refused as
-    /// [`write_history`] refuses them.
-    fn build(read: &ReadState, purpose: StreamPurpose, root: Hash) -> Result<Selection, RdyError> {
+    /// Walks the history of `root` as `read` holds it, less the link closure of `base`, as
+    /// [`history_page`] walks it: a base that `read` does not hold counts as none. The root and
+    /// the purpose are refused as [`write_history`] refuses them.
+    fn build(
+        read: &ReadState,
+        purpose: StreamPurpose,
+        root: Hash,
+        base: Option<Hash>,
+    ) -> Result<Selection, RdyError> {
         read.ensure_current_epoch()?;
-        let found = walk_history(
-            read.reader(),
-            purpose,
-            root,
-            &BTreeSet::new(),
-            None,
-            read.seq(),
-        )
-        .map_err(to_rdy)?;
+        let reader = read.reader();
+        let end = read.seq();
+        let base = match purpose {
+            StreamPurpose::CanonHistory | StreamPurpose::ViewHistory => base.filter(|b| {
+                StoreSource { reader, end }
+                    .holds(purpose.root_kind(), b)
+                    .unwrap_or(false)
+            }),
+            _ => base,
+        };
+        let found =
+            walk_history(reader, purpose, root, &BTreeSet::new(), base, end).map_err(to_rdy)?;
         count_selection();
         let grow = |_| to_rdy(StreamError::allocation(None, 0));
         let mut index = HashMap::new();
@@ -335,6 +348,7 @@ impl Selection {
             root,
             found,
             index,
+            incremental: base.is_some(),
         })
     }
 
@@ -427,7 +441,7 @@ impl Selection {
                 .map_err(|e| to_rdy(StreamError::from_record(0, 0, &e).with_object(Some(*k))))?;
             let mut kids = Vec::with_capacity(refs.len());
             for r in refs {
-                kids.push(self.resolve(*k, r).map_err(to_rdy)?);
+                kids.push(self.resolve(&source, *k, r).map_err(to_rdy)?);
             }
             kids.sort_unstable();
             kids.dedup();
@@ -479,20 +493,40 @@ impl Selection {
 
     /// The key a link of record `from` names: its own kind, or for a kind-None link the one
     /// kind of its hash that the captured history holds (the walk has refused an ambiguous or
-    /// foreign link already). A hash the history does not hold is kind 0, a prerequisite.
-    fn resolve(&self, from: ObjectKey, r: ObjectRef) -> Result<ObjectKey, StreamError> {
+    /// foreign link already). A hash the history does not hold is kind 0, a prerequisite. In an
+    /// incremental selection a kind-None link may name a record of the base's link closure,
+    /// which the selection leaves out: the link then takes the one kind of its hash that
+    /// `source` holds, as the walk resolved it, so a batch names the prerequisite that a batch
+    /// of the whole history names.
+    fn resolve(
+        &self,
+        source: &StoreSource,
+        from: ObjectKey,
+        r: ObjectRef,
+    ) -> Result<ObjectKey, StreamError> {
         if let Some(kind) = r.kind {
             return Ok(ObjectKey { kind, hash: r.hash });
         }
+        let ambiguous =
+            || StreamError::bad_record(0, 0, Reason::AmbiguousObjectKind).with_object(Some(from));
         let mut found = None;
         for &kind in sync_kinds() {
             let key = ObjectKey { kind, hash: r.hash };
             if self.index.contains_key(&key) {
                 if found.is_some() {
-                    return Err(StreamError::bad_record(0, 0, Reason::AmbiguousObjectKind)
-                        .with_object(Some(from)));
+                    return Err(ambiguous());
                 }
                 found = Some(key);
+            }
+        }
+        if found.is_none() && self.incremental {
+            for &kind in sync_kinds() {
+                if source.holds(kind, &r.hash)? {
+                    if found.is_some() {
+                        return Err(ambiguous());
+                    }
+                    found = Some(ObjectKey { kind, hash: r.hash });
+                }
             }
         }
         Ok(found.unwrap_or(ObjectKey {
@@ -502,18 +536,18 @@ impl Selection {
     }
 }
 
-/// One caller-owned read operation of a history: a first pull (D-H0BZN). It walks the history
-/// of `root` once, in [`PreparedPull::new`], and keeps that closure with its key set and the
-/// read state that captured it. Its known pages and every get read that closure, so a pull of
-/// many gets walks the history once, and the pages and gets of one pull use one canon tip and
-/// one set of view heads. It reads up to the state's captured log end and checks the redaction
-/// epoch before and after each call, as [`write_history`] does: a record, signature, answer or
-/// removal stored later is not in this pull, and a removal refuses the next call
-/// (`E_REDACTED_STATE`).
+/// One caller-owned read operation of a history: a first pull, or an incremental pull above a
+/// base the receiver holds (D-H0BZN). It walks the history of `root` once, in
+/// [`PreparedPull::with_base`], and keeps that closure with its key set and the read state that
+/// captured it. Its known pages and every get read that closure, so a pull of many gets walks
+/// the history once, and the pages and gets of one pull use one canon tip and one set of view
+/// heads. It reads up to the state's captured log end and checks the redaction epoch before and
+/// after each call, as [`write_history`] does: a record, signature, answer or removal stored
+/// later is not in this pull, and a removal refuses the next call (`E_REDACTED_STATE`).
 ///
 /// The caller owns it: one operation, no process cache and no file. Dropping it releases the
-/// captured state. Only a history with no base is prepared; an incremental read keeps its own
-/// walk ([`history_page`] with a base).
+/// captured state. The one-call forms ([`history_page`], [`write_history_keys`]) keep their own
+/// walks for a request that no operation owns.
 pub struct PreparedPull {
     read: Arc<ReadState>,
     selection: Selection,
@@ -540,7 +574,21 @@ impl PreparedPull {
         purpose: StreamPurpose,
         root: Hash,
     ) -> Result<PreparedPull, RdyError> {
-        let selection = Selection::build(&read, purpose, root)?;
+        PreparedPull::with_base(read, purpose, root, None)
+    }
+
+    /// [`PreparedPull::new`] less the link closure of `base` (a landing or view op the receiver
+    /// holds), walked once as [`history_page`] walks it: the attachments of the base's records
+    /// still travel, and a base that `read` does not hold counts as none. Its pages are
+    /// [`history_page`]'s of that base; a get holds exactly the keys it names, which must be
+    /// keys of this selection, with the features of the whole selection in its header.
+    pub fn with_base(
+        read: Arc<ReadState>,
+        purpose: StreamPurpose,
+        root: Hash,
+        base: Option<Hash>,
+    ) -> Result<PreparedPull, RdyError> {
+        let selection = Selection::build(&read, purpose, root, base)?;
         Ok(PreparedPull { read, selection })
     }
 

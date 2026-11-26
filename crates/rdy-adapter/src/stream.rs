@@ -4,9 +4,9 @@
 //! (`rdy_engine::stream_check`, `rdy_engine::stream_export`); this module delegates and re-exports
 //! the types those calls use, so a consumer names them from this crate alone. Nothing here keeps
 //! state of its own: a check opens no store and a new process can make each call, and an export
-//! reads only the refs the snapshot captured. The one exception is a first pull a caller
-//! prepares ([`Snapshot::prepare_pull`]): the caller owns that value for one operation, and
-//! dropping it releases what it kept. A host that wants independent batches from one ordered stream
+//! reads only the refs the snapshot captured. The one exception is a pull a caller prepares
+//! ([`Snapshot::prepare_pull`], [`Snapshot::prepare_pull_with_base`]): the caller owns that value
+//! for one operation, and dropping it releases what it kept. A host that wants independent batches from one ordered stream
 //! splits it with [`StreamReader`] and [`StreamWriter`]; those re-exports claim no authorization
 //! for a single batch and manage no files. The host owns its batch files, upload ids and
 //! quarantine (D-WDKWQ); a checked batch is not a complete upload.
@@ -119,14 +119,30 @@ impl Snapshot {
     /// uses the one canon tip and set of view heads that this snapshot captured. The caller
     /// owns the value for the one operation: nothing is cached in the process or on disk, and
     /// dropping it releases the captured state. A root the snapshot does not hold is
-    /// `E_UNRESOLVED_REF`; another purpose is `E_STREAM_PURPOSE`. An incremental read (a base)
-    /// uses [`Snapshot::history_page`] and [`Snapshot::write_history`], which keep their walks.
+    /// `E_UNRESOLVED_REF`; another purpose is `E_STREAM_PURPOSE`. A pull above a base uses
+    /// [`Snapshot::prepare_pull_with_base`]; a request that no operation owns uses
+    /// [`Snapshot::history_page`] and [`Snapshot::write_history_keys`], which keep their walks.
     pub fn prepare_pull(
         &self,
         purpose: StreamPurpose,
         root: Hash,
     ) -> Result<PreparedPull, RdyError> {
-        PreparedPull::new(Arc::clone(self.shared_state()), purpose, root)
+        self.prepare_pull_with_base(purpose, root, None)
+    }
+
+    /// [`Snapshot::prepare_pull`] less the link closure of `base`, a landing or view op the
+    /// receiver holds: one incremental pull. It walks the history once with that base, as
+    /// [`Snapshot::history_page`] walks it: a base the snapshot does not hold counts as none, and
+    /// the later attachments of the base's records still travel. Its pages are that walk's keys
+    /// in its order; a get names keys of that selection only (another key is `E_UNRESOLVED_REF`
+    /// and nothing is written), and its batch holds exactly those keys.
+    pub fn prepare_pull_with_base(
+        &self,
+        purpose: StreamPurpose,
+        root: Hash,
+        base: Option<Hash>,
+    ) -> Result<PreparedPull, RdyError> {
+        PreparedPull::with_base(Arc::clone(self.shared_state()), purpose, root, base)
     }
 
     /// Prepares one caller-owned read of the state of the canon tip `root` (a landing) of this
@@ -147,13 +163,24 @@ impl Snapshot {
         purpose: StreamPurpose,
         root: Hash,
     ) -> Result<PullReply, RdyError> {
+        self.prepare_pull_reply_with_base(purpose, root, None)
+    }
+
+    /// [`Snapshot::prepare_pull_with_base`] for a hub's get replies, as
+    /// [`Snapshot::prepare_pull_reply`].
+    pub fn prepare_pull_reply_with_base(
+        &self,
+        purpose: StreamPurpose,
+        root: Hash,
+        base: Option<Hash>,
+    ) -> Result<PullReply, RdyError> {
         Ok(PullReply {
-            pull: self.prepare_pull(purpose, root)?,
+            pull: self.prepare_pull_with_base(purpose, root, base)?,
         })
     }
 }
 
-/// One first pull's replies: a [`PreparedPull`] that gives each get as an [`EncodedHistory`].
+/// One prepared pull's replies: a [`PreparedPull`] that gives each get as an [`EncodedHistory`].
 /// The caller owns it for the one operation, as it owns a prepared pull.
 #[derive(Debug)]
 pub struct PullReply {

@@ -12,11 +12,13 @@
 //!
 //! A put is checked once when it arrives, after a bounded zstd decode when it is sent
 //! compressed, and the push keeps that check with its file ([`CheckedBatchFile`]); its write
-//! checks the push from those checks. The test driver may open a first-pull scope around one
-//! client command ([`Hub::scope`]): the scope's first known pull with no base prepares the pull
-//! once ([`rdy_adapter::Snapshot::prepare_pull_reply`]), and its pages and gets read that
-//! preparation. A get that offers zstd may come back as one zstd frame. Requests outside a scope
-//! keep their one-request snapshot reads. A scope is test-driver ownership, not a hub session.
+//! checks the push from those checks. The test driver may open a pull scope around one client
+//! command ([`Hub::scope`]): the scope's first known pull prepares the pull once, with that
+//! request's base or none ([`rdy_adapter::Snapshot::prepare_pull_reply_with_base`]), and the
+//! known pages of that purpose, root and base and every get of that purpose and root read that
+//! one selection. A get checks its keys against the selection and walks nothing again. A get
+//! that offers zstd may come back as one zstd frame. Requests outside a scope keep their
+//! one-request snapshot reads. A scope is test-driver ownership, not a hub session.
 //! [`Peer`] plays an older hub or client for the encoding checks.
 //!
 //! The state reply lists stream format 5 in `stream_write`: the hub sends a canon tip's state
@@ -119,6 +121,10 @@ pub struct Served {
     pub offered_zstd: bool,
     /// Whether the reply body was one zstd frame.
     pub zstd_reply: bool,
+    /// The history closure walks (`rdy_engine::stream_export::walks_for_tests`, one per
+    /// `history_closure_before` call) the step made: a pull's preparation counts its walk on the
+    /// step that prepared it.
+    pub walks: u64,
 }
 
 /// One request the hub read.
@@ -178,12 +184,12 @@ struct Push {
     checked: Vec<CheckedBatchFile>,
 }
 
-/// One client command's first-pull scope: the pull it prepared, by purpose and root, and the
+/// One client command's pull scope: the pull it prepared, by purpose, root and base, and the
 /// canon state it prepared, by root.
 #[derive(Default)]
 struct Scope {
     operation: String,
-    reply: Option<(StreamPurpose, Hash, PullReply)>,
+    reply: Option<(StreamPurpose, Hash, Option<Hash>, PullReply)>,
     state: Option<(Hash, PreparedCanonState)>,
 }
 
@@ -224,7 +230,7 @@ struct Repo {
     min_rdy: Option<String>,
     peer: Peer,
     scope: Option<Scope>,
-    /// The first pulls prepared so far.
+    /// The pulls prepared so far, first and incremental.
     prepared: u64,
     served: Vec<Served>,
     /// The wire and decoded bytes of the batch of the request being served.
@@ -358,7 +364,7 @@ impl Hub {
             .push_back(fault);
     }
 
-    /// Opens the first-pull scope of one client command, named `operation` in the served
+    /// Opens the pull scope of one client command, named `operation` in the served
     /// requests; dropping the guard, when the command returns or fails, releases the scope and
     /// what it prepared. A new command gets a new scope.
     pub fn scope(&self, operation: &str) -> ScopeGuard {
@@ -462,7 +468,7 @@ impl Hub {
         }
     }
 
-    /// The first pulls the hub prepared so far.
+    /// The pulls the hub prepared so far, first and incremental.
     pub fn prepared(&self) -> u64 {
         self.shared
             .repo
@@ -611,7 +617,7 @@ impl Hub {
     }
 }
 
-/// An open first-pull scope ([`Hub::scope`]).
+/// An open pull scope ([`Hub::scope`]).
 pub struct ScopeGuard {
     shared: Arc<Shared>,
 }
@@ -846,7 +852,8 @@ fn answer(req: &Req, shared: &Shared) -> Answer {
     repo.zstd_reply = false;
     let (walks, _) = rdy_engine::stream_export::walks_for_tests();
     let out = route(req, &mut repo);
-    repo.history_walks += rdy_engine::stream_export::walks_for_tests().0 - walks;
+    let walks = rdy_engine::stream_export::walks_for_tests().0 - walks;
+    repo.history_walks += walks;
     let reply_bytes = match &out {
         Answer::Whole(b) | Answer::Cut(b, _) => body_len(b),
         Answer::Nothing => 0,
@@ -870,6 +877,7 @@ fn answer(req: &Req, shared: &Shared) -> Answer {
         server_ms: start.elapsed().as_secs_f64() * 1000.0,
         offered_zstd: offers_zstd(req),
         zstd_reply: repo.zstd_reply,
+        walks,
     };
     repo.served.push(served);
     out
@@ -1067,21 +1075,19 @@ fn known(req: &Req, repo: &mut Repo) -> Answer {
         return known_state(repo, &snap, root, base, after);
     }
     repo.history_reads += 1;
-    // a first pull in a scope: prepared once, on its first page
-    if base.is_none()
-        && let Some(scope) = repo.scope.as_mut()
-    {
+    // a pull in a scope: prepared once, on its first page, with that page's base
+    if let Some(scope) = repo.scope.as_mut() {
         if scope.reply.is_none() {
-            match snap.prepare_pull_reply(purpose, root.hash) {
+            match snap.prepare_pull_reply_with_base(purpose, root.hash, base) {
                 Ok(reply) => {
-                    scope.reply = Some((purpose, root.hash, reply));
+                    scope.reply = Some((purpose, root.hash, base, reply));
                     repo.prepared += 1;
                 }
                 Err(_) => return not_found(&format!("{}:{}", root.kind, root.hash)),
             }
         }
-        if let Some((p, h, reply)) = repo.scope.as_ref().and_then(|s| s.reply.as_ref())
-            && (*p, *h) == (purpose, root.hash)
+        if let Some((p, h, b, reply)) = repo.scope.as_ref().and_then(|s| s.reply.as_ref())
+            && (*p, *h, *b) == (purpose, root.hash, base)
         {
             return match reply.page(after, 100_000) {
                 Ok(page) => page_reply(&page.keys, page.next),
@@ -1211,8 +1217,8 @@ fn get(req: &Req, repo: &mut Repo) -> Answer {
         .scope
         .as_ref()
         .and_then(|s| s.reply.as_ref())
-        .filter(|(p, h, _)| (*p, *h) == (purpose, root.hash))
-        .map(|(_, _, reply)| reply);
+        .filter(|(p, h, _, _)| (*p, *h) == (purpose, root.hash))
+        .map(|(_, _, _, reply)| reply);
     let bytes = if state {
         // the canon state, as the wire bytes: one zstd frame only when offered
         let enc = match with_state(repo, &snap, root, |p| p.write_keys_encoded(&keys, accept)) {
