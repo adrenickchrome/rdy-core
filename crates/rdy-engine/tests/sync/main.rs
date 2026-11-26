@@ -6,6 +6,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod decoded_batch;
 mod follower_guard;
 mod foreign_deviation;
 mod foreign_facts;

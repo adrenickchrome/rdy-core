@@ -8,6 +8,7 @@ mod carried_fixture;
 mod redaction_fixture;
 
 mod carried_records;
+mod decoded_batch;
 mod dump_chain;
 mod foreign_compatibility;
 mod foreign_frozen;

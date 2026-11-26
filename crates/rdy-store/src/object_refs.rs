@@ -24,26 +24,22 @@
 //! not a SNAPSHOT edge; its map travels as its SNAPSHOT_DELTA, which links to its landing, its
 //! `base` delta and the version of each `set` entry (its `full` hash and `drop` ids are no
 //! links). Without the feature, `state` links to the landing's SNAPSHOT exactly as before.
-use crate::bounded::{self, CHUNK_BYTES, MAX_CHUNK_BYTES, RecordError};
+use crate::bounded::RecordError;
+use crate::decoded_record::DecodedRecord;
 use crate::format::{FEATURE_SNAPSHOT_DELTA, StoreFeatures};
 use crate::kinds::{
-    self, ALT_SET, ANSWER, ASSESSMENT, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, BlobManifest, CHANGE,
-    CHECK_REQUEST, DISPUTE, DISPUTE_RESOLUTION, FOREIGN, INTENT, LANDING, PLAN, PROPOSAL,
-    REDACTION, REDACTION_APPLY, REDACTION_RESIDUE, REVIEW, SIGNATURE, SNAPSHOT, SNAPSHOT_DELTA,
-    TAG, TENSION, TRANSITION, VIEW_OP,
+    self, ALT_SET, ANSWER, ASSESSMENT, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, CHANGE, CHECK_REQUEST,
+    DISPUTE, FOREIGN, INTENT, LANDING, PLAN, PROPOSAL, REDACTION, REDACTION_RESIDUE, REVIEW,
+    SNAPSHOT, SNAPSHOT_DELTA, TENSION, VIEW_OP,
 };
 use crate::transition::{Cause, Side, SideV1, TransitionsV1, Why};
 use crate::view::{ViewOp, ViewOpKind};
 use rdy_model::assessment::AssessmentV2;
-use rdy_model::check_request::CheckRequest;
-use rdy_model::dispute::{Dispute, DisputeResolution};
-use rdy_model::redaction::{RedactTarget, Redaction, RedactionApply, RedactionResidue, ResidualOp};
-use rdy_model::review::{ReviewSubjectV1, ReviewV1};
-use rdy_model::semantic::SemanticTensionV1;
-use rdy_model::signature::Signature;
+use rdy_model::redaction::{RedactTarget, Redaction, RedactionResidue, ResidualOp};
+use rdy_model::review::ReviewSubjectV1;
 use rdy_model::{
     AltChoice, AltSet, AltStatus, Answer, AnswerAct, Block, Change, ChangeLinks, FieldValue, Hash,
-    Intent, LandingRecord, Op, Proposal, SnapshotDelta, StateSnapshot, Tag,
+    LandingRecord, Op, Proposal,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -169,95 +165,87 @@ fn edges_of(
     payload: &[u8],
     foreign: bool,
 ) -> Result<Vec<ObjectRef>, RecordError> {
-    if !is_portable(crate::codec::logical_kind(kind)) {
-        return Err(RecordError::Kind);
-    }
-    let split = crate::codec::split(kind, payload)?;
-    let (kind, payload) = (split.kind, split.body);
+    edges_of_decoded(
+        features,
+        &DecodedRecord::decode_frame(kind, payload)?,
+        foreign,
+    )
+}
+
+/// [`portable_refs_of`] of a record already decoded ([`DecodedRecord`]): the same edges, read
+/// from the one value, with no decode. A dropped record has none here (its residue is the
+/// stream record's, `crate::sync_stream::StreamRecord::refs`).
+pub(crate) fn portable_refs_of_decoded(
+    features: &StoreFeatures,
+    d: &DecodedRecord,
+) -> Result<Vec<ObjectRef>, RecordError> {
+    edges_of_decoded(features, d, false)
+}
+
+/// The edges of one decoded record in a history of `features`; `foreign` keeps the
+/// foreign-only ones. The edges are the value's alone: a figure's blob field that is not a
+/// full hash, and a span of a kind that is not portable, are `Decode`.
+fn edges_of_decoded(
+    features: &StoreFeatures,
+    d: &DecodedRecord,
+    foreign: bool,
+) -> Result<Vec<ObjectRef>, RecordError> {
     let mut e = Edges {
         out: Vec::new(),
         foreign,
         deltas: features.has(FEATURE_SNAPSHOT_DELTA),
     };
-    match kind {
-        BLOCK => e.block(&crate::codec::decode_bounded_split::<Block>(&split)?)?,
-        CHANGE => e.change(&crate::codec::decode_bounded_split::<Change>(&split)?)?,
-        PROPOSAL => e.proposal(&bounded::decode::<Proposal>(payload)?),
-        LANDING => e.landing(&crate::codec::decode_bounded_split::<LandingRecord>(
-            &split,
-        )?),
-        SNAPSHOT => {
-            let s = bounded::decode::<StateSnapshot>(payload)?;
-            e.all(BLOCK, s.blocks.values());
-        }
-        SNAPSHOT_DELTA => {
-            let d = crate::codec::decode_bounded_split::<SnapshotDelta>(&split)?;
+    match d {
+        DecodedRecord::Block(b) => e.block(b)?,
+        DecodedRecord::Change(c) => e.change(c)?,
+        DecodedRecord::Proposal(p) => e.proposal(p),
+        DecodedRecord::Landing(l) => e.landing(l),
+        DecodedRecord::Snapshot(s) => e.all(BLOCK, s.blocks.values()),
+        DecodedRecord::SnapshotDelta(d) => {
             e.one(LANDING, d.landing);
             e.opt(SNAPSHOT_DELTA, d.base);
             e.all(BLOCK, d.set.iter().map(|(_, v)| v));
         }
-        BLOB_CHUNK => {
-            if payload.len() > MAX_CHUNK_BYTES {
-                return Err(RecordError::limit(CHUNK_BYTES, MAX_CHUNK_BYTES));
-            }
-        }
-        BLOB_MANIFEST => {
-            let m = bounded::decode::<BlobManifest>(payload)?;
-            e.all(BLOB_CHUNK, &m.chunks);
-        }
-        TAG => e.one(LANDING, bounded::decode::<Tag>(payload)?.landing),
-        ANSWER => e.answer(&crate::codec::decode_bounded_split::<Answer>(&split)?),
-        SIGNATURE => e.any(bounded::decode::<Signature>(payload)?.subject),
-        VIEW_OP => e.view_op(&bounded::decode::<ViewOp>(payload)?),
-        INTENT => {
-            let i = bounded::decode::<Intent>(payload)?;
+        DecodedRecord::BlobChunk | DecodedRecord::Dropped => {}
+        DecodedRecord::BlobManifest(m) => e.all(BLOB_CHUNK, &m.chunks),
+        DecodedRecord::Tag(t) => e.one(LANDING, t.landing),
+        DecodedRecord::Answer(a) => e.answer(a),
+        DecodedRecord::Signature(s) => e.any(s.subject),
+        DecodedRecord::ViewOp(v) => e.view_op(v),
+        DecodedRecord::Intent(i) => {
             e.opt(INTENT, i.stable);
             e.opt(INTENT, i.prev);
         }
-        ALT_SET => e.alt_set(&bounded::decode::<AltSet>(payload)?),
+        DecodedRecord::AltSet(a) => e.alt_set(a),
         // the registered wire types read every encoding of their kind (`crate::codec`)
-        REVIEW => {
-            if let ReviewSubjectV1::Check { request } =
-                crate::codec::decode_bounded_split::<ReviewV1>(&split)?.subject
-            {
+        DecodedRecord::Review(r) => {
+            if let ReviewSubjectV1::Check { request } = r.subject {
                 e.one(CHECK_REQUEST, request);
             }
         }
-        TENSION => {
-            let t = crate::codec::decode_bounded_split::<SemanticTensionV1>(&split)?;
+        DecodedRecord::Tension(t) => {
             e.one(REVIEW, t.review);
             e.opt(TENSION, t.prev);
         }
-        TRANSITION => e.transitions(&crate::codec::decode_bounded_split::<TransitionsV1>(
-            &split,
-        )?),
-        REDACTION => e.redaction(&crate::codec::decode_bounded_split::<Redaction>(&split)?)?,
-        REDACTION_RESIDUE => e.residue(&crate::codec::decode_bounded_split::<RedactionResidue>(
-            &split,
-        )?),
-        REDACTION_APPLY => {
-            let a = bounded::decode::<RedactionApply>(payload)?;
+        DecodedRecord::Transition(t) => e.transitions(t),
+        DecodedRecord::Redaction(r) => e.redaction(r)?,
+        DecodedRecord::RedactionResidue(r) => e.residue(r),
+        DecodedRecord::RedactionApply(a) => {
             e.one(REDACTION, a.request);
             e.one(LANDING, a.landing);
         }
         // a whole version or a delta, by its own frame: no predecessor is read
-        PLAN => e.plan(&crate::plan_record::decode_body(split.version, payload)?.0),
-        ASSESSMENT => e.assessment(&crate::codec::decode_bounded_split::<AssessmentV2>(&split)?),
-        DISPUTE => {
-            let d = crate::codec::decode_bounded_split::<Dispute>(&split)?;
-            e.one(LANDING, d.landing);
-        }
-        DISPUTE_RESOLUTION => {
-            let r = crate::codec::decode_bounded_split::<DisputeResolution>(&split)?;
+        DecodedRecord::Plan(p) => e.plan(p),
+        DecodedRecord::Assessment(a) => e.assessment(a),
+        DecodedRecord::Dispute(d) => e.one(LANDING, d.landing),
+        DecodedRecord::DisputeResolution(r) => {
             e.one(DISPUTE, r.dispute);
             e.opt(LANDING, r.correction);
         }
-        CHECK_REQUEST => {
-            let r = crate::codec::decode_bounded_split::<CheckRequest>(&split)?;
+        DecodedRecord::CheckRequest(r) => {
             e.opt(CHANGE, r.subject.change);
             e.opt(PROPOSAL, r.subject.version);
         }
-        _ => return Err(RecordError::Kind),
     }
     let mut out = e.out;
     out.sort_unstable();
