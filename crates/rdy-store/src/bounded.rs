@@ -124,9 +124,28 @@ pub fn fits<T: serde::Serialize + ?Sized>(value: &T) -> Result<(), RecordError> 
 /// Decodes `bytes` as exactly one `T`, within the limits above. Any input left after the value
 /// is `Decode`.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, RecordError> {
+    DECODES.with(|c| c.set(c.get() + 1));
     record_len(bytes.len())?;
     let gate = Gate::default();
     run(&gate, bytes)
+}
+
+thread_local! {
+    /// How many typed values this thread's [`decode`] was asked for.
+    static DECODES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many typed values [`decode`] was asked for on this thread since
+/// [`reset_decodes_for_tests`]: a test's count of typed decodes (one per record a batch check
+/// reads as a value).
+#[doc(hidden)]
+pub fn decodes_for_tests() -> u64 {
+    DECODES.with(Cell::get)
+}
+
+#[doc(hidden)]
+pub fn reset_decodes_for_tests() {
+    DECODES.with(|c| c.set(0));
 }
 
 /// A record's fallible shape: a type with the record's encoding whose decode grows only through

@@ -1554,7 +1554,7 @@ fn open_checked<R: Read + Seek, E: From<StreamError>>(
         .seek(SeekFrom::Start(0))
         .map_err(|e| StreamError::io(Some(0), 0, &e))?;
     let mut index: BTreeMap<ObjectKey, Place> = BTreeMap::new();
-    let report = check_batch_with(&mut input, on_header, |n, offset, r| {
+    let report = check_batch_with(&mut input, on_header, |n, offset, r, _| {
         let place = match r {
             StreamRecord::Present {
                 payload, encoding, ..

@@ -1123,11 +1123,34 @@ pub fn registered_features() -> Vec<StoreFeature> {
 ///
 /// A frame that does not split or decode uses nothing here: its own checks refuse it.
 pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
+    let Ok(o) = crate::codec::split(raw, payload) else {
+        return vec![];
+    };
+    // only the kinds whose features follow their value are decoded; a frame that does not
+    // decode uses what its encoding and kind alone use
+    let typed = matches!(
+        o.kind,
+        crate::kinds::BLOCK
+            | crate::kinds::CHANGE
+            | crate::kinds::PLAN
+            | crate::kinds::ANSWER
+            | crate::kinds::REVIEW
+    ) || (o.kind == crate::kinds::LANDING && o.version >= 1);
+    let value = typed
+        .then(|| crate::decoded_record::DecodedRecord::decode_split(&o).ok())
+        .flatten();
+    features_of(&o, value.as_ref())
+}
+
+/// [`required_features`] of split frame `o` whose typed value is `value` (None when it does not
+/// decode, or is not read): the value's rules read it, never the bytes again.
+pub(crate) fn features_of(
+    o: &crate::codec::ObjectBytes<'_>,
+    value: Option<&crate::decoded_record::DecodedRecord>,
+) -> Vec<StoreFeature> {
+    use crate::decoded_record::DecodedRecord;
     use crate::kinds;
     let mut out: Vec<StoreFeature> = vec![];
-    let Ok(o) = crate::codec::split(raw, payload) else {
-        return out;
-    };
     let mut add = |name: &str| {
         if !out.iter().any(|f| f.name == name) {
             out.push(registered(name));
@@ -1135,11 +1158,6 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
     };
     if o.version >= 1 {
         add(FEATURE_OBJECT_ENCODING);
-    }
-    fn typed<T: serde::de::DeserializeOwned + 'static>(
-        o: &crate::codec::ObjectBytes<'_>,
-    ) -> Option<T> {
-        crate::codec::decode_bounded_split(o).ok()
     }
     // a kind's optional encoding is the foreign copy's alone, by its version
     if o.kind == kinds::FOREIGN || crate::codec::optional(o.kind) == Some(o.version) {
@@ -1158,45 +1176,41 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
         }
     }
     // a repo_link block, alone or in a change, turns the foreign copy on (D-2WY7Y); a change
-    // is decoded once, and an encoding-0 one has no carried field
+    // is read once, and an encoding-0 one has no carried field
     let repo_link = |b: &rdy_model::Block| b.block_type == REPO_LINK_TYPE;
-    match o.kind {
-        kinds::BLOCK => {
-            if let Some(b) = typed::<rdy_model::Block>(&o) {
-                if repo_link(&b) {
-                    add(FEATURE_FOREIGN_COPY);
-                }
-                if is_dark_figure(&b) {
-                    add(FEATURE_FIGURE_DARK);
-                }
+    match value {
+        Some(DecodedRecord::Block(b)) if o.kind == kinds::BLOCK => {
+            if repo_link(b) {
+                add(FEATURE_FOREIGN_COPY);
+            }
+            if is_dark_figure(b) {
+                add(FEATURE_FIGURE_DARK);
             }
         }
-        kinds::CHANGE => {
-            if let Some(c) = typed::<rdy_model::Change>(&o) {
-                let written = || {
-                    c.ops.iter().filter_map(|op| match op {
-                        rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } => {
-                            Some(block)
-                        }
-                        rdy_model::Op::Delete { .. } => None,
-                    })
-                };
-                if written().any(repo_link) {
-                    add(FEATURE_FOREIGN_COPY);
-                }
-                if written().any(is_dark_figure) {
-                    add(FEATURE_FIGURE_DARK);
-                }
-                if o.version >= 1 && c.links.replayed_from.is_some() {
-                    add(FEATURE_VIEW_REPLAY);
-                }
+        Some(DecodedRecord::Change(c)) if o.kind == kinds::CHANGE => {
+            let written = || {
+                c.ops.iter().filter_map(|op| match op {
+                    rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } => {
+                        Some(block)
+                    }
+                    rdy_model::Op::Delete { .. } => None,
+                })
+            };
+            if written().any(repo_link) {
+                add(FEATURE_FOREIGN_COPY);
+            }
+            if written().any(is_dark_figure) {
+                add(FEATURE_FIGURE_DARK);
+            }
+            if o.version >= 1 && c.links.replayed_from.is_some() {
+                add(FEATURE_VIEW_REPLAY);
             }
         }
         _ => {}
     }
     match o.kind {
         kinds::LANDING if o.version >= 1 => {
-            if typed::<rdy_model::LandingRecord>(&o).is_some_and(|l| l.assessment.is_some()) {
+            if matches!(value, Some(DecodedRecord::Landing(l)) if l.assessment.is_some()) {
                 add(FEATURE_ASSESSMENT);
             }
         }
@@ -1205,7 +1219,7 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
             use rdy_model::plan::{PlanAct, PlanKind, PlanOutcome};
             // encoding 0 through its frozen reader, encoding 1 through its wire record: this
             // frame only
-            if let Ok((p, _)) = crate::plan_record::decode_body(o.version, o.body) {
+            if let Some(DecodedRecord::Plan(p)) = value {
                 let sealed =
                     p.seal().iter().flat_map(|s| &s.items).any(|i| {
                         i.kind == PlanKind::Tension || i.outcome == PlanOutcome::Dismissed
@@ -1222,22 +1236,24 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
         kinds::DISPUTE | kinds::DISPUTE_RESOLUTION => add(FEATURE_DISPUTE),
         kinds::ANSWER => {
             use rdy_model::AnswerAct;
-            match typed::<rdy_model::Answer>(&o).map(|a| a.act) {
-                Some(AnswerAct::Dispute | AnswerAct::ResolveDispute) => add(FEATURE_DISPUTE),
-                Some(AnswerAct::AcceptVerdict) => add(FEATURE_CHECK_REQUEST),
-                _ => {}
+            if let Some(DecodedRecord::Answer(a)) = value {
+                match a.act {
+                    AnswerAct::Dispute | AnswerAct::ResolveDispute => add(FEATURE_DISPUTE),
+                    AnswerAct::AcceptVerdict => add(FEATURE_CHECK_REQUEST),
+                    _ => {}
+                }
             }
         }
         kinds::CHECK_REQUEST => add(FEATURE_CHECK_REQUEST),
         kinds::SNAPSHOT_DELTA => add(FEATURE_SNAPSHOT_DELTA),
         kinds::REVIEW => {
             use rdy_model::Verdict;
-            use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+            use rdy_model::review::ReviewSubjectV1;
             // the wire type reads every encoding of the kind (`crate::codec`)
-            if typed::<ReviewV1>(&o).is_some_and(|r| {
+            if matches!(value, Some(DecodedRecord::Review(r)) if
                 matches!(r.subject, ReviewSubjectV1::Check { .. })
-                    || matches!(r.verdict, Verdict::Pass | Verdict::Concern | Verdict::Fail)
-            }) {
+                    || matches!(r.verdict, Verdict::Pass | Verdict::Concern | Verdict::Fail))
+            {
                 add(FEATURE_CHECK_REQUEST);
             }
         }
