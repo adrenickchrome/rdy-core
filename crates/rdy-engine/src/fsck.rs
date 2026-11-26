@@ -110,24 +110,7 @@ impl Rdy {
     /// project fsck orders them; the state part then skips it.
     fn fsck_store_part(&self, st: &crate::ReadState, chains: bool) -> Result<StorePart, RdyError> {
         let verified = self.store.verify_report()?;
-        if chains {
-            check_chains(st)?;
-        }
-        let landings = st.reader().landings()?;
-        let chain: Vec<rdy_model::Hash> = landings.iter().map(|(h, _)| *h).collect();
-        let versions = self.check_tags(&chain)?;
-        Ok(StorePart {
-            frames: verified.frames,
-            redaction: verified.redaction.map(|c| FsckRedaction {
-                redacted_objects: c.objects,
-                redacted_frames: c.frames,
-                redacted_bytes: c.bytes,
-                checked_payloads: c.checked_payloads,
-            }),
-            landings: landings.len(),
-            versions,
-            chains,
-        })
+        store_part(st, &self.store.reader(), verified, chains)
     }
 
     /// The full check: [`Rdy::fsck`] with no partial-history exception. A project whose history
@@ -145,10 +128,13 @@ impl Rdy {
     }
 
     /// [`Rdy::fsck_full`]'s first part, for a check that runs off the writer (a history
-    /// completion on the daemon's blocking pool): the refusal while records are missing, the
-    /// full check's own state, the checks that need the store's handle, and the frontier and
-    /// redaction epoch the check sees. [`FullCheck::finish`] runs every other check on that
-    /// captured state, with no handle. A holder is refused: it has no history.
+    /// completion on the daemon's blocking pool). It reads what bounds the check and nothing
+    /// whole: the redaction epoch, the published state, the incomplete history it names, the
+    /// full check's own state (its heads; every cell is built on first read) and the frame
+    /// check's capture (`Store::capture_frame_check`: a reader, the log's end and its
+    /// authorization). [`FullCheck::finish`] runs every check on those captures, with no store
+    /// handle: the refusal while records are missing, the frame walk, the tag rules, the
+    /// snapshot chains and the rest. A holder is refused: it has no history.
     pub fn capture_full_check(&self) -> Result<FullCheck, RdyError> {
         if self.is_holder() {
             return Err(RdyError::new(
@@ -158,35 +144,55 @@ impl Rdy {
             ));
         }
         let epoch = self.store.redaction_epoch();
-        let st = self.read();
-        let (state, frontier) = match st.partial_history()? {
-            None => (st, None),
-            Some((remote, history)) => {
-                let held =
-                    crate::partial_history::store_held(st.reader(), st.root(), remote, history)?;
-                if held < history.records {
-                    return Err(st
-                        .history_progress()?
-                        .expect("an incomplete history has a progress")
-                        .refusal());
-                }
-                let frontier = history.frontier;
-                (
-                    std::sync::Arc::new(self.full_history_state()?),
-                    Some(frontier),
-                )
-            }
+        let published = self.read();
+        let pending = published
+            .partial_history()?
+            .map(|(remote, history)| (remote.to_string(), history.clone()));
+        let state = match &pending {
+            None => std::sync::Arc::clone(&published),
+            Some(_) => std::sync::Arc::new(self.full_history_state()?),
         };
-        // a project with no incomplete history keeps a project fsck's order; a completion's
-        // check leaves the snapshot chains to the part off the writer
-        let part = self.fsck_store_part(&state, frontier.is_none())?;
+        let frames = self.store.capture_frame_check()?;
         Ok(FullCheck {
+            frontier: pending.as_ref().map(|(_, h)| h.frontier),
+            published,
             state,
-            part,
-            frontier,
+            pending,
+            reader: self.store.reader(),
+            frames,
             epoch,
         })
     }
+}
+
+/// The store part of a project fsck over captured reads: `verified` (the frame walk's report),
+/// then with `chains` every project landing's snapshot chain, then the tag rules over `st`'s
+/// canon landings, read through `reader`.
+fn store_part(
+    st: &crate::ReadState,
+    reader: &rdy_store::StoreReader,
+    verified: rdy_store::redaction_io::VerifyReport,
+    chains: bool,
+) -> Result<StorePart, RdyError> {
+    if chains {
+        check_chains(st)?;
+    }
+    let landings = st.reader().landings()?;
+    let chain: Vec<rdy_model::Hash> = landings.iter().map(|(h, _)| *h).collect();
+    crate::history_fetch::check_point("tags");
+    let versions = crate::version::check_tags_in(reader, &chain)?;
+    Ok(StorePart {
+        frames: verified.frames,
+        redaction: verified.redaction.map(|c| FsckRedaction {
+            redacted_objects: c.objects,
+            redacted_frames: c.frames,
+            redacted_bytes: c.bytes,
+            checked_payloads: c.checked_payloads,
+        }),
+        landings: landings.len(),
+        versions,
+        chains,
+    })
 }
 
 /// What a project fsck's store part found: the frames, the removal counts, the canon landings
@@ -201,22 +207,42 @@ struct StorePart {
     chains: bool,
 }
 
-/// A full check captured by [`Rdy::capture_full_check`]: its own state, what its store part
-/// found, and the incomplete history's frontier and the redaction epoch it saw (None for a
+/// A full check captured by [`Rdy::capture_full_check`]: the published state, the incomplete
+/// history it names, the full check's own state, a store reader, the frame check's capture, and
+/// the incomplete history's frontier and the redaction epoch it saw (frontier None for a
 /// project with no incomplete history). It holds no store handle, so it may move to another
 /// thread.
 pub struct FullCheck {
+    published: std::sync::Arc<crate::ReadState>,
+    pending: Option<(String, rdy_store::sync_state::SyncHistory)>,
     state: std::sync::Arc<crate::ReadState>,
-    part: StorePart,
+    reader: rdy_store::StoreReader,
+    frames: rdy_store::FrameCheck,
     pub frontier: Option<rdy_model::Hash>,
     pub epoch: u64,
 }
 
 impl FullCheck {
-    /// Runs every check of the full check that reads the captured state alone. The report is
-    /// [`Rdy::fsck_full`]'s.
+    /// Runs every check of the full check on the captures. The report is
+    /// [`Rdy::fsck_full`]'s: while the history ref is incomplete, a store that does not hold
+    /// every record its checked key file lists is E_HISTORY_PENDING before any other check.
     pub fn finish(self) -> Result<FsckReport, RdyError> {
-        fsck_state_part(&self.state, self.part)
+        if let Some((remote, history)) = &self.pending {
+            let st = &self.published;
+            let held = crate::partial_history::store_held(st.reader(), st.root(), remote, history)?;
+            if held < history.records {
+                return Err(st
+                    .history_progress()?
+                    .expect("an incomplete history has a progress")
+                    .refusal());
+            }
+        }
+        crate::history_fetch::check_point("frames");
+        let verified = self.frames.run()?;
+        // a project with no incomplete history keeps a project fsck's order (the snapshot
+        // chains between the frames and the tags); a completion's check runs them last
+        let part = store_part(&self.state, &self.reader, verified, self.pending.is_none())?;
+        fsck_state_part(&self.state, part)
     }
 }
 
@@ -224,6 +250,7 @@ impl FullCheck {
 /// the objects, the reconcile of the open moves, the signatures, the carried warnings and the
 /// history member.
 fn fsck_state_part(st: &crate::ReadState, part: StorePart) -> Result<FsckReport, RdyError> {
+    crate::history_fetch::check_point("state");
     let reader = st.reader();
     if !part.chains {
         check_chains(st)?;

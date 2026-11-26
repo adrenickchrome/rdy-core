@@ -14,7 +14,10 @@
 //! - a stop ends the fetch at the next step boundary; the runtime's drop joins the step in
 //!   flight before the store closes, and the checked staged files stay for the next start.
 //!
-//! The store holds at most one incomplete history, so one job per daemon is enough.
+//! The store holds at most one incomplete history, so one job per daemon is enough. Where the
+//! job is ([`HistoryJob`]) is kept on the daemon's `Shared`: the CLI's foreground clone serves
+//! the new project from a daemon inside its own process (`crate::serve::serve_clone_history`)
+//! and follows the job there, so every other client is served while the history arrives.
 use crate::client::{StartOptions, connect_or_start};
 use crate::daemon::{DaemonHandle, log};
 use crate::layout::RunDir;
@@ -23,11 +26,29 @@ use crate::shared::Shared;
 use crate::spawn::{serve_command, spawn_serve};
 use rdy_engine::engine::Engine;
 use rdy_engine::history_fetch::HistoryFetchStep;
+use rdy_engine::partial_history::HistoryProgress;
 use rdy_engine::{E_INTERNAL, E_IO, RdyError, Session, classify};
 use rdy_model::Role;
 use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Where a daemon's history job is: what a command that serves the project in its own process
+/// follows to print each step and to know when the history is done.
+#[derive(Clone, Debug, Default)]
+pub enum HistoryJob {
+    /// The job has not looked yet: the daemon is not ready.
+    #[default]
+    Waiting,
+    /// The fetch runs; the progress after its last step, none before the first.
+    Running(Option<HistoryProgress>),
+    /// The fetch ended: complete, or stopped by this error.
+    Done(Result<HistoryProgress, RdyError>),
+    /// A stop ended the fetch at a step boundary; the next start resumes it.
+    Paused,
+    /// The project has no incomplete history.
+    Absent,
+}
 
 /// The remote whose history the project of `engine` still fetches, if any.
 fn pending_remote(engine: &dyn Engine) -> Result<Option<String>, RdyError> {
@@ -58,15 +79,20 @@ async fn yield_to_calls(shared: &Arc<Shared>) {
 pub(crate) async fn run(shared: Arc<Shared>, handle: DaemonHandle, human: Option<String>) {
     let stopped = handle.stopped();
     if *stopped.borrow() {
+        shared.history_job.send_replace(HistoryJob::Paused);
         return;
     }
+    let job = Arc::clone(&shared);
+    let end = move |state: HistoryJob| {
+        job.history_job.send_replace(state);
+    };
     let engine = shared.engine();
     let remote = match pending_remote(&*engine) {
         Ok(Some(r)) => r,
-        Ok(None) => return,
+        Ok(None) => return end(HistoryJob::Absent),
         Err(e) => {
             log(&format!("history fetch not started: {e}"));
-            return;
+            return end(HistoryJob::Done(Err(e)));
         }
     };
     // the daemon stays up while the history arrives
@@ -79,10 +105,11 @@ pub(crate) async fn run(shared: Arc<Shared>, handle: DaemonHandle, human: Option
         Ok(s) => s,
         Err(e) => {
             log(&format!("history fetch not started: {e}"));
-            return;
+            return end(HistoryJob::Done(Err(e)));
         }
     };
     log(&format!("history fetch from remote {remote} started"));
+    shared.history_job.send_replace(HistoryJob::Running(None));
     let begin = {
         let engine = Arc::clone(&engine);
         let root = root.clone();
@@ -96,23 +123,36 @@ pub(crate) async fn run(shared: Arc<Shared>, handle: DaemonHandle, human: Option
         Ok(Ok(f)) => f,
         Ok(Err(e)) => {
             log(&format!("history fetch stopped: {e}"));
-            return;
+            return end(HistoryJob::Done(Err(e)));
         }
         Err(e) => {
             log(&format!("history fetch stopped: {e}"));
-            return;
+            return end(HistoryJob::Done(Err(RdyError::new(
+                E_INTERNAL,
+                format!("the history fetch did not start: {e}"),
+                "run rdy pull to resume the history",
+            ))));
         }
     };
     let step = move |fetch: &mut rdy_engine::history_fetch::HistoryFetch| {
         crate::ops::sync::with_service(&root, |s| s.resume_history_step(&*engine, &session, fetch))
     };
     match drive(&shared, stopped, fetch, step).await {
-        None => log("history fetch paused by the stop; the next start resumes it"),
-        Some(Ok(p)) => log(&format!(
-            "history fetch complete: {} of {} records",
-            p.held, p.total
-        )),
-        Some(Err(e)) => log(&format!("history fetch stopped: {e}")),
+        None => {
+            log("history fetch paused by the stop; the next start resumes it");
+            end(HistoryJob::Paused);
+        }
+        Some(Ok(p)) => {
+            log(&format!(
+                "history fetch complete: {} of {} records",
+                p.held, p.total
+            ));
+            end(HistoryJob::Done(Ok(p)));
+        }
+        Some(Err(e)) => {
+            log(&format!("history fetch stopped: {e}"));
+            end(HistoryJob::Done(Err(e)));
+        }
     }
 }
 
@@ -120,14 +160,15 @@ pub(crate) async fn run(shared: Arc<Shared>, handle: DaemonHandle, human: Option
 /// runs on the blocking pool, awaited, with `fetch` moved in and back (a stop that drops this
 /// task while a step runs drops the fetch, and its guard, with the step's end). Ends at the
 /// first complete step (its progress), the first error, or a stop seen at a step boundary
-/// (None). Public for the daemon's tests, which drive it with their own steps.
+/// (None). Each step that leaves more to do sets the job's progress ([`HistoryJob::Running`]).
+/// Public for the daemon's tests, which drive it with their own steps.
 #[doc(hidden)]
 pub async fn drive<F: Send + 'static>(
     shared: &Arc<Shared>,
     stopped: tokio::sync::watch::Receiver<bool>,
     mut fetch: F,
     step: impl Fn(&mut F) -> Result<HistoryFetchStep, RdyError> + Send + Sync + 'static,
-) -> Option<Result<rdy_engine::partial_history::HistoryProgress, RdyError>> {
+) -> Option<Result<HistoryProgress, RdyError>> {
     let step = Arc::new(step);
     loop {
         if *stopped.borrow() {
@@ -152,7 +193,11 @@ pub async fn drive<F: Send + 'static>(
         };
         fetch = back;
         match r {
-            Ok(HistoryFetchStep::More(_)) => {}
+            Ok(HistoryFetchStep::More(p)) => {
+                shared
+                    .history_job
+                    .send_replace(HistoryJob::Running(Some(p)));
+            }
             Ok(HistoryFetchStep::Complete(p)) => return Some(Ok(p)),
             Err(e) => return Some(Err(e)),
         }

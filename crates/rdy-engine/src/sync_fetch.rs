@@ -103,26 +103,35 @@ pub(crate) fn take_state(
 /// The completion take of an incomplete history (D-GGTYA, R1): the staged canon history
 /// batches `batches` at the frontier `target.root`, each checked once by this operation, in one
 /// checked batch (`Store::take_fetched_checked`) that moves no canon or view ref, so local
-/// landings made since the state take stay. The older landings it makes visible can move drift
-/// tensions: the publish after it is a chain move, which logs those moves under cause
-/// `recheck`.
+/// landings made since the state take stay. Its batch carries the remote's sync state, so its
+/// plans read as fetched ones.
+///
+/// The take logs no moves. The history ref is still incomplete, so the state after the take
+/// reads the older landings only in part (their canon membership is rebuilt by the
+/// completion's reindex): moves computed from it would name canon sides with no landing, and
+/// the completion would re-key them. The drift moves the older landings cause are logged once,
+/// under cause `recheck`, by the completion ([`complete_history`]), from the state logged here
+/// before the take: a handle that logged nothing since it opened logs what moved while no rdy
+/// ran first (`Rdy::reconcile_transitions`, as a daemon does after ready).
 pub(crate) fn take_history_checked(
     rdy: &mut Rdy,
     batches: &[CheckedBatchFile],
     target: &FetchTarget,
 ) -> Result<FetchOutcome, RdyError> {
+    rdy.reconcile_transitions()?;
     let files = batch_files(batches)?;
     let checked: Vec<&rdy_store::sync_stream::CheckedBatch> = batches
         .iter()
         .map(CheckedBatchFile::store_checked)
         .collect();
-    fetch_core_with(rdy, &files, Some(&checked), None, target, true)
+    fetch_core_with(rdy, &files, Some(&checked), None, target, false)
 }
 
 /// The second and last history ref write (D-GGTYA, R1, N1): `Store::complete_history` of
 /// remote `remote` at `frontier` while the redaction epoch is still `epoch` (the values the
-/// full check saw), then the state published again over the rebuilt index. A refusal writes
-/// nothing.
+/// full check saw), then the state published again over the rebuilt index as a chain move,
+/// which logs the moves the older landings cause under cause `recheck` (a batch of its own,
+/// as `Rdy::invalidate` logs one). A refusal writes nothing.
 pub(crate) fn complete_history(
     rdy: &mut Rdy,
     remote: &str,
@@ -130,6 +139,8 @@ pub(crate) fn complete_history(
     epoch: u64,
 ) -> Result<(), RdyError> {
     rdy.seal_open()?;
+    // a recheck computes its moves from a logged state (see `take_history_checked`)
+    rdy.reconcile_transitions()?;
     rdy.store.complete_history(remote, frontier, epoch)?;
     rdy.publish_chain_moved()
 }

@@ -21,14 +21,17 @@
 //!      written to the next numbered `.part` file, checked, synced and renamed to `.batch`
 //!      (`00000000.batch` to `00001023.batch`, at most [`MAX_STAGED_BYTES`] raw bytes);
 //!    - when every key is staged or held: the completion take, all staged files checked again
-//!      and taken in one checked batch that moves no canon or view ref, then a publish that
-//!      logs the drift moves the older landings cause under cause `recheck`;
-//!    - when the store holds every key: the full check, with its store part on the writer and
-//!      the rest on the captured state off it ([`crate::fsck::FullCheck`]);
+//!      off the writer and taken in one checked batch that moves no canon or view ref; the
+//!      batch carries the fetched provenance of the sync ref, so the older records read as
+//!      fetched;
+//!    - when the store holds every key: the full check, captured on the writer (the published
+//!      state, a reader and the frame check's bound, no record read) and run off it on that
+//!      capture ([`crate::fsck::FullCheck`]);
 //!    - after a passing full check: the second and last history ref write, `complete` true,
 //!      only while the frontier and the redaction epoch are still the ones the check saw; when
-//!      either changed the check runs once more first. Then the staged files are removed; a
-//!      failed removal never undoes the completion.
+//!      either changed the check runs once more first. Its publish reindexes the whole history
+//!      and logs the drift moves the older landings cause, once, under cause `recheck`. Then
+//!      the staged files are removed; a failed removal never undoes the completion.
 //!
 //!    A crash after the take and before the completion repeats the full check, not the take.
 //!    Held progress is never stored: the steps return it.
@@ -51,6 +54,40 @@ use rdy_store::sync_stream::StreamPurpose;
 use rdy_store::take_batch::FetchTarget;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// A test hook the parts of a history completion that run off the writer call at each named
+/// point: `batches` (a staged file's check before the take), `frames`, `tags` and `state` (the
+/// full check's frame walk, tag rules and state checks). Production installs none.
+pub type CheckHook = Box<dyn FnMut(&'static str)>;
+
+thread_local! {
+    static CHECK_HOOK: std::cell::RefCell<Option<CheckHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `hook` installed for this thread's history completion (a test hook; see
+/// [`CheckHook`]). The prior hook comes back when `f` returns or panics.
+#[doc(hidden)]
+pub fn with_check_hook_for_tests<T>(hook: CheckHook, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<CheckHook>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prior = self.0.take();
+            CHECK_HOOK.with(|c| *c.borrow_mut() = prior);
+        }
+    }
+    let prior = CHECK_HOOK.with(|c| c.borrow_mut().replace(hook));
+    let _restore = Restore(prior);
+    f()
+}
+
+/// Calls this thread's [`CheckHook`], if one is installed, at point `name`.
+pub(crate) fn check_point(name: &'static str) {
+    CHECK_HOOK.with(|c| {
+        if let Some(h) = c.borrow_mut().as_mut() {
+            h(name);
+        }
+    });
+}
 
 /// The most staged batch files of one history.
 pub const MAX_STAGED_FILES: u32 = 1024;
@@ -642,6 +679,7 @@ impl SyncService<'_> {
             let path = dir.join(batch_name(n));
             let opened =
                 rdy_store::pio::open_no_follow(std::fs::OpenOptions::new().read(true), &path);
+            check_point("batches");
             let checked = opened.ok().and_then(|f| {
                 crate::stream_check::check_batch_file(f, Some(fetch.repo_id), |_, _, _| {}).ok()
             });

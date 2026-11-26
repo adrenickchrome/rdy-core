@@ -471,6 +471,27 @@ impl UrlCloneSummary {
             fix: e.fix.clone(),
         });
     }
+
+    /// The end of a foreground history continuation: its final progress and the clone's fsck
+    /// once the history is complete, or the error that stopped either, kept as a warning.
+    pub fn finish_history(
+        &mut self,
+        fetched: Result<(HistoryProgress, Result<FsckReport, RdyError>), RdyError>,
+    ) {
+        match fetched {
+            Ok((p, checked)) => {
+                self.history = Some(p);
+                match checked {
+                    Ok(f) => {
+                        self.landings = f.landings;
+                        self.fsck = f;
+                    }
+                    Err(e) => self.warn(&e),
+                }
+            }
+            Err(e) => self.warn(&e),
+        }
+    }
 }
 
 /// A step that a test runs on the new project's directory after the fetch and before the
@@ -640,19 +661,7 @@ pub fn continue_history(
             }
         }
     })();
-    match ran {
-        Ok(p) => {
-            summary.history = Some(p);
-            match engine.inspect(Rdy::fsck) {
-                Ok(f) => {
-                    summary.landings = f.landings;
-                    summary.fsck = f;
-                }
-                Err(e) => summary.warn(&e),
-            }
-        }
-        Err(e) => summary.warn(&e),
-    }
+    summary.finish_history(ran.map(|p| (p, engine.inspect(Rdy::fsck))));
     if let Err(e) = engine.close() {
         summary.warn(&e);
     }

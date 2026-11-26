@@ -1532,3 +1532,51 @@ fn r59019_restore_refuses_while_history_pending() {
         "{routes:?}"
     );
 }
+
+/// O17: while `rdy clone <url>` fetches the history in the foreground, the clone is served to
+/// every other client: a second command and an MCP session in the clone answer, its history
+/// still arriving, and the clone's reply is complete once the held get is let go. No daemon log line reaches the
+/// clone's stderr.
+#[test]
+fn r59019_clone_serves_other_commands_while_history_arrives() {
+    let k = kit(&["a", "b"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    k.hub.send_canon_state();
+    let hold = k.hub.hold_history_get();
+    let (_parent, dir) = target();
+    let clone = command(
+        k.proj.path(),
+        &k.home,
+        &["--json", "clone", &hub_url(&k), dir.to_str().unwrap()],
+    )
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .unwrap();
+    hold.wait_arrived();
+    let o = command(&dir, &k.home, &["--json", "status"])
+        .output()
+        .unwrap();
+    let (ok, status) = parsed(&o);
+    let mut mcp = rdy_qa::mcp::McpClient::start_proxy_at(&dir, &k.home.env());
+    mcp.call(
+        "rdy_session",
+        json!({"actor": "agent:a", "run": "a", "role": "reader"}),
+    )
+    .ok();
+    let log = mcp.call("rdy_log", json!({}));
+    drop(mcp);
+    hold.release();
+    let done = clone.wait_with_output().unwrap();
+    let _ = command(&dir, &k.home, &["serve", "--stop"]).output();
+    assert!(ok, "{status}\n{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(status["history"]["complete"], false, "{status}");
+    let log = log.ok();
+    assert_eq!(log["warnings"][0]["code"], "W_HISTORY_PENDING", "{log}");
+    let (ok, v) = parsed(&done);
+    let err = String::from_utf8_lossy(&done.stderr);
+    assert!(ok, "{v}\n{err}");
+    assert_eq!(v["history"]["complete"], true, "{v}");
+    assert_eq!(v["warnings"], json!([]), "{v}");
+    assert!(!err.contains("rdy serve:"), "{err}");
+}

@@ -63,7 +63,7 @@ pub mod serve;
 
 pub use serve::{
     CtlSession, ProfileSiteReady, ServeError, ServeHandler, ServeOptions, ServeRun, serve,
-    serve_with_profile, start,
+    serve_clone_history, serve_with_profile, start,
 };
 pub mod proxy;
 

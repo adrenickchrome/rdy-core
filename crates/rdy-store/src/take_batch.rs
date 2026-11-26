@@ -1223,13 +1223,17 @@ fn fetch_tag_refs(
 /// `root` as its fetched tip or head and the target's URL. A state of the same hub repo keeps
 /// its applied tip and held request, whatever URL it named; a state of another repo starts
 /// again. A view state's root is the first op of the
-/// fetched head's chain. None when the state holds that value already (a retry).
+/// fetched head's chain. None when the state holds that value already and the take writes no
+/// record (`writes` false: a retry). A take that writes records always carries its sync state,
+/// which marks its batch fetched (`redaction_io::marks_fetched`), so its plans keep the holder's
+/// rules: a canon state's take names its tip before the history behind it arrives (D-GGTYA).
 fn fetch_state_ref(
     reader: &StoreReader,
     source: &mut UploadSource,
     target: &FetchTarget,
     repo_id: RepoId,
     root: ObjectKey,
+    writes: bool,
 ) -> Result<Option<(String, Vec<u8>)>, StreamError> {
     use crate::sync_state::{SyncCanon, SyncValue, SyncView};
     use crate::sync_stream::StreamPurpose;
@@ -1297,7 +1301,7 @@ fn fetch_state_ref(
         _ => return Err(fetch_mismatch(root)),
     };
     let bytes = value.encode();
-    if reader.get_ref(&name).map_err(store)?.as_deref() == Some(&bytes[..]) {
+    if !writes && reader.get_ref(&name).map_err(store)?.as_deref() == Some(&bytes[..]) {
         return Ok(None);
     }
     Ok(Some((name, bytes)))
@@ -1965,7 +1969,9 @@ fn prepare_intake<E>(
                 &mut tags_taken,
                 &mut tags_kept,
             )?;
-            if let Some(r) = fetch_state_ref(reader, &mut source, target, header.repo_id, root_key)?
+            let wrote = !writes.is_empty();
+            if let Some(r) =
+                fetch_state_ref(reader, &mut source, target, header.repo_id, root_key, wrote)?
             {
                 refs.push(r);
             }

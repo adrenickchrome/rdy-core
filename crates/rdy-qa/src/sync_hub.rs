@@ -35,7 +35,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -216,6 +216,29 @@ pub struct Shared {
     perf: Mutex<PerfLog>,
     fault: Mutex<Fault>,
     pub repo: Mutex<Repo>,
+    /// The next history get waits here, once: it says it arrived, then waits for the release
+    /// (or for the hold to be dropped). Taken by that get, before the repo lock.
+    history_hold: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+}
+
+/// A hold on the hub's next history get ([`Hub::hold_history_get`]).
+pub struct HistoryHold {
+    arrived: mpsc::Receiver<()>,
+    release: mpsc::Sender<()>,
+}
+
+impl HistoryHold {
+    /// Waits until the held get arrived; panics after a minute (a get that never came).
+    pub fn wait_arrived(&self) {
+        self.arrived
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the held history get arrived");
+    }
+
+    /// Lets the held get be answered.
+    pub fn release(self) {
+        let _ = self.release.send(());
+    }
 }
 
 pub struct Hub {
@@ -253,6 +276,7 @@ impl Hub {
             perf: Mutex::new(PerfLog::default()),
             fault: Mutex::new(Fault::None),
             repo: Mutex::new(Repo::default()),
+            history_hold: Mutex::new(None),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let workers: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -302,6 +326,14 @@ impl Hub {
         repo.store = Some(read);
         repo.closure = None;
         repo.prepared = None;
+    }
+
+    /// Holds the next history get (any purpose but `canon_state`) before it is answered.
+    pub fn hold_history_get(&self) -> HistoryHold {
+        let (arrived_tx, arrived) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        *self.shared.history_hold.lock().unwrap() = Some((arrived_tx, release_rx));
+        HistoryHold { arrived, release }
     }
 
     /// The hub sends a canon tip's state (stream format 5): a clone from it is ready before
@@ -501,6 +533,14 @@ fn serve(stream: TcpStream, shared: &Shared) {
         let _ = tls.sock.shutdown(Shutdown::Both);
         return;
     };
+    if req.route() == "/objects/get" && req.json()["purpose"] != "canon_state" {
+        let hold = shared.history_hold.lock().unwrap().take();
+        if let Some((arrived, release)) = hold {
+            let _ = arrived.send(());
+            // a dropped hold releases the get too
+            let _ = release.recv();
+        }
+    }
     let bytes = match shared.capture {
         Capture::Bodies => {
             shared.log.lock().unwrap().push(req.clone());

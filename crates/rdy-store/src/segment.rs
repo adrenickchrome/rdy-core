@@ -749,6 +749,58 @@ impl SegmentReader {
     }
 }
 
+impl SegmentReader {
+    /// [`SegmentLog::verify_frames_counted`] over this reader, up to `upto` (the log's end when
+    /// the check was captured): every frame read and its hash checked (an authorized hole of
+    /// `holes` by its header alone), each batch marker matched against its batch's frames, and a
+    /// sealed segment that does not end at a marker refused. Returns the non-marker frames and,
+    /// of them, the holes.
+    pub(crate) fn verify_frames_upto(
+        &self,
+        upto: Location,
+        holes: &Holes,
+    ) -> io::Result<(usize, usize)> {
+        let origin = Location {
+            segment: 0,
+            offset: 0,
+        };
+        let mut count = 0;
+        let mut dropped = 0;
+        let mut seg = 0u32;
+        // the frames read since the previous valid marker of this segment
+        let mut since: Vec<(u64, Hash)> = vec![];
+        self.for_each_view_from(origin, upto, holes, |loc, v, _| {
+            if loc.segment != seg {
+                seg = loc.segment;
+                since.clear();
+            }
+            match v.payload {
+                Some(payload) if v.kind == kinds::BATCH_COMMIT => {
+                    if !marker_matches(seg, &since, payload) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "batch marker in segment {seg} at offset {} does not match its batch",
+                                loc.offset
+                            ),
+                        ));
+                    }
+                    since.clear();
+                }
+                payload => {
+                    if payload.is_none() {
+                        dropped += 1;
+                    }
+                    since.push((loc.offset, v.hash));
+                    count += 1;
+                }
+            }
+            Ok(())
+        })?;
+        Ok((count, dropped))
+    }
+}
+
 /// The frame at `loc` in `f`, by positioned reads of its header and payload, with the offset just
 /// past it. A frame that does not fit the file or does not match its hash is `InvalidData`, as
 /// `SegmentLog::read_hashed` has it.

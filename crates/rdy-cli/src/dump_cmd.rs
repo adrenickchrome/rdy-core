@@ -159,7 +159,7 @@ pub(crate) fn clone(
     }
     let dir = dir.or(project).unwrap_or_else(|| env.cwd.clone());
     let v = match source_kind(&source)? {
-        SourceKind::Url => return clone_url(&source, &dir, fork),
+        SourceKind::Url => return clone_url(&source, &dir, fork, env.no_daemon),
         SourceKind::File if at.is_some() => {
             return Err(rdy_engine::clone::at_needs_project().into());
         }
@@ -197,11 +197,15 @@ pub(crate) fn clone(
 }
 
 /// `rdy clone <url>`: the hub repo at `url`, cloned in this process as the configured person,
-/// with `RDY_ACTOR` and `RDY_RUN` (D-D5J18, D-47HVF).
+/// with `RDY_ACTOR` and `RDY_RUN` (D-D5J18, D-47HVF). A history still arriving once the clone
+/// is ready is fetched in the foreground by a daemon of the clone that serves inside this
+/// process, so other commands and MCP sessions are served meanwhile; `--no-daemon` fetches it
+/// with the store open in this process alone.
 fn clone_url(
     source: &std::path::Path,
     dir: &std::path::Path,
     fork: bool,
+    no_daemon: bool,
 ) -> Result<(Value, String), ErrorReply> {
     if fork {
         return Err(rdy_engine::clone::url_fork().into());
@@ -234,9 +238,24 @@ fn clone_url(
         let _ = writeln!(err, "history: {} of {} records", p.held, p.total);
         let _ = err.flush();
     };
-    let s = rdy_engine::clone::clone_url_with_steps(
-        &session, &url, dir, &user_file, &mut ready, &mut step,
-    )?;
+    let s = if no_daemon {
+        rdy_engine::clone::clone_url_with_steps(
+            &session, &url, dir, &user_file, &mut ready, &mut step,
+        )?
+    } else {
+        let mut s = rdy_engine::clone::clone_url(&session, &url, dir, &user_file)?;
+        if s.history_pending() {
+            ready(&s);
+            let project = std::path::PathBuf::from(&s.project);
+            s.finish_history(rdy_daemon::serve_clone_history(
+                &project,
+                crate::conn::VERSION,
+                &mut step,
+                rdy_engine::Rdy::fsck,
+            ));
+        }
+        s
+    };
     let mut t = format!(
         "cloned hub repo {} into {}: {} landings, {} versions, canon at {}; fsck ok\nremote {}: share, {}\nrepo id: {}\nsettings from the hub: {}\nsettings at their defaults: {}",
         s.url,

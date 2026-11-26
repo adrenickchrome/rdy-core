@@ -5310,6 +5310,34 @@ impl StoreReader {
     }
 }
 
+/// A frame check captured by [`Store::capture_frame_check`]: it holds no store handle, so it
+/// may move to another thread.
+pub struct FrameCheck {
+    reader: StoreReader,
+    upto: Location,
+    auth: Arc<crate::redaction_io::Authorization>,
+}
+
+impl FrameCheck {
+    /// [`Store::verify_report`] of the log as it stood at the capture: every frame before the
+    /// captured end read whole and its hash checked, an authorized hole by its header alone,
+    /// each batch marker matched against its batch, and a sealed segment that does not end at a
+    /// marker refused; the counts are `verify_report`'s. A batch sealed after the capture is not
+    /// read: the caller compares what it captured again before it acts on the result.
+    pub fn run(self) -> Result<VerifyReport, StoreError> {
+        self.reader.refuse_pending()?;
+        let (frames, holes) = self
+            .reader
+            .segments()
+            .verify_frames_upto(self.upto, &self.auth.holes)?;
+        let redaction = self.auth.is_active().then(|| RedactionCounts {
+            checked_payloads: (frames - holes) as u64,
+            ..self.auth.counts()
+        });
+        Ok(VerifyReport { frames, redaction })
+    }
+}
+
 /// The removal of payloads (`crate::redaction_io`): finishing authorized work, the live apply
 /// writer, and fsck's counts.
 impl Store {
@@ -5605,6 +5633,21 @@ impl Store {
             ..auth.counts()
         });
         Ok(VerifyReport { frames, redaction })
+    }
+
+    /// [`Store::verify_report`]'s capture, for a check that runs off the writer (a history
+    /// completion's full check on a daemon's blocking pool): a reader, the log's end and its
+    /// authorization as they stand now. [`FrameCheck::run`] then reads every frame up to that
+    /// end with no store handle. An open batch is refused, as `verify_report` refuses it.
+    pub fn capture_frame_check(&self) -> Result<FrameCheck, StoreError> {
+        if self.open.is_some() {
+            return Err(batch_open("first"));
+        }
+        Ok(FrameCheck {
+            reader: self.reader(),
+            upto: self.log.end(),
+            auth: Arc::clone(self.log.authorization()),
+        })
     }
 
     /// Seals one batch that holds REDACTION_APPLY records, then finishes the removal before it

@@ -115,6 +115,19 @@ fn serve_stdin() -> Stdio {
     reader.map_or_else(Stdio::null, Stdio::from)
 }
 
+/// The run dir's `daemon.log`, for appending: the run dir made first, the file created 0600
+/// and refused if it is a symlink.
+pub(crate) fn open_log(run: &RunDir) -> io::Result<std::fs::File> {
+    run.ensure()?;
+    let log = open_no_follow(
+        sys::private_file(OpenOptions::new().append(true).create(true)),
+        &run.log_file(),
+    )?;
+    // a file left by an older run keeps its mode through open; set it exactly
+    sys::make_private_file(&log)?;
+    Ok(log)
+}
+
 /// The command that starts a detached daemon for `project`, unspawned: `<rdy_bin> serve --detach
 /// --spawned --project <project>` in `sys::daemon_start_dir` (`--spawned` tells `rdy serve --detach`
 /// to serve in that process rather than spawn another), stdin from /dev/null (or, under a start armed on
@@ -130,13 +143,7 @@ pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result
     let run = run.absolute()?;
     check_socket_path(&run)?;
     let project = std::path::absolute(project)?;
-    run.ensure()?;
-    let log = open_no_follow(
-        sys::private_file(OpenOptions::new().append(true).create(true)),
-        &run.log_file(),
-    )?;
-    // a file left by an older run keeps its mode through open; set it exactly
-    sys::make_private_file(&log)?;
+    let log = open_log(&run)?;
     let (out, err) = (log.try_clone()?, log.try_clone()?);
     let mut cmd = Command::new(rdy_bin);
     cmd.arg("serve")

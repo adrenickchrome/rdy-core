@@ -781,3 +781,33 @@ fn harness_name(name: &str) -> String {
         None => name.to_string(),
     }
 }
+
+/// A frame check captured on the store and run with no store handle reads the log as
+/// `verify_report` reads it at the capture: the same frame count, and nothing a later batch
+/// appended.
+#[test]
+fn r59019_captured_frame_check_reads_as_verify_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
+    s.commit_change(
+        change(vec![Op::Create {
+            block: block("b-AAAAA", "one"),
+        }]),
+        vec![("canon".into(), b"A".to_vec())],
+    )
+    .unwrap();
+    s.put_blob(b"kept").unwrap();
+    let report = s.verify_report().unwrap();
+    let capture = s.capture_frame_check().unwrap();
+    s.put(kinds::BLOCK, &block("b-BBBBB", "after")).unwrap();
+    let run = std::thread::spawn(move || capture.run())
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!(run, report);
+    assert_eq!(s.verify_report().unwrap().frames, report.frames + 1);
+    assert_eq!(
+        s.capture_frame_check().unwrap().run().unwrap().frames,
+        report.frames + 1
+    );
+}

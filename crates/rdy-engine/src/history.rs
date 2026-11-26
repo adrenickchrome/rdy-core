@@ -161,15 +161,27 @@ pub(crate) fn author(p: &Provenance) -> Author {
     }
 }
 
-/// One version of a canon block (restatement drift, FW-CH2): the version, where the log holds
-/// the landing that carried it (`None` when its change has not landed), and the version before
-/// it (`None` after a create). Landings compare by their place in the log, which is the canon
-/// chain's order, never by the approver's clock (POST-LAUNCH 43).
+/// One version of a canon block (restatement drift, FW-CH2): the version, where the landing
+/// that carried it stands in canon's order (`None` when its change has not landed), and the
+/// version before it (`None` after a create). Landings compare by canon's ancestry, never by
+/// the approver's clock (POST-LAUNCH 43).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionStep {
     pub version: Hash,
-    pub landed_at: Option<Location>,
+    pub landed_at: Option<LandingOrder>,
     pub base: Option<Hash>,
+}
+
+/// Where a landing stands in canon's order: its chain depth, which the index derives from the
+/// `prev` links whatever order the log holds the chain in, then its place in the log. A URL
+/// clone's state take writes the tip before the older landings its history brings
+/// (D-GGTYA), so after that history arrives the log's order is not the chain's; the depth is.
+/// While that history is incomplete no landing at or after its frontier has a depth (the
+/// chain is not all held) and the log's order is the chain's again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LandingOrder {
+    pub depth: Option<u64>,
+    pub at: Location,
 }
 
 /// What one call has already decoded: changes by hash (and each one's ops by block), landing
@@ -350,13 +362,16 @@ impl<'a> Memo<'a> {
         Ok((entry, prev))
     }
 
-    /// Where the log holds the landing that carried change `c`, when it landed: canon's order,
-    /// never the clock (POST-LAUNCH 43).
-    fn landed_at(&mut self, c: &Hash) -> Result<Option<Location>, RdyError> {
+    /// Where the landing that carried change `c` stands in canon's order, when it landed:
+    /// canon's ancestry ([`LandingOrder`]), never the clock (POST-LAUNCH 43).
+    fn landed_at(&mut self, c: &Hash) -> Result<Option<LandingOrder>, RdyError> {
         let Some(h) = self.landing_id(c)? else {
             return Ok(None);
         };
-        Ok(Some(self.reader.landing_location(&h)?))
+        Ok(Some(LandingOrder {
+            depth: self.reader.landing_depth(&h)?,
+            at: self.reader.landing_location(&h)?,
+        }))
     }
 
     /// The step for `version` of `id` and the change that wrote it there, never one in `used`

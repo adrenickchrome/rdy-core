@@ -4,6 +4,7 @@ use crate::ctl::CtlRequest;
 use crate::daemon::{Daemon, DaemonConfig, DaemonHandle, ExitReason, Readiness, STOP_GRACE, log};
 use crate::error::{E_BAD_INPUT, E_NO_SESSION, ErrorReply};
 use crate::handler::Handler;
+use crate::history_fetch::HistoryJob;
 use crate::layout::RunDir;
 use crate::mcp_token;
 use crate::ops::{OpContext, dispatch, dispatch_with};
@@ -15,6 +16,7 @@ use crate::site::{self, LanOverride, SiteInfo, SiteServer};
 use crate::sys;
 use crate::writer::panic_text;
 use rdy_engine::hooks::RunContext;
+use rdy_engine::partial_history::HistoryProgress;
 use rdy_engine::publication::{ResolvedProfile, profile_at};
 use rdy_engine::signing_crypto::SigningAgent;
 use rdy_engine::{E_HELD_BY_READER, E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
@@ -540,6 +542,141 @@ pub fn serve(opts: ServeOptions) -> Result<ExitReason, ServeError> {
     let out = run.wait();
     drop(watch);
     out
+}
+
+/// The foreground continuation of a URL clone (O17, the CLI): the project at `project` is
+/// served by a daemon inside this process, so every other client (a CLI command, an MCP
+/// session) connects to it and is served while its history arrives. Its history job fetches
+/// the history between calls (`crate::history_fetch`); `step` runs here with the progress after
+/// each step that leaves more to do, and once the history is complete `after` runs serialized
+/// with every write (its own result beside the progress). The daemon then stops and the store closes before this returns.
+///
+/// SIGINT and SIGTERM stop the daemon, so the fetch ends at the next step boundary and keeps
+/// what arrived; a second one exits at once. Its log lines go to the run dir's `daemon.log`,
+/// never to this process's stderr. A project another rdy process holds is `E_LOCKED`.
+pub fn serve_clone_history<T: Send + 'static>(
+    project: &Path,
+    version: &str,
+    step: &mut dyn FnMut(&HistoryProgress),
+    after: impl FnOnce(&Rdy) -> Result<T, RdyError> + Send + 'static,
+) -> Result<(HistoryProgress, Result<T, RdyError>), RdyError> {
+    let run_dir = RunDir::of_project(project);
+    let sink = crate::spawn::open_log(&run_dir).map_err(|e| {
+        RdyError::new(
+            rdy_engine::E_IO,
+            format!("{}: {e}", run_dir.log_file().display()),
+            "check the project's .rdy directory and its permissions, then run rdy pull",
+        )
+    })?;
+    struct ToStderr;
+    impl Drop for ToStderr {
+        fn drop(&mut self) {
+            crate::daemon::log_to(None);
+        }
+    }
+    crate::daemon::log_to(Some(sink));
+    let _to_stderr = ToStderr;
+    let opts = ServeOptions {
+        project: project.to_path_buf(),
+        version: version.to_string(),
+        detach: false,
+        idle_timeout: None,
+        human_actor: None,
+        site_lan_override: None,
+    };
+    let mut signals = StopSignals::install(project).map_err(clone_serve_error)?;
+    let run = start_checked(opts, None, signals.as_mut()).map_err(clone_serve_error)?;
+    let watch = signals.and_then(|s| s.stop_on_signal(run.handle()));
+    let out = follow_history(&run, step).map(|p| {
+        let slot = Arc::new(Mutex::new(None));
+        let put = Arc::clone(&slot);
+        let ran = run.shared().engine().read_serialized(Box::new(move |r| {
+            *put.lock().unwrap_or_else(|e| e.into_inner()) = Some(after(r));
+            Ok(Value::Null)
+        }));
+        let v = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let checked = match (ran, v) {
+            (Err(e), _) => Err(e),
+            (Ok(_), Some(v)) => v,
+            (Ok(_), None) => Err(RdyError::new(
+                rdy_engine::E_INTERNAL,
+                "the check after the history fetch returned nothing",
+                "this is a bug in rdy; run rdy fsck in the clone",
+            )),
+        };
+        (p, checked)
+    });
+    run.handle().stop();
+    if let Err(e) = run.wait() {
+        log(&format!("the clone's daemon did not stop cleanly: {e}"));
+    }
+    drop(watch);
+    out
+}
+
+/// A daemon start of [`serve_clone_history`] as an rdy error: a store another process holds is
+/// `E_LOCKED`, an open error is itself.
+fn clone_serve_error(e: ServeError) -> RdyError {
+    match e {
+        ServeError::Open(e) => e,
+        ServeError::AlreadyRunning(_) => RdyError::new(
+            E_LOCKED,
+            format!("the clone's history was not fetched here: {e}"),
+            "the process that holds the clone fetches its history; run rdy status in the clone to follow it",
+        ),
+        e => RdyError::new(
+            rdy_engine::E_IO,
+            format!("the clone's daemon did not start: {e}"),
+            "run rdy pull in the clone to resume its history",
+        ),
+    }
+}
+
+/// The history stopped before it was complete: the clone is ready and keeps what arrived.
+fn history_paused() -> RdyError {
+    RdyError::new(
+        rdy_engine::E_IO,
+        "the history fetch stopped before it was complete; the clone is ready and keeps what arrived",
+        "run rdy pull in the clone to resume its history",
+    )
+}
+
+/// Follows the history job of `run`'s daemon until it ends: `step` runs with each new progress.
+/// A stop of the daemon before the job ends is [`history_paused`].
+fn follow_history(
+    run: &ServeRun,
+    step: &mut dyn FnMut(&HistoryProgress),
+) -> Result<HistoryProgress, RdyError> {
+    let mut job = run.shared().history_job.subscribe();
+    let mut stopped = run.handle().stopped();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            RdyError::new(
+                rdy_engine::E_IO,
+                format!("cannot start a runtime to follow the history: {e}"),
+                "run rdy pull in the clone to resume its history",
+            )
+        })?;
+    rt.block_on(async move {
+        loop {
+            let now = job.borrow_and_update().clone();
+            match now {
+                HistoryJob::Waiting | HistoryJob::Running(None) => {}
+                HistoryJob::Running(Some(p)) => step(&p),
+                HistoryJob::Done(r) => return r,
+                HistoryJob::Paused | HistoryJob::Absent => return Err(history_paused()),
+            }
+            if *stopped.borrow_and_update() {
+                return Err(history_paused());
+            }
+            tokio::select! {
+                r = job.changed() => if r.is_err() { return Err(history_paused()) },
+                r = stopped.changed() => if r.is_err() { return Err(history_paused()) },
+            }
+        }
+    })
 }
 
 /// What a foreground profile-only start has once its listener is open: the folded key, the

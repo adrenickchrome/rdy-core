@@ -4932,3 +4932,270 @@ fn r59018_completion_crash_never_claims_missing_history() {
     engine.inspect(Rdy::fsck_full).unwrap();
     engine.close().unwrap();
 }
+
+/// The sentence the drift projects' two prose blocks share.
+const SAID: &str = "Every job retries for five seconds and then reports a failure to the owner.";
+
+/// Writes `ops` in view `work` of `engine`'s project, answers the change plan's open items,
+/// proposes and lands it. Returns the landing and the write.
+fn land_ops(engine: &Local, ops: serde_json::Value) -> (Hash, WriteResult) {
+    rdy_engine::engine::with_writer_result(engine, move |r| {
+        let w = r.write(
+            &writer(),
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(ops).unwrap(),
+                justification: None,
+                message: "drift".into(),
+            },
+        )?;
+        common::answer_open_items(r, &writer(), "work");
+        let p = r.propose(&writer(), "work", "batch", Some(common::TEST_SUMMARY))?;
+        common::confirm_exceptions(r, &founder(), &p);
+        let l: Hash = r.land(&founder(), &p.id)?.parse().unwrap();
+        Ok((l, w))
+    })
+    .unwrap()
+}
+
+/// A project whose canon holds two prose blocks that share [`SAID`], then an edit of the first
+/// one that the change plan answers; with `unrelated`, one more landing of an unrelated doc
+/// after it, so the edit is not the tip.
+fn drift_env(unrelated: bool) -> Env {
+    let mut e = env(1);
+    let (l, w) = land_ops(
+        &e.engine,
+        serde_json::json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "jobs", "title": "Jobs", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$x", "parent": "$d", "body": SAID},
+            {"op": "create", "type": "doc", "id": "$e", "fields": {"name": "ops", "title": "Ops", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$y", "parent": "$e", "body": format!("In short: {SAID}")}
+        ]),
+    );
+    e.landings.push(l);
+    let x = w.created["$x"].clone();
+    let (l, _) = land_ops(
+        &e.engine,
+        serde_json::json!([{"op": "update", "id": x,
+            "body": "Every job retries for ten seconds and then reports a failure to the owner."}]),
+    );
+    e.landings.push(l);
+    if unrelated {
+        e.landings.push(land_in(&e.engine, "unrelated"));
+    }
+    e
+}
+
+/// The open restatement drift tensions of the project at `dir`, as their summaries.
+fn drifts_at(dir: &std::path::Path) -> Vec<String> {
+    let engine = Local::open(dir).unwrap();
+    let mut out: Vec<String> = engine
+        .read()
+        .tensions()
+        .unwrap()
+        .iter()
+        .filter(|t| t.kind == rdy_engine::tensions::TensionKind::RestatementDrift)
+        .map(|t| t.summary.clone())
+        .collect();
+    engine.close().unwrap();
+    out.sort();
+    out
+}
+
+/// The logged opening of each open tension of the project at `dir`, as its record's JSON
+/// bytes with the record's clock, in tension order.
+fn opened_moves(dir: &std::path::Path) -> Vec<(Vec<u8>, i64)> {
+    let engine = Local::open(dir).unwrap();
+    let read = engine.read();
+    let reader = read.reader();
+    let mut out = Vec::new();
+    for (id, record) in reader.open_tensions().unwrap() {
+        let t = reader.transitions(&record).unwrap();
+        let m = t.opened.iter().find(|m| m.tension == id).unwrap();
+        out.push((serde_json::to_vec(m).unwrap(), t.at_ms));
+    }
+    drop(read);
+    engine.close().unwrap();
+    out
+}
+
+/// How many TRANSITION records the log of the project at `dir` holds.
+fn transitions_logged(dir: &std::path::Path) -> usize {
+    let engine = Local::open(dir).unwrap();
+    let read = engine.read();
+    let mut n = 0;
+    read.reader()
+        .for_each_object_of(kinds::TRANSITION, |_| {
+            n += 1;
+            Ok(())
+        })
+        .unwrap();
+    drop(read);
+    engine.close().unwrap();
+    n
+}
+
+/// A completion whose take writes the fetched PLAN records of the older landings carries the
+/// fetched batch's sync state, though the state take already named that tip: the plans keep
+/// the holder's rules and move no `plan/` ref. The full check, the completion and a reindex
+/// then pass.
+#[test]
+fn r59019_completion_takes_older_plans_as_fetched() {
+    let e = drift_env(true);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    assert!(s.history_pending());
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, s, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    assert!(done.history.unwrap().complete);
+    let engine = Local::open(&dest).unwrap();
+    engine.inspect(Rdy::fsck_full).unwrap();
+    rdy_engine::engine::with_writer_result(&engine, |r| r.reindex()).unwrap();
+    engine.inspect(Rdy::fsck_full).unwrap();
+    engine.close().unwrap();
+}
+
+/// The older landings a completion makes visible order by canon's ancestry, not by where the
+/// log holds them (the state take wrote the tip first): the completed clone keeps the drift
+/// the complete-history reference has, after a reopen and a reindex too.
+#[test]
+fn r59019_completion_logs_the_history_moves() {
+    let e = drift_env(false);
+    let dir = private_dir();
+    let reference = dir.path().join("reference");
+    let full = clone_hub(&e, false, 100);
+    clone_ready(&e, &full, &reference).unwrap();
+    let want = drifts_at(&reference);
+    assert_eq!(want.len(), 1, "{want:?}");
+    let hub = clone_hub(&e, true, 100);
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    // local work before the history arrives: an unrelated landing and a draft
+    let engine = Local::open(&dest).unwrap();
+    let local = land_in(&engine, "local");
+    write_in(&engine, "draft", "local-draft");
+    let draft = view_head_of(&engine, "draft");
+    engine.close().unwrap();
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, s, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    assert_eq!(drifts_at(&dest), want);
+    // the completion moved no canon or view ref
+    let engine = Local::open(&dest).unwrap();
+    assert_eq!(engine.read().canon_head(), Some(local));
+    assert_eq!(view_head_of(&engine, "draft"), draft);
+    engine.close().unwrap();
+    // the logged opening: the reference's move, logged once under cause recheck
+    let moves = opened_moves(&dest);
+    // the reference's clone logged its opening as a write; the completion's is a recheck
+    let as_recheck = |m: &[u8]| {
+        let mut t: rdy_store::transition::TensionMove = serde_json::from_slice(m).unwrap();
+        t.why.cause = rdy_store::transition::Cause::Recheck;
+        serde_json::to_vec(&t).unwrap()
+    };
+    let reference_moves: Vec<Vec<u8>> = opened_moves(&reference)
+        .iter()
+        .map(|(m, _)| as_recheck(m))
+        .collect();
+    assert_eq!(
+        moves.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>(),
+        reference_moves,
+        "{}",
+        String::from_utf8_lossy(&moves[0].0)
+    );
+    assert_eq!(transitions_logged(&dest), 1);
+    let engine = Local::open(&dest).unwrap();
+    rdy_engine::engine::with_writer_result(&engine, |r| r.reindex()).unwrap();
+    engine.close().unwrap();
+    assert_eq!(drifts_at(&dest), want);
+    assert_eq!(opened_moves(&dest), moves);
+}
+
+/// An engine over `inner` that records whether a writer call (a write or a serialized read)
+/// is running.
+struct Watched {
+    inner: Local,
+    busy: Arc<AtomicBool>,
+}
+
+impl Watched {
+    fn call<T>(&self, f: impl FnOnce() -> T) -> T {
+        self.busy.store(true, Ordering::SeqCst);
+        let out = f();
+        self.busy.store(false, Ordering::SeqCst);
+        out
+    }
+}
+
+impl rdy_engine::engine::Engine for Watched {
+    fn read(&self) -> Arc<ReadState> {
+        self.inner.read()
+    }
+    fn write(&self, f: rdy_engine::engine::WriteFn) -> Result<serde_json::Value, RdyError> {
+        self.call(|| self.inner.write(f))
+    }
+    fn read_serialized(
+        &self,
+        f: rdy_engine::engine::ReadFn,
+    ) -> Result<serde_json::Value, RdyError> {
+        self.call(|| self.inner.read_serialized(f))
+    }
+    fn open_report(&self) -> OpenReport {
+        self.inner.open_report()
+    }
+    fn root(&self) -> std::path::PathBuf {
+        self.inner.root()
+    }
+    fn briefs(&self) -> Arc<BriefRegistry> {
+        self.inner.briefs()
+    }
+    fn leases(&self) -> Arc<rdy_engine::semantic::lease::LeaseRegistry> {
+        self.inner.leases()
+    }
+}
+
+/// D-GGTYA: a completion's staged-file checks and its full check (the frame walk, the tag rules
+/// and the state checks) run on a captured read, never inside a writer call; only the take and
+/// the completion ref batch hold the writer.
+#[test]
+fn r59019_full_check_runs_off_the_writer() {
+    use rdy_engine::history_fetch::{HistoryFetchStep, with_check_hook_for_tests};
+    let e = env(3);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let busy = Arc::new(AtomicBool::new(false));
+    let engine = Watched {
+        inner: Local::open(&dest).unwrap(),
+        busy: Arc::clone(&busy),
+    };
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    let renderer = Renderer::default();
+    let service = SyncService::new(&dest, &e.user_file, &api, &clock, &hub, &renderer);
+    let seen: Arc<Mutex<Vec<(&'static str, bool)>>> = Arc::default();
+    let hook = {
+        let seen = Arc::clone(&seen);
+        let busy = Arc::clone(&busy);
+        Box::new(move |p: &'static str| seen.lock().unwrap().push((p, busy.load(Ordering::SeqCst))))
+    };
+    with_check_hook_for_tests(hook, || {
+        let mut fetch = service
+            .begin_history(&engine, &writer(), &s.remote)
+            .unwrap();
+        while let HistoryFetchStep::More(_) = service
+            .resume_history_step(&engine, &writer(), &mut fetch)
+            .unwrap()
+        {}
+    });
+    let seen = seen.lock().unwrap().clone();
+    for p in ["batches", "frames", "tags", "state"] {
+        assert!(seen.iter().any(|(q, _)| *q == p), "{p}: {seen:?}");
+    }
+    assert!(seen.iter().all(|(_, busy)| !busy), "{seen:?}");
+    engine.inner.close().unwrap();
+}

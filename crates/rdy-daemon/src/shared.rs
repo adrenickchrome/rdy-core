@@ -77,6 +77,9 @@ pub struct Shared {
     /// The full listener's MCP layer's transport counts, once it is made.
     mcp_transports: OnceLock<TransportStats>,
     session_end: Mutex<Vec<SessionEndHook>>,
+    /// Where this daemon's history job is (`crate::history_fetch::run`): a command that serves
+    /// the project in its own process follows it ([`crate::serve::serve_clone_history`]).
+    pub(crate) history_job: tokio::sync::watch::Sender<crate::history_fetch::HistoryJob>,
     /// The notifier and site worker threads. Each holds a strong `Shared` while it handles a
     /// message, so the shutdown joins them: when it returns, none holds the published state.
     helpers: Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -143,6 +146,7 @@ impl Shared {
                 mcp_token: OnceLock::new(),
                 mcp_recheck: tokio::sync::watch::channel(0).0,
                 mcp_transports: OnceLock::new(),
+                history_job: tokio::sync::watch::channel(Default::default()).0,
                 session_end: Mutex::new(vec![
                     Box::new(move |id: SessionId| {
                         owned.release_owner(id.0);
