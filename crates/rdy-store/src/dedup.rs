@@ -13,6 +13,11 @@
 //! A pass appends its `Map` rows and one `Through { end }` row, then syncs the file once. Only
 //! then are the rows published to readers, and only then are the mapped target ranges punched.
 //! A lost punch is harmless: the durable map supplies the complete logical range.
+//!
+//! A receiving operation (a load, a clone, a take, a fetch, a hub move) maps nothing. When it
+//! leaves the threshold's count at [`THRESHOLD_BYTES`] or more, it appends one
+//! `Received { end }` row and syncs the file once: a later ordinary write's threshold pass
+//! neither counts nor scans the bytes before `end`, and the next compact maps them.
 use crate::error::StoreError;
 use crate::segment::{HEADER, Location};
 use crate::{fsutil, pio};
@@ -146,6 +151,9 @@ pub enum SpanMapRecordV1 {
     },
     /// The candidate scan of the sealed log through `end` is durable.
     Through { end: Location },
+    /// A receiving operation left the sealed log through `end` unmapped: no threshold pass
+    /// counts or scans the bytes before it; a compact still maps them.
+    Received { end: Location },
 }
 
 /// One mapping: a target range and the source range that holds its bytes.
@@ -172,6 +180,8 @@ pub enum MapEvent {
     Scan,
     /// A threshold pass started.
     Threshold,
+    /// A receiving operation's `Received` row is about to be written.
+    Received,
 }
 
 /// A test observer of mapping steps; an error at `Append` or `Sync` fails that step.
@@ -266,6 +276,8 @@ pub struct SpanMap {
     sources: BTreeMap<Location, Vec<(u64, u64)>>,
     /// The end of the last durable Through row.
     through: Option<Location>,
+    /// The end of the last durable Received row.
+    received: Option<Location>,
     rows: u64,
     /// The valid journal bytes, its header included; 0 when there is no file.
     len: u64,
@@ -290,6 +302,7 @@ impl std::fmt::Debug for SpanMap {
         f.debug_struct("SpanMap")
             .field("rows", &self.rows)
             .field("through", &self.through)
+            .field("received", &self.received)
             .finish()
     }
 }
@@ -445,7 +458,7 @@ impl SpanMap {
     /// A short row or a row that does not check at the end of the journal is a torn tail: a
     /// writable open copies it to `SPANMAP.torn-{offset}` and cuts it, a read-only open ignores
     /// it. A row that does not check followed by a valid one, a damaged header, a forward
-    /// source, an overlap or a non-monotonic Through is damage.
+    /// source, an overlap, a non-monotonic Through or a non-monotonic Received is damage.
     pub fn load(store_dir: &Path, mode: MapOpen) -> Result<SpanMap, StoreError> {
         let path = SpanMap::path_in(store_dir);
         let mut map = SpanMap {
@@ -525,6 +538,13 @@ impl SpanMap {
                     return Err(corrupt());
                 }
                 self.through = Some(end);
+                Ok(())
+            }
+            SpanMapRecordV1::Received { end } => {
+                if self.received.is_some_and(|r| r > end) {
+                    return Err(corrupt());
+                }
+                self.received = Some(end);
                 Ok(())
             }
             SpanMapRecordV1::Map { target, source } => {
@@ -698,6 +718,17 @@ impl SpanMap {
         self.through
     }
 
+    /// The end of the last durable Received row.
+    pub fn received(&self) -> Option<Location> {
+        self.received
+    }
+
+    /// Where a threshold pass starts to count and scan: the later of the last Through and the
+    /// last Received end, or `None` (the log's start) when the map holds neither.
+    pub fn threshold_from(&self) -> Option<Location> {
+        self.through.max(self.received)
+    }
+
     /// The durable rows.
     pub fn rows(&self) -> u64 {
         self.rows
@@ -813,6 +844,39 @@ impl SpanMap {
         if let Some(end) = through {
             records.push(SpanMapRecordV1::Through { end });
         }
+        self.append_records(
+            store_dir,
+            records,
+            MapEvent::Append {
+                maps: maps.len(),
+                through: through.is_some(),
+            },
+        )
+    }
+
+    /// Appends one `Received { end }` row, then syncs the file once (a new file is created
+    /// with its header). Nothing is published, as [`SpanMap::append`].
+    pub(crate) fn append_received(
+        &self,
+        store_dir: &Path,
+        end: Location,
+    ) -> Result<Staged, StoreError> {
+        let mut records: Vec<SpanMapRecordV1> = Vec::new();
+        records
+            .try_reserve_exact(1)
+            .map_err(|_| StoreError::DedupLimit)?;
+        records.push(SpanMapRecordV1::Received { end });
+        self.append_records(store_dir, records, MapEvent::Received)
+    }
+
+    /// The write of [`SpanMap::append`] and [`SpanMap::append_received`]: `records` after the
+    /// last durable row, `step` to the observer first, then one sync.
+    fn append_records(
+        &self,
+        store_dir: &Path,
+        records: Vec<SpanMapRecordV1>,
+        step: MapEvent,
+    ) -> Result<Staged, StoreError> {
         if records.is_empty() {
             return Ok(Staged::default());
         }
@@ -834,10 +898,7 @@ impl SpanMap {
         {
             return Err(StoreError::DedupLimit);
         }
-        event(MapEvent::Append {
-            maps: maps.len(),
-            through: through.is_some(),
-        })?;
+        event(step)?;
         let mut guard = self.file.lock().unwrap_or_else(|e| e.into_inner());
         let mut start = self.len;
         if guard.is_none() {

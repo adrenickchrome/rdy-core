@@ -225,7 +225,8 @@ pub struct Store {
     /// writes no marker and makes no sync, and `seal` ends the batch. Off after open.
     held: bool,
     /// While set, a sealed write runs no threshold span-mapping pass: a project seed and the
-    /// receiving operations that write through the ordinary path map nothing (D-1ER84).
+    /// receiving operations that write through the ordinary path map nothing (D-1ER84). Their
+    /// end leaves what they wrote to the next compact (`Store::leave_received`).
     no_map_pass: bool,
     /// While a move writes its checked objects (`Store::write_move_checked`): the index link
     /// counts a batch check found for them, by raw kind and hash, which their index entries
@@ -2791,11 +2792,16 @@ impl Store {
         self.held
     }
 
-    /// Runs `f` with threshold span-mapping passes off on this handle (a receiving operation).
+    /// Runs `f` with threshold span-mapping passes off on this handle (a receiving operation),
+    /// then, for the outermost call, leaves what the log now holds unmapped to the next compact
+    /// (`Store::leave_received`): no later ordinary write maps it.
     pub(crate) fn without_map_pass<T>(&mut self, f: impl FnOnce(&mut Store) -> T) -> T {
         let was = std::mem::replace(&mut self.no_map_pass, true);
         let out = f(self);
         self.no_map_pass = was;
+        if !was {
+            self.leave_received();
+        }
         out
     }
 
@@ -6368,8 +6374,25 @@ impl Store {
     }
 
     /// Writes a prepared take (see [`Store::take_batches`], [`Store::take_fetched`]): returns
-    /// the log's end after it and the data frames it wrote (none for a complete retry).
+    /// the log's end after it and the data frames it wrote (none for a complete retry). A take
+    /// or move maps nothing (D-1ER84): once its batch is durable, what the log holds unmapped
+    /// is left to the next compact (`Store::leave_received`), so the operation's own later
+    /// batches and every later ordinary write map none of it.
     fn seal_take<E>(
+        &mut self,
+        files: &[File],
+        plan: &crate::take_batch::Plan,
+        how: RefWrite,
+    ) -> Result<(Location, u64), crate::take_batch::TakeError<E>> {
+        let sealed = self.seal_take_batch(files, plan, how);
+        if sealed.is_ok() {
+            self.leave_received();
+        }
+        sealed
+    }
+
+    /// The batch of [`Store::seal_take`].
+    fn seal_take_batch<E>(
         &mut self,
         files: &[File],
         plan: &crate::take_batch::Plan,

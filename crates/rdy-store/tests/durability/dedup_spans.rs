@@ -104,6 +104,7 @@ fn record_events() -> Rc<RefCell<Vec<String>>> {
             MapEvent::Punch(_) => "punch".into(),
             MapEvent::Scan => "scan".into(),
             MapEvent::Threshold => "threshold".into(),
+            MapEvent::Received => "received".into(),
         });
         Ok(())
     })));
@@ -1190,6 +1191,7 @@ fn r5902_kill_child() {
                 MapEvent::Punch(_) => "punch",
                 MapEvent::Scan => "scan",
                 MapEvent::Threshold => "threshold",
+                MapEvent::Received => "received",
             };
             if name == kill {
                 std::process::abort();
@@ -2245,4 +2247,257 @@ fn r5902_native_punch_and_fallback() {
     let s = Store::open(&path).unwrap();
     assert_eq!(s.change(&id).unwrap(), want);
     s.check_objects().unwrap();
+}
+
+/// Lands `count` changes, each of which creates one block with a body of `len` bytes (a stream
+/// carries at most 1 MiB of text in one record), from block number `first`.
+fn land_big(s: &mut Store, n: u32, first: u32, count: u32, len: usize) -> Hash {
+    let approver = Provenance {
+        actor: "human:a".into(),
+        run: None,
+        role: Role::Approver,
+        at_ms: 11,
+    };
+    for i in first..first + count {
+        let b = block(&format!("b-{i:05}"), &text(len, u64::from(i)));
+        s.commit_to_view("work", change(vec![Op::Create { block: b }]))
+            .unwrap();
+    }
+    let writer = change(vec![]).provenance;
+    let p = s.propose("work", &format!("p{n}"), writer).unwrap();
+    s.land_atomic(rdy_store::LandRequest {
+        proposal: p,
+        accept: None,
+        approver,
+        alt: None,
+        relay: None,
+        evidence: None,
+        assessment: None,
+    })
+    .unwrap()
+    .landing
+}
+
+/// The canon history batch of `s` through landing `root`, whole.
+fn canon_history(s: &Store, root: Hash) -> Vec<u8> {
+    use rdy_store::closure::{END_OF_LOG, StoreSource, history_closure_before, write_batch};
+    use rdy_store::sync_stream::{StreamHeader, StreamPurpose};
+    let reader = s.reader();
+    let known = Default::default();
+    let found = history_closure_before(
+        &reader,
+        StreamPurpose::CanonHistory,
+        root,
+        &known,
+        None,
+        END_OF_LOG,
+    )
+    .unwrap();
+    let header = StreamHeader::canon_history(
+        found.features,
+        reader.repo_id().unwrap().unwrap(),
+        root,
+        found.prerequisites,
+    );
+    let mut source = StoreSource {
+        reader: &reader,
+        end: END_OF_LOG,
+    };
+    write_batch(&mut source, &header, &found.records, Vec::new())
+        .unwrap()
+        .0
+}
+
+/// The names of the map steps `f` runs on this thread.
+fn steps_of<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let log = record_events();
+    let out = f();
+    clear_hooks();
+    let steps = log.borrow().clone();
+    (out, steps)
+}
+
+/// r5902 (D-1ER84: a fetch, a take and a move map nothing): a fetch that leaves the threshold's
+/// count past 64 MiB writes one Received row and no Map or Through row; the next ordinary write
+/// and the next seal, before and after a reopen, run no threshold pass and scan nothing; the
+/// store's own ordinary writes still reach the threshold, and their pass maps none of the
+/// received bytes; the next compact maps them, and a repeat compact keeps the logical bytes.
+#[test]
+fn r5902_a_fetch_leaves_received_bytes_to_compact() {
+    use rdy_store::sync_stream::StreamPurpose;
+    use rdy_store::take_batch::FetchTarget;
+    use std::convert::Infallible;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    let mut s = Store::create(&src).unwrap();
+    // each change holds a 900,000-byte block twice (its BLOCK frame and the CHANGE's copy):
+    // 40 changes put the history past 64 MiB
+    let mut root = None;
+    for n in 0..5 {
+        root = Some(land_big(&mut s, n, 1 + 8 * n, 8, 900_000));
+    }
+    let root = root.unwrap();
+    let repo = s.repo_id().unwrap().unwrap();
+    let batch = canon_history(&s, root);
+    s.close().unwrap();
+    assert!(
+        batch.len() as u64 >= dedup::THRESHOLD_BYTES,
+        "{}",
+        batch.len()
+    );
+    let file = dir.path().join("canon.rdysync");
+    std::fs::write(&file, &batch).unwrap();
+
+    let path = dir.path().join("dst");
+    let mut q = Store::create_fork_project(&path, repo).unwrap();
+    let target = FetchTarget {
+        remote: "origin".into(),
+        // test-hygiene: allow port the fetch target records this URL; nothing connects to it
+        url: "https://127.0.0.1:9/r/demo".into(),
+        purpose: StreamPurpose::CanonHistory,
+        root,
+        view: None,
+    };
+    let (taken, steps) = steps_of(|| {
+        q.take_fetched::<Infallible>(&[std::fs::File::open(&file).unwrap()], &target, |_, _| {
+            Ok(())
+        })
+        .unwrap()
+    });
+    assert!(taken.new_objects > 0);
+    assert_eq!(
+        steps,
+        ["received", "sync", "publish"],
+        "no scan, no map row"
+    );
+    let received = q.log_end();
+    let map = map_of(&path);
+    assert_eq!(map.received(), Some(received));
+    assert_eq!((map.mappings().count(), map.through()), (0, None));
+
+    // the next ordinary write and the next sealed batch count from the Received end
+    let ((), steps) = steps_of(|| {
+        q.commit_to_view(
+            "work",
+            change(vec![Op::Create {
+                block: block("b-90001", "after the fetch"),
+            }]),
+        )
+        .unwrap();
+        q.set_held(true).unwrap();
+        q.commit_to_view(
+            "work",
+            change(vec![Op::Create {
+                block: block("b-90002", "a held batch"),
+            }]),
+        )
+        .unwrap();
+        q.set_held(false).unwrap();
+    });
+    assert!(steps.is_empty(), "{steps:?}");
+    q.close().unwrap();
+    // and so does the first write after a reopen
+    let mut q = Store::open(&path).unwrap();
+    let ((), steps) = steps_of(|| {
+        q.commit_to_view(
+            "work",
+            change(vec![Op::Create {
+                block: block("b-90003", "after a reopen"),
+            }]),
+        )
+        .unwrap();
+    });
+    assert!(steps.is_empty(), "{steps:?}");
+
+    // the store's own writes still reach the threshold; their pass scans from the Received end
+    let (own, steps) = steps_of(|| {
+        let mut own = vec![];
+        for i in 0..12u32 {
+            let b = block(
+                &format!("b-{:05}", 91_000 + i),
+                &text(4 << 20, 500 + u64::from(i)),
+            );
+            own.push(
+                q.commit_to_view("work", change(vec![Op::Create { block: b }]))
+                    .unwrap(),
+            );
+            if map_of(&path).through().is_some() {
+                break;
+            }
+        }
+        own
+    });
+    assert_eq!(
+        steps.iter().filter(|e| *e == "threshold").count(),
+        1,
+        "{steps:?}"
+    );
+    let map = map_of(&path);
+    assert!(map.mappings().count() > 0);
+    assert!(
+        map.mappings().all(|m| m.target.place >= received),
+        "the threshold pass maps none of the received bytes"
+    );
+    let own_mapped = map.mappings().count();
+    assert!(own_mapped + 1 >= own.len(), "{own_mapped} of {}", own.len());
+
+    // the next compact maps what the fetch received
+    let reads: Vec<Change> = own.iter().map(|id| q.change(id).unwrap()).collect();
+    let first = q.compact(false).unwrap();
+    let map = map_of(&path);
+    assert!(
+        map.mappings().any(|m| m.target.place < received),
+        "compact maps the received bytes"
+    );
+    assert!(map.mappings().count() > own_mapped);
+    let rows = map.rows();
+    let again = q.compact(false).unwrap();
+    assert_eq!(
+        (again.log_bytes, again.deduplicated_bytes),
+        (first.log_bytes, first.deduplicated_bytes),
+        "a repeat compact keeps the logical bytes"
+    );
+    assert_eq!(map_of(&path).rows(), rows, "a repeat compact adds no row");
+    q.close().unwrap();
+    let q = Store::open(&path).unwrap();
+    for (id, w) in own.iter().zip(&reads) {
+        assert_eq!(&q.change(id).unwrap(), w);
+    }
+    q.verify().unwrap();
+}
+
+/// r5902: a Received row is checked as a Through row is: it loads in order and keeps the latest
+/// end, the threshold starts at the later of the two ends, and a Received end before the last
+/// one is damage.
+#[test]
+fn r5902_received_rows_load_in_order_and_fail_closed() {
+    use dedup::SpanMapRecordV1::{Received, Through};
+    use rdy_store::segment::Location;
+    let at = |segment: u32, offset: u64| Location { segment, offset };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    std::fs::write(
+        path.join(SPANMAP_FILE),
+        journal(&[
+            Received { end: at(0, 500) },
+            Through { end: at(0, 900) },
+            Received { end: at(1, 40) },
+        ]),
+    )
+    .unwrap();
+    let map = map_of(path);
+    assert_eq!(map.rows(), 3);
+    assert_eq!(map.received(), Some(at(1, 40)));
+    assert_eq!(map.through(), Some(at(0, 900)));
+    assert_eq!(map.threshold_from(), Some(at(1, 40)));
+    assert_eq!(map.mappings().count(), 0);
+    std::fs::write(
+        path.join(SPANMAP_FILE),
+        journal(&[Received { end: at(1, 40) }, Received { end: at(0, 500) }]),
+    )
+    .unwrap();
+    assert!(matches!(
+        SpanMap::load(path, MapOpen::ReadOnly),
+        Err(StoreError::DedupCorrupt)
+    ));
 }

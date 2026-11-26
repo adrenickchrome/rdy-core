@@ -394,15 +394,17 @@ impl Store {
             && self.open_batch().is_none()
     }
 
-    /// The unmapped sealed log bytes: from the last durable `Through` (or the log's start) to
-    /// the end of the log, across segments.
+    /// The unmapped sealed log bytes a threshold pass counts: from the later of the last
+    /// durable `Through` and `Received` (or the log's start) to the end of the log, across
+    /// segments. The bytes a receiving operation left before its `Received` are the next
+    /// compact's.
     pub(crate) fn unmapped_bytes(&self) -> u64 {
         let log = self.segment_log();
         let from = log
             .spans()
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .through()
+            .threshold_from()
             .unwrap_or(ORIGIN_PLACE);
         let end = log.end();
         if end <= from {
@@ -445,7 +447,7 @@ impl Store {
             .spans()
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .through()
+            .threshold_from()
             .unwrap_or(ORIGIN_PLACE);
         let result = self.prepare_pass(from).and_then(|p| {
             let full = p.full;
@@ -464,6 +466,38 @@ impl Store {
         }
         drop(map);
         let _ = self.punch_mapped();
+    }
+
+    /// The end of a receiving operation (D-1ER84: a load, clone, take, fetch or hub move maps
+    /// nothing, and the next compact maps what it received). When the threshold's count of
+    /// unmapped bytes ([`Store::unmapped_bytes`]) has reached [`dedup::THRESHOLD_BYTES`], it
+    /// appends one `Received { end }` row at the sealed end and syncs the span map once, so no
+    /// later ordinary write's threshold pass counts or scans those bytes. Below the threshold,
+    /// on a store that maps no spans, on a follower, with threshold passes off on this handle
+    /// or with no room for the row and a later Through, it writes nothing. It maps and punches
+    /// nothing, and its failure never reaches the operation: it stops threshold passes on this
+    /// handle and keeps the note for the next compact, as a failed threshold pass does.
+    pub fn leave_received(&self) {
+        if !self.maps_spans() || self.refuse_follower_write().is_err() {
+            return;
+        }
+        if self.unmapped_bytes() < dedup::THRESHOLD_BYTES {
+            return;
+        }
+        let end = self.segment_log().end();
+        let spans = self.segment_log().spans();
+        let staged = {
+            let map = spans.read().unwrap_or_else(|e| e.into_inner());
+            let row = dedup::MAX_ROW_BYTES as u64 + 36;
+            if !map.threshold_allowed() || !map.has_room(2, 2 * row) {
+                return;
+            }
+            map.append_received(self.dir(), end)
+        };
+        let mut map = spans.write().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = staged.and_then(|s| map.publish(s)) {
+            map.stop(StopReason::of(&e));
+        }
     }
 
     /// The span-mapping step's pass (`crate::upgrade::DEDUP_SPANS_STEP`): when the durable map

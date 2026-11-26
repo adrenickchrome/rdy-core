@@ -864,6 +864,9 @@ fn check(
             return Err(e);
         }
     }
+    // a load maps nothing (D-1ER84): what it placed is the next compact's, so no later
+    // ordinary write maps it (a follower's seed writes nothing here)
+    r.store().leave_received();
     let counted = (|| {
         let fsck = r.fsck()?;
         let tags = r.store().count_refs("tag/")?;

@@ -23,7 +23,7 @@ use rdy_model::plan::{PlanAct, PlanAnswer, PlanKind, item_hash};
 use rdy_model::{BlockId, Hash, Plan, Provenance, Role};
 use rdy_qa::fixtures::{approver, land, write};
 use rdy_qa::foreign_fixture;
-use rdy_store::dedup::{MapOpen, SPANMAP_FILE, SpanMap};
+use rdy_store::dedup::{MapOpen, SpanMap};
 use rdy_store::format::{
     DEDUP_SPANS_REQUIRED_RDY, FEATURE_DEDUP_SPANS, FeatureClass, registered_features,
 };
@@ -599,12 +599,6 @@ fn rows(root: &Path) -> u64 {
         .rows()
 }
 
-fn spanmap_len(root: &Path) -> Option<u64> {
-    std::fs::metadata(root.join(".rdy/store").join(SPANMAP_FILE))
-        .ok()
-        .map(|m| m.len())
-}
-
 /// r5902: the bytes rdy reads, the dump bytes and the sync batch bytes are the same before and
 /// after physical mapping, with no log write between; fsck and a reindex pass after it; and a
 /// damaged retained source byte fails the existing hash check.
@@ -659,9 +653,41 @@ fn r5902_logical_reads_and_exports_are_identical() {
     assert!(damaged.is_err(), "the hash check fails");
 }
 
-/// r5902: load, clone, a fork's project take and a holder's take append no map row and punch no
-/// mapped range, even with the source past the threshold; the next compact builds each local
-/// map at its own places, and every original object key survives.
+/// The map steps `f` runs on this thread.
+fn steps_of<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let log = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+    let l = log.clone();
+    rdy_store::dedup::on_map_event(Some(Box::new(move |e: &rdy_store::dedup::MapEvent| {
+        l.borrow_mut().push(format!("{e:?}"));
+        Ok(())
+    })));
+    let out = f();
+    rdy_store::dedup::on_map_event(None);
+    let steps = log.borrow().clone();
+    (out, steps)
+}
+
+/// The receiver's map holds no mapping and no Through, and the one Received row that leaves the
+/// operation's bytes to the next compact: at the end of the batch that put the receiver past the
+/// threshold (a fork's small origin batch may follow it).
+fn received_only(r: &Rdy, to: &Path, what: &str) {
+    let map = SpanMap::load(&to.join(".rdy/store"), MapOpen::ReadOnly).unwrap();
+    assert_eq!(map.mappings().count(), 0, "{what}: no mapping");
+    assert_eq!(map.through(), None, "{what}: no Through");
+    assert_eq!(map.rows(), 1, "{what}: one Received row");
+    let end = r.store().log_end();
+    assert!(
+        map.received().is_some_and(|at| at <= end),
+        "{what}: {:?} {end:?}",
+        map.received()
+    );
+}
+
+/// r5902: load, clone, a fork's project take and a holder's take map nothing and punch no
+/// mapped range, even with the source past the threshold: each appends one Received row and no
+/// Map or Through row. The receiver's next ordinary write (after a reopen, as a person's first
+/// write after a load or a clone) runs no threshold pass and scans nothing; the next compact
+/// builds each local map at its own places, and every original object key survives.
 #[test]
 fn r5902_receivers_build_local_maps() {
     let (_base, root, big) = source(rdy_store::dedup::THRESHOLD_BYTES as usize + (1 << 20));
@@ -701,12 +727,15 @@ fn r5902_receivers_build_local_maps() {
     made.push(("fork", to));
     r.close().unwrap();
     for (what, to) in &made {
-        // no row, and no Through: the header at most
-        assert!(
-            spanmap_len(to).is_none_or(|n| n == 12),
-            "{what}: {:?}",
-            spanmap_len(to)
-        );
+        // the first ordinary write after the receiving operation maps nothing
+        let mut r = Rdy::open(to).unwrap();
+        received_only(&r, to, what);
+        let ops = json!([{"op": "create", "type": "doc", "id": "$n",
+                          "fields": {"title": "After", "doc_type": "page"}}]);
+        let (wrote, steps) = steps_of(|| write(&mut r, "w-after", ops));
+        wrote.unwrap();
+        assert!(steps.is_empty(), "{what}: {steps:?}");
+        r.close().unwrap();
         let r = Rdy::open(to).unwrap();
         let facts = foreign_fixture::store_facts(&r);
         for k in keys.as_array().unwrap() {
@@ -742,8 +771,8 @@ fn r5902_receivers_build_local_maps() {
         },
     )
     .unwrap();
+    received_only(&h, &holder, "holder");
     h.close().unwrap();
-    assert!(spanmap_len(&holder).is_none_or(|n| n == 12), "holder");
     // the take was past the threshold of unmapped bytes, and the holder's own compact then
     // builds its local map, reads back every byte and keeps every original key
     let store = holder.join(".rdy/store");
