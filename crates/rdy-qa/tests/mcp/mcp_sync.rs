@@ -1294,3 +1294,47 @@ mod nightly {
         assert_eq!(entries(parent.path()), 0);
     }
 }
+
+/// A13: `rdy_push` with `restore` in a project whose history is still arriving is
+/// E_HISTORY_PENDING with the exact message and fix, before any capture, put or write.
+#[test]
+fn r59019_restore_refuses_while_history_pending() {
+    let k = kit(&["a", "b"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    let dump = k.proj.path().join("p.rdydump");
+    let o = run(&k, &["dump", "--out", dump.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    k.hub.send_canon_state();
+    let session = rdy_engine::classify("human:qa", None, None, rdy_model::Role::Reader).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let dir = parent.path().join("clone");
+    let s = rdy_engine::clone::clone_url(&session, &hub_url(&k), &dir, &k.home.config()).unwrap();
+    let p = s.history.expect("a ready clone's progress");
+    assert!(!p.complete, "{p:?}");
+    // the hub serves no record now: the history stays incomplete whatever fetches it
+    k.hub.shared.repo.lock().unwrap().store = None;
+    std::fs::copy(&dump, dir.join("p.rdydump")).unwrap();
+    let before = k.hub.routes().len();
+    let mut c = McpClient::start_proxy_capturing(&dir, &k.home.env());
+    let r = c.call(
+        "rdy_session",
+        json!({"actor": "agent:claude", "run": "r7", "role": "writer"}),
+    );
+    assert!(r.is_ok(), "{r:?}");
+    let e = mcp_err(&mut c, "rdy_push", json!({"restore": "p.rdydump"}));
+    drop(c);
+    let _ = command(&dir, &k.home, &["serve", "--stop"]).output();
+    assert_eq!(e["code"], "E_HISTORY_PENDING", "{e}");
+    assert_eq!(
+        e["message"],
+        rdy_engine::partial_history::history_pending_message(p.held, p.total)
+    );
+    assert_eq!(e["fix"], rdy_engine::partial_history::HISTORY_PENDING_FIX);
+    let routes = k.hub.routes();
+    assert!(
+        routes[before..]
+            .iter()
+            .all(|r| r != "objects/put" && r != "write"),
+        "{routes:?}"
+    );
+}

@@ -380,10 +380,13 @@ fn start_checked(
         let shared = Arc::clone(&shared);
         let readiness = readiness.clone();
         let handle = handle.clone();
+        let human = opts.human_actor.clone();
         std::thread::Builder::new()
             .name("rdy-serve".into())
             .spawn(move || {
-                serve_thread(rt, daemon, shared, readiness, site, handle, root, released)
+                serve_thread(
+                    rt, daemon, shared, readiness, site, handle, root, released, human,
+                )
             })
     };
     let thread = match thread {
@@ -742,6 +745,7 @@ fn serve_thread(
     handle: DaemonHandle,
     root: PathBuf,
     released: Option<mpsc::Receiver<()>>,
+    human: Option<String>,
 ) -> Result<ExitReason, ServeError> {
     // the site accepts until the daemon stops; the runtime's drop below ends what is left of
     // it before the store closes, so a successor finds the port free
@@ -752,6 +756,8 @@ fn serve_thread(
     log("building canon");
     let warm = Arc::clone(&shared);
     let warmed = root.clone();
+    let runtime = rt.handle().clone();
+    let history = handle.clone();
     rt.spawn_blocking(move || {
         let ready = warm_then_ready(
             &readiness,
@@ -780,6 +786,8 @@ fn serve_thread(
         // plan M2e2 (D-Z0EMP): what moved while no daemon ran (the pack, the rdy build) is
         // logged once, after ready, in a batch of cause `reopened`
         warm.writer.reconcile_soon();
+        // O17: the incomplete history a URL clone left, fetched between calls from now on
+        runtime.spawn(crate::history_fetch::run(warm, history, human));
     });
     let ran = rt.block_on(daemon.run());
     // the profile-only listeners: no start from now on, and each listener's task, ended by the

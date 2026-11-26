@@ -59,13 +59,15 @@ use crate::error::{
     upstream_protocol,
 };
 use crate::fsck::FsckReport;
+use crate::history_fetch::HistoryFetchStep;
 use crate::hub_config::{HubConfig, RemoteEntry, RemoteMode};
 use crate::hub_http::HttpHubTransport;
 use crate::hub_publish::{PublishRenderer, RenderedUpload};
 use crate::hub_sync::{SyncService, Target};
-use crate::hub_sync_wire::{HttpSyncWire, PackReason, SETTINGS_MEMBERS, SettingsBundle};
-use crate::hub_types::{RemoteUrl, SystemHubClock};
+use crate::hub_sync_wire::{HttpSyncWire, PackReason, SETTINGS_MEMBERS, SettingsBundle, SyncWire};
+use crate::hub_types::{HubClock, HubTransport, RemoteUrl, SystemHubClock};
 use crate::load::{LoadSummary, Opened, inside_source_rdy, load_opened, open_dump, open_stream};
+use crate::partial_history::HistoryProgress;
 use crate::read_state::ReadState;
 use crate::readiness::assessment::pack_digest;
 use crate::render_inputs::{
@@ -437,6 +439,38 @@ pub struct UrlCloneSummary {
     pub warnings: Vec<CloneWarning>,
     pub fsck: FsckReport,
     pub next: String,
+    /// The project's history (D-GGTYA): present for a clone from a hub that sends a canon
+    /// tip's state, which is ready before its history arrives; absent for a clone that took the
+    /// whole history first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history: Option<HistoryProgress>,
+    /// The clone's notes: the old-hub note, or the pause note of a ready clone whose history
+    /// no process fetches now. Absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+impl UrlCloneSummary {
+    /// The ready text of a clone whose history is still arriving; None otherwise.
+    pub fn ready_text(&self) -> Option<String> {
+        self.history
+            .filter(|p| !p.complete)
+            .map(|p| crate::history_fetch::ready_text(&self.project, &p))
+    }
+
+    /// Whether the clone's history is still arriving.
+    pub fn history_pending(&self) -> bool {
+        self.history.is_some_and(|p| !p.complete)
+    }
+
+    /// Adds `e` as a warning: a history continuation that stopped keeps the ready project.
+    pub fn warn(&mut self, e: &RdyError) {
+        self.warnings.push(CloneWarning {
+            code: e.code.to_string(),
+            message: e.message.clone(),
+            fix: e.fix.clone(),
+        });
+    }
 }
 
 /// A step that a test runs on the new project's directory after the fetch and before the
@@ -485,15 +519,144 @@ pub fn clone_url_checked(
     user_file: &Path,
     before_checks: Option<BeforeChecks>,
 ) -> Result<UrlCloneSummary, RdyError> {
-    let url = RemoteUrl::parse(url)?;
+    let parsed = RemoteUrl::parse(url)?;
     check_new_dir(dir, "clone a hub URL into a new directory, or an empty one")?;
     let settings = HubConfig::load(None, Some(user_file))?;
-    let api = HttpHubTransport::new(settings.fence(url.origin())?)?;
-    let wire = HttpSyncWire::new(HttpHubTransport::new(settings.fence(url.origin())?)?);
-    let service = SyncService::for_clone(user_file, &api, &SystemHubClock, &wire, &NoRenderer);
+    let api = HttpHubTransport::new(settings.fence(parsed.origin())?)?;
+    let wire = HttpSyncWire::new(HttpHubTransport::new(settings.fence(parsed.origin())?)?);
+    clone_url_via(
+        session,
+        url,
+        dir,
+        user_file,
+        &api,
+        &SystemHubClock,
+        &wire,
+        before_checks,
+    )
+}
+
+/// [`clone_url_checked`] over the credential transport `api`, the clock `clock` and the sync
+/// wire `wire` (a test's in-process hub). It returns at Ready.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn clone_url_via(
+    session: &Session,
+    url: &str,
+    dir: &Path,
+    user_file: &Path,
+    api: &dyn HubTransport,
+    clock: &dyn HubClock,
+    wire: &dyn SyncWire,
+    before_checks: Option<BeforeChecks>,
+) -> Result<UrlCloneSummary, RdyError> {
+    let url = RemoteUrl::parse(url)?;
+    check_new_dir(dir, "clone a hub URL into a new directory, or an empty one")?;
+    let service = SyncService::for_clone(user_file, api, clock, wire, &NoRenderer);
     service.clone_target(session, &url, |t| {
         clone_from(&service, session, t, dir, user_file, before_checks)
     })
+}
+
+/// [`clone_url`], then the history in this process (O17: the CLI's foreground): `ready` runs
+/// with the ready summary once the project is installed and before the first history get,
+/// then each history step runs until the history is complete. The reply is the final summary,
+/// its history complete. A continuation that stops keeps the installed project and the ready
+/// summary, with the stop's error added as a warning; nothing is rolled back. A clone that
+/// took the whole history first (an older hub) calls neither.
+pub fn clone_url_with_progress(
+    session: &Session,
+    url: &str,
+    dir: &Path,
+    user_file: &Path,
+    ready: &mut dyn FnMut(&UrlCloneSummary),
+) -> Result<UrlCloneSummary, RdyError> {
+    clone_url_with_steps(session, url, dir, user_file, ready, &mut |_| {})
+}
+
+/// [`clone_url_with_progress`] with `step` called with the progress after each history step
+/// that leaves more to do.
+pub fn clone_url_with_steps(
+    session: &Session,
+    url: &str,
+    dir: &Path,
+    user_file: &Path,
+    ready: &mut dyn FnMut(&UrlCloneSummary),
+    step: &mut dyn FnMut(&HistoryProgress),
+) -> Result<UrlCloneSummary, RdyError> {
+    let parsed = RemoteUrl::parse(url)?;
+    let summary = clone_url(session, url, dir, user_file)?;
+    if !summary.history_pending() {
+        return Ok(summary);
+    }
+    let settings = HubConfig::load(None, Some(user_file))?;
+    let api = HttpHubTransport::new(settings.fence(parsed.origin())?)?;
+    let wire = HttpSyncWire::new(HttpHubTransport::new(settings.fence(parsed.origin())?)?);
+    Ok(continue_history(
+        session,
+        summary,
+        user_file,
+        &api,
+        &SystemHubClock,
+        &wire,
+        ready,
+        step,
+    ))
+}
+
+/// The foreground continuation of the ready clone `summary` over `api`, `clock` and `wire`
+/// (see [`clone_url_with_progress`]).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn continue_history(
+    session: &Session,
+    mut summary: UrlCloneSummary,
+    user_file: &Path,
+    api: &dyn HubTransport,
+    clock: &dyn HubClock,
+    wire: &dyn SyncWire,
+    ready: &mut dyn FnMut(&UrlCloneSummary),
+    step: &mut dyn FnMut(&HistoryProgress),
+) -> UrlCloneSummary {
+    if !summary.history_pending() {
+        return summary;
+    }
+    ready(&summary);
+    let project = PathBuf::from(&summary.project);
+    let engine = match Local::open(&project) {
+        Ok(e) => e,
+        Err(e) => {
+            summary.warn(&e);
+            return summary;
+        }
+    };
+    let service = SyncService::new(&project, user_file, api, clock, wire, &NoRenderer);
+    let ran = (|| {
+        let mut fetch = service.begin_history(&engine, session, &summary.remote)?;
+        loop {
+            match service.resume_history_step(&engine, session, &mut fetch)? {
+                HistoryFetchStep::More(p) => step(&p),
+                HistoryFetchStep::Complete(p) => return Ok::<_, RdyError>(p),
+            }
+        }
+    })();
+    match ran {
+        Ok(p) => {
+            summary.history = Some(p);
+            match engine.inspect(Rdy::fsck) {
+                Ok(f) => {
+                    summary.landings = f.landings;
+                    summary.fsck = f;
+                }
+                Err(e) => summary.warn(&e),
+            }
+        }
+        Err(e) => summary.warn(&e),
+    }
+    if let Err(e) = engine.close() {
+        summary.warn(&e);
+    }
+    summary
 }
 
 /// The render-input capture of a URL clone: it renders nothing.
@@ -839,9 +1002,19 @@ fn clone_from(
     write_project(&project, &bundle, &t.url, &origin)?;
     count_open();
     let engine = Local::open(&project)?;
-    let fetched = service.clone_fetch(&engine, session, t, &base_url, &state);
+    // a hub that sends a canon tip's state (format 5): the state now, the history after Ready;
+    // any other hub: the whole history first (a malformed format-5 reply is an error, never a
+    // reason to take the whole history instead)
+    let partial = state.sends_canon_state();
+    let fetched = if partial {
+        service.clone_state(&engine, t, &base_url, &state).map(Some)
+    } else {
+        service
+            .clone_fetch(&engine, session, t, &base_url, &state)
+            .map(|(f, _)| f)
+    };
     let fetched = match fetched {
-        Ok((fetched, _)) => fetched,
+        Ok(fetched) => fetched,
         Err(e) => {
             // the fetch's error wins over a failed close
             let _ = engine.close();
@@ -889,6 +1062,12 @@ fn clone_from(
         warnings: bundle.warnings,
         fsck: checked.fsck,
         next: NEXT.to_string(),
+        history: checked.history,
+        notes: if partial {
+            Vec::new()
+        } else {
+            vec![crate::history_fetch::OLD_HUB_NOTE.to_string()]
+        },
     })
 }
 
@@ -1000,6 +1179,7 @@ struct Checked {
     tags: usize,
     views: usize,
     fsck: FsckReport,
+    history: Option<HistoryProgress>,
 }
 
 /// Step 5's checks on `engine`, the handle that applied canon: the effective pack's digest (read
@@ -1032,11 +1212,13 @@ fn check_project_on(
     }
     let fsck = engine.inspect(Rdy::fsck)?;
     HubConfig::load(Some(project), Some(user_file))?;
+    let history = engine.read().history_progress()?;
     Ok(Checked {
         origin,
         tags,
         views,
         fsck,
+        history,
     })
 }
 

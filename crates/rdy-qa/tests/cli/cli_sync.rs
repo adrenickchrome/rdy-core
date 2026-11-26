@@ -1474,3 +1474,61 @@ fn cra2_push_carries_a_landed_removal_with_its_proof() {
         assert!(held.contains(&key), "the hub holds {key:?}");
     }
 }
+
+/// A URL clone of `k`'s hub repo from a hub that sends a canon tip's state, returned at Ready;
+/// then the hub serves no record, so the history stays incomplete whatever fetches it. Returns
+/// the clone's parent, its directory and its progress.
+fn partial_clone(
+    k: &Kit,
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    rdy_engine::partial_history::HistoryProgress,
+) {
+    k.hub.send_canon_state();
+    let session = rdy_engine::classify("human:qa", None, None, rdy_model::Role::Reader).unwrap();
+    let (parent, dir) = target();
+    let s = rdy_engine::clone::clone_url(&session, &hub_url(k), &dir, &k.home.config()).unwrap();
+    let p = s.history.expect("a ready clone's progress");
+    assert!(!p.complete && p.held < p.total, "{p:?}");
+    k.hub.shared.repo.lock().unwrap().store = None;
+    (parent, dir, p)
+}
+
+/// A13: `rdy push --restore` in a project whose history is still arriving is
+/// E_HISTORY_PENDING with the exact message and fix, before any capture, put or write.
+#[test]
+fn r59019_restore_refuses_while_history_pending() {
+    let k = kit(&["a", "b"]);
+    let (_copy, _store) = serve_copy(&k, &[]);
+    let dump = k.proj.path().join("p.rdydump");
+    let o = run(&k, &["dump", "--out", dump.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let (_parent, dir, p) = partial_clone(&k);
+    let before = k.hub.routes().len();
+    let o = command(
+        &dir,
+        &k.home,
+        &["--json", "push", "--restore", dump.to_str().unwrap()],
+    )
+    .output()
+    .unwrap();
+    let (ok, v) = parsed(&o);
+    let _ = command(&dir, &k.home, &["serve", "--stop"]).output();
+    assert!(!ok, "{v}");
+    assert_eq!(
+        words(&v),
+        (
+            "E_HISTORY_PENDING",
+            rdy_engine::partial_history::history_pending_message(p.held, p.total).as_str(),
+            rdy_engine::partial_history::HISTORY_PENDING_FIX,
+        )
+    );
+    let routes = k.hub.routes();
+    assert!(
+        routes[before..]
+            .iter()
+            .all(|r| r != "objects/put" && r != "write"),
+        "{routes:?}"
+    );
+}

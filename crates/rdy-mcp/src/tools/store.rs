@@ -142,7 +142,24 @@ pub fn rdy_clone(st: &mut McpState, p: CloneParams) -> Result<Value, RdyError> {
             return Err(url_fork());
         }
         let user_file = require_user_file(user_file_from_env())?;
-        let summary = clone_url(&s, url, &dir, &user_file)?;
+        let mut summary = clone_url(&s, url, &dir, &user_file)?;
+        // Ready: the destination project's daemon fetches the history between calls (O17);
+        // with no daemon to hand it to, the fetch waits for the next pull
+        if summary.history_pending() {
+            let project = std::path::PathBuf::from(&summary.project);
+            match st.engine.continue_clone_history(&project, &s) {
+                Ok(true) => {}
+                Ok(false) => summary
+                    .notes
+                    .push(rdy_engine::history_fetch::PAUSED_NOTE.to_string()),
+                Err(e) => {
+                    summary.warn(&e);
+                    summary
+                        .notes
+                        .push(rdy_engine::history_fetch::PAUSED_NOTE.to_string());
+                }
+            }
+        }
         return Ok(serde_json::to_value(summary).expect("a reply serializes"));
     }
     let at = p.at.as_deref();

@@ -78,6 +78,64 @@ pub fn fetch_checked(
     batches: &[CheckedBatchFile],
     target: &FetchTarget,
 ) -> Result<FetchOutcome, RdyError> {
+    let files = batch_files(batches)?;
+    let checked: Vec<&rdy_store::sync_stream::CheckedBatch> = batches
+        .iter()
+        .map(CheckedBatchFile::store_checked)
+        .collect();
+    fetch_core(rdy, &files, Some(&checked), target)
+}
+
+/// A URL clone's take of a canon state (D-GGTYA, D-4PV25): the format-5 batches `batches`, which
+/// the caller checked together (`stream_check::check_state_batches`), taken by
+/// `Store::take_canon_state`, which checks each again, with the incomplete history ref
+/// `history`, in one sealed batch that moves canon to the state's root.
+/// The state is then published as a chain move (canon had no head before).
+pub(crate) fn take_state(
+    rdy: &mut Rdy,
+    batches: &[File],
+    target: &FetchTarget,
+    history: &rdy_store::sync_state::SyncHistory,
+) -> Result<FetchOutcome, RdyError> {
+    fetch_core_with(rdy, batches, None, Some(history), target, true)
+}
+
+/// The completion take of an incomplete history (D-GGTYA, R1): the staged canon history
+/// batches `batches` at the frontier `target.root`, each checked once by this operation, in one
+/// checked batch (`Store::take_fetched_checked`) that moves no canon or view ref, so local
+/// landings made since the state take stay. The older landings it makes visible can move drift
+/// tensions: the publish after it is a chain move, which logs those moves under cause
+/// `recheck`.
+pub(crate) fn take_history_checked(
+    rdy: &mut Rdy,
+    batches: &[CheckedBatchFile],
+    target: &FetchTarget,
+) -> Result<FetchOutcome, RdyError> {
+    let files = batch_files(batches)?;
+    let checked: Vec<&rdy_store::sync_stream::CheckedBatch> = batches
+        .iter()
+        .map(CheckedBatchFile::store_checked)
+        .collect();
+    fetch_core_with(rdy, &files, Some(&checked), None, target, true)
+}
+
+/// The second and last history ref write (D-GGTYA, R1, N1): `Store::complete_history` of
+/// remote `remote` at `frontier` while the redaction epoch is still `epoch` (the values the
+/// full check saw), then the state published again over the rebuilt index. A refusal writes
+/// nothing.
+pub(crate) fn complete_history(
+    rdy: &mut Rdy,
+    remote: &str,
+    frontier: Hash,
+    epoch: u64,
+) -> Result<(), RdyError> {
+    rdy.seal_open()?;
+    rdy.store.complete_history(remote, frontier, epoch)?;
+    rdy.publish_chain_moved()
+}
+
+/// A second handle on each checked batch's file, for the take.
+fn batch_files(batches: &[CheckedBatchFile]) -> Result<Vec<File>, RdyError> {
     let mut files = Vec::with_capacity(batches.len());
     for b in batches {
         files.push(
@@ -86,11 +144,7 @@ pub fn fetch_checked(
                 .map_err(|e| to_rdy(rdy_store::stream_error::StreamError::io(Some(0), 0, &e)))?,
         );
     }
-    let checked: Vec<&rdy_store::sync_stream::CheckedBatch> = batches
-        .iter()
-        .map(CheckedBatchFile::store_checked)
-        .collect();
-    fetch_core(rdy, &files, Some(&checked), target)
+    Ok(files)
 }
 
 /// [`fetch`] and [`fetch_checked`]: one take, with the files' checked batches when there are.
@@ -99,6 +153,19 @@ fn fetch_core(
     batches: &[File],
     checked: Option<&[&rdy_store::sync_stream::CheckedBatch]>,
     target: &FetchTarget,
+) -> Result<FetchOutcome, RdyError> {
+    fetch_core_with(rdy, batches, checked, None, target, false)
+}
+
+/// One take: a canon state's take with `history`, else a fetch; then the publish, as a chain
+/// move when `chain_moved`.
+fn fetch_core_with(
+    rdy: &mut Rdy,
+    batches: &[File],
+    checked: Option<&[&rdy_store::sync_stream::CheckedBatch]>,
+    history: Option<&rdy_store::sync_state::SyncHistory>,
+    target: &FetchTarget,
+    chain_moved: bool,
 ) -> Result<FetchOutcome, RdyError> {
     if rdy.is_holder() {
         return Err(RdyError::new(
@@ -110,17 +177,28 @@ fn fetch_core(
     // a fetch is a batch of its own: one a raw write left open is sealed and published first
     rdy.seal_open()?;
     let epoch = rdy.store.redaction_epoch();
-    let taken = match checked {
-        Some(c) => rdy
+    let taken = match (checked, history) {
+        (Some(c), Some(h)) => {
+            rdy.store
+                .take_canon_state_checked::<Infallible>(batches, c, target, h, |_, _| Ok(()))
+        }
+        (None, Some(h)) => rdy
             .store
-            .take_fetched_checked::<Infallible>(batches, c, target, |_, _| Ok(())),
-        None => rdy
+            .take_canon_state::<Infallible>(batches, target, h, |_, _| Ok(())),
+        (Some(c), None) => {
+            rdy.store
+                .take_fetched_checked::<Infallible>(batches, c, target, |_, _| Ok(()))
+        }
+        (None, None) => rdy
             .store
             .take_fetched::<Infallible>(batches, target, |_, _| Ok(())),
     };
     match taken {
         Ok(t) => {
-            if t.frames > 0 {
+            if t.frames > 0 && chain_moved {
+                crate::stream_take::renew_after_removal(rdy, epoch);
+                rdy.publish_chain_moved()?;
+            } else if t.frames > 0 {
                 republish(rdy, epoch)?;
             }
             let warnings = rdy.read().uncovered_warnings()?;

@@ -405,6 +405,7 @@ fn take_and_strict() -> RdyError {
 }
 
 /// The selected remote's install and trust.
+#[derive(Clone)]
 pub(crate) struct Target {
     pub(crate) name: String,
     pub(crate) url: String,
@@ -785,7 +786,7 @@ impl<'a> SyncService<'a> {
 
     /// `e` with the settings' warnings, and with the account handle refreshed once when the hub
     /// refused the actor claim (as `rdy publish` does).
-    fn fail(&self, t: Option<&Target>, warnings: &[Issue], mut e: RdyError) -> RdyError {
+    pub(crate) fn fail(&self, t: Option<&Target>, warnings: &[Issue], mut e: RdyError) -> RdyError {
         if e.code == E_UPSTREAM_ACTOR_CLAIM
             && let Some(t) = t
         {
@@ -823,6 +824,19 @@ impl<'a> SyncService<'a> {
         guarded: bool,
         run: impl FnOnce(&Target) -> Result<T, RdyError>,
     ) -> Result<T, RdyError> {
+        let (target, _guard, warnings) = self.resolve_target(session, remote, guarded)?;
+        run(&target).map_err(|e| self.fail(Some(&target), &warnings, e))
+    }
+
+    /// Steps 1 to 3 without the run: the selected remote's target, its guard when `guarded`
+    /// (held by the caller for as long as its sync runs) and the settings' warnings. A history
+    /// fetch keeps all three across its steps ([`crate::history_fetch::HistoryFetch`]).
+    pub(crate) fn resolve_target(
+        &self,
+        session: &Session,
+        remote: Option<&str>,
+        guarded: bool,
+    ) -> Result<(Target, Option<RemoteGuard>, Vec<Issue>), RdyError> {
         // 1. the remote
         if let Some(name) = remote
             && !hub_config::is_remote_name(name)
@@ -843,7 +857,7 @@ impl<'a> SyncService<'a> {
         }
 
         // 2. one push or pull per remote
-        let _guard = if guarded {
+        let guard = if guarded {
             Some(RemoteGuard::take(&self.project, &remote.name)?)
         } else {
             None
@@ -870,7 +884,7 @@ impl<'a> SyncService<'a> {
             bound: first.claim,
             account: first.account,
         };
-        run(&target).map_err(|e| self.fail(Some(&target), &warnings, e))
+        Ok((target, guard, warnings))
     }
 
     /// A URL clone's steps 1 to 3 (D-D5J18): the remote `hub` at `url`, refused with
@@ -1025,6 +1039,9 @@ impl<'a> SyncService<'a> {
             engine.read().require_complete_history()?;
         }
         self.with_target(session, request.remote.as_deref(), |t| {
+            // the remote's incomplete history comes first, under this pull's own guard; the
+            // pull then reads the hub's state again (D-GGTYA)
+            crate::history_fetch::resume_under_guard(self, engine, session, t)?;
             self.pull_exchange(engine, session, t, &request)
         })
     }
@@ -1054,6 +1071,31 @@ impl<'a> SyncService<'a> {
         request: RestoreRequest,
     ) -> Result<RestoreOutcome, RdyError> {
         crate::sync_restore::restore(self, session, &request)
+    }
+
+    /// [`SyncService::restore`] entered from the project of `engine` (`push --restore`): while
+    /// that project's history is still arriving it is E_HISTORY_PENDING, before any capture,
+    /// put or write (D-4PV25's refusal matrix).
+    pub fn restore_from(
+        &self,
+        engine: &dyn Engine,
+        session: &Session,
+        request: RestoreRequest,
+    ) -> Result<RestoreOutcome, RdyError> {
+        engine.read().require_complete_history()?;
+        self.restore(session, request)
+    }
+
+    /// [`SyncService::restore_preview`] entered from the project of `engine`, refused as
+    /// [`SyncService::restore_from`] is while its history is still arriving.
+    pub fn restore_preview_from(
+        &self,
+        engine: &dyn Engine,
+        session: &Session,
+        request: RestoreRequest,
+    ) -> Result<CanonPreview, RdyError> {
+        engine.read().require_complete_history()?;
+        self.restore_preview(session, request)
     }
 
     /// What the restore of `request` would remove from hub canon (see [`CanonPreview`]): the
@@ -2023,30 +2065,9 @@ impl<'a> SyncService<'a> {
         let root_key = ObjectKey { kind, hash: root };
         // the known pages, in the hub's order; the keys this store holds stay home
         let mut want = Vec::new();
-        let mut seen = BTreeSet::new();
-        let mut after = None;
-        loop {
-            let cx = self.context(t, &read, Some(base_url))?;
-            let page = self.wire.known_pull(
-                &cx,
-                &KnownPull {
-                    after,
-                    base,
-                    purpose,
-                    root: root_key,
-                },
-            )?;
-            for k in page.keys {
-                if !seen.insert(k) {
-                    return Err(upstream_protocol());
-                }
-                if !reader.has_kind(k.kind, &k.hash).map_err(store)? {
-                    want.push(k);
-                }
-            }
-            match page.next {
-                None => break,
-                Some(n) => after = Some(n),
+        for k in self.known_listing(&read, t, base_url, purpose, root_key, base)? {
+            if !reader.has_kind(k.kind, &k.hash).map_err(store)? {
+                want.push(k);
             }
         }
         if want.is_empty() {
@@ -2095,82 +2116,7 @@ impl<'a> SyncService<'a> {
             write_steps(engine, &t.name, vec![step])?;
             return Ok(None);
         }
-        let per = usize::try_from(state.batch_records)
-            .unwrap_or(MAX_KNOWN_KEYS)
-            .clamp(1, MAX_KNOWN_KEYS);
-        // the groups to get (TASK-3869): the known step gives no record's bytes, so each new
-        // group is sized from the bytes per kind that the replies so far held (`GroupSizer`),
-        // within batch_records. A group whose reply still passes batch_bytes is split in two and
-        // its halves got in turn (`split`, last first), down to one key, which is refused.
-        let mut sizer = GroupSizer::new(state.batch_bytes, per);
-        let mut split: Vec<&[ObjectKey]> = Vec::new();
-        let mut rest: &[ObjectKey] = &want;
-        let mut files = Vec::new();
-        loop {
-            let keys = match split.pop() {
-                Some(k) => k,
-                None if rest.is_empty() => break,
-                None => {
-                    let (k, r) = rest.split_at(sizer.next(rest));
-                    rest = r;
-                    k
-                }
-            };
-            let mut file = tempfile::tempfile().map_err(|_| scratch_error())?;
-            let cx = self.context(t, &read, Some(base_url))?;
-            let request = GetRequest {
-                keys: keys.to_vec(),
-                purpose,
-                root: root_key,
-            };
-            let mut sink = Capped {
-                out: &mut file,
-                cap: state.batch_bytes,
-                bytes: 0,
-                over: false,
-            };
-            // one transport piece of room past the cap: a reply past it always shows its first
-            // byte past the cap to the sink before the transport stops it
-            let limit = state.batch_bytes.saturating_add(UPLOAD_BUFFER_BYTES as u64);
-            let got = self.wire.get(&cx, &request, &mut sink, limit);
-            let over = sink.over;
-            let written = sink.bytes;
-            drop(cx);
-            if over {
-                if keys.len() == 1 {
-                    return Err(upstream_protocol());
-                }
-                let (front, back) = keys.split_at(keys.len() / 2);
-                split.push(back);
-                split.push(front);
-                continue;
-            }
-            // a get that the hub refuses over its cap, with its structured marker, is split in
-            // two as a get over `batch_bytes` is; a refusal of one key, or without the marker,
-            // is the hub's error as it came
-            if let Err(e) = &got
-                && e.hub_get_cap.is_some()
-                && keys.len() > 1
-            {
-                let (front, back) = keys.split_at(keys.len() / 2);
-                split.push(back);
-                split.push(front);
-                continue;
-            }
-            got?;
-            // the one check of this reply: the take reuses it for these exact bytes
-            let mut records = Vec::new();
-            let checked =
-                crate::stream_check::check_batch_file(file, Some(repo_id), |kind, at, len| {
-                    records.push((kind, at, len))
-                })?;
-            sizer.taken(written, &records);
-            let header = &checked.report().header;
-            if header.purpose != purpose || header.root() != root_key {
-                return Err(upstream_protocol());
-            }
-            files.push(checked);
-        }
+        let files = self.get_all(&read, t, base_url, state, purpose, root_key, &want, repo_id)?;
         let target = FetchTarget {
             remote: t.name.clone(),
             url: t.url.clone(),
@@ -2184,6 +2130,292 @@ impl<'a> SyncService<'a> {
         })
         .map(Some)
     }
+
+    /// Every key of the known pull pages of `root` (purpose `purpose`, above `base`), in the
+    /// hub's order. A key a page repeats is the hub's protocol error.
+    pub(crate) fn known_listing(
+        &self,
+        read: &ReadState,
+        t: &Target,
+        base_url: &str,
+        purpose: StreamPurpose,
+        root: ObjectKey,
+        base: Option<ObjectKey>,
+    ) -> Result<Vec<ObjectKey>, RdyError> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut after = None;
+        loop {
+            let cx = self.context(t, read, Some(base_url))?;
+            let page = self.wire.known_pull(
+                &cx,
+                &KnownPull {
+                    after,
+                    base,
+                    purpose,
+                    root,
+                },
+            )?;
+            for k in page.keys {
+                if !seen.insert(k) {
+                    return Err(upstream_protocol());
+                }
+                out.push(k);
+            }
+            match page.next {
+                None => break,
+                Some(n) => after = Some(n),
+            }
+        }
+        known_listing_done();
+        Ok(out)
+    }
+
+    /// Gets the keys `want` of `root` (purpose `purpose`) in groups within the hub's limits,
+    /// each streamed to a scratch file and checked once (the take reuses that check).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_all(
+        &self,
+        read: &ReadState,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+        purpose: StreamPurpose,
+        root: ObjectKey,
+        want: &[ObjectKey],
+        repo_id: rdy_model::RepoId,
+    ) -> Result<Vec<crate::stream_check::CheckedBatchFile>, RdyError> {
+        self.get_all_with(
+            read,
+            t,
+            base_url,
+            state,
+            purpose,
+            root,
+            want,
+            &mut |file, written, sizer| check_got(file, repo_id, purpose, root, sizer, written),
+        )
+    }
+
+    /// [`Self::get_all`] with each reply's file and bytes passed to `got`, which checks it (and
+    /// teaches the sizer its records) or keeps it for a check of the files together.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_all_with<T>(
+        &self,
+        read: &ReadState,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+        purpose: StreamPurpose,
+        root: ObjectKey,
+        want: &[ObjectKey],
+        got: &mut dyn FnMut(std::fs::File, u64, &mut GroupSizer) -> Result<T, RdyError>,
+    ) -> Result<Vec<T>, RdyError> {
+        // the groups to get (TASK-3869): the known step gives no record's bytes, so each new
+        // group is sized from the bytes per kind that the replies so far held (`GroupSizer`),
+        // within batch_records. A group whose reply still passes batch_bytes is split in two and
+        // its halves got in turn (`split`, last first), down to one key, which is refused.
+        let mut sizer = GroupSizer::for_state(state);
+        let mut split: Vec<&[ObjectKey]> = Vec::new();
+        let mut rest: &[ObjectKey] = want;
+        let mut files = Vec::new();
+        loop {
+            let keys = match split.pop() {
+                Some(k) => k,
+                None if rest.is_empty() => break,
+                None => {
+                    let (k, r) = rest.split_at(sizer.next(rest));
+                    rest = r;
+                    k
+                }
+            };
+            let mut file = tempfile::tempfile().map_err(|_| scratch_error())?;
+            match self.get_one(read, t, base_url, state, purpose, root, keys, &mut file)? {
+                GetEnd::Split => {
+                    let (front, back) = keys.split_at(keys.len() / 2);
+                    split.push(back);
+                    split.push(front);
+                }
+                GetEnd::Got(written) => files.push(got(file, written, &mut sizer)?),
+            }
+        }
+        Ok(files)
+    }
+
+    /// One get of `keys` of `root` (purpose `purpose`) into `file`, within the hub's
+    /// `batch_bytes`. A reply past the cap, or the hub's refusal over its cap with the structured
+    /// marker, asks for a split when it holds two keys or more; one key past the cap is the
+    /// hub's protocol error, and any other refusal is the hub's error as it came.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_one(
+        &self,
+        read: &ReadState,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+        purpose: StreamPurpose,
+        root: ObjectKey,
+        keys: &[ObjectKey],
+        file: &mut std::fs::File,
+    ) -> Result<GetEnd, RdyError> {
+        let cx = self.context(t, read, Some(base_url))?;
+        let request = GetRequest {
+            keys: keys.to_vec(),
+            purpose,
+            root,
+        };
+        let mut sink = Capped {
+            out: file,
+            cap: state.batch_bytes,
+            bytes: 0,
+            over: false,
+        };
+        // one transport piece of room past the cap: a reply past it always shows its first
+        // byte past the cap to the sink before the transport stops it
+        let limit = state.batch_bytes.saturating_add(UPLOAD_BUFFER_BYTES as u64);
+        let got = self.wire.get(&cx, &request, &mut sink, limit);
+        let over = sink.over;
+        let written = sink.bytes;
+        drop(cx);
+        if over {
+            if keys.len() == 1 {
+                return Err(upstream_protocol());
+            }
+            return Ok(GetEnd::Split);
+        }
+        // a get that the hub refuses over its cap, with its structured marker, is split in
+        // two as a get over `batch_bytes` is; a refusal of one key, or without the marker,
+        // is the hub's error as it came
+        if let Err(e) = &got
+            && e.hub_get_cap.is_some()
+            && keys.len() > 1
+        {
+            return Ok(GetEnd::Split);
+        }
+        got?;
+        Ok(GetEnd::Got(written))
+    }
+
+    /// A URL clone's fetch of hub canon's state at the captured tip of `state` (D-GGTYA, O16):
+    /// the state's known pages and gets (purpose `canon_state`), then every canon history key
+    /// at the same tip, keys only, with no base, written as the one checked key file
+    /// (`.rdy/sync/<remote>/history/keys`) with its exact distinct count, and only then the
+    /// state take: one batch with the state's records, canon at the tip, the remote's canon
+    /// state, and the incomplete history ref naming that count.
+    pub(crate) fn clone_state(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+    ) -> Result<FetchOutcome, RdyError> {
+        let tip = state.canon.ok_or_else(upstream_protocol)?;
+        let hub_repo = state.repo_id.ok_or_else(upstream_protocol)?;
+        let read = engine.read();
+        let root = ObjectKey {
+            kind: kinds::LANDING,
+            hash: tip,
+        };
+        let mut want = Vec::new();
+        for k in self.known_listing(&read, t, base_url, StreamPurpose::CanonState, root, None)? {
+            if !read.reader().has_kind(k.kind, &k.hash).map_err(store)? {
+                want.push(k);
+            }
+        }
+        // the state's files are checked together (one header, the state's link table), then
+        // taken by the store, which checks each again
+        let mut files: Vec<std::fs::File> = self.get_all_with(
+            &read,
+            t,
+            base_url,
+            state,
+            StreamPurpose::CanonState,
+            root,
+            &want,
+            &mut |file, _, _| Ok(file),
+        )?;
+        let mut readers = Vec::with_capacity(files.len());
+        for f in &mut files {
+            use std::io::Seek as _;
+            f.seek(std::io::SeekFrom::Start(0))
+                .map_err(|_| scratch_error())?;
+        }
+        for f in &files {
+            readers.push(std::io::BufReader::new(f));
+        }
+        if !readers.is_empty() {
+            let reports = crate::stream_check::check_state_batches(readers, Some(hub_repo))?;
+            if reports.iter().any(|r| r.header.root() != root) {
+                return Err(upstream_protocol());
+            }
+        }
+        // the history's keys at the same tip, before the state take: the denominator of Ready
+        let keys =
+            self.known_listing(&read, t, base_url, StreamPurpose::CanonHistory, root, None)?;
+        let history = crate::history_fetch::write_key_file(
+            read.root(),
+            &t.name,
+            &t.url,
+            hub_repo,
+            tip,
+            keys,
+        )?;
+        drop(read);
+        let target = FetchTarget {
+            remote: t.name.clone(),
+            url: t.url.clone(),
+            purpose: StreamPurpose::CanonState,
+            root: tip,
+            view: None,
+        };
+        with_writer_result(engine, move |rdy| {
+            crate::sync_fetch::take_state(rdy, &files, &target, &history)
+        })
+    }
+}
+
+/// How one get ended: its reply's bytes in the file, or a split asked for.
+pub(crate) enum GetEnd {
+    Got(u64),
+    Split,
+}
+
+/// Checks the get reply in `file` (`written` bytes) once, as one batch of repo `repo_id` with
+/// purpose `purpose` and root `root`, and teaches `sizer` its records.
+pub(crate) fn check_got(
+    file: std::fs::File,
+    repo_id: rdy_model::RepoId,
+    purpose: StreamPurpose,
+    root: ObjectKey,
+    sizer: &mut GroupSizer,
+    written: u64,
+) -> Result<crate::stream_check::CheckedBatchFile, RdyError> {
+    let mut records = Vec::new();
+    let checked = crate::stream_check::check_batch_file(file, Some(repo_id), |kind, at, len| {
+        records.push((kind, at, len))
+    })?;
+    sizer.taken(written, &records);
+    let header = &checked.report().header;
+    if header.purpose != purpose || header.root() != root {
+        return Err(upstream_protocol());
+    }
+    Ok(checked)
+}
+
+thread_local! {
+    /// This thread's count of known listings that reached their final page.
+    static KNOWN_LISTINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn known_listing_done() {
+    KNOWN_LISTINGS.with(|c| c.set(c.get() + 1));
+}
+
+/// This thread's count of known listings that reached their final page so far. A test reads
+/// the difference over a call.
+#[doc(hidden)]
+pub fn known_listings_for_tests() -> u64 {
+    KNOWN_LISTINGS.with(std::cell::Cell::get)
 }
 
 /// The bytes that a fetch assumes for a key of a kind that no reply has shown yet: a fixed,
@@ -2207,7 +2439,7 @@ const FETCH_GROWTH: u64 = 4;
 /// records). A group takes keys in order while its estimate stays within `FETCH_FILL_FIFTHS` of
 /// `batch_bytes`, and within `FETCH_GROWTH` times the largest reply so far (a mean from a small
 /// sample runs low when later records of a kind grow): at least one key, at most `per`.
-struct GroupSizer {
+pub(crate) struct GroupSizer {
     target: u64,
     per: usize,
     kinds: std::collections::BTreeMap<u8, (u64, u64)>,
@@ -2217,6 +2449,14 @@ struct GroupSizer {
 }
 
 impl GroupSizer {
+    /// The sizer of the hub limits that `state` names.
+    pub(crate) fn for_state(state: &SyncState) -> GroupSizer {
+        let per = usize::try_from(state.batch_records)
+            .unwrap_or(MAX_KNOWN_KEYS)
+            .clamp(1, MAX_KNOWN_KEYS);
+        GroupSizer::new(state.batch_bytes, per)
+    }
+
     fn new(batch_bytes: u64, per: usize) -> GroupSizer {
         GroupSizer {
             target: batch_bytes / 5 * FETCH_FILL_FIFTHS,
@@ -2237,7 +2477,7 @@ impl GroupSizer {
     }
 
     /// How many of `rest`'s first keys the next group takes.
-    fn next(&self, rest: &[ObjectKey]) -> usize {
+    pub(crate) fn next(&self, rest: &[ObjectKey]) -> usize {
         let target = match self.largest {
             0 => self.target,
             l => self.target.min(l.saturating_mul(FETCH_GROWTH)),
@@ -2256,7 +2496,7 @@ impl GroupSizer {
 
     /// A reply within the limit: `bytes` in all, holding `records`, each `(kind, frame start,
     /// payload bytes)` in stream order.
-    fn taken(&mut self, bytes: u64, records: &[(u8, u64, u64)]) {
+    pub(crate) fn taken(&mut self, bytes: u64, records: &[(u8, u64, u64)]) {
         for pair in records.windows(2) {
             let gap = pair[1]
                 .1

@@ -295,6 +295,23 @@ impl Engine for DaemonEngine {
         self.0.open_report.clone()
     }
 
+    /// The URL clone at `dir` hands its history to that project's own daemon (O17): started or
+    /// woken through the existing connect and start steps, never this daemon's writer. True
+    /// once that daemon answered a session and a ping: its startup scan took the history over,
+    /// and it fetches it between calls (`crate::history_fetch`).
+    fn continue_clone_history(
+        &self,
+        dir: &std::path::Path,
+        session: &Session,
+    ) -> Result<bool, RdyError> {
+        let version = self
+            .0
+            .identity
+            .get()
+            .map_or(env!("CARGO_PKG_VERSION"), |(v, _)| v.as_str());
+        crate::history_fetch::hand_off(dir, session, version)
+    }
+
     fn root(&self) -> PathBuf {
         self.0.root.clone()
     }

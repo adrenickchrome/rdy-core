@@ -233,7 +233,7 @@ pub(crate) fn republish(rdy: &mut Rdy, epoch: u64) -> Result<(), RdyError> {
 
 /// Starts the shared caches over when the redaction epoch moved past `epoch`, or a removal is
 /// sealed and its erasure unfinished. The next publish then builds nothing from the old epoch.
-fn renew_after_removal(rdy: &mut Rdy, epoch: u64) {
+pub(crate) fn renew_after_removal(rdy: &mut Rdy, epoch: u64) {
     let pending = rdy.store.reader().check_redaction_epoch().is_err();
     if pending || rdy.store.redaction_epoch() != epoch {
         rdy.renew_epoch_caches();

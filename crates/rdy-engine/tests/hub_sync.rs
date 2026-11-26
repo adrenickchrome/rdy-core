@@ -4397,3 +4397,538 @@ fn r59016_busy_held_and_refused_are_terminal() {
     assert_eq!((asks(&hub).len(), poll.seconds()), (2, vec![1]));
     assert_eq!(hub.writes().len(), 1);
 }
+
+// ---- URL clone: the tip ready first, then the checked history (D-GGTYA, D-4PV25, O16, O17) ----
+
+/// A hub serving `e`'s project with canon at its last landing, `page` keys a known page, and
+/// the canon tip's state (stream format 5) when `state`.
+fn clone_hub(e: &Env, state: bool, page: usize) -> Hub {
+    let hub = Hub::new();
+    hub.serve(e.engine.read());
+    hub.state.lock().unwrap().canon = Some(*e.landings.last().unwrap());
+    *hub.page.lock().unwrap() = page;
+    if state {
+        hub.send_canon_state();
+    }
+    hub
+}
+
+/// The URL clone of `e`'s hub repo into `dest` over `hub`, returned at Ready.
+fn clone_ready(
+    e: &Env,
+    hub: &Hub,
+    dest: &std::path::Path,
+) -> Result<rdy_engine::clone::UrlCloneSummary, RdyError> {
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    rdy_engine::clone::clone_url_via(
+        &writer(),
+        &e.url,
+        dest,
+        &e.user_file,
+        &api,
+        &clock,
+        hub,
+        None,
+    )
+}
+
+/// The foreground continuation of the ready clone `s` over `hub`; `steps` collects each step's
+/// progress.
+fn continue_clone(
+    e: &Env,
+    hub: &Hub,
+    s: rdy_engine::clone::UrlCloneSummary,
+    steps: &mut Vec<rdy_engine::partial_history::HistoryProgress>,
+) -> rdy_engine::clone::UrlCloneSummary {
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    rdy_engine::clone::continue_history(
+        &writer(),
+        s,
+        &e.user_file,
+        &api,
+        &clock,
+        hub,
+        &mut |_| {},
+        &mut |p| steps.push(*p),
+    )
+}
+
+/// Each known pull and get the hub served, in order, with its purpose.
+fn wire_order(hub: &Hub) -> Vec<(&'static str, StreamPurpose)> {
+    let pulls = hub.pulls.lock().unwrap().clone();
+    let gets = hub.gets.lock().unwrap().clone();
+    let (mut p, mut g) = (pulls.iter(), gets.iter());
+    let mut out = Vec::new();
+    for c in hub.calls() {
+        match c.step {
+            "known_pull" => out.push(("known_pull", p.next().unwrap().purpose)),
+            "get" => {
+                // a failed get is entered but never recorded
+                if let Some(r) = g.next() {
+                    out.push(("get", r.purpose));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The canon history keys the hub got for `gets`.
+fn got_history(gets: &[GetRequest]) -> BTreeSet<ObjectKey> {
+    gets.iter()
+        .filter(|g| g.purpose == StreamPurpose::CanonHistory)
+        .flat_map(|g| g.keys.iter().copied())
+        .collect()
+}
+
+fn hub_gets(hub: &Hub) -> Vec<GetRequest> {
+    hub.gets.lock().unwrap().clone()
+}
+
+/// The history ref of the project at `dir`.
+fn history_ref(dir: &std::path::Path, remote: &str) -> rdy_store::sync_state::SyncHistory {
+    let engine = Local::open(dir).unwrap();
+    let h = engine
+        .read()
+        .reader()
+        .sync_history(remote)
+        .unwrap()
+        .unwrap();
+    engine.close().unwrap();
+    h
+}
+
+/// O16: every canon history key at the captured tip is listed (known reaches its last page)
+/// before the state take; the checked list's exact distinct count is Ready's denominator. A
+/// resume makes no known call and gets only the keys still missing. The history ref is written
+/// twice: at install (complete false) and at completion; no step writes progress.
+#[test]
+fn r59019_key_list_precedes_ready_and_survives_resume() {
+    let e = env(4);
+    let hub = clone_hub(&e, true, 2);
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    assert!(want.len() > 4, "{}", want.len());
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    // at Ready: the history listing ran to its end, base none at the captured tip, and no
+    // history record was got
+    let order = wire_order(&hub);
+    let history_pulls: Vec<KnownPull> = hub
+        .pulls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.purpose == StreamPurpose::CanonHistory)
+        .cloned()
+        .collect();
+    assert_eq!(history_pulls.len(), want.len().div_ceil(2), "{order:?}");
+    for p in &history_pulls {
+        assert_eq!((p.base, p.root), (None, landing(tip)));
+    }
+    assert!(
+        !order
+            .iter()
+            .any(|(s, p)| *s == "get" && *p == StreamPurpose::CanonHistory),
+        "{order:?}"
+    );
+    let p = s.history.expect("a ready clone's progress");
+    assert_eq!((p.total, p.complete), (want.len() as u64, false));
+    assert!(p.held < p.total, "{p:?}");
+    assert_eq!(
+        s.ready_text().unwrap(),
+        format!(
+            "ready: work in {} now; history arriving: {} of {} records",
+            s.project, p.held, p.total
+        )
+    );
+    assert!(s.notes.is_empty(), "{:?}", s.notes);
+    let installed = history_ref(&dest, &s.remote);
+    assert_eq!((installed.complete, installed.records), (false, p.total));
+    // a continuation that stops at its second get keeps the ready project and warns
+    hub.clear();
+    hub.gets.lock().unwrap().clear();
+    hub.pulls.lock().unwrap().clear();
+    // gets of at most two records each; the third fails
+    hub.state.lock().unwrap().batch_records = 2;
+    hub.fail_at("get", 3, hub_not_found());
+    let mut steps = Vec::new();
+    let mut stopped = continue_clone(&e, &hub, s, &mut steps);
+    assert_eq!(stopped.warnings.len(), 1, "{:?}", stopped.warnings);
+    assert_eq!(stopped.warnings[0].code, "E_HUB_NOT_FOUND");
+    assert!(
+        hub.pulls.lock().unwrap().is_empty(),
+        "a resume lists no key"
+    );
+    let first = got_history(&hub_gets(&hub));
+    assert!(!first.is_empty());
+    assert_eq!(history_ref(&dest, &stopped.remote), installed);
+    // the resume: no known call, only missing keys, then complete
+    hub.clear();
+    hub.gets.lock().unwrap().clear();
+    hub.fail.lock().unwrap().clear();
+    stopped.warnings.clear();
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, stopped, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    assert!(
+        hub.pulls.lock().unwrap().is_empty(),
+        "a resume lists no key"
+    );
+    let second = got_history(&hub_gets(&hub));
+    assert!(first.is_disjoint(&second), "{first:?} {second:?}");
+    let all: BTreeSet<ObjectKey> = first.union(&second).copied().collect();
+    assert!(all.is_subset(&want));
+    let p = done.history.unwrap();
+    assert_eq!(
+        (p.held, p.total, p.complete),
+        (p.total, want.len() as u64, true)
+    );
+    let completed = history_ref(&dest, &done.remote);
+    assert!(completed.complete);
+    assert_eq!(
+        (completed.frontier, completed.records, completed.repo_id),
+        (installed.frontier, installed.records, installed.repo_id)
+    );
+    // every step's progress came back from the steps, none was stored
+    assert!(
+        steps.windows(2).all(|w| w[0].held <= w[1].held),
+        "{steps:?}"
+    );
+    let engine = Local::open(&dest).unwrap();
+    let read = engine.read();
+    for k in &want {
+        assert!(read.reader().has_kind(k.kind, &k.hash).unwrap(), "{k:?}");
+    }
+    assert!(read.require_complete_history().is_ok());
+    drop(read);
+    engine.close().unwrap();
+}
+
+/// A13: a restore entered from a project whose history is still arriving is E_HISTORY_PENDING
+/// with the exact message and fix, before any capture, put or write.
+#[test]
+fn r59019_restore_refuses_while_history_pending() {
+    let e = env(3);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let p = s.history.unwrap();
+    assert!(!p.complete);
+    let dump = dump_of(&e.engine, dir.path(), "full.rdydump");
+    let engine = Local::open(&dest).unwrap();
+    hub.clear();
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    let renderer = Renderer::default();
+    let scratch = private_dir();
+    let service = SyncService::new(&dest, &e.user_file, &api, &clock, &hub, &renderer)
+        .scratch_in(scratch.path());
+    let request = || RestoreRequest {
+        dump: vec![dump.clone()],
+        remote: None,
+    };
+    for x in [
+        err(service.restore_from(&engine, &agent(), request())),
+        err(service.restore_preview_from(&engine, &agent(), request())),
+    ] {
+        assert_eq!(x.code, E_HISTORY_PENDING);
+        assert_eq!(
+            x.message,
+            rdy_engine::partial_history::history_pending_message(p.held, p.total)
+        );
+        assert_eq!(x.fix, rdy_engine::partial_history::HISTORY_PENDING_FIX);
+    }
+    assert!(hub.calls().is_empty(), "{:?}", hub.steps());
+    assert!(renderer.scopes.lock().unwrap().is_empty());
+    engine.close().unwrap();
+}
+
+/// D-GGTYA: a ready clone takes reads, writes and landings under their ordinary gates before
+/// any history record arrives; the completion keeps that local work.
+#[test]
+fn r59018_ready_allows_work_before_history() {
+    let e = env(3);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    assert!(s.history_pending());
+    let engine = Local::open(&dest).unwrap();
+    write_in(&engine, "draft", "local-draft");
+    let local = land_in(&engine, "local-landed");
+    let draft = view_head_of(&engine, "draft");
+    engine.close().unwrap();
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, s, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    assert!(done.history.unwrap().complete);
+    let engine = Local::open(&dest).unwrap();
+    let read = engine.read();
+    assert_eq!(read.canon_head(), Some(local));
+    drop(read);
+    assert_eq!(view_head_of(&engine, "draft"), draft);
+    engine.close().unwrap();
+}
+
+/// The head of view `name` in `engine`'s project.
+fn view_head_of(engine: &Local, name: &str) -> Hash {
+    engine.read().view_head(name).unwrap().head
+}
+
+/// An older hub (no format 5): the clone takes the whole history before it is ready, with the
+/// exact note. A hub that advertises format 5 and sends a bad state batch is an error, never a
+/// retry as an older hub, and leaves no project.
+#[test]
+fn r59018_old_hub_fallback_and_settings_stay_exact() {
+    let e = env(3);
+    let hub = clone_hub(&e, false, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    assert_eq!(
+        s.notes,
+        vec!["this hub sends history only; the clone waits for all of it".to_string()]
+    );
+    assert!(!s.history_pending());
+    assert_eq!(s.ready_text(), None);
+    assert!(
+        hub.pulls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| p.purpose != StreamPurpose::CanonState)
+    );
+    // a bad format-5 reply
+    let bad = clone_hub(&e, true, 100);
+    *bad.get_bytes.lock().unwrap() = Some(b"not a batch".to_vec());
+    let dest = dir.path().join("bad");
+    let x = err(clone_ready(&e, &bad, &dest));
+    assert_ne!(x.code, "", "{x:?}");
+    let gets = hub_gets(&bad);
+    assert_eq!(gets.len(), 1, "{gets:?}");
+    assert_eq!(gets[0].purpose, StreamPurpose::CanonState);
+    assert!(
+        bad.pulls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| p.purpose == StreamPurpose::CanonState),
+        "no fallback to the history"
+    );
+    assert!(!dest.join(".rdy").exists());
+}
+
+/// One "process" of the history fetch of the clone at `dest`: opens it, begins the fetch and
+/// runs steps until one is complete or `stop` says so after it, then drops the fetch and closes
+/// the project, as a crash leaves it. Returns the last step and the gets it made.
+fn fetch_until(
+    e: &Env,
+    hub: &Hub,
+    dest: &std::path::Path,
+    remote: &str,
+    stop: &dyn Fn(&rdy_engine::history_fetch::HistoryFetchStep) -> bool,
+) -> (rdy_engine::history_fetch::HistoryFetchStep, usize) {
+    use rdy_engine::history_fetch::HistoryFetchStep;
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    let renderer = Renderer::default();
+    let engine = Local::open(dest).unwrap();
+    let service = SyncService::new(dest, &e.user_file, &api, &clock, hub, &renderer);
+    let before = hub_gets(hub).len();
+    let mut fetch = service.begin_history(&engine, &writer(), remote).unwrap();
+    let last = loop {
+        let st = service
+            .resume_history_step(&engine, &writer(), &mut fetch)
+            .unwrap();
+        if matches!(st, HistoryFetchStep::Complete(_)) || stop(&st) {
+            break st;
+        }
+    };
+    drop(fetch);
+    engine.close().unwrap();
+    (last, hub_gets(hub).len() - before)
+}
+
+/// The keys of the staged batch file `path`.
+fn staged_keys(path: &std::path::Path) -> Vec<ObjectKey> {
+    let bytes = std::fs::read(path).unwrap();
+    rdy_store::sync_stream::check_batch(&bytes[..])
+        .unwrap()
+        .keys
+}
+
+/// Whether the project at `dest` holds every key of `keys`.
+fn holds_all(dest: &std::path::Path, keys: &BTreeSet<ObjectKey>) -> bool {
+    let engine = Local::open(dest).unwrap();
+    let read = engine.read();
+    let all = keys
+        .iter()
+        .all(|k| read.reader().has_kind(k.kind, &k.hash).unwrap());
+    drop(read);
+    engine.close().unwrap();
+    all
+}
+
+/// D-KE83X: a fetch cut after each checked file keeps the files; the next one gets only the
+/// keys no kept file holds. A kept file that changed is refused and its keys got again; a
+/// `.part` is removed. A hub that moved on and local landings made meanwhile change nothing of
+/// the frontier being completed, and the local work stays.
+#[test]
+fn r59018_resume_keeps_checked_files_and_local_work() {
+    use rdy_engine::history_fetch::{HistoryFetchStep, staged_batches_for_tests};
+    let e = env(5);
+    let hub = clone_hub(&e, true, 100);
+    hub.state.lock().unwrap().batch_records = 2;
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let installed = history_ref(&dest, &s.remote);
+    // two cuts, each after one checked file
+    let one = |_: &HistoryFetchStep| true;
+    for n in 1..=2 {
+        let (st, gets) = fetch_until(&e, &hub, &dest, &s.remote, &one);
+        assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+        assert_eq!(gets, 1);
+        assert_eq!(staged_batches_for_tests(&dest, &s.remote).len(), n);
+    }
+    let staged = staged_batches_for_tests(&dest, &s.remote);
+    let kept = staged_keys(&staged[0]);
+    let changed = staged_keys(&staged[1]);
+    // the second file changes; a .part is left behind
+    let mut bytes = std::fs::read(&staged[1]).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    std::fs::write(&staged[1], &bytes).unwrap();
+    let part = staged[1].with_extension("part");
+    std::fs::write(&part, b"half a reply").unwrap();
+    // the hub moves on; the clone lands work of its own
+    let (_hub_dir, hub_store) = copy_project(&e);
+    let later = land_in(&hub_store, "later");
+    hub.serve(hub_store.read());
+    hub.state.lock().unwrap().canon = Some(later);
+    let engine = Local::open(&dest).unwrap();
+    let local = land_in(&engine, "local");
+    engine.close().unwrap();
+    hub.gets.lock().unwrap().clear();
+    let (st, _) = fetch_until(&e, &hub, &dest, &s.remote, &|_| false);
+    assert!(matches!(st, HistoryFetchStep::Complete(_)), "{st:?}");
+    let got = got_history(&hub_gets(&hub));
+    assert!(
+        kept.iter().all(|k| !got.contains(k)),
+        "a kept file is not got again"
+    );
+    assert!(
+        changed.iter().all(|k| got.contains(k)),
+        "a changed file is got again"
+    );
+    assert!(!part.exists());
+    assert!(staged_batches_for_tests(&dest, &s.remote).is_empty());
+    let done = history_ref(&dest, &s.remote);
+    assert!(done.complete);
+    assert_eq!(
+        (done.frontier, done.records),
+        (installed.frontier, installed.records)
+    );
+    assert!(holds_all(&dest, &want));
+    let engine = Local::open(&dest).unwrap();
+    assert_eq!(engine.read().canon_head(), Some(local));
+    let landed = engine
+        .read()
+        .reader()
+        .has_kind(kinds::LANDING, &later)
+        .unwrap();
+    assert!(!landed, "the hub's move is the next pull's");
+    engine.close().unwrap();
+}
+
+/// A cut at each phase: before the take, after the take and before the full check, after the
+/// check and before the completion, and after the completion before the cleanup. Each reopen
+/// picks the right phase: no get once every key is staged, no second take, and complete stays
+/// false until a full check passed.
+#[test]
+fn r59018_completion_crash_never_claims_missing_history() {
+    use rdy_engine::history_fetch::{HistoryFetchStep, staged_batches_for_tests};
+    let e = env(4);
+    let hub = clone_hub(&e, true, 100);
+    hub.state.lock().unwrap().batch_records = 2;
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let total = s.history.unwrap().total;
+    let remote = s.remote.clone();
+    // every key staged, the take not yet run
+    let staged_all = |st: &HistoryFetchStep| st.progress().held == total;
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &staged_all);
+    assert!(
+        matches!(st, HistoryFetchStep::More(_)) && gets > 1,
+        "{st:?}"
+    );
+    assert!(!holds_all(&dest, &want));
+    assert!(!history_ref(&dest, &remote).complete);
+    let files = staged_batches_for_tests(&dest, &remote);
+    assert!(!files.is_empty());
+    let saved = std::fs::read(&files[0]).unwrap();
+    let one = |_: &HistoryFetchStep| true;
+    // the take, then a cut
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &one);
+    assert_eq!(
+        (st, gets),
+        (
+            HistoryFetchStep::More(rdy_engine::partial_history::HistoryProgress {
+                frontier: tip,
+                complete: false,
+                held: total,
+                total,
+            }),
+            0
+        )
+    );
+    assert!(holds_all(&dest, &want));
+    assert!(!history_ref(&dest, &remote).complete);
+    // the full check, then a cut: still not complete
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &one);
+    assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+    assert_eq!(gets, 0);
+    assert!(!history_ref(&dest, &remote).complete);
+    // a passing check is not stored: the next process checks again before the completion
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &one);
+    assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+    assert_eq!(gets, 0);
+    assert!(!history_ref(&dest, &remote).complete);
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &|_| false);
+    assert!(matches!(st, HistoryFetchStep::Complete(_)), "{st:?}");
+    assert_eq!(gets, 0);
+    let done = history_ref(&dest, &remote);
+    assert!(done.complete);
+    assert!(staged_batches_for_tests(&dest, &remote).is_empty());
+    // a cut after the completion and before the cleanup: the next fetch only cleans up
+    std::fs::write(&files[0], &saved).unwrap();
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &one);
+    assert!(matches!(st, HistoryFetchStep::Complete(_)), "{st:?}");
+    assert_eq!(gets, 0);
+    assert!(!files[0].exists());
+    assert_eq!(history_ref(&dest, &remote), done);
+    let engine = Local::open(&dest).unwrap();
+    assert!(engine.read().require_complete_history().is_ok());
+    engine.inspect(Rdy::fsck_full).unwrap();
+    engine.close().unwrap();
+}

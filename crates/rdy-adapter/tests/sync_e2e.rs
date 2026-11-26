@@ -2001,6 +2001,19 @@ fn r59011_seed_clone_and_old_peers_preserve_history() {
         };
         assert!(ok, "{case}: clone {v}");
         assert_eq!(hub.prepared(), 1, "{case}: one first-pull closure");
+        if matches!(way, Way::CliPushMcpClone) {
+            // an MCP clone returns at Ready and hands its history to the clone's own daemon
+            // (O17): stop it, then finish the history in this process before reading the store
+            let at = target.to_str().unwrap();
+            let _ = c
+                .command(&target, &["--project", at, "serve", "--stop"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let (ok, v) =
+                run_json(c.command(&target, &["--project", at, "--no-daemon", "--json", "pull"]));
+            assert!(ok, "{case}: the pull that finishes the history {v}");
+        }
         assert_eq!(held_at(&target), source, "{case}: the clone");
         let gets: Vec<mock::Served> = hub
             .served()

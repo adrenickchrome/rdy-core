@@ -10,6 +10,7 @@ use super::*;
 use rdy_engine::RdyError;
 use rdy_engine::clone::{CloneSource, at_needs_fork, clone_at, clone_url, url_fork};
 use rdy_engine::config_levels::user_file_from_env;
+use rdy_engine::history_fetch::PAUSED_NOTE;
 use rdy_engine::hub_credentials::require_user_file;
 use serde::Deserialize;
 use serde_json::Value;
@@ -33,7 +34,20 @@ pub(super) fn clone(cx: &OpContext, a: CloneArgs) -> Result<Value, RdyError> {
             return Err(url_fork());
         }
         let user_file = require_user_file(user_file_from_env())?;
-        let summary = clone_url(cx.session, url, &resolve_path(cx.cwd, &a.dir), &user_file)?;
+        let dir = resolve_path(cx.cwd, &a.dir);
+        let mut summary = clone_url(cx.session, url, &dir, &user_file)?;
+        // the history goes on in the new project's own daemon, between calls (O17)
+        if summary.history_pending() {
+            let project = std::path::PathBuf::from(&summary.project);
+            match cx.engine.continue_clone_history(&project, cx.session) {
+                Ok(true) => {}
+                Ok(false) => summary.notes.push(PAUSED_NOTE.to_string()),
+                Err(e) => {
+                    summary.warn(&e);
+                    summary.notes.push(PAUSED_NOTE.to_string());
+                }
+            }
+        }
         return Ok(to_json(&summary));
     }
     let st = cx.engine.read();

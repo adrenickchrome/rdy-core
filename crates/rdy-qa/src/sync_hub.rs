@@ -202,6 +202,10 @@ pub struct Repo {
     /// A perf-mode hub's last history closure, by purpose and root: every get of one pull walks
     /// the same history, so it is walked once. A new served project clears it.
     closure: Option<(String, Hash, Arc<Vec<ObjectKey>>)>,
+    /// When set, the state reply lists stream format 5 and known and get of purpose
+    /// `canon_state` serve the canon tip's state (D-GGTYA), prepared once for its root.
+    pub canon_state: bool,
+    prepared: Option<Arc<rdy_engine::canon_state_export::PreparedCanonState>>,
 }
 
 pub struct Shared {
@@ -297,6 +301,13 @@ impl Hub {
         let mut repo = self.shared.repo.lock().unwrap();
         repo.store = Some(read);
         repo.closure = None;
+        repo.prepared = None;
+    }
+
+    /// The hub sends a canon tip's state (stream format 5): a clone from it is ready before
+    /// its history arrives.
+    pub fn send_canon_state(&self) {
+        self.shared.repo.lock().unwrap().canon_state = true;
     }
 
     /// The settings step replies with `body`.
@@ -635,6 +646,23 @@ fn key_json(kind: u8, hash: &str) -> Value {
     json!({"hash": hash, "kind": kind})
 }
 
+/// The canon state at `root` of the served project, prepared on its first use.
+fn prepared_state(
+    repo: &mut Repo,
+    read: &Arc<ReadState>,
+    root: Hash,
+) -> Result<Arc<rdy_engine::canon_state_export::PreparedCanonState>, rdy_engine::RdyError> {
+    if let Some(p) = repo.prepared.as_ref().filter(|p| p.root() == root) {
+        return Ok(Arc::clone(p));
+    }
+    let p = Arc::new(rdy_engine::canon_state_export::PreparedCanonState::new(
+        Arc::clone(read),
+        root,
+    )?);
+    repo.prepared = Some(Arc::clone(&p));
+    Ok(p)
+}
+
 fn purpose_of(name: &str) -> StreamPurpose {
     match name {
         "view_history" => StreamPurpose::ViewHistory,
@@ -725,9 +753,14 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
                     }
                 })
                 .collect();
+            let streams = if repo.canon_state {
+                json!([2, 4, 5])
+            } else {
+                json!([2, 4])
+            };
             let mut state = json!({"canon": repo.canon.as_deref().map(|h| key_json(LANDING, h)),
                 "repo_id": repo.repo_id, "rdy": r["rdy"],
-                "stream_read": [2, 4], "stream_write": [2, 4], "features": [],
+                "stream_read": streams, "stream_write": streams, "features": [],
                 "min_rdy": repo.min_rdy, "batch_bytes": BATCH_BYTES,
                 "batch_records": 100_000, "quarantine_seconds": 86_400,
                 "profile": null, "audience": null, "artifact_bytes": 1_073_741_824u64,
@@ -766,6 +799,25 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
                 .ok()
                 .filter(|b| read.reader().has_kind(b.kind, &b.hash).unwrap_or(false))
                 .map(|b| b.hash);
+            if r["purpose"] == "canon_state" {
+                let after = serde_json::from_value::<ObjectKey>(r["after"].clone()).ok();
+                return Some(
+                    match prepared_state(&mut repo, &read, root.hash)
+                        .and_then(|p| p.page(after, rdy_engine::history_facts::MAX_KEYS))
+                    {
+                        Ok(page) => {
+                            let keys: Vec<Value> = page
+                                .keys
+                                .iter()
+                                .map(|k| key_json(k.kind, &k.hash.to_string()))
+                                .collect();
+                            let next = page.next.map(|k| key_json(k.kind, &k.hash.to_string()));
+                            reply(200, &json!({"keys": keys, "next": next}))
+                        }
+                        Err(e) => hub_error(422, "E_BAD_INPUT", &e.message, &e.fix),
+                    },
+                );
+            }
             let purpose = purpose_of(r["purpose"].as_str().unwrap_or("canon_history"));
             let all = history_of(&mut repo, shared.capture, &read, purpose, root.hash, base);
             if shared.capture == Capture::Perf {
@@ -820,6 +872,23 @@ fn answer(req: &Req, shared: &Shared) -> Option<Vec<u8>> {
             let r = req.json();
             let read = repo.store.clone()?;
             let root: ObjectKey = serde_json::from_value(r["root"].clone()).ok()?;
+            if r["purpose"] == "canon_state" {
+                let keys: Vec<ObjectKey> = r["keys"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|k| serde_json::from_value(k.clone()).ok())
+                    .collect();
+                let mut out = Vec::new();
+                return Some(
+                    match prepared_state(&mut repo, &read, root.hash)
+                        .and_then(|p| p.write_keys(&keys, &mut out).map(drop))
+                    {
+                        Ok(()) => reply_bytes(200, "application/octet-stream", &out),
+                        Err(e) => hub_error(422, "E_BAD_INPUT", &e.message, &e.fix),
+                    },
+                );
+            }
             let purpose = purpose_of(r["purpose"].as_str().unwrap_or("canon_history"));
             if shared.capture == Capture::Perf {
                 // exactly the named records, as a hub's get reads them; a landing and its

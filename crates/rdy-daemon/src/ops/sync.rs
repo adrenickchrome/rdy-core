@@ -166,7 +166,7 @@ impl SyncWire for LazyWire<'_> {
 }
 
 /// Runs `f` with the sync coordinator of the project at `root`.
-fn with_service<T>(
+pub(crate) fn with_service<T>(
     root: &Path,
     f: impl FnOnce(&SyncService<'_>) -> Result<T, RdyError>,
 ) -> Result<T, RdyError> {
@@ -356,13 +356,15 @@ pub(crate) fn push(
             dump: vec![root.join(dump)],
             remote: inputs.remote.clone(),
         };
+        // entered from this project: refused while its history is still arriving, before the
+        // preview reads the dump or the hub
         return with_service(root, |s| {
-            let preview = s.restore_preview(session, request.clone())?;
+            let preview = s.restore_preview_from(engine, session, request.clone())?;
             match card_step(who, &relay, Move::Restore, &preview)? {
                 Step::Card(v) | Step::Cancelled(v) => return Ok(v),
                 Step::Go => {}
             }
-            Ok(restore_json(&s.restore(session, request)?))
+            Ok(restore_json(&s.restore_from(engine, session, request)?))
         });
     }
     let request = PushRequest {

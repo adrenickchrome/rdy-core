@@ -217,8 +217,26 @@ fn clone_url(
         run.as_deref(),
         rdy_model::Role::Reader,
     )?;
+    use std::io::Write as _;
     let url = source.to_string_lossy();
-    let s = rdy_engine::clone::clone_url(&session, &url, dir, &user_file)?;
+    // O17: the CLI fetches the history in the foreground once the clone is ready; the ready
+    // line and each step's progress go to stderr, flushed before the first history get, and
+    // the reply stays one final object
+    let mut ready = |s: &rdy_engine::clone::UrlCloneSummary| {
+        if let Some(line) = s.ready_text() {
+            let mut err = std::io::stderr().lock();
+            let _ = writeln!(err, "{line}");
+            let _ = err.flush();
+        }
+    };
+    let mut step = |p: &rdy_engine::partial_history::HistoryProgress| {
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(err, "history: {} of {} records", p.held, p.total);
+        let _ = err.flush();
+    };
+    let s = rdy_engine::clone::clone_url_with_steps(
+        &session, &url, dir, &user_file, &mut ready, &mut step,
+    )?;
     let mut t = format!(
         "cloned hub repo {} into {}: {} landings, {} versions, canon at {}; fsck ok\nremote {}: share, {}\nrepo id: {}\nsettings from the hub: {}\nsettings at their defaults: {}",
         s.url,
@@ -232,6 +250,17 @@ fn clone_url(
         list(&s.settings.hub),
         list(&s.settings.defaults),
     );
+    if let Some(h) = &s.history {
+        t.push_str(&format!(
+            "\nhistory: {} of {} records{}",
+            h.held,
+            h.total,
+            if h.complete { ", complete" } else { "" }
+        ));
+    }
+    for n in &s.notes {
+        t.push_str(&format!("\nnote: {n}"));
+    }
     for w in &s.warnings {
         t.push_str(&format!("\n{}: {}\nfix: {}", w.code, w.message, w.fix));
     }

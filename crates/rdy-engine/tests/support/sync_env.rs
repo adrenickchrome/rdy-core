@@ -386,6 +386,8 @@ pub struct Hub {
     pub dumps: Mutex<BTreeMap<String, Vec<u8>>>,
     /// The id of each dump step, in order.
     pub dump_ids: Mutex<Vec<String>>,
+    /// The canon state the hub serves (stream format 5), prepared once for its root.
+    pub canon_state: Mutex<Option<Arc<rdy_engine::canon_state_export::PreparedCanonState>>>,
 }
 
 pub fn base_state() -> PublishState {
@@ -419,6 +421,7 @@ impl Hub {
             fail: Mutex::default(),
             hook: Mutex::default(),
             each: Mutex::default(),
+            canon_state: Mutex::default(),
             calls: Mutex::default(),
             puts: Mutex::default(),
             roots: Mutex::default(),
@@ -488,6 +491,30 @@ impl Hub {
     pub fn serve(&self, read: Arc<ReadState>) {
         self.state.lock().unwrap().repo_id = read.reader().repo_id().unwrap();
         *self.store.lock().unwrap() = Some(read);
+    }
+
+    /// Makes the hub send a canon tip's state (stream format 5) of what it serves.
+    pub fn send_canon_state(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.stream_read = vec![2, 4, 5];
+        st.stream_write = vec![2, 4, 5];
+    }
+
+    /// The canon state at `root` the hub serves, prepared on its first use.
+    pub fn prepared_state(
+        &self,
+        root: Hash,
+    ) -> Result<Arc<rdy_engine::canon_state_export::PreparedCanonState>, RdyError> {
+        let mut slot = self.canon_state.lock().unwrap();
+        if let Some(p) = slot.as_ref().filter(|p| p.root() == root) {
+            return Ok(Arc::clone(p));
+        }
+        let read = self.store.lock().unwrap().clone().expect("a hub store");
+        let p = Arc::new(rdy_engine::canon_state_export::PreparedCanonState::new(
+            read, root,
+        )?);
+        *slot = Some(Arc::clone(&p));
+        Ok(p)
     }
 
     pub fn steps(&self) -> Vec<&'static str> {
@@ -719,6 +746,16 @@ impl SyncWire for Hub {
     fn known_pull(&self, cx: &UploadContext, request: &KnownPull) -> Result<KnownPage, RdyError> {
         self.enter("known_pull", cx, None, None)?;
         self.pulls.lock().unwrap().push(request.clone());
+        if request.purpose == StreamPurpose::CanonState {
+            let size = *self.page.lock().unwrap();
+            let p = self
+                .prepared_state(request.root.hash)?
+                .page(request.after, size.min(rdy_engine::history_facts::MAX_KEYS))?;
+            return Ok(KnownPage {
+                keys: p.keys,
+                next: p.next,
+            });
+        }
         let read = self.store.lock().unwrap().clone().expect("a hub store");
         let reader = read.reader();
         if !reader
@@ -774,6 +811,12 @@ impl SyncWire for Hub {
         self.gets.lock().unwrap().push(request.clone());
         let mut bytes = match self.get_bytes.lock().unwrap().take() {
             Some(b) => b,
+            None if request.purpose == StreamPurpose::CanonState => {
+                let mut out = Vec::new();
+                self.prepared_state(request.root.hash)?
+                    .write_keys(&request.keys, &mut out)?;
+                out
+            }
             None => {
                 // the hub's export of exactly the keys asked for (the core read a hub serves)
                 let read = self.store.lock().unwrap().clone().expect("a hub store");
@@ -889,6 +932,18 @@ impl SyncWire for Hub {
             }
             WritePlan::NotSent(e) => Err(WriteFailure::not_sent(e)),
         }
+    }
+
+    fn settings(
+        &self,
+        cx: &UploadContext,
+    ) -> Result<rdy_engine::hub_sync_wire::SettingsBundle, RdyError> {
+        self.enter("settings", cx, None, None)?;
+        // fixture v2's "none" case: the hub holds no settings
+        Ok(rdy_engine::hub_sync_wire::SettingsBundle {
+            pack_reason: Some(rdy_engine::hub_sync_wire::PackReason::None),
+            ..Default::default()
+        })
     }
 
     fn outcome(&self, cx: &UploadContext, push: &str) -> Result<OutcomeReply, RdyError> {
