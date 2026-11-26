@@ -27,6 +27,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::path::PathBuf;
 
+// test-hygiene: allow port the fetch target records this URL; nothing connects to it
 const URL: &str = "https://127.0.0.1:9/r/demo";
 const AT: i64 = 1_763_164_800_000;
 
