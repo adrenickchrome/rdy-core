@@ -778,7 +778,8 @@ fn normal(v: &Value, m: &Machine) -> Value {
     fn strip(v: &mut Value) {
         match v {
             Value::Object(o) => {
-                o.retain(|k, _| !k.ends_with("_ms") && k != "elapsed");
+                // a time or the process's live memory figure differs from run to run
+                o.retain(|k, _| !k.ends_with("_ms") && k != "elapsed" && k != "memory");
                 o.values_mut().for_each(strip);
             }
             Value::Array(a) => a.iter_mut().for_each(strip),
