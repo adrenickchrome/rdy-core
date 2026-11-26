@@ -964,6 +964,82 @@ fn scc9_clone_pack_digest_mismatch_from_newer_rdy_refuses() {
     assert_eq!(fetches(&k), 0);
 }
 
+/// r59014: the chat path keeps each refusal of a clone that checks on the handle that applied
+/// canon: a pack whose digest is not the clone's, a hub that leaves out the snapshot deltas, a
+/// settings reply that the clone cannot read, and a user config with a share remote already. Each
+/// leaves the destination, absent or empty, as it was.
+#[test]
+fn r59014_clone_keeps_bad_record_and_settings_refusals() {
+    let (k, _copy, _store, mut c) = served_kit(&["a", "b"]);
+    let url = hub_url(&k);
+    let refused = |c: &mut McpClient, label: &str| {
+        let mut first = None;
+        for existing in [false, true] {
+            let (parent, dir) = target();
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+            }
+            let before = tree(&dir);
+            let e = mcp_err(c, "rdy_clone", clone_args(&url, &dir));
+            assert_eq!(tree(&dir), before, "{label}");
+            assert_eq!(entries(parent.path()), usize::from(existing), "{label}");
+            first.get_or_insert(e);
+        }
+        first.unwrap()
+    };
+    // a pack whose digest is not the clone's
+    let mut other = builtin_pack();
+    other["version"] = json!("0.0.1-other");
+    k.hub
+        .settings(pack_settings(other, Some(this_rdy().as_str())));
+    let e = refused(&mut c, "pack digest");
+    let (message, fix) = unfit_words("pack", &url, Some(this_rdy().as_str()));
+    assert_eq!(
+        words(&e),
+        ("E_BAD_INPUT".into(), message, fix),
+        "pack digest"
+    );
+    // a settings member the clone cannot read
+    let (label, body, member, captured) = refusal_cases().remove(0);
+    k.hub.settings(body);
+    let e = refused(&mut c, &label);
+    let (message, fix) = unfit_words(member, &url, captured.as_deref());
+    assert_eq!(words(&e), ("E_BAD_INPUT".into(), message, fix), "{label}");
+    // a hub that leaves out the snapshot deltas
+    k.hub.settings(settings_step(5));
+    k.hub.get_omits(rdy_store::kinds::SNAPSHOT_DELTA);
+    let e = refused(&mut c, "missing snapshot delta");
+    assert_eq!(e["code"], "E_BAD_RECORD", "{e}");
+    assert_eq!(
+        e["fix"],
+        "request this stream again; run rdy fsck at its source"
+    );
+    let message = e["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("stream record ") && message.contains("unlisted dependency"),
+        "{e}"
+    );
+    // a user config that already holds a share remote
+    let (k2, _copy2, _store2, mut c2) = served_kit(&["a"]);
+    let mut config = std::fs::read_to_string(k2.home.config()).unwrap();
+    config.push_str(&format!(
+        "remotes:\n  team:\n    url: {}\n    mode: share\n",
+        hub_url(&k2)
+    ));
+    std::fs::write(k2.home.config(), &config).unwrap();
+    let (parent, dir) = target();
+    let e = mcp_err(&mut c2, "rdy_clone", clone_args(&hub_url(&k2), &dir));
+    assert_eq!(
+        words(&e),
+        (
+            "E_REMOTE_EXISTS".into(),
+            rdy_engine::REMOTE_EXISTS_MESSAGE.into(),
+            rdy_engine::REMOTE_EXISTS_FIX.into()
+        )
+    );
+    assert_eq!(entries(parent.path()), 0);
+}
+
 /// scc9: no refusal quotes a sentinel key or value of an unreadable pack or setting, or the
 /// parser's error, for a newer, older, equal or absent capturing rdy: each message and fix is
 /// the template filled with the member, the URL and the versions alone.
