@@ -16,7 +16,19 @@ fn main() {
         }
     };
     let measures = match mode {
-        PerfMode::Gate => rdy_qa::perf::run_workload(),
+        PerfMode::Gate => {
+            let mut rows = rdy_qa::perf::run_workload();
+            // the two sync rows run only here, never in `run_workload`; an absent or wrong
+            // input fails the run, it never skips the rows
+            match rdy_qa::sync_perf::measure() {
+                Ok(sync) => rows.extend(sync),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+            rows
+        }
         PerfMode::Renderer10k => rdy_qa::perf::renderer_10k(),
     };
     println!("{}", serde_json::to_string(&measures).expect("json"));

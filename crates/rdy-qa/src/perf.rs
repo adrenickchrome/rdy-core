@@ -336,7 +336,9 @@ pub fn target_class(op: &str) -> Option<TargetClass> {
         | "m3_policy_land"
         | "m3_compact"
         | "publication_check"
-        | "render_diagrams_10k" => TargetClass::NoTarget,
+        | "render_diagrams_10k"
+        | "sync_push_500mb"
+        | "sync_pull_full_history_500mb" => TargetClass::NoTarget,
         _ => return None,
     };
     Some(if large && class == TargetClass::Ceiling {
@@ -416,6 +418,16 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "search_literal" => {
             "no spec target: a full scan of block text, first page (recorded for FW-PR1; semantic search is M5)"
+        }
+        // the two sync rows (D-3PNRK): reported, never a ceiling or a baseline row
+        "sync_push_500mb" => {
+            return Some(format!(
+                "recorded: the real CLI pushes the canon history of a generated 500 MB log to an empty loopback hub, zstd put bodies, five cold runs (reported; no ceiling). {}",
+                crate::sync_perf::PUSH_TARGET
+            ));
+        }
+        "sync_pull_full_history_500mb" => {
+            "recorded: the real CLI clones the same history by URL from a loopback hub into an absent directory, no base and no held history, with fsck, five cold runs (reported; no ceiling)"
         }
         "view_materialize_cold" => "< 50 ms cold (M2 spec 15.1)",
         "view_materialize_incremental" => "< 1 ms incremental (M2 spec 15.1)",

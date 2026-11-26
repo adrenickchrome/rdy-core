@@ -43,6 +43,8 @@ pub mod skip;
 pub mod snapshot_delta_fixture;
 pub mod soak;
 pub mod swarm;
+pub mod sync_hub;
+pub mod sync_perf;
 pub mod tensions;
 pub mod test_hygiene;
 pub mod wc;

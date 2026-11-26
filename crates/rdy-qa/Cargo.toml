@@ -27,6 +27,10 @@ ssh-key.workspace = true
 toml.workspace = true
 spdx.workspace = true
 sha2.workspace = true
+zstd.workspace = true
+# the loopback hub fixture of the sync tests and the sync perf rows (`sync_hub`)
+rustls.workspace = true
+rcgen.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Security_Authorization", "Win32_NetworkManagement_IpHelper", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Memory"] }
@@ -36,9 +40,6 @@ rdy-graph.workspace = true
 # the gate's signing tests sign with fixed in-memory test keys only
 ed25519-dalek.workspace = true
 ssh-key.workspace = true
-# the hub surface tests' local TLS fixture
-rustls.workspace = true
-rcgen.workspace = true
 
 [lints]
 workspace = true
