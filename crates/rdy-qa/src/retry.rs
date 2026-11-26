@@ -2,11 +2,13 @@
 //! on the same tree, inside the time that is left on the run's budget. The retry runs only those
 //! binaries, one at a time. The report keeps both results: the first run's rows stay as they
 //! were, and a `retried` list holds the second results. After a good retry the run is
-//! `PASS (retried: <names>)`.
+//! `PASS (retried: <names>)`. Each retried row also holds the flake issue link that the run was
+//! given for its binary (`--flake-links`), or none: the release counts a retried pass only with it.
 use crate::gate_steps::{BUDGET_ROW, BUILD_STEP};
 use crate::report::{BinaryFailure, binary_failure_sections};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// The most failed binaries a retry takes. More is not a flake: the run stays failed.
 pub const MAX_RETRIED: usize = 3;
@@ -33,6 +35,68 @@ pub struct Retried {
     pub passed: usize,
     pub failed: usize,
     pub secs: f64,
+    /// The open flake issue that the run was given for this binary (`--flake-links`), or none.
+    /// The release gate counts a retried pass only when every retried binary has one.
+    pub flake_issue: Option<String>,
+}
+
+/// The most `<binary>=<issue id>` pairs of `--flake-links`.
+pub const MAX_FLAKE_LINKS: usize = 64;
+
+/// The longest `--flake-links` text, in bytes.
+pub const MAX_FLAKE_LINKS_BYTES: usize = 4096;
+
+/// A binary key: `<package>/<kind>/<name>`, three names of letters, digits, `.`, `_` and `-`.
+fn is_binary_key(text: &str) -> bool {
+    let mut parts = text.split('/');
+    let names = [parts.next(), parts.next(), parts.next()];
+    parts.next().is_none()
+        && names.iter().all(|n| {
+            n.is_some_and(|n| {
+                !n.is_empty()
+                    && n.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            })
+        })
+}
+
+/// A flake issue id: `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. The id is opaque text; this checks its form.
+fn is_issue_id(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Reads `--flake-links`: comma-separated `<binary>=<issue id>` pairs, by binary. An empty text is
+/// no links. It holds at most [`MAX_FLAKE_LINKS`] pairs and [`MAX_FLAKE_LINKS_BYTES`] bytes, and
+/// links a binary once.
+pub fn flake_links(text: &str) -> Result<BTreeMap<String, String>, String> {
+    if text.len() > MAX_FLAKE_LINKS_BYTES {
+        return Err(format!(
+            "--flake-links: the list is longer than {MAX_FLAKE_LINKS_BYTES} bytes"
+        ));
+    }
+    let mut links = BTreeMap::new();
+    if text.is_empty() {
+        return Ok(links);
+    }
+    let pairs: Vec<&str> = text.split(',').collect();
+    if pairs.len() > MAX_FLAKE_LINKS {
+        return Err(format!("--flake-links: more than {MAX_FLAKE_LINKS} pairs"));
+    }
+    for pair in pairs {
+        let (binary, id) = match pair.split_once('=') {
+            Some((b, i)) if is_binary_key(b) && is_issue_id(i) => (b, i),
+            _ => return Err(format!("--flake-links: {pair} is not <binary>=<issue id>")),
+        };
+        if links.insert(binary.to_string(), id.to_string()).is_some() {
+            return Err(format!("--flake-links: {binary} is linked twice"));
+        }
+    }
+    Ok(links)
 }
 
 /// The failed binaries of the first run's report that a retry runs, or why it refuses: the run
@@ -134,16 +198,17 @@ pub fn markdown(first: &str, retried: &[Retried], pass: bool) -> String {
         }
         out.push('\n');
     }
-    out.push_str("\n## Retry\n\nThe failed binaries ran once more on the same tree, one at a time. The rows above are the first results.\n\n| Binary | Result | Exit | Passed | Failed | Seconds |\n|---|---|---|---|---|---|\n");
+    out.push_str("\n## Retry\n\nThe failed binaries ran once more on the same tree, one at a time. The rows above are the first results.\n\n| Binary | Result | Exit | Passed | Failed | Seconds | Flake issue |\n|---|---|---|---|---|---|---|\n");
     for r in retried {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {:.1} |\n",
+            "| {} | {} | {} | {} | {} | {:.1} | {} |\n",
             r.binary,
             if r.ok { "PASS" } else { "FAIL" },
             r.exit,
             r.passed,
             r.failed,
-            r.secs
+            r.secs,
+            r.flake_issue.as_deref().unwrap_or("none")
         ));
     }
     out
@@ -193,6 +258,14 @@ mod tests {
             passed: 3,
             failed: usize::from(!ok),
             secs: 2.5,
+            flake_issue: None,
+        }
+    }
+
+    fn linked(binary: &str, issue: &str) -> Retried {
+        Retried {
+            flake_issue: Some(issue.into()),
+            ..retried(binary, true)
         }
     }
 
@@ -313,5 +386,86 @@ mod tests {
             r["retried_failures"][0]["binary"],
             "rdy-daemon/test/windows_lifecycle"
         );
+    }
+
+    #[test]
+    fn r59022_retry_rows_carry_their_flake_issue_links() {
+        let mut r = failed_run(&["a/test/1", "a/test/2"], &[WORKSPACE_ROW]);
+        let rows = [linked("a/test/1", "flake-7"), retried("a/test/2", true)];
+        assert!(apply(&mut r, &rows));
+        assert_eq!(r["retried"][0]["flake_issue"], "flake-7");
+        assert!(r["retried"][1]["flake_issue"].is_null(), "{r}");
+        let md = markdown("# rdy QA gate: FAIL\n", &rows, true);
+        assert!(
+            md.contains("| Seconds | Flake issue |\n|---|---|---|---|---|---|---|\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| a/test/1 | PASS | exit 0 | 3 | 0 | 2.5 | flake-7 |\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| a/test/2 | PASS | exit 0 | 3 | 0 | 2.5 | none |\n"),
+            "{md}"
+        );
+        // the rtry2 row substring still matches
+        assert!(
+            md.contains("| a/test/2 | PASS | exit 0 | 3 | 0 | 2.5 |"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn r59022_flake_links_parse_and_refuse_bad_pairs() {
+        assert!(flake_links("").unwrap().is_empty());
+        let links = flake_links("rdy-qa/test/cli=flake-7,rdy-store/lib/rdy_store=9.a_b").unwrap();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links["rdy-qa/test/cli"], "flake-7");
+        assert_eq!(links["rdy-store/lib/rdy_store"], "9.a_b");
+        let not_pair = |pair: &str| format!("--flake-links: {pair} is not <binary>=<issue id>");
+        for bad in [
+            "rdy-qa/test/cli",
+            "rdy-qa/test/cli=",
+            "=flake-7",
+            "rdy-qa/test=flake-7",
+            "rdy-qa/test/cli/x=flake-7",
+            "rdy-qa//cli=flake-7",
+            "rdy-qa/test/cli=-flake",
+            "rdy-qa/test/cli=fl ake",
+            "rdy-qa/test/cli=a=b",
+            "rdy qa/test/cli=flake-7",
+        ] {
+            assert_eq!(flake_links(bad).unwrap_err(), not_pair(bad), "{bad}");
+        }
+        assert_eq!(
+            flake_links("a/test/1=flake-1,,a/test/2=flake-2").unwrap_err(),
+            not_pair("")
+        );
+        assert_eq!(
+            flake_links("a/test/1=flake-1,a/test/1=flake-2").unwrap_err(),
+            "--flake-links: a/test/1 is linked twice"
+        );
+        let id64 = format!("a/test/1={}", "x".repeat(64));
+        assert!(flake_links(&id64).is_ok());
+        let id65 = format!("a/test/1={}", "x".repeat(65));
+        assert_eq!(flake_links(&id65).unwrap_err(), not_pair(&id65));
+        let many = |n: usize| {
+            (0..n)
+                .map(|i| format!("a/test/b{i}=f{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        assert_eq!(flake_links(&many(64)).unwrap().len(), 64);
+        assert_eq!(
+            flake_links(&many(65)).unwrap_err(),
+            "--flake-links: more than 64 pairs"
+        );
+        let long = format!("a/test/1={}", "x".repeat(5000));
+        assert_eq!(
+            flake_links(&long).unwrap_err(),
+            "--flake-links: the list is longer than 4096 bytes"
+        );
+        let edge = format!("a/test/1=f,{}", "y".repeat(4096 - "a/test/1=f,".len()));
+        assert!(!flake_links(&edge).unwrap_err().contains("4096 bytes"));
     }
 }

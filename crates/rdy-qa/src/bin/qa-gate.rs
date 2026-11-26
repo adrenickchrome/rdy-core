@@ -83,6 +83,12 @@ struct Args {
     /// `--require-all`.
     #[arg(long, value_name = "REPORT", requires = "budget_secs", conflicts_with_all = ["focus", "only", "rebaseline"])]
     retry_failed: Option<PathBuf>,
+    /// With `--retry-failed`: the open flake issue of each binary that may be retried, as comma-
+    /// separated `<binary>=<issue id>` pairs (at most 64 pairs and 4096 bytes). Each retried
+    /// row of the report takes the id of its binary, and the release counts a retried pass only
+    /// when every retried binary has one. A link for a binary that was not retried is ignored.
+    #[arg(long, value_name = "PAIRS", requires = "retry_failed")]
+    flake_links: Option<String>,
 }
 
 /// The test tiers of `--tier`.
@@ -402,12 +408,24 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The flake issue links of `--flake-links`, by binary: none without the flag.
+fn retry_links(args: &Args) -> Result<BTreeMap<String, String>, String> {
+    rdy_qa::retry::flake_links(args.flake_links.as_deref().unwrap_or(""))
+}
+
 /// `--retry-failed`: runs the failed test binaries of the first run's report once more, one at
 /// a time, on the clock's time left, and writes the report with both results: the first run's
 /// files are kept beside it as `report.first.json` and `report.first.md`. Returns the exit code.
 fn retry(args: &Args, path: &Path, first: &serde_json::Value, tmp_root: Option<&Path>) -> i32 {
     use rdy_qa::retry::{Retried, apply, apply_failures, markdown_with_failures, targets};
     let spent = || CLOCK.get().is_some_and(Clock::spent);
+    let links = match retry_links(args) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
     let targets = match targets(first) {
         Ok(t) => t,
         Err(e) => {
@@ -459,6 +477,7 @@ fn retry(args: &Args, path: &Path, first: &serde_json::Value, tmp_root: Option<&
                     passed: run.passed,
                     failed: run.failed,
                     secs: elapsed.as_secs_f64(),
+                    flake_issue: links.get(key).cloned(),
                 }
             }
             None => Retried {
@@ -468,6 +487,7 @@ fn retry(args: &Args, path: &Path, first: &serde_json::Value, tmp_root: Option<&
                 passed: 0,
                 failed: 0,
                 secs: 0.0,
+                flake_issue: links.get(key).cloned(),
             },
         };
         eprintln!(
@@ -1318,6 +1338,30 @@ mod tests {
             "a ceiling needs a target"
         );
         assert_eq!(CEILING_FACTOR, 2);
+    }
+
+    #[test]
+    fn r59022_flake_links_need_retry_failed() {
+        let base = ["--tier", "release", "--budget-secs", "630"];
+        let with = |extra: &[&str]| parse(&[&base[..], extra].concat());
+        assert!(with(&["--flake-links", "a/test/1=flake-7"]).is_err());
+        let a = with(&[
+            "--retry-failed",
+            "target/qa/report.json",
+            "--flake-links",
+            "a/test/1=flake-7",
+        ])
+        .unwrap();
+        let links = retry_links(&a).unwrap();
+        assert_eq!(links.get("a/test/1").map(String::as_str), Some("flake-7"));
+        // no flag: no links; a bad list is an error for the retry to refuse
+        let a = with(&["--retry-failed", "target/qa/report.json"]).unwrap();
+        assert!(retry_links(&a).unwrap().is_empty());
+        let a = with(&["--retry-failed", "r.json", "--flake-links", "nope"]).unwrap();
+        assert_eq!(
+            retry_links(&a).unwrap_err(),
+            "--flake-links: nope is not <binary>=<issue id>"
+        );
     }
 
     #[test]

@@ -391,10 +391,36 @@ def check_ref(repo, ref, sha, main_ref):
 COUNT_RE = re.compile(r'([0-9]+) passed, ([0-9]+) failed, ([0-9]+) ignored, ([0-9]+) skipped')
 
 
+FLAKE_ISSUE_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
+
+
+def check_retried(retried, malformed):
+    """Whether a passing report was a retried pass. `retried` is absent or a list of rows; each row
+    of a retried pass is a binary that passed again with a flake issue link. A row that did not pass,
+    or has no link, refuses the run."""
+    if retried is None:
+        return False
+    if not isinstance(retried, list):
+        raise malformed
+    for row in retried:
+        if not (isinstance(row, dict) and isinstance(row.get('ok'), bool) and is_int(row.get('failed'))):
+            raise malformed
+        if row['ok'] is not True or row['failed'] != 0:
+            raise ControllerError('the native fast gate did not pass')
+    for row in retried:
+        link = row.get('flake_issue')
+        if not (isinstance(link, str) and FLAKE_ISSUE_RE.fullmatch(link)):
+            raise ControllerError('the native fast gate passed only on a retry, and a retried binary '
+                                  'has no flake issue link')
+    return bool(retried)
+
+
 def fast_gate_counts(report, commit):
     """The exact counts of a native `cargo qa --skip-perf --require-all` report.json on `commit`:
     every test gate and every area summed. Refuses a failed, dirty, other-commit or empty run, and
-    any failed or prerequisite-skipped test."""
+    any failed or prerequisite-skipped test. A run that passed on a retry counts when each retried
+    binary passed again and carries a flake issue link: the failures of the first run, which only the
+    retried binaries can hold, count as passed."""
     value = loads(report, limit=REPORT_MAX, floats=True)
     malformed = ControllerError('the native fast gate report is malformed')
     if not isinstance(value, dict):
@@ -409,6 +435,7 @@ def fast_gate_counts(report, commit):
     gates, areas = value.get('gates'), value.get('areas')
     if not (isinstance(gates, list) and isinstance(areas, list)):
         raise malformed
+    retried = check_retried(value.get('retried'), malformed)
     totals = [0, 0, 0, 0]
     for gate in gates:
         detail = gate.get('detail') if isinstance(gate, dict) else None
@@ -427,6 +454,9 @@ def fast_gate_counts(report, commit):
             raise malformed
         totals = [t + area[k] for t, k in zip(totals, keys)]
     passed, failed, ignored, skipped = totals
+    if retried:
+        # the retry target rule admits only failures of retried binaries, and each passed on retry
+        passed, failed = passed + failed, 0
     if failed or skipped:
         raise ControllerError('the native fast gate did not pass with every prerequisite')
     if passed == 0:
