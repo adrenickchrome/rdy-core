@@ -45,6 +45,10 @@ SAMPLE_SOURCE = 'samples/tally/tally.rdydump'
 SAMPLE_FREEZE = 'samples/tally/freeze.json'
 GUIDE_TOOL = Path(__file__).resolve().parent / 'guide.py'
 KUNGFU_TABLE = 'crates/rdy-engine/kungfu-tools.json'
+# The baseline x86-64 check: the emulator, and the CPU model that leaves out SSE3, CX16 and LAHF-LM.
+BASELINE_EMULATOR = 'qemu-x86_64'
+BASELINE_CPU = 'qemu64,-sse3,-cx16,-lahf-lm'
+LINUX_TARGET = 'x86_64-unknown-linux-gnu'
 # The packaged checker's six checks, in order (`CHECK_NAMES` in rdy-qa's release_install.rs).
 CHECK_NAMES = ('signature', 'checksums', 'install', 'version', 'daemon', 'mcp')
 
@@ -580,7 +584,10 @@ def inspect_archive(path, version, target, extra=()):
 
 def check_packaged_guide(path, version, target, source, work, env):
     """Runs the `rdy` of the inspected archive `path` and compares its built-in rows and menu with
-    the guide bundle and tool table of the source archive. Refuses with the checker's own line."""
+    the guide bundle and tool table of the source archive. Refuses with the checker's own line.
+
+    Returns the path of the extracted binary, which stays in `<work>/guide-check` for the next check:
+    the caller removes that folder."""
     folder = Path(work) / 'guide-check'
     folder.mkdir(mode=0o700)
     binary = folder / binary_name(target)
@@ -598,10 +605,75 @@ def check_packaged_guide(path, version, target, source, work, env):
                                    '--bundle', release / 'agent-guide.json', '--sidecar', release / 'agent-guide.sha256',
                                    '--table', Path(source) / KUNGFU_TABLE],
                                   env=env)
-    shutil.rmtree(str(folder), ignore_errors=True)
     if status != 0:
         lines = said.decode('utf-8', 'replace').splitlines()
         raise ControllerError(lines[0] if lines else 'the guide check of the ' + target + ' binary failed')
+    return binary
+
+
+def check_baseline_cpu(binary, version, source, work, env):
+    """Runs the extracted packaged Linux `binary` under the baseline x86-64 CPU model: `--version`, then a
+    no-daemon load, fsck and dump of the frozen sample of the source archive, in a new home below `work`.
+    The version, the sample's recorded formats and each step's success must match. A timeout, a signal
+    (a SIGILL from an instruction the baseline lacks) or a nonzero exit refuses the candidate."""
+    failed = ControllerError('the packaged Linux binary failed the baseline x86-64 check')
+    path = env.get('PATH')
+    if shutil.which(BASELINE_EMULATOR, path=path) is None:
+        raise ControllerError('baseline x86-64 check needs ' + BASELINE_EMULATOR)
+    dump, freeze_file = Path(source) / SAMPLE_SOURCE, Path(source) / SAMPLE_FREEZE
+    for sample in (dump, freeze_file):
+        if sample.is_symlink() or not sample.is_file():
+            raise ControllerError('the baseline x86-64 check needs the frozen sample dump')
+    freeze = loads(freeze_file.read_bytes()[:RECORD_MAX + 1])
+    if sha256_file(dump, SAMPLE_MAX) != (freeze.get('sha256'), freeze.get('size')):
+        raise ControllerError('the baseline x86-64 check needs the frozen sample dump')
+    folder = Path(work) / 'baseline-check'
+    home = folder / 'home'
+    config = home / '.config'
+    (config / 'rdy').mkdir(mode=0o700, parents=True)
+    write_new(config / 'rdy' / 'config.yaml', b'actor: human:sample-author\nsigning:\n  sign: never\n')
+    copy, project, again = folder / SAMPLE_NAME, folder / 'project', folder / 'again.rdydump'
+    write_new(copy, dump.read_bytes())
+    person = dict(env)
+    for name in ('RDY_ACTOR', 'RDY_RUN', 'RDY_NO_DAEMON', 'SSH_AUTH_SOCK'):
+        person.pop(name, None)
+    person.update({'HOME': str(home), 'XDG_CONFIG_HOME': str(config)})
+
+    def run(*args):
+        status, out, _ = run_bounded([BASELINE_EMULATOR, '-cpu', BASELINE_CPU, binary] + list(args),
+                                     deadline=HELPER_DEADLINE, env=person)
+        if status != 0:
+            raise failed
+        return out
+
+    def reply(out):
+        try:
+            value = loads(out, limit=OUTPUT_MAX, floats=True)
+        except ControllerError:
+            raise failed
+        if not isinstance(value, dict):
+            raise failed
+        return value
+
+    try:
+        if run('--version') != ('rdy ' + version + '\n').encode():
+            raise failed
+        loaded = reply(run('--json', 'load', '--no-daemon', copy, project))
+        if (loaded.get('dump_format') != freeze.get('dump_format')
+                or loaded.get('store_format') != freeze.get('store_format')
+                or loaded.get('landings') != 1 or loaded.get('tags') != 1):
+            raise failed
+        reply(run('--json', 'fsck', '--no-daemon', '--project', project))
+        dumped = reply(run('--json', 'dump', '--no-daemon', '--project', project, '--out', again))
+        if dumped.get('dump_format') != freeze.get('dump_format') or not again.is_file() or again.stat().st_size == 0:
+            raise failed
+    except ControllerError as error:
+        if error is failed:
+            raise
+        # a helper that would not start, ran past its deadline or wrote too much
+        raise failed
+    finally:
+        shutil.rmtree(str(folder), ignore_errors=True)
 
 
 def build_receipt(version, commit, target, run_id, run_attempt, archive_name, archive_bytes=None,
@@ -718,7 +790,12 @@ def build(repo, commit, version, target, work, out, fast_gate_path, run_id, run_
         raise ControllerError('qa-release-package did not package the ' + target + ' archive')
     packaged = work / 'package' / name
     inspect_archive(packaged, version, target, extra=sorted({home, str(work), cargo_home, rustup_home}))
-    check_packaged_guide(packaged, version, target, source, work, env)
+    try:
+        extracted = check_packaged_guide(packaged, version, target, source, work, env)
+        if target == LINUX_TARGET:
+            check_baseline_cpu(extracted, version, source, work, env)
+    finally:
+        shutil.rmtree(str(work / 'guide-check'), ignore_errors=True)
     digest, size = sha256_file(packaged, ARCHIVE_MAX)
     out.mkdir(mode=0o700, parents=True)
     shutil.copyfile(str(packaged), str(out / name))
