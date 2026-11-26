@@ -730,14 +730,11 @@ fn spv7_same_key_concurrent_starts_return_one_port() {
     assert_eq!(sh.profile_sites.keys(), vec!["guide".to_string()]);
     let guide = port_of(&urls[0]);
     let candidates = profile_candidates(&root_of(w.h.dir.path()), "guide");
-    let won = candidates
-        .iter()
-        .position(|p| *p == guide)
-        .unwrap_or_else(|| panic!("{guide} is not a candidate: {candidates:?}"));
-    // one walk of the candidates, in order, up to the port it took, then [::1] on that port: one
-    // listener set. The profile hash does not keep the source's port out of the candidates, so
-    // the walk tries it when the ports before it are busy, but never takes it
-    let mut walk: Vec<SocketAddr> = candidates[..=won].iter().map(|p| sock(*p)).collect();
+    // one walk of the candidates, in order, up to the port it took (or all sixteen, then the
+    // OS-assigned port), then [::1] on that port: one listener set. The profile hash does not
+    // keep the source's port out of the candidates, so the walk tries it when the ports before
+    // it are busy, but never takes it
+    let mut walk = walk_to(&candidates, guide);
     walk.push(SocketAddr::from((Ipv6Addr::LOCALHOST, guide)));
     assert_eq!(
         rec.binds(),
@@ -1609,15 +1606,35 @@ fn spv7_lan_uses_the_profile_port_and_warning() {
     }
 }
 
+/// The `127.0.0.1` binds of one walk of `candidates` that took `port`: the candidates up to it,
+/// or, when `port` is none of them, all sixteen and then the OS-assigned `127.0.0.1:0`
+/// (D-5GFFX). Every candidate refuses when the operating system reserves the window (a Windows
+/// excluded port range) or other processes hold it, whatever the test does.
+fn walk_to(candidates: &[u16], port: u16) -> Vec<SocketAddr> {
+    match candidates.iter().position(|p| *p == port) {
+        Some(won) => candidates[..=won].iter().map(|p| sock(*p)).collect(),
+        None => candidates.iter().chain(&[0]).map(|p| sock(*p)).collect(),
+    }
+}
+
 /// Every address the profile listener of `guide` tried is a loopback or a private one: on its
-/// own port, or (an occupied earlier candidate) on `127.0.0.1` alone.
+/// own port, or (an occupied earlier candidate, or the OS-assigned bind after sixteen refused
+/// candidates) on `127.0.0.1` alone.
 #[track_caller]
 fn no_wildcard(rec: &Recorder, root: &Path, port: u16) {
     let binds = rec.binds();
     let candidates = profile_candidates(root, "guide");
-    assert!(binds.contains(&sock(port)), "{binds:?}");
+    // the walk ends on `127.0.0.1:{port}`, or on the `127.0.0.1:0` that gave it
+    let walk = walk_to(&candidates, port);
+    assert!(binds.starts_with(&walk), "the walk {walk:?}: {binds:?}");
+    for a in &binds[walk.len()..] {
+        assert_eq!(
+            a.port(),
+            port,
+            "after the walk, the port it took: {binds:?}"
+        );
+    }
     for a in &binds {
-        assert!(candidates.contains(&a.port()), "{binds:?}");
         if a.port() != port {
             assert_eq!(
                 a.ip(),
