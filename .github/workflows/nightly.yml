@@ -272,6 +272,11 @@ jobs:
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
       - name: Locked dependencies
         run: cargo fetch --locked
+      - name: Release CLI
+        # The perf tier runs target/release/rdy; the gate's own build goes to target/gate.
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo build --release --locked -p rdy-cli
       - name: Deep gate with perf
         env:
           CARGO_NET_OFFLINE: "true"
