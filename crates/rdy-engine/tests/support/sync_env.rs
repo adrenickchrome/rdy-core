@@ -229,7 +229,9 @@ impl HubClock for Clock {
 
 use rdy_engine::hub_publish::{PublishRenderer, RenderedUpload};
 use rdy_engine::hub_publish_wire::{Discovery, ObjectPut, PublishState, UploadContext};
-use rdy_engine::hub_sync::{PullOutcome, PullRequest, PushOutcome, PushRequest, SyncService};
+use rdy_engine::hub_sync::{
+    OutcomePollClock, PullOutcome, PullRequest, PushOutcome, PushRequest, SyncService,
+};
 use rdy_engine::hub_sync_wire::{
     DumpRequest, GetRequest, HubRequest, KnownPage, KnownPull, LookupOutcome, OutcomeReply,
     SyncState, SyncStateRequest, SyncWire, WriteFailure, WriteKind, WriteOutcome, WriteReply,
@@ -240,6 +242,67 @@ use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_stream::StreamPurpose;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
+
+type WaitProbe = Box<dyn Fn(Duration) + Send + std::marker::Sync>;
+
+/// The fake monotonic clock of a busy outcome lookup's waits (r59016). It moves only when a test
+/// advances it or a wait runs, and a wait never sleeps: it records the delay, runs the probe
+/// (which a test uses to look at the hub while the lookup waits), then moves the clock on.
+#[derive(Default)]
+pub struct PollClock {
+    now: Mutex<Duration>,
+    /// Each wait's delay, in order.
+    pub delays: Mutex<Vec<Duration>>,
+    probe: Mutex<Option<WaitProbe>>,
+}
+
+impl PollClock {
+    pub fn advance(&self, by: Duration) {
+        *self.now.lock().unwrap() += by;
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        *self.now.lock().unwrap()
+    }
+
+    /// Runs `f` with the delay at the start of every wait.
+    pub fn on_wait(&self, f: impl Fn(Duration) + Send + std::marker::Sync + 'static) {
+        *self.probe.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// The delays waited, in whole seconds.
+    pub fn seconds(&self) -> Vec<u64> {
+        self.delays
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Duration::as_secs)
+            .collect()
+    }
+}
+
+impl OutcomePollClock for PollClock {
+    fn now(&self) -> Duration {
+        self.elapsed()
+    }
+
+    fn wait(&self, delay: Duration) {
+        self.delays.lock().unwrap().push(delay);
+        if let Some(f) = self.probe.lock().unwrap().as_ref() {
+            f(delay);
+        }
+        self.advance(delay);
+    }
+}
+
+/// A hub refusal of the outcome lookup while the hub still runs the write: `E_HUB_BUSY` with the
+/// `retry_after` its error object validated to `seconds`.
+pub fn busy_refusal(seconds: u64) -> RdyError {
+    let mut e = RdyError::new("E_HUB_BUSY", "the hub is busy", "wait before trying again");
+    e.upstream_retry_after = Some(seconds);
+    e
+}
 
 /// One wire request as the fake hub saw it.
 #[derive(Clone, Debug)]
@@ -285,6 +348,8 @@ pub struct Hub {
     pub bytes: Mutex<BTreeMap<String, u64>>,
     pub fail: Mutex<BTreeMap<(&'static str, usize), RdyError>>,
     pub hook: Mutex<Option<(&'static str, Hook)>>,
+    /// Runs at the start of every request of its step.
+    pub each: Mutex<Option<(&'static str, Hook)>>,
     pub calls: Mutex<Vec<Call>>,
     /// Each put's push id and the keys its batch carried, in order.
     pub puts: Mutex<Vec<(String, Vec<ObjectKey>)>>,
@@ -353,6 +418,7 @@ impl Hub {
             bytes: Mutex::default(),
             fail: Mutex::default(),
             hook: Mutex::default(),
+            each: Mutex::default(),
             calls: Mutex::default(),
             puts: Mutex::default(),
             roots: Mutex::default(),
@@ -480,6 +546,11 @@ impl Hub {
             }
         };
         if let Some((_, mut f)) = hook {
+            f(step);
+        }
+        if let Some((s, f)) = self.each.lock().unwrap().as_mut()
+            && *s == step
+        {
             f(step);
         }
         match self.fail.lock().unwrap().remove(&(step, n)) {
@@ -872,6 +943,8 @@ pub struct Sync<'a> {
     pub api: NoApi,
     pub clock: Clock,
     pub renderer: Renderer,
+    /// The fake clock of the service's busy outcome lookups.
+    pub poll: Arc<PollClock>,
 }
 
 impl<'a> Sync<'a> {
@@ -882,6 +955,7 @@ impl<'a> Sync<'a> {
             api: NoApi::default(),
             clock: Clock::at(T0),
             renderer: Renderer::default(),
+            poll: Arc::default(),
         }
     }
 
@@ -894,6 +968,7 @@ impl<'a> Sync<'a> {
             self.hub,
             &self.renderer,
         )
+        .with_outcome_poll_clock(&*self.poll)
     }
 
     pub fn push(&self, request: PushRequest) -> Result<PushOutcome, RdyError> {

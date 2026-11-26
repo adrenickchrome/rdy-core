@@ -1460,6 +1460,7 @@ fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyE
         REQUEST_ID_FIX,
     ));
     if let Some(n) = dto.retry_after {
+        e.upstream_retry_after = Some(n);
         e.issues
             .push(notice(format!("retry after {n} seconds"), RETRY_FIX));
     }
