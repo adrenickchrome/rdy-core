@@ -1283,6 +1283,18 @@ const CANON_REF: &str = "canon";
 /// Canon's head and the landed rows as (change, landing) ([`Index::canon_and_landed`]).
 pub(crate) type CanonRows = (Option<Hash>, Vec<(Hash, Hash)>);
 
+/// Whether ref `name` set to `value` is a complete history ref (`meta/sync/<remote>/history`,
+/// D-GGTYA): the write that completes a history.
+fn completes_history(name: &str, value: &[u8]) -> bool {
+    if !name.starts_with(crate::sync_state::SYNC_REF) {
+        return false;
+    }
+    matches!(
+        crate::sync_state::check_ref(name, value),
+        Ok(Some(crate::sync_state::SyncValue::History(h))) if h.complete
+    )
+}
+
 /// The landing a `canon` ref value names: None for an empty value, and for a value that is no
 /// hash (fsck reports that ref; no landing reads landed on it).
 fn canon_value(v: &[u8]) -> Option<Hash> {
@@ -1665,7 +1677,23 @@ impl Index {
                                     .map_err(db)?;
                             }
                         }
-                        if let Some(was) = was {
+                        // a history completion (D-GGTYA): canon's rows were kept to the
+                        // frontier while the history was arriving; its records are held now,
+                        // so the rows are rebuilt over canon's whole chain
+                        let completes = completes_history(name, value);
+                        let moves = match was {
+                            Some(was) => Some((was, canon_value(value))),
+                            None if completes => {
+                                landed.retain(|_, _| false).map_err(db)?;
+                                let head = refs
+                                    .get(CANON_REF)
+                                    .map_err(db)?
+                                    .and_then(|v| canon_value(v.value()));
+                                Some((None, head))
+                            }
+                            None => None,
+                        };
+                        if let Some((was, now)) = moves {
                             if carries.is_none() {
                                 carries = Some(w.open_table(LANDING_CARRIES).map_err(db)?);
                             }
@@ -1677,7 +1705,7 @@ impl Index {
                                 carries.as_ref().expect("opened above"),
                                 replays.as_ref().expect("opened above"),
                                 was,
-                                canon_value(value),
+                                now,
                             )?;
                         }
                     }

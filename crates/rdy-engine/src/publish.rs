@@ -1025,6 +1025,16 @@ impl Rdy {
         })
     }
 
+    /// A private state of the store as it stands, over a full-check reader
+    /// (`StoreReader::full_history_reader`): every canon walk and check takes the whole history
+    /// with no partial-history exception, while the incomplete history ref is kept. The full
+    /// check reads it; it is never published.
+    pub(crate) fn full_history_state(&self) -> Result<ReadState, RdyError> {
+        let reader = self.store.reader().full_history_reader();
+        let prev = self.state.load_full();
+        self.full_state(&prev, reader, &CoordHeads::default(), EpochCaches::new())
+    }
+
     /// The private masked preview of a removal (plan Redaction, Task 10): the state as it will
     /// read once the recorded requests `requests` are applied, built by the full builder from
     /// `Store::redaction_preview_reader`, with new caches and nothing copied from a published

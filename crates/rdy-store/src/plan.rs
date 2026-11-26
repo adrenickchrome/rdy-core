@@ -272,6 +272,12 @@ pub(crate) trait PlanLookup {
     fn landing_here(&self, p: &Hash) -> Result<Option<Hash>, StoreError>;
     /// Whether the store is a holder: its chains and seals arrive by take, with no view.
     fn holder(&self) -> bool;
+    /// Whether the store holds the object of `kind` and hash `h` anywhere in its log, later
+    /// records included: a full check asks it of a carried plan's frontier links, which a
+    /// history's later batches bring (D-4PV25). Only the store's check answers true.
+    fn held_anywhere(&self, _kind: u8, _h: &Hash) -> Result<bool, StoreError> {
+        Ok(false)
+    }
 }
 
 /// The typed record of `kind` that `look` reads; None when it does not decode.
@@ -454,15 +460,81 @@ pub(crate) fn invalid_context(
     p: &Plan,
     look: &dyn PlanLookup,
 ) -> Result<Option<&'static str>, StoreError> {
+    invalid_context_deferring(h, p, look, None)
+}
+
+/// A PLAN of the carried chain of an incomplete history's frontier (the closed state link
+/// table, D-4PV25): the root's sealed PLAN, or a record of its `prev` chain back to and
+/// including the nearest Full record. Its frontier links may be absent while the history is
+/// incomplete: its `proposal` and `seal.version`, and the Full record's own `prev`. Every other
+/// rule, and each frontier link that is held, is checked as for any plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CarriedPlan {
+    /// Whether the record is the chain's Full record (a whole version), whose own `prev` is a
+    /// frontier link; a delta's `prev` is never absent.
+    pub(crate) full: bool,
+    /// Whether this is the full check (`StoreReader::full_history_reader`): no link is
+    /// deferred, and each frontier link must be held, in the log before the plan or in the
+    /// history's later batches, and keep its rules.
+    pub(crate) full_check: bool,
+}
+
+/// Where a carried plan's frontier link stands ([`invalid_context_deferring`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Link {
+    /// Held where the ordinary rule reads it, or (a full check) in a later batch.
+    Held,
+    /// Absent while the history is incomplete: deferred to the full check.
+    Deferred,
+    /// Absent where a record must hold it.
+    Missing,
+}
+
+/// [`invalid_context`] of plan `p`, with the frontier links of `carried` deferred when it is a
+/// record of the carried chain ([`CarriedPlan`]).
+pub(crate) fn invalid_context_deferring(
+    h: &Hash,
+    p: &Plan,
+    look: &dyn PlanLookup,
+    carried: Option<CarriedPlan>,
+) -> Result<Option<&'static str>, StoreError> {
     let holder = look.holder();
     let here = |place: Place| match place {
         Place::Batch => true,
         Place::Log => holder,
         Place::Missing => false,
     };
+    // a frontier link of the carried chain: held as the ordinary rule reads it; else
+    // deferred while the history is incomplete, or, in the full check, held in a later batch
+    // of the history (then checked as held) or missing
+    let link = |kind: u8, h: &Hash, ordinary: bool| -> Result<Link, StoreError> {
+        if ordinary {
+            return Ok(Link::Held);
+        }
+        Ok(match carried {
+            Some(c) if c.full_check && look.held_anywhere(kind, h)? => Link::Held,
+            Some(c) if !c.full_check && look.place(kind, h)? == Place::Missing => Link::Deferred,
+            _ => Link::Missing,
+        })
+    };
+    // the carried chain's Full record: its own `prev` is a frontier link
+    let frontier_prev = carried.is_some_and(|c| c.full);
     match p.prev {
+        Some(prev)
+            if frontier_prev
+                && link(
+                    kinds::PLAN,
+                    &prev,
+                    look.place(kinds::PLAN, &prev)? != Place::Missing,
+                )? == Link::Deferred => {}
         Some(prev) => {
-            if look.place(kinds::PLAN, &prev)? == Place::Missing {
+            let ordinary = look.place(kinds::PLAN, &prev)? != Place::Missing;
+            let held = if frontier_prev {
+                link(kinds::PLAN, &prev, ordinary)? == Link::Held
+            } else {
+                ordinary
+            };
+            if !held {
                 return Ok(Some(INVALID_CHAIN));
             }
             let Some(q) = hydrate(look, &prev)? else {
@@ -519,8 +591,9 @@ pub(crate) fn invalid_context(
             return Ok(Some(INVALID_SEAL));
         }
         let landed = typed::<LandingRecord>(look, kinds::LANDING, &seal.landing)?;
+        let ordinary = look.place(kinds::PROPOSAL, &seal.version)? != Place::Missing;
         if landed.is_none_or(|l| l.proposal != seal.version)
-            || look.place(kinds::PROPOSAL, &seal.version)? == Place::Missing
+            || link(kinds::PROPOSAL, &seal.version, ordinary)? == Link::Missing
         {
             return Ok(Some(INVALID_SEAL));
         }
@@ -539,12 +612,17 @@ pub(crate) fn invalid_context(
             return Ok(Some(DUPLICATE_LANDING_SEAL));
         }
     } else if let Some(prop) = p.proposal {
-        if !here(look.place(kinds::PROPOSAL, &prop)?) {
-            return Ok(Some(INVALID_PROPOSAL));
-        }
-        let version = typed::<Proposal>(look, kinds::PROPOSAL, &prop)?;
-        if version.is_none_or(|v| v.view != p.view) {
-            return Ok(Some(INVALID_PROPOSAL));
+        // a carried record's bound proposal behind the frontier: its view is the full check's
+        let ordinary = here(look.place(kinds::PROPOSAL, &prop)?);
+        match link(kinds::PROPOSAL, &prop, ordinary)? {
+            Link::Deferred => {}
+            Link::Missing => return Ok(Some(INVALID_PROPOSAL)),
+            Link::Held => {
+                let version = typed::<Proposal>(look, kinds::PROPOSAL, &prop)?;
+                if version.is_none_or(|v| v.view != p.view) {
+                    return Ok(Some(INVALID_PROPOSAL));
+                }
+            }
         }
         if let Some(other) = look.bound(&prop)?
             && other != *h
@@ -1546,6 +1624,10 @@ impl PlanLookup for CheckLookup<'_> {
     fn holder(&self) -> bool {
         self.holder
     }
+
+    fn held_anywhere(&self, kind: u8, h: &Hash) -> Result<bool, StoreError> {
+        Ok(self.reader.index().typed(kind, h)?.is_some())
+    }
 }
 
 impl StoreReader {
@@ -1570,6 +1652,9 @@ impl StoreReader {
         let mut bound: HashMap<Hash, Hash> = HashMap::new();
         let mut sealed: HashMap<Hash, Hash> = HashMap::new();
         let landings = RefCell::new(BatchLandings::default());
+        // the carried chain of an incomplete history's frontier, whose frontier links may be
+        // absent (D-4PV25); none in a full check, which validates them
+        let carried = self.carried_plan_chain()?;
         // the derived rows the log gives, from the same entries and reducer as the index
         let want = crate::index::Index::in_memory()?;
         let mut rows: Vec<IndexEntry> = vec![];
@@ -1665,7 +1750,9 @@ impl StoreReader {
                     if let Some(reason) = invalid_record(&p) {
                         return Err(StoreError::Decode(damage(&hash, reason)));
                     }
-                    if let Some(reason) = invalid_context(&hash, &p, &look)? {
+                    let carried_plan = carried.get(&hash).copied();
+                    if let Some(reason) = invalid_context_deferring(&hash, &p, &look, carried_plan)?
+                    {
                         return Err(StoreError::Decode(damage(&hash, reason)));
                     }
                     // a fetched plan names no local view's chain: no `plan/` ref names it
@@ -1725,6 +1812,54 @@ impl StoreReader {
         self.check_readiness_rows(&want, upto)?;
         self.check_dispute_rows(&want, upto)?;
         Ok(n)
+    }
+
+    /// The carried PLAN chain of an incomplete history's frontier (the closed state link table,
+    /// D-4PV25): the seal of the frontier landing, then its `prev` chain back to and including
+    /// the nearest Full record, at most `MAX_PLAN_DELTA_DEPTH` deltas and that record; each
+    /// marked whether it is the Full record ([`CarriedPlan`]). Empty with no incomplete history
+    /// (and in a full check, `StoreReader::full_history_reader`), or when the frontier has no
+    /// sealed plan. A record that does not read ends the walk: the plan checks report it.
+    fn carried_plan_chain(&self) -> Result<HashMap<Hash, CarriedPlan>, StoreError> {
+        let mut out = HashMap::new();
+        // the incomplete ref's frontier, which a full check keeps as it stands
+        let Some(frontier) = self.partial_history()?.map(|h| h.frontier) else {
+            return Ok(out);
+        };
+        let full_check = self.is_full_history();
+        let mut at = self.plan_of_landing(&frontier, crate::closure::END_OF_LOG)?;
+        while let Some(h) = at {
+            if out.len() > rdy_model::plan_encoding::MAX_PLAN_DELTA_DEPTH || out.contains_key(&h) {
+                break;
+            }
+            let Ok((version, body)) = self.get_versioned_body(kinds::PLAN, &h) else {
+                break;
+            };
+            match plan_record::decode_body(version, &body) {
+                Ok((PlanRecord::Full(_), _)) => {
+                    out.insert(
+                        h,
+                        CarriedPlan {
+                            full: true,
+                            full_check,
+                        },
+                    );
+                    break;
+                }
+                Ok((PlanRecord::Delta(d), _)) => {
+                    out.insert(
+                        h,
+                        CarriedPlan {
+                            full: false,
+                            full_check,
+                        },
+                    );
+                    at = PlanRecord::Delta(d).prev();
+                }
+                Err(_) => break,
+            }
+        }
+        Ok(out)
     }
 
     /// The starts of the project batches in `from..upto` that a fetch or a fork's take wrote:

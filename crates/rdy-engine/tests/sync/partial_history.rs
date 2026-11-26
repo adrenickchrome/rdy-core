@@ -223,6 +223,32 @@ fn r59018_read_warnings_do_not_hide_content() {
         assert_eq!(st.landings().unwrap().len(), 1);
         assert!(st.log_page(None, None).unwrap().is_empty());
     }
+    // an ordinary edit of held content: the version is the frontier map's, whose producer is
+    // behind the frontier; it is written, proposed and landed like any other edit
+    write(
+        &mut r,
+        "u",
+        serde_json::json!([{"op": "update", "id": BLOCK, "fields": {"title": "Edited locally"}}]),
+    )
+    .unwrap();
+    let p = r
+        .propose(&writer(), "u", "u", Some(crate::common::TEST_SUMMARY))
+        .unwrap();
+    crate::common::confirm_exceptions(&mut r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap();
+    {
+        let st = r.read();
+        assert_eq!(st.landings().unwrap().len(), 2);
+        let c = serde_json::to_value(st.context(&Scope::Canon, &id).unwrap()).unwrap();
+        assert!(c.to_string().contains("Edited locally"), "{c}");
+        // the local edit's provenance is held: its last change is the local one
+        assert_eq!(
+            st.last_changes(&Scope::Canon, std::slice::from_ref(&id))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
     // a fresh write, its proposal and its landing extend the frontier normally
     write(
         &mut r,
@@ -236,18 +262,41 @@ fn r59018_read_warnings_do_not_hide_content() {
     crate::common::confirm_exceptions(&mut r, &founder(), &p);
     r.land(&founder(), &p.id).unwrap();
     let st = r.read();
-    assert_eq!(st.landings().unwrap().len(), 2);
+    assert_eq!(st.landings().unwrap().len(), 3);
     assert_eq!(
         st.log_page(None, None).unwrap().len(),
-        1,
-        "the local landing is logged"
+        2,
+        "the local landings are logged"
     );
     assert!(st.history_warning().unwrap().is_some(), "still partial");
     drop(st);
-    // the local landing's delta continues the chain from the frontier's map
+    // the local landings' deltas continue the chain from the frontier's map
+    let report = r.fsck().unwrap();
+    assert_eq!(report.landings, 3);
+    assert!(!report.history.unwrap().complete);
+    drop(r);
+    // a delete of held content, in a second partial project: proposed and landed
+    let root = d.path().join("q");
+    std::fs::create_dir(&root).unwrap();
+    partial_project(&root);
+    let mut r = Rdy::open(&root).unwrap();
+    write(
+        &mut r,
+        "x",
+        serde_json::json!([{"op": "delete", "id": BLOCK}]),
+    )
+    .unwrap();
+    let p = r
+        .propose(&writer(), "x", "x", Some(crate::common::TEST_SUMMARY))
+        .unwrap();
+    crate::common::confirm_exceptions(&mut r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap();
+    let st = r.read();
+    assert_eq!(st.landings().unwrap().len(), 2);
+    assert!(st.context(&Scope::Canon, &id).is_err(), "deleted");
+    drop(st);
     let report = r.fsck().unwrap();
     assert_eq!(report.landings, 2);
-    assert!(!report.history.unwrap().complete);
 }
 
 /// r59018: the progress is exact (listed keys held plus staged trailer records, at most the
@@ -361,4 +410,260 @@ fn r59018_partial_fsck_is_strict() {
     let r = Rdy::open(&root).unwrap();
     let e = r.fsck().unwrap_err();
     assert_eq!(e.code, E_BAD_RECORD, "{e:?}");
+}
+
+/// r59018 (fix round 1): the full check runs before completion. The frozen canon history taken
+/// into the partial project holds every listed record; the full check then checks all of it,
+/// with no partial-history exception, while the ref stays incomplete; ordinary fsck still stops
+/// at the frontier until completion sets the flag.
+#[test]
+fn r59018_full_check_runs_before_completion() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("p");
+    std::fs::create_dir(&root).unwrap();
+    partial_project(&root);
+    let (_, frontier) = state_facts();
+    {
+        let mut s = Store::open(&root.join(".rdy").join(rdy_store::layout::STORE_DIR)).unwrap();
+        let target = FetchTarget {
+            remote: "origin".into(),
+            url: URL.into(),
+            purpose: StreamPurpose::CanonHistory,
+            root: frontier,
+            view: None,
+        };
+        let file = std::fs::File::open(qa_sync_fixture("sync4-canon-history.bin")).unwrap();
+        s.take_fetched::<Infallible>(&[file], &target, |_, _| Ok(()))
+            .unwrap();
+        s.close().unwrap();
+    }
+    let r = Rdy::open(&root).unwrap();
+    let held = FsckHistory {
+        complete: false,
+        held: 19,
+        total: 19,
+    };
+    assert_eq!(
+        r.read().history_progress().unwrap().unwrap().held,
+        19,
+        "every listed record is held"
+    );
+    // the ordinary check keeps the partial rules while the ref is incomplete
+    let partial = r.fsck().unwrap();
+    assert_eq!(partial.landings, 1);
+    assert_eq!(partial.history, Some(held));
+    // the full check checks every landing of the history, and the ref stays incomplete
+    let full = r.fsck_full().unwrap();
+    assert_eq!(full.landings, 3);
+    assert_eq!(full.history, Some(held));
+    assert!(
+        r.read().history_warning().unwrap().is_some(),
+        "still partial"
+    );
+    let epoch = r.store().redaction_epoch();
+    drop(r);
+    {
+        let mut s = Store::open(&root.join(".rdy").join(rdy_store::layout::STORE_DIR)).unwrap();
+        s.complete_history("origin", frontier, epoch).unwrap();
+        s.close().unwrap();
+    }
+    let r = Rdy::open(&root).unwrap();
+    let report = r.fsck().unwrap();
+    assert_eq!(report.landings, 3);
+    assert_eq!(
+        report.history,
+        Some(FsckHistory {
+            complete: true,
+            held: 19,
+            total: 19,
+        })
+    );
+    assert_eq!(r.fsck_full().unwrap().landings, 3);
+    assert!(r.read().history_warning().unwrap().is_none());
+}
+
+/// A source project: a section with two linked claims, landed; then an edit of the referenced
+/// claim whose plan items are confirmed twice, landed with its sealed plan (a delta on a whole
+/// plan version). Returns the project and the root landing.
+fn sealed_plan_source(root: &Path) -> (Rdy, Hash) {
+    let mut r = Rdy::init(root, "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        "work",
+        serde_json::json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$x", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$x", "body": "A holds 30 days."},
+            {"op": "create", "type": "claim", "id": "$b", "parent": "$x", "body": "B builds on {{$a}}."}
+        ]),
+    )
+    .unwrap();
+    let claim = w.created["$a"].clone();
+    let p = r
+        .propose(&writer(), "work", "work", Some(crate::common::TEST_SUMMARY))
+        .unwrap();
+    crate::common::confirm_exceptions(&mut r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap();
+    write(
+        &mut r,
+        "w-plan",
+        serde_json::json!([{"op": "update", "id": claim, "body": "A holds 40 days."}]),
+    )
+    .unwrap();
+    let items: Vec<String> = r
+        .read()
+        .view_plan("w-plan")
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|row| match row {
+            rdy_engine::plan::api::PlanRow::Live(i) => Some(i.id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!items.is_empty(), "the edit opens a plan item");
+    for reason in ["it still holds", "it still holds, checked again"] {
+        let answers: Vec<rdy_engine::plan::PlanAnswerInput> = items
+            .iter()
+            .map(|i| rdy_engine::plan::PlanAnswerInput {
+                item: i.clone(),
+                act: rdy_model::plan::PlanAct::Confirm,
+                reason: Some(reason.into()),
+            })
+            .collect();
+        r.answer_plan(&writer(), "w-plan", &answers).unwrap();
+    }
+    let p = r
+        .propose(
+            &writer(),
+            "w-plan",
+            "w-plan",
+            Some(crate::common::TEST_SUMMARY),
+        )
+        .unwrap();
+    crate::common::confirm_exceptions(&mut r, &founder(), &p);
+    let landing: Hash = r.land(&founder(), &p.id).unwrap().parse().unwrap();
+    (r, landing)
+}
+
+/// r59018 (fix round 1): a valid carried sealed PLAN. A canon state whose root carries a sealed
+/// plan (its `prev` chain to the Full record) is taken into a fresh project; partial fsck takes
+/// the plan's frontier links (`stable`, `proposal`, `seal.version`) as deferred, as the take
+/// does. Once the canon history arrives, the full check validates those links.
+#[test]
+fn r59018_a_carried_sealed_plan_passes_partial_fsck() {
+    use rdy_engine::canon_state_export::PreparedCanonState;
+    let d = tempfile::tempdir().unwrap();
+    let (src, root) = sealed_plan_source(&d.path().join("src"));
+    src.fsck().unwrap();
+    let repo = src.store().repo_id().unwrap().unwrap();
+    // the canon state of the root, one batch
+    let state = PreparedCanonState::new(src.read(), root).unwrap();
+    let keys = state.keys().to_vec();
+    assert!(
+        keys.iter().any(|k| k.kind == rdy_store::kinds::PLAN),
+        "the state carries the plan"
+    );
+    let state_path = d.path().join("state.batch");
+    state
+        .write_keys(&keys, std::fs::File::create(&state_path).unwrap())
+        .unwrap();
+    // the canon history of the root, one format-4 batch, and its keys
+    let reader = src.store().reader();
+    let end = rdy_store::closure::END_OF_LOG;
+    let found = rdy_store::closure::history_closure_before(
+        &reader,
+        StreamPurpose::CanonHistory,
+        root,
+        &Default::default(),
+        None,
+        end,
+    )
+    .unwrap();
+    let header = rdy_store::sync_stream::StreamHeader::canon_history(
+        found.features.clone(),
+        repo,
+        root,
+        found.prerequisites.clone(),
+    );
+    let mut source = rdy_store::closure::StoreSource {
+        reader: &reader,
+        end,
+    };
+    let history_path = d.path().join("history.batch");
+    rdy_store::closure::write_batch(
+        &mut source,
+        &header,
+        &found.records,
+        std::fs::File::create(&history_path).unwrap(),
+    )
+    .unwrap();
+    let history_keys = found.records.clone();
+    drop(reader);
+    drop(state);
+    drop(src);
+
+    // a fresh project of the source's repo takes the state
+    let dest = d.path().join("dest");
+    std::fs::create_dir(&dest).unwrap();
+    Rdy::init(&dest, "rdy-standard").unwrap().close().unwrap();
+    let store_dir = dest.join(".rdy").join(rdy_store::layout::STORE_DIR);
+    std::fs::remove_dir_all(&store_dir).unwrap();
+    let mut s = Store::create_fork_project(&store_dir, repo).unwrap();
+    let history = SyncHistory {
+        repo_id: repo,
+        url: URL.into(),
+        frontier: root,
+        complete: false,
+        records: history_keys.len() as u64,
+    };
+    let target = FetchTarget {
+        remote: "origin".into(),
+        url: URL.into(),
+        purpose: StreamPurpose::CanonState,
+        root,
+        view: None,
+    };
+    s.take_canon_state::<Infallible>(
+        &[std::fs::File::open(&state_path).unwrap()],
+        &target,
+        &history,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    // the store's partial object check keeps the table's deferred PLAN links; its full check
+    // takes no partial-history exception, so the missing history fails it
+    s.reader().check_objects().unwrap();
+    assert!(s.reader().full_history_reader().check_objects().is_err());
+    s.close().unwrap();
+    write_keys(&dest, repo, root, history_keys);
+    let r = Rdy::open(&dest).unwrap();
+    let report = r.fsck().unwrap();
+    assert!(!report.history.unwrap().complete);
+    pending_any(&r.fsck_full().unwrap_err());
+    drop(r);
+
+    // the canon history arrives: the full check validates the plan's deferred links
+    {
+        let mut s = Store::open(&store_dir).unwrap();
+        let target = FetchTarget {
+            purpose: StreamPurpose::CanonHistory,
+            ..target
+        };
+        s.take_fetched::<Infallible>(
+            &[std::fs::File::open(&history_path).unwrap()],
+            &target,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        s.close().unwrap();
+    }
+    let r = Rdy::open(&dest).unwrap();
+    let full = r.fsck_full().unwrap();
+    assert_eq!(full.landings, 2);
+    assert!(!full.history.unwrap().complete);
+}
+
+fn pending_any(e: &RdyError) {
+    assert_eq!(e.code, E_HISTORY_PENDING, "{e:?}");
 }

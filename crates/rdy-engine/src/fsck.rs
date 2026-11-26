@@ -90,21 +90,29 @@ impl Rdy {
         if self.is_holder() {
             return self.fsck_holder();
         }
+        self.fsck_in(&self.read())
+    }
+
+    /// The project fsck over `st` and its reader: the published state for [`Rdy::fsck`], whose
+    /// walks stop at an incomplete history's frontier; a full check's state for
+    /// [`Rdy::fsck_full`], which has no frontier.
+    fn fsck_in(&self, st: &crate::ReadState) -> Result<FsckReport, RdyError> {
+        let reader = st.reader();
         let verified = self.store.verify_report()?;
         let frames = verified.frames;
-        let landings = self.store.landings()?;
+        let landings = reader.landings()?;
         // every project landing's snapshot, off canon too, by the chain checks a holder check, a
         // take and a load share (`rdy_store::snapshot::check_snapshot_chains`); a verified
         // foreign-removal proof's landing keeps the foreign log rules only
-        let all = self.store.project_landings()?;
+        let all = reader.project_landings()?;
         let refs: Vec<(rdy_model::Hash, &rdy_model::LandingRecord)> =
             all.iter().map(|(h, r)| (*h, r)).collect();
-        self.store.check_snapshot_chains(&refs)?;
+        reader.check_snapshot_chains(&refs)?;
         let chain: Vec<rdy_model::Hash> = landings.iter().map(|(h, _)| *h).collect();
         let versions = self.check_tags(&chain)?;
-        let objects = self.store.check_objects()?;
-        let unlogged = crate::transitions::reconcile_moves(&self.read(), None, &[], None)?;
-        let (signatures, foreign_signatures) = self.check_signatures()?;
+        let objects = reader.check_objects()?;
+        let unlogged = crate::transitions::reconcile_moves(st, None, &[], None)?;
+        let (signatures, foreign_signatures) = self.check_signatures(st)?;
         Ok(FsckReport {
             frames,
             landings: landings.len(),
@@ -124,16 +132,34 @@ impl Rdy {
                 redacted_bytes: c.bytes,
                 checked_payloads: c.checked_payloads,
             }),
-            warnings: self.read().carried_warnings()?,
+            warnings: st.carried_warnings()?,
             history: self.fsck_history()?,
         })
     }
 
-    /// The full check: [`Rdy::fsck`] of a project whose history is complete. While the history
-    /// is still arriving it is E_HISTORY_PENDING: the records behind the frontier are missing.
+    /// The full check: [`Rdy::fsck`] with no partial-history exception. A project whose history
+    /// is complete, or that has none, takes the ordinary check. While the history ref is
+    /// incomplete, the store must hold every record its checked key file lists, else it is
+    /// E_HISTORY_PENDING (the records behind the frontier are missing); then every walk and
+    /// check takes the whole history, past the frontier, the missing-link exception of the
+    /// canon state link table off (D-4PV25), and the incomplete ref is kept as it is. A
+    /// completion runs it before `Store::complete_history` sets the flag.
     pub fn fsck_full(&self) -> Result<FsckReport, RdyError> {
-        self.read().require_complete_history()?;
-        self.fsck()
+        if self.is_holder() {
+            return self.fsck_holder();
+        }
+        let st = self.read();
+        let Some((remote, history)) = st.partial_history()? else {
+            return self.fsck_in(&st);
+        };
+        let held = crate::partial_history::store_held(st.reader(), st.root(), remote, history)?;
+        if held < history.records {
+            return Err(st
+                .history_progress()?
+                .expect("an incomplete history has a progress")
+                .refusal());
+        }
+        self.fsck_in(&self.full_history_state()?)
     }
 
     /// The history member of the report: each staged batch rechecked whole (every payload
@@ -185,7 +211,7 @@ impl Rdy {
             .tag_histories(&heads)
             .map_err(crate::holder::holder_error)?
             .len();
-        let (signatures, foreign_signatures) = self.check_signatures()?;
+        let (signatures, foreign_signatures) = self.check_signatures(&self.read())?;
         Ok(FsckReport {
             frames: verified.frames,
             landings,
@@ -215,8 +241,7 @@ impl Rdy {
     /// and, of them, the signatures of another project a holder cannot verify (`foreign_repo`,
     /// information, not damage); an invalid or mismatched signature fails with the first
     /// issue's code, message and fix and at most [`MAX_SIGNATURE_ISSUES`] issues.
-    fn check_signatures(&self) -> Result<(usize, usize), RdyError> {
-        let st = self.read();
+    fn check_signatures(&self, st: &crate::ReadState) -> Result<(usize, usize), RdyError> {
         let mut count = 0usize;
         let mut foreign = 0usize;
         let mut failed = 0usize;
@@ -236,13 +261,13 @@ impl Rdy {
             {
                 let read = match &repos {
                     Some(r) => Ok(r.clone()),
-                    None => repo_ids(&st).inspect(|r| repos = Some(r.clone())),
+                    None => repo_ids(st).inspect(|r| repos = Some(r.clone())),
                 };
                 match read
                     .and_then(|(current, sources)| {
-                        subject_context(&st, &g.subject, current, sources)
+                        subject_context(st, &g.subject, current, sources)
                     })
-                    .and_then(|c| carried_sources(&st, &c).map(|from| (c, from)))
+                    .and_then(|c| carried_sources(st, &c).map(|from| (c, from)))
                 {
                     Ok((c, from)) => {
                         context = Some(c);

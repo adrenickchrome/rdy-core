@@ -645,7 +645,25 @@ impl StoreReader {
     /// The frontier of the project's incomplete history, if any: where a walk of canon stops
     /// ([`StoreReader::partial_history`]).
     pub fn history_frontier(&self) -> Result<Option<Hash>, StoreError> {
+        if self.full_history {
+            return Ok(None);
+        }
         Ok(self.partial_history()?.map(|h| h.frontier))
+    }
+
+    /// This reader in full-check mode: no incomplete history's frontier
+    /// ([`StoreReader::history_frontier`] is None), so every walk and check takes the whole
+    /// history with no partial-history exception, while the history ref is kept as it stands.
+    /// A completion checks a fully received history with it before it sets `complete`.
+    pub fn full_history_reader(&self) -> StoreReader {
+        let mut r = self.clone();
+        r.full_history = true;
+        r
+    }
+
+    /// Whether this is a full-check reader ([`StoreReader::full_history_reader`]).
+    pub fn is_full_history(&self) -> bool {
+        self.full_history
     }
 
     /// The history value `value` of ref `name`, with its store rules (see

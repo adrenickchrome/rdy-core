@@ -92,6 +92,10 @@ pub struct StoreReader {
     /// The masks of recorded requests this reader reads as applied (`redaction_preview_reader`);
     /// None for every other reader.
     preview: Option<Arc<crate::redaction::Preview>>,
+    /// Whether this reader checks the full history (`full_history_reader`): it has no
+    /// incomplete history's frontier, so no partial-history exception applies, while the
+    /// history ref itself is kept as it is. False for every other reader.
+    pub(crate) full_history: bool,
 }
 
 /// What every reader of one store shares, whatever index it holds.
@@ -2087,6 +2091,7 @@ impl Store {
             tracking: Arc::default(),
             epoch: 0,
             preview: None,
+            full_history: false,
         };
         let mut store = Store {
             dir: dir.to_path_buf(),
@@ -2296,6 +2301,7 @@ impl Store {
             tracking: Arc::default(),
             epoch: 0,
             preview: None,
+            full_history: false,
         };
         let end = log.end();
         let mut store = Store {
@@ -2733,6 +2739,7 @@ impl Store {
         let mut r = StoreReader::clone(self);
         r.epoch = r.shared.epoch.load(Ordering::Acquire);
         r.preview = None;
+        r.full_history = false;
         r
     }
 
@@ -3067,6 +3074,7 @@ impl Store {
             tracking,
             epoch,
             preview: None,
+            full_history: false,
         });
     }
 
@@ -5201,6 +5209,12 @@ impl StoreReader {
                 Op::Update { base, .. } | Op::Delete { base, .. } => {
                     let producers = self.index().producers(base)?;
                     if producers.is_empty() {
+                        // a version of the captured frontier's map, written behind the
+                        // frontier of an incomplete history (D-4PV25): its producer is not
+                        // held, so no dep can name it; the merge settles such a base side
+                        if self.frontier_map_holds(op.block_id(), base)? {
+                            continue;
+                        }
                         return Err(StoreError::NotFound(*base));
                     }
                     if producers.len() > 1
@@ -5251,6 +5265,16 @@ impl StoreReader {
             }
         }
         Ok(deps.into_iter().collect())
+    }
+
+    /// Whether `version` is `id`'s version in the map of an incomplete history's frontier: a
+    /// version the store holds with no producer, as the captured canon state proves it. False
+    /// with no incomplete history.
+    pub fn frontier_map_holds(&self, id: &BlockId, version: &Hash) -> Result<bool, StoreError> {
+        let Some(frontier) = self.history_frontier()? else {
+            return Ok(false);
+        };
+        Ok(self.snapshot_at(&frontier)?.blocks.get(id) == Some(version))
     }
 
     /// The landing view `view` reads from: canon's head for a view with no head or one that

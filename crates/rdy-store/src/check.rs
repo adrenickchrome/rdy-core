@@ -180,7 +180,18 @@ impl StoreReader {
             }
             landed_changes += rec.changes.len();
         }
-        self.check_landed(&landings)?;
+        // the index's landed rows are derived from canon as far as the incomplete history's
+        // frontier until the completion's reindex rebuilds them from the held records: a full
+        // check (`full_history_reader`) checks every record and edge past the frontier, and the
+        // rows against the chain to the frontier, as they stand
+        let index_frontier = match frontier {
+            None if self.is_full_history() => self.partial_history()?.map(|h| h.frontier),
+            _ => None,
+        };
+        match index_frontier.and_then(|f| landings.iter().position(|(l, _)| *l == f)) {
+            Some(at) => self.check_landed(&landings[..=at])?,
+            None => self.check_landed(&landings)?,
+        }
         let intents = self
             .check_chains::<Intent>(kinds::INTENT, INTENT_REF, "intent", |i| (i.stable, i.prev))?;
         let alt_sets =

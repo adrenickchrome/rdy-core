@@ -88,6 +88,10 @@ impl HistoryProgress {
 pub(crate) struct HistoryCell {
     captured: Result<Option<(String, SyncHistory)>, RdyError>,
     progress: OnceLock<Result<Option<HistoryProgress>, RdyError>>,
+    /// Whether the state reads the full history (a full check's state, over
+    /// `StoreReader::full_history_reader`): its walks have no frontier, while the incomplete
+    /// ref and its progress stay as captured.
+    full: bool,
 }
 
 impl Default for HistoryCell {
@@ -95,6 +99,7 @@ impl Default for HistoryCell {
         HistoryCell {
             captured: Ok(None),
             progress: OnceLock::new(),
+            full: false,
         }
     }
 }
@@ -113,6 +118,7 @@ impl HistoryCell {
         HistoryCell {
             captured,
             progress: OnceLock::new(),
+            full: reader.is_full_history(),
         }
     }
 }
@@ -367,6 +373,24 @@ pub fn progress_of(
     })
 }
 
+/// How many of the records `history`'s checked key file lists the store itself holds (staged
+/// batches not counted): a full check of an incomplete history needs all of them.
+pub(crate) fn store_held(
+    reader: &StoreReader,
+    root: &Path,
+    remote: &str,
+    history: &SyncHistory,
+) -> Result<u64, RdyError> {
+    let keys = read_key_file(&key_file(root, remote), history)?;
+    let mut held = 0u64;
+    for k in &keys.keys {
+        if reader.has_kind(k.kind, &k.hash)? {
+            held += 1;
+        }
+    }
+    Ok(held)
+}
+
 /// The exact progress a full check counts: every listed key the store holds or a staged batch
 /// holds, each once, after each staged batch passes its whole check (`check_batch`, which hashes
 /// every payload). Partial fsck, a resume and the completion use it.
@@ -428,7 +452,11 @@ impl ReadState {
     }
 
     /// The frontier where this state's canon walks stop: the incomplete history's, else None.
+    /// A full check's state has none: it reads the whole history.
     pub(crate) fn history_frontier(&self) -> Result<Option<Hash>, RdyError> {
+        if self.history.full {
+            return Ok(None);
+        }
         Ok(self.partial_history()?.map(|(_, h)| h.frontier))
     }
 
