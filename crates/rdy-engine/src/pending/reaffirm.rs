@@ -7,13 +7,19 @@
 //! The cards are read from canon's captured graph through the shared suspect projection
 //! (`ReadState::suspects` with its accepted deferrals): each structural suspect row of a live or
 //! partly superseded accepted decision joins the group of its target, the cause. A code row has
-//! no target and never makes a card. Two exclusions, closed:
+//! no target and never makes a card. Three exclusions, closed:
 //! - a decision that a latest open proposal version re-affirms (its `reaffirmed` metadata or a
 //!   pin of it moves) or fully retires (it supersedes it whole, or revokes it) is no member of any
 //!   card: the open work answers it;
 //! - a cause/member pair that an active accepted deferral covers (a sealed deferral or a
 //!   KeepSuspect answer the canon has not cleared) is not in that cause's group; the member's
-//!   other causes keep it.
+//!   other causes keep it;
+//! - a member whose own landing made the cause's state (the landing's own edits): the landing
+//!   that last changed, deleted or retired the cause also wrote the member's current version
+//!   (edit order inside the view does not matter), or the member's landing came first and every
+//!   landing that changed the cause after it came from the same view as the member's landing. A
+//!   `one_way` member keeps its card in this second case. A cause change from any other landing
+//!   opens the card. The member's suspect rows stay in every read.
 //!
 //! An empty group makes no card. The cause's version is its latest block object: its version in
 //! canon, or the version its delete removed.
@@ -405,7 +411,7 @@ fn raised_by(
     cause_in_canon: Option<Hash>,
     deleter: Option<Hash>,
     retirements: &[BlockId],
-) -> Result<Option<(String, i64)>, RdyError> {
+) -> Result<Raised, RdyError> {
     let reader = st.reader();
     let mut landings = vec![];
     if let Some(v) = cause_in_canon {
@@ -414,21 +420,206 @@ fn raised_by(
     if let Some(d) = deleter {
         landings.extend(reader.first_carrier(&d, Some(st.seq()))?);
     }
+    let mut retired = vec![];
     for r in retirements {
         if let Some(b) = m.get(r) {
-            landings.extend(retirement_landing(st, b, cause)?);
+            retired.extend(retirement_landing(st, b, cause)?);
         }
     }
+    landings.extend(retired.iter().copied());
     let mut last: Option<(rdy_store::segment::Location, Hash)> = None;
     for l in landings {
         let key = (reader.landing_location(&l)?, l);
         last = Some(last.map_or(key, |k| k.max(key)));
     }
-    let Some(l) = last.map(|(_, l)| l).or(st.canon_head()) else {
-        return Ok(None);
+    let last = last.map(|(_, l)| l);
+    let Some(l) = last.or(st.canon_head()) else {
+        return Ok(Raised {
+            last,
+            retired,
+            by: None,
+        });
     };
     let rec = reader.landing(&l)?;
-    Ok(Some((rec.approved_by.actor, rec.approved_by.at_ms)))
+    Ok(Raised {
+        last,
+        retired,
+        by: Some((rec.approved_by.actor, rec.approved_by.at_ms)),
+    })
+}
+
+/// What [`raised_by`] finds for one cause.
+struct Raised {
+    /// The landing that last changed, deleted or retired the cause, if any is found.
+    last: Option<Hash>,
+    /// The landings that introduced its retirements.
+    retired: Vec<Hash>,
+    /// The approver of `last` (else of canon's head landing) and the time of that landing.
+    by: Option<(String, i64)>,
+}
+
+/// The name of the view a landing came from: its proposal's view.
+fn landing_view(st: &ReadState, landing: &Hash) -> Result<String, RdyError> {
+    let reader = st.reader();
+    let rec = reader.landing(landing)?;
+    Ok(reader.proposal(&rec.proposal)?.view)
+}
+
+/// The landings that changed one cause, newest first, read back through its versions as far as a
+/// caller asks: first the landing of the cause's current state, then, one step at a time, the
+/// landing of each earlier version (a delete counts as the step that removed the cause). The
+/// retirements of the cause join as landings of their own.
+struct CauseHistory {
+    cause: BlockId,
+    /// The next step back: the change to read and where it sits.
+    next: Option<Hash>,
+    /// The landings read so far with where the log holds them, by log order, newest first.
+    seen: Vec<(rdy_store::segment::Location, Hash)>,
+    /// The landings that retired the cause.
+    retired: Vec<(rdy_store::segment::Location, Hash)>,
+}
+
+impl CauseHistory {
+    fn new(
+        st: &ReadState,
+        cause: &BlockId,
+        version: &Hash,
+        deleter: Option<Hash>,
+        retired: &[Hash],
+    ) -> Result<Self, RdyError> {
+        let reader = st.reader();
+        let next = match deleter {
+            Some(d) => Some(d),
+            None => reader.producer_at(&reader.producers(version)?, st.canon_head().as_ref())?,
+        };
+        let mut retired_at = vec![];
+        for l in retired {
+            retired_at.push((reader.landing_location(l)?, *l));
+        }
+        Ok(CauseHistory {
+            cause: cause.clone(),
+            next,
+            seen: vec![],
+            retired: retired_at,
+        })
+    }
+
+    /// Reads back until the oldest landing read is at or before `bound`, or the history ends.
+    fn read_to(
+        &mut self,
+        st: &ReadState,
+        bound: rdy_store::segment::Location,
+    ) -> Result<(), RdyError> {
+        let reader = st.reader();
+        while self.seen.last().is_none_or(|(at, _)| *at > bound) {
+            let Some(change) = self.next.take() else {
+                return Ok(());
+            };
+            let Some(landing) = reader.first_carrier(&change, Some(st.seq()))? else {
+                return Ok(());
+            };
+            self.seen
+                .push((reader.landing_location(&landing)?, landing));
+            let base = reader
+                .change(&change)?
+                .ops
+                .into_iter()
+                .find_map(|op| match op {
+                    Op::Update { base, block } if block.id == self.cause => Some(base),
+                    Op::Delete { base, id } if id == self.cause => Some(base),
+                    _ => None,
+                });
+            if let Some(base) = base {
+                self.next = reader.producer_before(&reader.producers(&base)?, &change)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The landings that changed or retired the cause after `bound`.
+    fn since(
+        &mut self,
+        st: &ReadState,
+        bound: rdy_store::segment::Location,
+    ) -> Result<Vec<Hash>, RdyError> {
+        self.read_to(st, bound)?;
+        let mut out: Vec<Hash> = self
+            .seen
+            .iter()
+            .chain(&self.retired)
+            .filter(|(at, _)| *at > bound)
+            .map(|(_, l)| *l)
+            .collect();
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+}
+
+/// The view of `landing`, read once into `views`.
+fn cached_view(
+    st: &ReadState,
+    views: &mut BTreeMap<Hash, String>,
+    landing: Hash,
+) -> Result<String, RdyError> {
+    if let Some(v) = views.get(&landing) {
+        return Ok(v.clone());
+    }
+    let v = landing_view(st, &landing)?;
+    views.insert(landing, v.clone());
+    Ok(v)
+}
+
+/// The members of one card that the landing's own edits left no reason to ask about (see the
+/// module docs): `ids` less every member whose own landing also made the cause's state.
+/// `last` is the landing that last changed, deleted or retired the cause.
+fn without_own_landings<'a>(
+    st: &ReadState,
+    m: &crate::Materialized,
+    history: &mut CauseHistory,
+    last: Option<Hash>,
+    ids: &BTreeSet<&'a BlockId>,
+) -> Result<BTreeSet<&'a BlockId>, RdyError> {
+    let Some(last) = last else {
+        return Ok(ids.clone());
+    };
+    let reader = st.reader();
+    let mut views: BTreeMap<Hash, String> = BTreeMap::new();
+    let mut keep = BTreeSet::new();
+    for id in ids {
+        let Some(b) = m.get(id) else {
+            keep.insert(*id);
+            continue;
+        };
+        let Some(own) = landing_of_version(st, &b.version_hash())? else {
+            keep.insert(*id);
+            continue;
+        };
+        if own == last {
+            continue;
+        }
+        if b.field_str("reversibility") == Some("one_way") {
+            keep.insert(*id);
+            continue;
+        }
+        let after = history.since(st, reader.landing_location(&own)?)?;
+        if after.is_empty() {
+            keep.insert(*id);
+            continue;
+        }
+        let own_view = cached_view(st, &mut views, own)?;
+        let mut same = true;
+        for l in &after {
+            if cached_view(st, &mut views, *l)? != own_view {
+                same = false;
+                break;
+            }
+        }
+        if !same {
+            keep.insert(*id);
+        }
+    }
+    Ok(keep)
 }
 
 /// The re-affirmation cards of canon (see the module docs), by cause id, with who raised each.
@@ -474,6 +665,14 @@ pub(crate) fn reaffirm_items(
             continue;
         };
         limits.members(ids.len())?;
+        let retirements: Vec<BlockId> = g.retiring_decisions(cause).into_iter().collect();
+        let in_canon = m.get(cause).map(|b| b.version_hash());
+        let raised = raised_by(st, &m, cause, in_canon, deleter, &retirements)?;
+        let mut history = CauseHistory::new(st, cause, &version, deleter, &raised.retired)?;
+        let ids = without_own_landings(st, &m, &mut history, raised.last, &ids)?;
+        if ids.is_empty() {
+            continue;
+        }
         let mut pairs = 0usize;
         let mut members = Vec::with_capacity(ids.len());
         for id in &ids {
@@ -492,7 +691,6 @@ pub(crate) fn reaffirm_items(
                 suspects: own,
             });
         }
-        let retirements: Vec<BlockId> = g.retiring_decisions(cause).into_iter().collect();
         limits.bytes(reaffirm_binding_len(cause, &retirements, &members))?;
         let title = match text(&block, "title") {
             Some(t) => format!("Re-affirm after {t}"),
@@ -529,8 +727,7 @@ pub(crate) fn reaffirm_items(
                 None,
             ),
         ];
-        let in_canon = m.get(cause).map(|b| b.version_hash());
-        if let Some((by, at)) = raised_by(st, &m, cause, in_canon, deleter, &retirements)? {
+        if let Some((by, at)) = raised.by {
             it.raised_by = by;
             it.raised_at = rfc3339(at);
             it.age = age(at, now);
