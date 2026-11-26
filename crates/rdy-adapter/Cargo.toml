@@ -20,6 +20,9 @@ tempfile.workspace = true
 # the loopback TLS fixture hub of the two-machine sync tests (test builds only)
 rustls.workspace = true
 rcgen.workspace = true
+# the prepared-API checks of the sync mock (test builds only)
+sha2.workspace = true
+zstd.workspace = true
 # the render entry-point counter the no-render-in-the-holder test reads (test builds only)
 rdy-render = { workspace = true, features = ["probe"] }
 
