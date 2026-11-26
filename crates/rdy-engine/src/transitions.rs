@@ -24,8 +24,9 @@ use std::sync::Arc;
 /// Whether a batch of `frames` can move the open tensions or the suspects (the closed list):
 /// every frame kind except `BLOB_CHUNK`, `BLOB_MANIFEST`, `TAG`, `INTENT`, `ANSWER`, `PLAN`, and
 /// a `REF_UPDATE` whose name starts with `inbox/`, `intent/`, `answer/`, `pending/` (O15) or
-/// `plan/` (a plan answer changes no block, D-4JMPH). A ref update that cannot be read counts as
-/// one that moves.
+/// `plan/` (a plan answer changes no block, D-4JMPH), or named `meta/store_features` (the
+/// manifest a feature's first use records in its batch). A ref update that cannot be read
+/// counts as one that moves.
 pub(crate) fn can_move(reader: &StoreReader, frames: &[(u8, Hash)]) -> bool {
     frames.iter().any(|(kind, h)| match *kind {
         kinds::BLOB_CHUNK
@@ -41,7 +42,9 @@ pub(crate) fn can_move(reader: &StoreReader, frames: &[(u8, Hash)]) -> bool {
                     || r.name.starts_with("intent/")
                     || r.name.starts_with(rdy_store::ANSWER_REF)
                     || r.name.starts_with(rdy_store::PENDING_REF)
-                    || r.name.starts_with(rdy_store::plan::PLAN_REF))
+                    || r.name.starts_with(rdy_store::plan::PLAN_REF)
+                    // a feature's first use records the manifest in the batch that uses it
+                    || r.name == rdy_store::format::REF_STORE_FEATURES)
             }),
         _ => true,
     })
@@ -742,13 +745,18 @@ mod tests {
                 at_ms: 1,
             },
             seal: None,
+            read_identity: None,
         };
         s.put_plan(&plan).unwrap();
         let alone = s.last_batch().to_vec();
         let view = ref_update(&mut s, "view/work");
         let reader = s.reader();
         let kinds_of: Vec<u8> = alone.iter().map(|(k, _)| *k).collect();
-        assert_eq!(kinds_of, [kinds::PLAN, kinds::REF_UPDATE]);
+        // the store's first encoding-1 PLAN also records the plan_delta feature, in its batch
+        assert_eq!(
+            kinds_of,
+            [kinds::PLAN, kinds::REF_UPDATE, kinds::REF_UPDATE]
+        );
         assert!(!can_move(&reader, &alone));
         let mut with_view = alone.to_vec();
         with_view.push((kinds::REF_UPDATE, view));

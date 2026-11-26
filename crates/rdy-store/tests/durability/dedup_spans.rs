@@ -804,6 +804,7 @@ fn plan_with(prev: Option<Hash>, answers: Vec<PlanAnswer>) -> Plan {
             at_ms: 1,
         },
         seal: None,
+        read_identity: None,
     }
 }
 

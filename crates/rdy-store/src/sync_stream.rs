@@ -1465,16 +1465,24 @@ fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError
             .map(|_| ())
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)));
     }
-    let payload = crate::codec::split(r.raw_kind(), payload)
-        .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?
-        .body;
+    let split = crate::codec::split(r.raw_kind(), payload)
+        .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
+    let payload = split.body;
     if key.kind == crate::kinds::PLAN {
-        // the plan record rules (`crate::plan`), with fsck's own text; its chain, bound
-        // proposal and seal need the records around it, which the whole-upload check
-        // (`crate::stream_source::check_typed_context`) checks before a take appends
-        let p = crate::plan::decode_plan(payload)
+        // the plan record rules (`crate::plan`), with fsck's own text, of the frame alone: a
+        // whole version's, or a delta's own fields and answer lists; its chain, bound proposal
+        // and seal, and a delta's hydrated version, need the records around it, which the
+        // whole-upload check (`crate::stream_source::check_typed_context`) checks before a take
+        // appends
+        let (p, _) = crate::plan_record::decode_body(split.version, payload)
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
-        return match crate::plan::invalid_record(&p) {
+        let rule = match &p {
+            crate::plan_record::PlanRecord::Delta(d) if !d.lists_valid() => {
+                Some(crate::plan::INVALID_CHAIN)
+            }
+            _ => crate::plan::invalid_record(&p.as_record_plan()),
+        };
+        return match rule {
             Some(rule) => {
                 Err(
                     StreamError::broken_rule(n, offset, &crate::plan::damage(&key.hash, rule))

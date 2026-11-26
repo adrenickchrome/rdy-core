@@ -938,7 +938,7 @@ fn frame_entries(
         kinds::DISPUTE => out.push(dispute_entry(hash, loc, &o)?),
         kinds::DISPUTE_RESOLUTION => out.push(resolution_entry(hash, loc, &o)?),
         kinds::ANSWER => out.extend(crate::plan::answer_entries(hash, loc, payload, r)?),
-        kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, payload, r)?),
+        kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, o.version, payload, r)?),
         kinds::SNAPSHOT_DELTA => out.push(snapshot_delta_entry(hash, loc, &o)?),
         _ => {}
     }
@@ -4326,6 +4326,18 @@ impl StoreReader {
         kind: u8,
         h: &Hash,
     ) -> Result<T, StoreError> {
+        // a plan hydrates through the one plan fold, which reads frames, never this method
+        if kind == kinds::PLAN
+            && std::any::TypeId::of::<T>() == std::any::TypeId::of::<rdy_model::Plan>()
+        {
+            let plan = crate::plan_record::fold(h, &self.plan_frames_read())
+                .map_err(crate::plan_record::FoldError::into_store)?;
+            let any: Box<dyn std::any::Any> = Box::new(plan);
+            return any
+                .downcast::<T>()
+                .map(|b| *b)
+                .map_err(|_| StoreError::Decode("a plan does not decode as this type".into()));
+        }
         let (raw, payload) = self.get_kind_raw(kind, h)?;
         crate::codec::decode_record(raw, &payload)
     }

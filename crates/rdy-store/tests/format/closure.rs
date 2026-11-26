@@ -287,6 +287,7 @@ fn source() -> Src {
         heads: vec![],
         provenance: w.clone(),
         seal: None,
+        read_identity: None,
     };
     s.write_guarded_for_tests(plan_frames(&bound)).unwrap();
     s.seal(vec![]).unwrap();
@@ -516,10 +517,11 @@ fn source() -> Src {
     }
 }
 
-/// The PLAN frame of `p` and its `plan/<view>` ref, as the plan writers compose them.
+/// The PLAN frame of `p` (a whole version, named by `p.id()`) and its `plan/<view>` ref, as
+/// the plan writers compose them.
 fn plan_frames(p: &Plan) -> Vec<(u8, Vec<u8>)> {
     vec![
-        (kinds::PLAN, enc(p)),
+        rdy_store::codec::item_new(kinds::PLAN, p),
         (
             kinds::REF_UPDATE,
             enc(&kinds::RefUpdate {

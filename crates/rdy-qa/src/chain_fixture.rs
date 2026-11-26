@@ -308,6 +308,7 @@ fn bound_plan(r: &mut Rdy, view: &str, body: &str) -> (Hash, Plan) {
         }],
         provenance: plan_prov("agent:plan", Role::Writer),
         seal: None,
+        read_identity: None,
     };
     r.store_mut()
         .write_guarded_for_tests(every_kind::plan_frames(&bound))

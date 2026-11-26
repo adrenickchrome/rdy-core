@@ -74,6 +74,7 @@ fn fixed_plan() -> Plan {
                 answer: Some(Hash([2; 32])),
             }],
         }),
+        read_identity: None,
     }
 }
 
@@ -118,9 +119,13 @@ fn cp1_plan_wire_order_and_item_domain_are_fixed() {
     .concat();
     let p = fixed_plan();
     assert_eq!(hex(&enc(&p)), hex(&expected));
-    assert_eq!(p.id(), Hash::of(&expected));
+    // the frozen version-0 layout keeps these bytes; a stored version-0 plan's id is their hash
+    assert_eq!(hex(&rdy_model::plan_encoding::v0_body(&p)), hex(&expected));
     let back: Plan = postcard::from_bytes(&expected).unwrap();
     assert_eq!(back, p);
+    // a new draft's id is the hash of its whole version-1 frame, apart from the old wire vector
+    let draft = [&[0x01, 0x00, 0x00][..], &expected].concat();
+    assert_eq!(p.id(), Hash::of(&draft));
 
     let kinds = [
         (PlanKind::Update, "update"),
@@ -551,4 +556,126 @@ fn cp1_metadata_text_is_not_a_reference() {
         ordinary.ref_tokens(),
         BTreeSet::from(["D-W2HXR".to_string()])
     );
+}
+
+/// r5906 (D-3PNRK, D-4JMPH, D-WWAK7): the two stored forms of a plan version. Encoding 0 is the
+/// frozen eight-field body; encoding 1 is `Full` (variant 0, the same body) or `Delta` (variant
+/// 1): the complete metadata and the answer differences, strictly increasing by item and
+/// disjoint. A stored read keeps its frame's identity and equals the same version built anew.
+#[test]
+fn r5906_plan_record_wire_is_fixed() {
+    use rdy_model::encoding::{EncodedIdentity, PLAN_DELTA_ENCODING, encoded_hash};
+    use rdy_model::plan_encoding::{
+        MAX_PLAN_DELTA_DEPTH, PlanDeltaV1, PlanRecordV1, PlanV0, delta_body, full_body, v0_body,
+    };
+    assert_eq!(PLAN_DELTA_ENCODING, 1);
+    assert_eq!(MAX_PLAN_DELTA_DEPTH, 128);
+    let p = fixed_plan();
+    let v0 = v0_body(&p);
+    // Full: the variant byte 0, then the frozen body
+    let full = full_body(&p);
+    assert_eq!(full, [&[0x00][..], &v0].concat());
+    match postcard::from_bytes::<PlanRecordV1>(&full).unwrap() {
+        PlanRecordV1::Full(b) => assert_eq!(b, PlanV0::of(&p)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(p.id(), encoded_hash(PLAN_DELTA_ENCODING, &full));
+
+    // a successor that keeps one answer, replaces one and adds one, and drops one
+    let by = p.answers[0].by.clone();
+    let answer = |item: u8, act: PlanAct, reason: Option<&str>| PlanAnswer {
+        item: Hash([item; 32]),
+        act,
+        reason: reason.map(str::to_string),
+        subject: None,
+        cause: Hash([3; 32]),
+        by: by.clone(),
+    };
+    let prev = Plan {
+        answers: vec![
+            answer(0x10, PlanAct::Confirm, Some("kept")),
+            answer(0x20, PlanAct::Defer, Some("later")),
+            answer(0x30, PlanAct::Confirm, Some("dropped")),
+        ],
+        seal: None,
+        ..p.clone()
+    };
+    let next = Plan {
+        stable: Some(Hash([9; 32])),
+        prev: Some(Hash([8; 32])),
+        answers: vec![
+            answer(0x10, PlanAct::Confirm, Some("kept")),
+            answer(0x20, PlanAct::Done, None),
+            answer(0x28, PlanAct::Dismiss, Some("not a tension")),
+        ],
+        seal: None,
+        ..p.clone()
+    };
+    let d = PlanDeltaV1::between(Hash([9; 32]), Hash([8; 32]), &prev.answers, &next);
+    assert_eq!(
+        d.answers_set,
+        vec![
+            answer(0x20, PlanAct::Done, None),
+            answer(0x28, PlanAct::Dismiss, Some("not a tension"))
+        ],
+        "a changed and a new answer; the unchanged one is left out"
+    );
+    assert_eq!(d.answers_remove, vec![Hash([0x30; 32])]);
+    assert!(d.lists_valid());
+    let body = delta_body(&d);
+    let expected = [
+        vec![0x01],       // Delta
+        fill(9),          // stable
+        fill(8),          // prev
+        s("work"),        // view
+        vec![0x00],       // proposal: None
+        vec![0x02],       // answers_set: 2
+        fill(0x20),       // .item
+        vec![0x02, 0x00], // .act Done, .reason None
+        vec![0x00],       // .subject None
+        fill(3),          // .cause
+        s("human:nick"),  // .by
+        vec![0x00, 0x03, 0x0a],
+        fill(0x28),
+        [vec![0x03, 0x01], s("not a tension")].concat(), // Dismiss, Some
+        vec![0x00],
+        fill(3),
+        s("human:nick"),
+        vec![0x00, 0x03, 0x0a],
+        vec![0x01], // answers_remove: 1
+        fill(0x30),
+        vec![0x01], // heads: 1
+        s("core"),
+        vec![0x00],
+        s("agent:a"),
+        [vec![0x01], s("r1")].concat(),
+        vec![0x01, 0x01],
+        vec![0x00], // seal: None
+    ]
+    .concat();
+    assert_eq!(hex(&body), hex(&expected));
+    assert_eq!(
+        postcard::from_bytes::<PlanRecordV1>(&body).unwrap(),
+        PlanRecordV1::Delta(d.clone())
+    );
+    // overlapping or unsorted lists are not a valid delta
+    let mut bad = d.clone();
+    bad.answers_remove = vec![Hash([0x28; 32])];
+    assert!(!bad.lists_valid(), "overlap");
+    let mut bad = d.clone();
+    bad.answers_set.reverse();
+    assert!(!bad.lists_valid(), "unsorted set");
+    let mut bad = d.clone();
+    bad.answers_remove = vec![Hash([0x31; 32]), Hash([0x30; 32])];
+    assert!(!bad.lists_valid(), "unsorted remove");
+
+    // a stored read keeps its identity; logical equality ignores it
+    let identity = EncodedIdentity {
+        hash: Hash([0xee; 32]),
+        version: 1,
+    };
+    let read = PlanV0::of(&next).into_current(Some(identity));
+    assert_eq!(read.id(), Hash([0xee; 32]));
+    assert_eq!(read, next);
+    assert_ne!(next.id(), read.id());
 }

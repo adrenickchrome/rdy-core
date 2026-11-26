@@ -897,6 +897,19 @@ impl Store {
         Ok(())
     }
 
+    /// The id the landing's plan `plan` is stored under when [`Store::plan_landing`] adds it to
+    /// `prepared`'s batch now: its prepared frame's hash (`Store::prepare_plan` against the
+    /// batch as it stands), a delta's or a whole version's. A seal's `prev` names the bound
+    /// version by it. The later preparation is deterministic, so it gives the same id. Writes
+    /// nothing; a broken rule is the plan check's refusal.
+    pub fn prepare_landing_plan_id(
+        &self,
+        prepared: &PreparedLanding,
+        plan: &Plan,
+    ) -> Result<Hash, StoreError> {
+        Ok(self.prepare_plan(plan, &prepared.items)?.frame.hash())
+    }
+
     /// Writes the landing `prepared` holds, with `signatures` (each of its landing, D-1Z951) in
     /// the same batch: after the landing, the refs and its plans, before any REDACTION_APPLY. A
     /// failed write writes nothing. With no signatures this is the write `land_atomic` makes.

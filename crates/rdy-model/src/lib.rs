@@ -19,6 +19,7 @@ pub mod key;
 pub mod list_parts;
 mod order;
 pub mod plan;
+pub mod plan_encoding;
 pub mod redaction;
 pub mod repo_id;
 pub mod signature;

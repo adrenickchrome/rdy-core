@@ -1355,6 +1355,7 @@ fn corruptions() -> Vec<Corrupt> {
                     heads: vec![],
                     provenance: writer(),
                     seal: None,
+                    read_identity: None,
                 };
                 let plan = s.put_plan(&plan).unwrap();
                 let mut b = block("b-00006", "Wrong plan answer.");
@@ -1469,6 +1470,7 @@ fn sealed_side(
             decisions: vec![item.0.cause.clone()],
             items: vec![item.0],
         }),
+        read_identity: None,
     };
     let frames = vec![
         codec::item_new(kinds::PLAN, &plan),
@@ -1757,6 +1759,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "foreign_copy",
             "hub_canon",
             "object_encoding",
+            "plan_delta",
             "plan_tension",
             "ported_change",
             "snapshot_delta",
@@ -1775,6 +1778,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "sync_state" => format::SYNC_STATE_REQUIRED_RDY,
             "ported_change" => format::PORTED_CHANGE_REQUIRED_RDY,
             "dedup_spans" => format::DEDUP_SPANS_REQUIRED_RDY,
+            "plan_delta" => format::PLAN_DELTA_REQUIRED_RDY,
             _ => FEATURE_REQUIRED_RDY,
         };
         assert_eq!(f.required_rdy, want, "{}", f.name);
@@ -1866,10 +1870,12 @@ fn ok4_features_activate_in_their_first_use_batch() {
         heads: vec![],
         provenance: writer(),
         seal: None,
+        read_identity: None,
     };
+    // (a plan of encoding 0, as rdy wrote them before plan deltas)
     let names_of = |p: &rdy_model::plan::Plan| -> Vec<String> {
-        let (raw, payload) = codec::item_new(kinds::PLAN, p);
-        format::required_features(raw, &payload)
+        let payload = postcard::to_allocvec(&rdy_model::plan_encoding::PlanV0::of(p)).unwrap();
+        format::required_features(kinds::PLAN, &payload)
             .into_iter()
             .map(|f| f.name)
             .collect()
@@ -1944,8 +1950,9 @@ fn ok4_features_activate_in_their_first_use_batch() {
         )
         .unwrap();
         assert!(q.is_empty());
-        log.append_batch(&[codec::item_new(kinds::PLAN, &plan)])
-            .unwrap();
+        // a plan of encoding 0, as rdy wrote them before plan deltas
+        let v0 = postcard::to_allocvec(&rdy_model::plan_encoding::PlanV0::of(&plan)).unwrap();
+        log.append_batch(&[(kinds::PLAN, v0)]).unwrap();
         log.sync().unwrap();
     }
     let s = Store::open(&src).unwrap();

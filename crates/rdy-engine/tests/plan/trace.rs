@@ -715,6 +715,7 @@ fn seal(
                 decisions: vec![d.clone()],
                 items,
             }),
+            read_identity: None,
         },
     );
     r.invalidate();

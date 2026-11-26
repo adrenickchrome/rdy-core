@@ -37,7 +37,6 @@ use crate::view::{ViewOp, ViewOpKind};
 use rdy_model::assessment::AssessmentV2;
 use rdy_model::check_request::CheckRequest;
 use rdy_model::dispute::{Dispute, DisputeResolution};
-use rdy_model::plan::Plan;
 use rdy_model::redaction::{RedactTarget, Redaction, RedactionApply, RedactionResidue, ResidualOp};
 use rdy_model::review::{ReviewSubjectV1, ReviewV1};
 use rdy_model::semantic::SemanticTensionV1;
@@ -241,7 +240,8 @@ fn edges_of(
             e.one(REDACTION, a.request);
             e.one(LANDING, a.landing);
         }
-        PLAN => e.plan(&crate::plan::decode_plan(payload)?),
+        // a whole version or a delta, by its own frame: no predecessor is read
+        PLAN => e.plan(&crate::plan_record::decode_body(split.version, payload)?.0),
         ASSESSMENT => e.assessment(&crate::codec::decode_bounded_split::<AssessmentV2>(&split)?),
         DISPUTE => {
             let d = crate::codec::decode_bounded_split::<Dispute>(&split)?;
@@ -464,11 +464,15 @@ impl Edges {
     /// A plan's chain links name plans; its bound proposal and its seal's landed version name
     /// proposal versions, and its seal's landing a landing; each sealed item's accepting answer
     /// names an ANSWER. Item hashes, content hashes, block ids and git hashes are identities.
-    fn plan(&mut self, p: &Plan) {
-        self.opt(PLAN, p.stable);
-        self.opt(PLAN, p.prev);
-        self.opt(PROPOSAL, p.proposal);
-        if let Some(seal) = &p.seal {
+    /// A plan's edges, the same set for a whole version and a delta: `stable` and `prev` (a
+    /// delta's `prev` keeps the inherited answers reachable), the bound proposal, and a seal's
+    /// version, landing and accepting answers. Item hashes, answer subjects and causes, removed
+    /// items and Git heads are no edges.
+    fn plan(&mut self, p: &crate::plan_record::PlanRecord) {
+        self.opt(PLAN, p.stable());
+        self.opt(PLAN, p.prev());
+        self.opt(PROPOSAL, p.proposal());
+        if let Some(seal) = p.seal() {
             self.one(PROPOSAL, seal.version);
             self.one(LANDING, seal.landing);
             for i in &seal.items {

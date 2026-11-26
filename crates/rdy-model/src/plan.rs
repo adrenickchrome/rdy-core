@@ -2,7 +2,8 @@
 //! person gave to its items, and the seal a landing puts on it. The store keeps it as an object
 //! of kind `PLAN`. Each declaration's field and variant order is its wire format (postcard):
 //! never add, remove or reorder a field or a variant between two others (D-F0904).
-use crate::{BlockId, Hash, Provenance, hash_of};
+use crate::encoding::{EncodedIdentity, PLAN_DELTA_ENCODING, encoded_hash};
+use crate::{BlockId, Hash, Provenance};
 use serde::{Deserialize, Serialize};
 
 /// The domain prefix of [`item_hash`].
@@ -175,8 +176,10 @@ pub struct PlanSeal {
     pub items: Vec<SealedItem>,
 }
 
-/// One version of a change plan (kind `PLAN`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One version of a change plan (kind `PLAN`). Its eight logical fields are the plan's
+/// meaning; a store keeps a version either whole or as the difference from the version before it
+/// ([`crate::plan_encoding`]), and both forms hydrate into this value.
+#[derive(Clone, Debug, Eq, Serialize, Deserialize)]
 pub struct Plan {
     /// The plan's first version, or `None` on that version.
     pub stable: Option<Hash>,
@@ -188,12 +191,38 @@ pub struct Plan {
     pub heads: Vec<PlanHead>,
     pub provenance: Provenance,
     pub seal: Option<PlanSeal>,
+    /// The identity of a stored read: never serialized, `None` on every new version. A store's
+    /// read sets it to the hash and encoding of the frame it came from; a caller that edits a
+    /// stored read clears it first.
+    #[serde(skip)]
+    pub read_identity: Option<EncodedIdentity>,
 }
 
 impl Plan {
-    /// `Hash::of` over the plan's encoding.
+    /// The plan's id: a stored read's recorded hash, else the hash of the version's canonical
+    /// whole frame in encoding [`PLAN_DELTA_ENCODING`] (the version prefix and the `Full` body).
+    /// A store may write a new version as a delta instead: the id a writer stores and every
+    /// reference to it is that prepared frame's hash, never this draft id.
     pub fn id(&self) -> Hash {
-        hash_of(self)
+        match self.read_identity {
+            Some(i) => i.hash,
+            None => encoded_hash(PLAN_DELTA_ENCODING, &crate::plan_encoding::full_body(self)),
+        }
+    }
+}
+
+/// Equal logical fields: a stored read equals the same version built anew, whichever form
+/// stored it.
+impl PartialEq for Plan {
+    fn eq(&self, o: &Plan) -> bool {
+        self.stable == o.stable
+            && self.prev == o.prev
+            && self.view == o.view
+            && self.proposal == o.proposal
+            && self.answers == o.answers
+            && self.heads == o.heads
+            && self.provenance == o.provenance
+            && self.seal == o.seal
     }
 }
 

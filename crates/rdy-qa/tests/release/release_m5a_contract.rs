@@ -563,8 +563,8 @@ const KEPT_TREES: [(&str, usize, &str); 12] = [
     // less the four goldens that span maps (0.59.0) moved, [`LATER_OWNED`]
     (
         "tests/golden/mcp",
-        41,
-        "964ec92949ce0385552b05dac60d3ca0a93cf9c896ec0926312c5ce32d53dec1",
+        28,
+        "98c0ac186c72928d7d43fc052044cdadaa75b97e1933c5e4fec6d70690db6bf9",
     ),
     (
         "tests/golden/mcp-wasm",
@@ -614,15 +614,33 @@ const KEPT_TREES: [(&str, usize, &str); 12] = [
 ];
 
 /// The paths under a kept tree that a later plan owns, by prefix: span maps' (0.59.0) first-use
-/// fixtures of `dedup_spans`, and the four MCP goldens whose bytes span maps moved (the compact
+/// fixtures of `dedup_spans`, plan deltas' (0.59.0) first-use fixtures of `plan_delta` and the
+/// MCP goldens whose hashes, byte counts and cursors plan deltas moved, and the
+/// four MCP goldens whose bytes span maps moved (the compact
 /// report's `ref_update` and `log_bytes`, and the inbox cursor).
-const LATER_OWNED: [&str; 6] = [
+const LATER_OWNED: [&str; 22] = [
     "v4-f1-dedup-spans",
     "dedup-spans-1",
+    "v4-f1-reduction",
+    "reduction-1",
+    "sync4-reduction",
     "rdy_compact--dry-run.json",
     "rdy_compact--unsupported.json",
     "rdy_inbox--page.json",
     "rdy_inbox--person.json",
+    "rdy_diff--detail-doc.json",
+    "rdy_diff--view.json",
+    "rdy_log--page.json",
+    "rdy_propose--with-advice.json",
+    "rdy_propose--with-consequences.json",
+    "rdy_resolve--accept.json",
+    "rdy_tensions--canon.json",
+    "rdy_view--create.json",
+    "rdy_view--exclude.json",
+    "rdy_view--fork.json",
+    "rdy_view--include.json",
+    "rdy_view--show-with-conflict.json",
+    "rdy_view--undo.json",
 ];
 
 /// The files under `dir` less [`LATER_OWNED`], and the sha256 of one line per file in byte order
@@ -746,17 +764,17 @@ fn vxs9_released_fixtures_and_stored_identities_keep_their_bytes() {
     // the store registry, the formats and the derived identities
     let (was, now) = (read(PREDECESSOR), read(CURRENT));
     assert_eq!(now["derived_identities"], was["derived_identities"]);
-    // the registry less span maps' `dedup_spans` (0.59.0), which came later, is what this
-    // fixture lists, and it is the only addition
+    // the registry less span maps' `dedup_spans` and plan deltas' `plan_delta` (0.59.0), which
+    // came later, is what this fixture lists, and they are the only additions
     let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
         .iter()
         .copied()
-        .filter(|n| *n != "dedup_spans")
+        .filter(|n| *n != "dedup_spans" && *n != "plan_delta")
         .collect();
     assert_eq!(
         now["store"]["registered_names"],
         serde_json::json!(live),
-        "the store registers what the contract lists, and dedup_spans"
+        "the store registers what the contract lists, dedup_spans and plan_delta"
     );
     assert_eq!(
         now["dump_load"]["dump_format"],
@@ -774,8 +792,8 @@ fn vxs9_released_fixtures_and_stored_identities_keep_their_bytes() {
     assert_eq!(live.len(), 13);
     assert_eq!(
         rdy_store::format::REGISTERED_FEATURES.len(),
-        live.len() + 1,
-        "dedup_spans is the only addition"
+        live.len() + 2,
+        "dedup_spans and plan_delta are the only additions"
     );
 }
 

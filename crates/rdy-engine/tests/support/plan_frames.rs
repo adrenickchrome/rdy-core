@@ -15,15 +15,23 @@ fn enc<T: serde::Serialize>(v: &T) -> Vec<u8> {
     encode_into(v, &mut buf).unwrap().to_vec()
 }
 
-/// Writes `plan` and the ref naming it, with no plan check; returns its id.
+/// Writes `plan` as a whole version (encoding 1, named by `plan.id()`) and the ref naming it,
+/// with no plan check; returns its id.
 pub fn put_plan_frames(s: &mut Store, plan: &Plan) -> Hash {
+    let plan = &Plan {
+        read_identity: None,
+        ..plan.clone()
+    };
     let id = plan.id();
     let r = RefUpdate {
         name: plan_ref(&plan.view),
         value: id.0.to_vec(),
         at: s.log_end(),
     };
-    s.write_guarded_for_tests(vec![(kinds::PLAN, enc(plan)), (kinds::REF_UPDATE, enc(&r))])
-        .unwrap();
+    s.write_guarded_for_tests(vec![
+        rdy_store::codec::item_new(kinds::PLAN, plan),
+        (kinds::REF_UPDATE, enc(&r)),
+    ])
+    .unwrap();
     id
 }

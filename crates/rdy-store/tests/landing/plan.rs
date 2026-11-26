@@ -5,8 +5,10 @@
 use rdy_model::plan::{
     Plan, PlanAct, PlanAnswer, PlanHead, PlanKind, PlanOutcome, PlanSeal, SealedItem, item_hash,
 };
+use rdy_model::plan_encoding::{PlanV0, v0_body};
 use rdy_model::*;
 use rdy_store::closure::{END_OF_LOG, StoreSource, closure, closure_before, write_batch};
+use rdy_store::codec;
 use rdy_store::kinds::{self, RefUpdate};
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::plan::{AcceptedDeferral, plan_ref};
@@ -90,12 +92,32 @@ fn ref_frame(name: &str, value: Vec<u8>) -> (u8, Vec<u8>) {
     )
 }
 
-/// The PLAN frame of `p` and its `plan/<view>` ref, as the plan writers compose them.
+/// The PLAN frame of `p` and its `plan/<view>` ref, as the plan writers compose them: a whole
+/// version of encoding 1, whose prepared id is `p.id()`.
 fn plan_frames(p: &Plan) -> Vec<(u8, Vec<u8>)> {
     vec![
-        (kinds::PLAN, enc(p)),
+        codec::item_new(kinds::PLAN, p),
         ref_frame(&plan_ref(&p.view), p.id().0.to_vec()),
     ]
+}
+
+/// The id the plan writer prepares `p` under after the log (a delta's frame hash when it
+/// chooses a delta): the id its refusal names.
+fn prepared_id_of(s: &Store, p: &Plan) -> Hash {
+    s.select_plan_frame(p, &[]).unwrap().hash()
+}
+
+/// The ids the plan writer prepares `first` and then `then` under, in one batch after the
+/// log: a landing's bound plan and its seal.
+fn prepared_pair(s: &Store, first: &Plan, then: &Plan) -> (Hash, Hash) {
+    let f = s.select_plan_frame(first, &[]).unwrap();
+    let t = s.select_plan_frame(then, &[f.clone().into_item()]).unwrap();
+    (f.hash(), t.hash())
+}
+
+/// The id of `p` stored in encoding 0, as rdy wrote plans before plan deltas.
+fn v0_id(p: &Plan) -> Hash {
+    Hash::of(&v0_body(p))
 }
 
 fn heads() -> Vec<PlanHead> {
@@ -198,6 +220,7 @@ fn build() -> Built {
         heads: heads(),
         provenance: writer(),
         seal: None,
+        read_identity: None,
     };
     s.write_guarded_for_tests(plan_frames(&v1)).unwrap();
     s.seal(vec![]).unwrap();
@@ -212,8 +235,9 @@ fn build() -> Built {
         answers: vec![defer_answer(item)],
         ..v1.clone()
     };
+    let id = prepared_id_of(&s, &v2);
     let answered = s.put_plan(&v2).unwrap();
-    assert_eq!(answered, v2.id());
+    assert_eq!(answered, id);
     // the person accepts the deferral
     let accept = s
         .put_answer(&answer(
@@ -362,6 +386,7 @@ fn cp3_public_writes_cannot_forge_plans_or_refs() {
         heads: vec![],
         provenance: writer(),
         seal: None,
+        read_identity: None,
     };
     let end = s.log_end();
     let refs = s.refs_with_prefix("").unwrap();
@@ -519,6 +544,7 @@ fn unbound_seal(view: &str, landing: Hash, version: Hash, decisions: Vec<BlockId
             decisions,
             items: vec![],
         }),
+        read_identity: None,
     }
 }
 
@@ -536,10 +562,15 @@ fn damaged(forge: impl FnOnce(&mut Built) -> Hash, reason: &str) {
     assert_damage(&b.s, &h, reason);
 }
 
-/// Writes `p` raw, as no writer does; it must be a new record.
+/// Writes `p` raw as a whole version, as no writer does; it must be a new record. A plan read
+/// back keeps its stored id, so the record is named by its own frame.
 fn raw(s: &mut Store, p: &Plan) -> Hash {
+    let p = Plan {
+        read_identity: None,
+        ..p.clone()
+    };
     assert!(!s.has_kind(kinds::PLAN, &p.id()).unwrap(), "a new plan");
-    s.write_guarded_for_tests(vec![(kinds::PLAN, enc(p))])
+    s.write_guarded_for_tests(vec![codec::item_new(kinds::PLAN, &p)])
         .unwrap();
     p.id()
 }
@@ -554,6 +585,7 @@ fn fresh(view: &str) -> Plan {
         heads: heads(),
         provenance: writer(),
         seal: None,
+        read_identity: None,
     }
 }
 
@@ -974,14 +1006,14 @@ fn cp3_tag_closure_carries_its_seal_and_chain() {
     // a batch's PLAN keeps the plan record rules, with fsck's own text
     let mut unsorted = s.plan(&b.answered).unwrap();
     unsorted.answers = vec![defer_answer(Hash([2; 32])), defer_answer(Hash([1; 32]))];
-    let k = key(kinds::PLAN, unsorted.id());
+    let k = key(kinds::PLAN, v0_id(&unsorted));
     let mut source: BTreeMap<ObjectKey, rdy_store::sync_stream::StreamRecord> = BTreeMap::new();
     source.insert(
         k,
         rdy_store::sync_stream::StreamRecord::Present {
             encoding: 0,
             key: k,
-            payload: enc(&unsorted),
+            payload: enc(&PlanV0::of(&unsorted)),
         },
     );
     let header = StreamHeader::tag_history(
@@ -995,7 +1027,7 @@ fn cp3_tag_closure_carries_its_seal_and_chain() {
     assert_eq!(e.code, "E_BAD_RECORD");
     assert!(
         e.message
-            .ends_with(&format!("plan {}: unsorted answers", unsorted.id())),
+            .ends_with(&format!("plan {}: unsorted answers", v0_id(&unsorted))),
         "{}",
         e.message
     );
@@ -1488,7 +1520,7 @@ fn replace_seal(
 ) {
     let old = key(kinds::PLAN, old);
     records.remove(&old);
-    let (k, r) = present(kinds::PLAN, p);
+    let (k, r) = present(kinds::PLAN, &PlanV0::of(p));
     records.insert(k, r);
     let at = order.iter().position(|x| *x == old).unwrap();
     order[at] = k;
@@ -1549,9 +1581,9 @@ fn cp3_holder_take_refuses_conflicting_or_broken_seals() {
         ..seal.clone()
     };
     let path = edited_upload(&b, tag, "two-seals.rdysync", |r, o| {
-        add_record(r, o, kinds::PLAN, &other);
+        add_record(r, o, kinds::PLAN, &PlanV0::of(&other));
     });
-    let later = b.seal.max(other.id());
+    let later = b.seal.max(v0_id(&other));
     let mut h = new_holder(&b, "h-two");
     refused_upload(
         &mut h,
@@ -1576,11 +1608,11 @@ fn cp3_holder_take_refuses_conflicting_or_broken_seals() {
     };
     let path = edited_upload(&b, tag, "mismatch.rdysync", |r, o| {
         replace_seal(r, o, b.seal, &mismatch);
-        let at = o.iter().position(|k| k.hash == mismatch.id()).unwrap();
+        let at = o.iter().position(|k| k.hash == v0_id(&mismatch)).unwrap();
         o.insert(at, pk);
         r.insert(pk, pr);
     });
-    let rule = format!("plan {}: invalid seal", mismatch.id());
+    let rule = format!("plan {}: invalid seal", v0_id(&mismatch));
     refused_upload(&mut h, &b, &path, &rule, true);
     // a seal whose chain is not its predecessor's
     let unchained = Plan {
@@ -1590,7 +1622,7 @@ fn cp3_holder_take_refuses_conflicting_or_broken_seals() {
     let path = edited_upload(&b, tag, "unchained.rdysync", |r, o| {
         replace_seal(r, o, b.seal, &unchained)
     });
-    let rule = format!("plan {}: invalid chain", unchained.id());
+    let rule = format!("plan {}: invalid chain", v0_id(&unchained));
     refused_upload(&mut h, &b, &path, &rule, true);
     // (a seal that drops an answer of the approved version's binding: cp10's landing test; this
     // chain's binding has none, and a seal may leave out the answer-only version's, D-4JMPH)
@@ -1611,7 +1643,7 @@ fn cp3_holder_take_refuses_conflicting_or_broken_seals() {
     let path = edited_upload(&b, tag, "conflict.rdysync", |r, o| {
         replace_seal(r, o, b.seal, &other)
     });
-    let rule = format!("plan {}: duplicate landing seal", other.id());
+    let rule = format!("plan {}: duplicate landing seal", v0_id(&other));
     refused_upload(&mut h, &b, &path, &rule, false);
     assert_eq!(h.plan_of_landing(&b.landing, end).unwrap(), Some(b.seal));
 }
@@ -1736,17 +1768,19 @@ fn cp10_landing_plans_carry_the_approved_binding_after_later_answers() {
     let (l, v) = (prepared.hash(), prepared.landed_version());
     assert_eq!(v, p);
     let dropped = seal_after(b.id(), a, l, v, vec![]);
+    let dropped_id = prepared_id_of(&s, &dropped);
     match s.plan_landing(&mut prepared, None, Some(&dropped)) {
         Err(StoreError::Refused(m)) => {
-            assert_eq!(m, format!("plan {}: invalid chain", dropped.id()))
+            assert_eq!(m, format!("plan {}: invalid chain", dropped_id))
         }
         other => panic!("a seal that drops a bound answer: {other:?}"),
     }
     let mut prepared = s.prepare_land(land_request(p, None)).unwrap();
     let sealed = seal_after(b.id(), a, l, v, b.answers.clone());
+    let sealed_id = prepared_id_of(&s, &sealed);
     s.plan_landing(&mut prepared, None, Some(&sealed)).unwrap();
     s.commit_land(prepared, &[]).unwrap();
-    assert_eq!(plan_ref_of(&s, "work"), Some(sealed.id()));
+    assert_eq!(plan_ref_of(&s, "work"), Some(sealed_id));
     s.check_objects().unwrap();
     // an unsealed answer-only version still keeps every answer of its predecessor
     let other = Plan {
@@ -1762,9 +1796,10 @@ fn cp10_landing_plans_carry_the_approved_binding_after_later_answers() {
         answers: vec![],
         ..fresh("other")
     };
+    let forged_id = prepared_id_of(&s, &forged);
     assert!(matches!(
         s.put_plan(&forged),
-        Err(StoreError::Refused(m)) if m == format!("plan {}: invalid chain", forged.id())
+        Err(StoreError::Refused(m)) if m == format!("plan {}: invalid chain", forged_id)
     ));
 
     // an acceptance: the final version binds the approved answers, after the answer-only one
@@ -1790,23 +1825,27 @@ fn cp10_landing_plans_carry_the_approved_binding_after_later_answers() {
         ..fresh("work")
     };
     let dropped = bound_final(vec![]);
+    let dropped_id = prepared_id_of(&s, &dropped);
     match s.plan_landing(&mut prepared, Some(&dropped), None) {
         Err(StoreError::Refused(m)) => {
-            assert_eq!(m, format!("plan {}: invalid chain", dropped.id()))
+            assert_eq!(m, format!("plan {}: invalid chain", dropped_id))
         }
         other => panic!("a final binding that drops a bound answer: {other:?}"),
     }
     let mut prepared = s.prepare_land(land_request(p, Some(accept()))).unwrap();
     assert_eq!(prepared.hash(), l);
     let fplan = bound_final(b.answers.clone());
-    let sealed = seal_after(b.id(), fplan.id(), l, fin, b.answers.clone());
+    let fplan_id = s.prepare_landing_plan_id(&prepared, &fplan).unwrap();
+    let sealed = seal_after(b.id(), fplan_id, l, fin, b.answers.clone());
+    let (prepared_f, sealed_id) = prepared_pair(&s, &fplan, &sealed);
+    assert_eq!(prepared_f, fplan_id);
     s.plan_landing(&mut prepared, Some(&fplan), Some(&sealed))
         .unwrap();
     s.commit_land(prepared, &[]).unwrap();
-    assert_eq!(plan_ref_of(&s, "work"), Some(sealed.id()));
+    assert_eq!(plan_ref_of(&s, "work"), Some(sealed_id));
     let end = s.log_end();
-    assert_eq!(s.plan_of_proposal(&fin, end).unwrap(), Some(fplan.id()));
-    assert_eq!(s.plan_of_landing(&l, end).unwrap(), Some(sealed.id()));
+    assert_eq!(s.plan_of_proposal(&fin, end).unwrap(), Some(fplan_id));
+    assert_eq!(s.plan_of_landing(&l, end).unwrap(), Some(sealed_id));
     s.check_objects().unwrap();
     // a holder takes the landing's closure, its chain and both plans
     let tag = s
@@ -1819,7 +1858,7 @@ fn cp10_landing_plans_carry_the_approved_binding_after_later_answers() {
         .unwrap();
     let path = _d.path().join("v1.rdysync");
     let records = export(&s, tag, END_OF_LOG, &path);
-    for h in [a, fplan.id(), sealed.id()] {
+    for h in [a, fplan_id, sealed_id] {
         assert!(records.contains(&key(kinds::PLAN, h)), "{h} in the closure");
     }
     let mut h = Store::create_holder(&_d.path().join("h"), s.repo_id().unwrap().unwrap()).unwrap();
@@ -1829,9 +1868,9 @@ fn cp10_landing_plans_carry_the_approved_binding_after_later_answers() {
     };
     // an upload whose seal drops the approved binding's answer is refused, before anything is
     // written, by the take and by a checked stream
-    let forgetful = seal_after(b.id(), fplan.id(), l, fin, vec![]);
+    let forgetful = seal_after(b.id(), fplan_id, l, fin, vec![]);
     let (mut records, mut order) = closure_records(&s, tag);
-    replace_seal(&mut records, &mut order, sealed.id(), &forgetful);
+    replace_seal(&mut records, &mut order, sealed_id, &forgetful);
     let bad = _d.path().join("forgetful.rdysync");
     let header = StreamHeader::tag_history(
         rdy_store::format::baseline_features(),
@@ -1840,7 +1879,7 @@ fn cp10_landing_plans_carry_the_approved_binding_after_later_answers() {
         vec![],
     );
     write_batch(&mut records, &header, &order, File::create(&bad).unwrap()).unwrap();
-    let rule = format!("plan {}: invalid chain", forgetful.id());
+    let rule = format!("plan {}: invalid chain", v0_id(&forgetful));
     let before = holder_state(&h);
     match h.take_batches(&[File::open(&bad).unwrap()], &target, incoming) {
         Err(rdy_store::take_batch::TakeError::Stream(e)) => {
@@ -1859,8 +1898,8 @@ fn cp10_landing_plans_carry_the_approved_binding_after_later_answers() {
     h.take_batches(&[File::open(&path).unwrap()], &target, incoming)
         .unwrap();
     let end = h.log_end();
-    assert_eq!(h.plan_of_landing(&l, end).unwrap(), Some(sealed.id()));
-    assert_eq!(h.plan_of_proposal(&fin, end).unwrap(), Some(fplan.id()));
+    assert_eq!(h.plan_of_landing(&l, end).unwrap(), Some(sealed_id));
+    assert_eq!(h.plan_of_proposal(&fin, end).unwrap(), Some(fplan_id));
     h.check_holder().unwrap();
 }
 
@@ -1912,9 +1951,10 @@ fn cp10_binding_after_an_unbound_version_starts_a_chain() {
         answers: vec![defer_answer(Hash([1; 32]))],
         ..fresh("work")
     };
+    let prepared_id = prepared_id_of(&s, &continued);
     match s.bind_plan(&mut prepared, &continued) {
         Err(StoreError::Refused(m)) => {
-            assert_eq!(m, format!("plan {}: invalid chain", continued.id()))
+            assert_eq!(m, format!("plan {}: invalid chain", prepared_id))
         }
         other => panic!("a binding that continues the chain: {other:?}"),
     }
@@ -2041,11 +2081,12 @@ fn cp3_fix1_impossible_kind_outcome_pairs_are_refused() {
     for (kind, outcome) in IMPOSSIBLE_OUTCOMES {
         let mut prepared = s.prepare_land(land_request(p, None)).unwrap();
         let x = sealed(&prepared, outcome_item(kind, outcome));
+        let x_id = prepared_id_of(&s, &x);
         match s.plan_landing(&mut prepared, None, Some(&x)) {
             Err(StoreError::Refused(m)) => {
                 assert_eq!(
                     m,
-                    format!("plan {}: invalid seal", x.id()),
+                    format!("plan {}: invalid seal", x_id),
                     "{kind:?}/{outcome:?}"
                 )
             }
@@ -2115,7 +2156,7 @@ fn cp3_fix1_impossible_kind_outcome_pairs_are_refused() {
             vec![],
         );
         write_batch(&mut records, &header, &order, File::create(&path).unwrap()).unwrap();
-        let rule = format!("plan {}: invalid seal", x.id());
+        let rule = format!("plan {}: invalid seal", v0_id(&x));
         refused_upload(&mut h, &b, &path, &rule, true);
     }
     for (n, (kind, outcome)) in POSSIBLE_OUTCOMES.into_iter().enumerate() {
@@ -2154,6 +2195,7 @@ fn seal_with(item: SealedItem) -> (Store, Result<(), StoreError>, Hash, tempfile
         b.answers.clone(),
     );
     x.seal.as_mut().unwrap().items = vec![item];
+    let id = prepared_id_of(&s, &x);
     let end = s.log_end();
     let out = s.plan_landing(&mut prepared, None, Some(&x));
     if out.is_ok() {
@@ -2161,7 +2203,7 @@ fn seal_with(item: SealedItem) -> (Store, Result<(), StoreError>, Hash, tempfile
     } else {
         assert_eq!(s.log_end(), end, "nothing written");
     }
-    (s, out, x.id(), d)
+    (s, out, id, d)
 }
 
 /// O5: a sealed tension item's subject is the tension's id, 64 lower-case hex digits. The

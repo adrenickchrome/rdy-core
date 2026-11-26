@@ -19966,7 +19966,13 @@
       "v4-f1-e1-snapshot-delta.expect.json": "13645 917e36512b6a05848dbf36cb12066da12c632c0e43bfca21fd9a394885ed0a36",
       "v4-f1-e1-snapshot-delta.rdydump": "13655 f92ef939bd0054285f7ac442390afc64b2ea753a0944301c8785d8d615fe3ceb",
       "v4-f1-e1.expect.json": "457228 26dd1b3eac47340d062b8293d29012f433de440c40d646b535c03b4f20795082",
-      "v4-f1-e1.rdydump": "232974 35b141c49c82442ea87a3b2919796f277e91779ffd1f1fc1471bd40547d7fea0"
+      "v4-f1-e1.rdydump": "232974 35b141c49c82442ea87a3b2919796f277e91779ffd1f1fc1471bd40547d7fea0",
+      "v4-f1-reduction-chain-1.rdydump": "13265 c6af8dfeeaf50d172551a22812d372bb7c0cc044642253918fa70ceb87cc78af",
+      "v4-f1-reduction-chain-2.rdydump": "61412 6738a89812341f7a45c8c3b1fe825ef4ef0ce3bca7ae3b91628c1182af897cfd",
+      "v4-f1-reduction-chain-full.rdydump": "21265 df6e09b996a596d872c0182a3473774ce982536a05153e8228ccecfd4f5d899c",
+      "v4-f1-reduction-chain.expect.json": "38824 c8c3e52e9affa20779591bac9b1eb1497002b60152e6f7eff688efcc80adbe8c",
+      "v4-f1-reduction.expect.json": "34353 a9f8cb83c0cf518679f0ad2d1dbef4fbb16d39669f73dc72587393ede0c45e39",
+      "v4-f1-reduction.rdydump": "94064 f28b47c0aa917a437595414764d28c63da0555b7c5b48a1f3bbf27a2dc7a7f5e"
     },
     "fork_at": {
       "canon_at_tag": true,
@@ -33504,6 +33510,10 @@
         "object_encoding",
         "ported_change"
       ],
+      "kind 24 encoding 1": [
+        "object_encoding",
+        "plan_delta"
+      ],
       "kind 25 encoding 1": [
         "object_encoding",
         "assessment"
@@ -33741,6 +33751,7 @@
       "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
       "hub_canon": "a holder's first move: a batch that writes canon, a view/, a held/ or a replaced/ ref",
       "object_encoding": "any frame of encoding 1 or more",
+      "plan_delta": "any PLAN of encoding 1, a whole version or a delta",
       "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
       "ported_change": "the first stored CHANGE of encoding 3 or 4, or REDACTION_RESIDUE of encoding 2",
       "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
@@ -33792,6 +33803,11 @@
         "class": "incompatible",
         "name": "object_encoding",
         "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "plan_delta",
+        "required_rdy": "0.59.0"
       },
       {
         "class": "incompatible",
@@ -34186,6 +34202,7 @@
       "foreign_copy",
       "hub_canon",
       "object_encoding",
+      "plan_delta",
       "plan_tension",
       "ported_change",
       "snapshot_delta",
@@ -34310,6 +34327,8 @@
       "sync-client-wire-v5.json": "17925 ea42701656fe0c0c09d067d4b3b0659b4f8390ff1014203c7739036b9b153b26",
       "sync4-canon-history.bin": "5884 8d51365e1d9bd84bf9c00526e672d401298d0128cdf3590d1c09f50eb5f746e4",
       "sync4-canon-history.expect.json": "4641 19bd7fd90178c3883d3d9cd018577877a7aaa6eadfb6d1da99355a9693574e5c",
+      "sync4-reduction.bin": "15331 88826bbea0c7eba4df575915fec0b4cebd19ee840fdedfa1306a1e7712983b07",
+      "sync4-reduction.expect.json": "5048 2d796533cf09c0faede758f5b41dfd6e3c49467953cb0f3d5ac72e1b1295c8ea",
       "sync4-view-history.bin": "6699 0abb9333ec131aa4f87c78e0a549322d053c49048c0c7ab15dd309ec96f7dace",
       "sync4-view-history.expect.json": "5338 3c4a8147ee8439998f41895ed2905165f7f3461dac089e8069b7e7dfa326eff4",
       "v1-s15.expect.json": "24439 1b288d272891be45291c7fb77a059cded97ae2c69354b6d2c1c10b6fa68b435d",

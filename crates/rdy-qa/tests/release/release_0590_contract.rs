@@ -195,19 +195,32 @@ fn delta(was: &str, now: &str) -> BTreeMap<String, (String, Value)> {
 }
 
 /// This release's closed contract delta so far, from its predecessor: span maps' (`dedup_spans`)
-/// leaves. The integrated agent text adds none. A later task of the release adds its own rows.
-const RELEASE_DELTA: [&str; 11] = [
+/// leaves, and plan deltas' (`plan_delta`): the feature, its activation by a PLAN of encoding 1,
+/// its rule and its first-use dump and sync fixtures. The integrated agent text adds none. A
+/// later task of the release adds its own rows.
+const RELEASE_DELTA: [&str; 22] = [
     "added /cli/runtime/probes/compact/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/fsck/stdout/deduplicated_bytes",
     "added /cli/runtime/probes/status/stdout/deduplicated_bytes",
     "added /dump_load/fixture_digests/v4-f1-dedup-spans.expect.json",
     "added /dump_load/fixture_digests/v4-f1-dedup-spans.rdydump",
+    "added /dump_load/fixture_digests/v4-f1-reduction-chain-1.rdydump",
+    "added /dump_load/fixture_digests/v4-f1-reduction-chain-2.rdydump",
+    "added /dump_load/fixture_digests/v4-f1-reduction-chain-full.rdydump",
+    "added /dump_load/fixture_digests/v4-f1-reduction-chain.expect.json",
+    "added /dump_load/fixture_digests/v4-f1-reduction.expect.json",
+    "added /dump_load/fixture_digests/v4-f1-reduction.rdydump",
     "added /mcp/result_fields/rdy_compact/ok/deduplicated_bytes",
+    "added /store/activation/kind 24 encoding 1",
     "added /store/creation_baseline/features/name=dedup_spans",
     "changed /store/creation_baseline_text",
     "added /store/feature_rules/dedup_spans",
+    "added /store/feature_rules/plan_delta",
     "added /store/features/name=dedup_spans",
+    "added /store/features/name=plan_delta",
     "changed /store/registered_names",
+    "added /sync/fixture_digests/sync4-reduction.bin",
+    "added /sync/fixture_digests/sync4-reduction.expect.json",
 ];
 
 /// r5901: M5a's fixture is the predecessor of this plan's fixture. It keeps M5a's frozen bytes,
