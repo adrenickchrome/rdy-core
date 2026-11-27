@@ -589,6 +589,22 @@ class GateTime(unittest.TestCase):
             self.check(client, override='all')
         self.assertEqual(str(caught.exception), 'the repository variable RDY_GATE_BUDGET_OVERRIDE is not <V>:<seconds>')
 
+    def test_a_rerun_of_the_failed_jobs_counts_the_copied_jobs_once(self):
+        # Attempt 1: the build runs 0:00 to 0:10 and the budget job fails 0:11 to 0:12. At 0:30 a rerun of the
+        # failed jobs copies the build into attempt 2 (queued 0:30, with its old times) and runs the budget again.
+        client = release(candidate=[(3, [[job((0,), (10,)), job((11,), (12,), 'failure')],
+                                         [job((0,), (10,), queued=(30,)), job((31,), (32,))]])])
+        record = self.check(client)
+        self.assertEqual(record['gate_seconds'], (10 + 1 + 1) * 60)
+        self.assertEqual(record['queue_seconds'], 0)
+        rerun = record['runs'][1]
+        self.assertEqual((rerun['attempt'], rerun['jobs'], rerun['seconds'], rerun['result']), (2, 2, 60, 'success'))
+        # in the first attempt, the same times still refuse
+        client = release(candidate=[(3, [[job((0,), (10,), queued=(30,))]])])
+        with self.assertRaises(ControllerError) as caught:
+            self.check(client)
+        self.assertEqual(str(caught.exception), 'job 301 has times out of order')
+
     def test_a_run_of_another_branch_or_a_backward_attempt_refuses(self):
         client = release(gate=[(1, [done((5,), (4,))])])
         with self.assertRaises(ControllerError) as caught:

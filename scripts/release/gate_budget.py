@@ -170,6 +170,10 @@ def job_intervals(job, now):
         end = utc_seconds(job.completed_at)
     else:
         end = max(now, start)
+    if job.status == 'completed' and job.run_attempt > 1 and start <= end <= queued:
+        # A rerun of the failed jobs copies each passed job into the new attempt: GitHub gives the copy a new
+        # creation time and keeps the old start and end. Its time counts in the attempt that ran it.
+        return None, (queued, queued)
     if end < start or start < queued:
         raise ControllerError('job ' + str(job.job_id) + ' has times out of order')
     return (start, end), (queued, start)
