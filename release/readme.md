@@ -55,7 +55,7 @@ Open a new terminal, then check:
 rdy --version
 ```
 
-It prints `rdy 0.59.0`.
+It prints `rdy 0.60.0`.
 
 <details>
 <summary><b>Install from the archive instead</b></summary>
@@ -63,26 +63,26 @@ It prints `rdy 0.59.0`.
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.59.0/rdy-0.59.0-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.59.0-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.59.0-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.60.0/rdy-0.60.0-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.60.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.60.0-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.59.0/rdy-0.59.0-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.59.0-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.59.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.60.0/rdy-0.60.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.60.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.60.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
 **Windows (x86_64), in PowerShell:**
 
 ```powershell
-Invoke-WebRequest -OutFile rdy-0.59.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.59.0/rdy-0.59.0-x86_64-pc-windows-msvc.tar.gz
-tar.exe -xzf rdy-0.59.0-x86_64-pc-windows-msvc.tar.gz
+Invoke-WebRequest -OutFile rdy-0.60.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.60.0/rdy-0.60.0-x86_64-pc-windows-msvc.tar.gz
+tar.exe -xzf rdy-0.60.0-x86_64-pc-windows-msvc.tar.gz
 New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Move-Item -Force rdy-0.59.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
+Move-Item -Force rdy-0.60.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
 ```
 
 If `~/.local/bin` is not on your PATH, add it. On macOS, a binary from a browser download may be blocked: run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
@@ -156,9 +156,9 @@ The docs for the latest release are at [**getrdy.dev/docs**](https://getrdy.dev/
 <details>
 <summary><b>Upgrade from a preview, or build from source</b></summary>
 
-rdy 0.59.0 opens a store from rdy 0.57.0, rdy 0.56.0, rdy 0.55.0, rdy 0.54.0, rdy 0.53.0 or rdy 0.52.0. You do not need to dump and load.
-The first time rdy 0.59.0 opens the store, even to read it, it upgrades the store to use dedup_spans, after a backup. After that, older rdy refuses the store.
-Before you push or publish with rdy 0.59.0, make sure that your hub supports the store features dedup_spans, plan_delta and partial_history.
+rdy 0.60.0 opens a store from rdy 0.57.0, rdy 0.56.0, rdy 0.55.0, rdy 0.54.0, rdy 0.53.0 or rdy 0.52.0. You do not need to dump and load.
+The first time rdy 0.60.0 opens the store, even to read it, it upgrades the store to use dedup_spans, after a backup. After that, older rdy refuses the store.
+Before you push or publish with rdy 0.60.0, make sure that your hub supports the store features dedup_spans, plan_delta and partial_history.
 A store from rdy 0.51.0 gets the same upgrade in place as with rdy 0.52.0, the first time rdy opens it, even to read it.
 After that upgrade, rdy 0.51.0 and older refuse the store. To keep a way back, dump each project with the old binary first.
 An upgrade keeps a backup of the old store in the project's .rdy folder, named .store-upgrade-\<hash>-\<hash>.

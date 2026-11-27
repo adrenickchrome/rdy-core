@@ -1,6 +1,6 @@
 **Your intent, ready for anyone who needs it.** rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents. Before an agent writes, rdy shows it what governs the change and what depends on it. After the write, rdy shows what the change affected. Nothing joins the accepted design until a person approves it.
 
-In this release, a clone by URL opens for work at the canon tip and fetches the older history after it, when the hub sends the canon state. rdy stores a repeated run of payload bytes once on disk, and stores a new version of a change plan as the answers that changed. Push and the first pull do less work. Search can rank hits by relevance, or find the blocks most like a block or a text, and a small briefing lists similar blocks as advice. Many refusals now name the next step. rdy 0.58.0 was not published, so this release also holds its changes: you can port landed changes from another project into a view, a land checks every pin, and the Linux archive runs on any x86-64 CPU. The first time rdy 0.59.0 opens a 0.57.0 project, even to read it, it upgrades the project after a backup. From then on, the project needs rdy 0.59.0. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
+In this release, a clone by URL opens for work at the canon tip and fetches the older history after it, when the hub sends the canon state. rdy stores a repeated run of payload bytes once on disk, and stores a new version of a change plan as the answers that changed. Push and the first pull do less work. Search can rank hits by relevance, or find the blocks most like a block or a text, and a small briefing lists similar blocks as advice. Many refusals now name the next step. rdy 0.58.0 and rdy 0.59.0 were not published, so this release holds their changes. From 0.58.0, you can port landed changes from another project into a view, a land checks every pin, and the Linux archive runs on any x86-64 CPU. The first time rdy 0.60.0 opens a 0.57.0 project, even to read it, it upgrades the project after a backup. From then on, the project needs rdy 0.60.0. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
 
 ## What you get
 
@@ -27,26 +27,26 @@ To install from the archive instead:
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.59.0/rdy-0.59.0-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.59.0-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.59.0-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.60.0/rdy-0.60.0-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.60.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.60.0-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.59.0/rdy-0.59.0-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.59.0-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.59.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.60.0/rdy-0.60.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.60.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.60.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
 **Windows (x86_64), in PowerShell:**
 
 ```powershell
-Invoke-WebRequest -OutFile rdy-0.59.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.59.0/rdy-0.59.0-x86_64-pc-windows-msvc.tar.gz
-tar.exe -xzf rdy-0.59.0-x86_64-pc-windows-msvc.tar.gz
+Invoke-WebRequest -OutFile rdy-0.60.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.60.0/rdy-0.60.0-x86_64-pc-windows-msvc.tar.gz
+tar.exe -xzf rdy-0.60.0-x86_64-pc-windows-msvc.tar.gz
 New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Move-Item -Force rdy-0.59.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
+Move-Item -Force rdy-0.60.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
 ```
 
 On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile. On Windows, add `$HOME\.local\bin` to your PATH. Then check:
@@ -55,7 +55,7 @@ On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HO
 rdy --version
 ```
 
-It prints `rdy 0.59.0`.
+It prints `rdy 0.60.0`.
 
 On macOS, if you downloaded the archive in a browser instead of with curl, macOS may block the binary. Run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
 
@@ -75,7 +75,7 @@ Each installer checks the release signature and the archive's SHA-256 before it 
 
 ## Release key
 
-This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0, 0.48.0, 0.49.0, 0.50.0, 0.51.0, 0.52.0, 0.53.0, 0.54.0, 0.55.0, 0.56.0 and 0.57.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.59.0:
+This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0, 0.48.0, 0.49.0, 0.50.0, 0.51.0, 0.52.0, 0.53.0, 0.54.0, 0.55.0, 0.56.0 and 0.57.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.60.0:
 
 ```text
 rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8
@@ -83,7 +83,7 @@ rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUy
 
 Fingerprint: `SHA256:Tj8hfra0U07asaeSZkt1b5e1HGJ+w8vMzLrn+G6/+/M`.
 
-Compare this line and fingerprint with the ones in the README at v0.59.0. Use the key only when both match.
+Compare this line and fingerprint with the ones in the README at v0.60.0. Use the key only when both match.
 
 ## Try it: your first project
 
@@ -208,12 +208,12 @@ Compare this line and fingerprint with the ones in the README at v0.59.0. Use th
 - **Faster push and first pull.** A push prepares the next upload batch while the current one uploads, and checks the canon inputs while it walks canon. A pull and a clone walk the history once for each operation, decode each record once, and ask the hub for zstd get replies. A clone runs its last check on the store that took canon. When a hub is busy after a lost reply, rdy waits and asks for the outcome again, for at most 120 seconds, and never sends the write again. New refusals: `E_IO`, "the upload preparation could not start" or "the canon input check could not start", with the fix "retry the push", and `E_INTERNAL`, "the upload preparation failed" or "the canon input check failed". On a test project of 57,618 records, over the local loopback, a first push took 7.1 s, where it took 15.4 s before this release. A clone of the whole history took 13.3 s, where it took 57.2 s, and a clone by URL was ready for work after 2.6 s. A push of a small change took 2.3 s (3.4 s before), and a pull of 10 new landings took 3.0 s (5.5 s before).
 - **Sync stream format 5.** rdy reads sync stream formats 2, 3, 4 and 5. Format 5 holds the state of the canon tip, and rdy asks for it only when the hub lists it.
 - **The schema texts for ports.** The `rdy_schema` edit-loop text says that a port needs a briefing of the target blocks, also on drafts. The view schema lists `from_file` and `brief` for replay.
-- **Breaking for older rdy: rdy 0.59.0 adds the store feature `dedup_spans` (class incompatible, minimum rdy 0.59.0); store format 19 and dump format 4 stay.** Every store rdy 0.59.0 creates uses `dedup_spans` from the start. The first time rdy 0.59.0 opens a store made by rdy 0.57.0, even to read it, it upgrades the store to use `dedup_spans`, after a backup beside the store, and maps the repeated byte runs already in it. From then on rdy 0.57.0 refuses that store, and a dump of it, with `E_STORE_FORMAT` and names rdy 0.59.0. The way back is a dump made with rdy 0.57.0 before the first rdy 0.59.0 open. rdy 0.59.0 loads every earlier dump.
-- **Breaking for older rdy: rdy 0.59.0 adds the store feature `partial_history` (class incompatible, minimum rdy 0.59.0); store format 19 and dump format 4 stay.** A store starts to use `partial_history` only when its project first takes a canon state in a URL clone, before its history arrives, and only a store or dump that uses it needs rdy 0.59.0: rdy 0.57.0 refuses one with `E_STORE_FORMAT` and names rdy 0.59.0. rdy 0.59.0 opens a store made by rdy 0.57.0 as it is, and loads every earlier dump.
-- **Breaking for older rdy: rdy 0.59.0 adds the store feature `plan_delta` (class incompatible, minimum rdy 0.59.0); store format 19 and dump format 4 stay.** A store starts to use `plan_delta` only when its project first writes a plan with this rdy (every plan version it writes uses it), and only a store or dump that uses it needs rdy 0.59.0: rdy 0.57.0 refuses one with `E_STORE_FORMAT` and names rdy 0.59.0. rdy 0.59.0 opens a store made by rdy 0.57.0 as it is, and loads every earlier dump.
-- **Breaking for older rdy: rdy 0.59.0 adds the store feature `ported_change` (class incompatible, minimum rdy 0.58.0); store format 19 and dump format 4 stay.** A store starts to use `ported_change` only when its project first stores a ported change or a removed port's residue, and only a store or dump that uses it needs rdy 0.58.0: rdy 0.57.0 refuses one with `E_STORE_FORMAT` and names rdy 0.58.0. rdy 0.59.0 opens a store made by rdy 0.57.0 as it is, and loads every earlier dump.
-- **Moving to 0.59.0.** You need no step of your own. The first time rdy 0.59.0 opens a store from rdy 0.57.0, it upgrades the store, and it loads every earlier dump. Store format 19 and dump format 4 stay. You can also dump the project with rdy 0.57.0 and load the dump with rdy 0.59.0. The `partial_history`, `plan_delta` and `ported_change` lines below say that rdy 0.59.0 opens a store made by rdy 0.57.0 as it is. That is true for those features. The `dedup_spans` upgrade above still runs on every store from rdy 0.57.0. rdy 0.58.0 was not published. Where a refusal names rdy 0.58.0, use rdy 0.59.0.
-- **A hub must support this release.** Before you push or publish a project with rdy 0.59.0, make sure that your hub supports the store features `dedup_spans`, `plan_delta` and `partial_history`.
+- **Breaking for older rdy: rdy 0.60.0 adds the store feature `dedup_spans` (class incompatible, minimum rdy 0.59.0); store format 19 and dump format 4 stay.** Every store rdy 0.60.0 creates uses `dedup_spans` from the start. The first time rdy 0.60.0 opens a store made by rdy 0.57.0, even to read it, it upgrades the store to use `dedup_spans`, after a backup beside the store, and maps the repeated byte runs already in it. From then on rdy 0.57.0 refuses that store, and a dump of it, with `E_STORE_FORMAT` and names rdy 0.59.0. The way back is a dump made with rdy 0.57.0 before the first rdy 0.60.0 open. rdy 0.60.0 loads every earlier dump.
+- **Breaking for older rdy: rdy 0.60.0 adds the store feature `partial_history` (class incompatible, minimum rdy 0.59.0); store format 19 and dump format 4 stay.** A store starts to use `partial_history` only when its project first takes a canon state in a URL clone, before its history arrives, and only a store or dump that uses it needs rdy 0.59.0: rdy 0.57.0 refuses one with `E_STORE_FORMAT` and names rdy 0.59.0. rdy 0.60.0 opens a store made by rdy 0.57.0 as it is, and loads every earlier dump.
+- **Breaking for older rdy: rdy 0.60.0 adds the store feature `plan_delta` (class incompatible, minimum rdy 0.59.0); store format 19 and dump format 4 stay.** A store starts to use `plan_delta` only when its project first writes a plan with this rdy (every plan version it writes uses it), and only a store or dump that uses it needs rdy 0.59.0: rdy 0.57.0 refuses one with `E_STORE_FORMAT` and names rdy 0.59.0. rdy 0.60.0 opens a store made by rdy 0.57.0 as it is, and loads every earlier dump.
+- **Breaking for older rdy: rdy 0.60.0 adds the store feature `ported_change` (class incompatible, minimum rdy 0.58.0); store format 19 and dump format 4 stay.** A store starts to use `ported_change` only when its project first stores a ported change or a removed port's residue, and only a store or dump that uses it needs rdy 0.58.0: rdy 0.57.0 refuses one with `E_STORE_FORMAT` and names rdy 0.58.0. rdy 0.60.0 opens a store made by rdy 0.57.0 as it is, and loads every earlier dump.
+- **Moving to 0.60.0.** You need no step of your own. The first time rdy 0.60.0 opens a store from rdy 0.57.0, it upgrades the store, and it loads every earlier dump. Store format 19 and dump format 4 stay. You can also dump the project with rdy 0.57.0 and load the dump with rdy 0.60.0. The `partial_history`, `plan_delta` and `ported_change` lines below say that rdy 0.60.0 opens a store made by rdy 0.57.0 as it is. That is true for those features. The `dedup_spans` upgrade above still runs on every store from rdy 0.57.0. rdy 0.58.0 and rdy 0.59.0 were not published. Where a refusal names rdy 0.58.0 or rdy 0.59.0, use rdy 0.60.0.
+- **A hub must support this release.** Before you push or publish a project with rdy 0.60.0, make sure that your hub supports the store features `dedup_spans`, `plan_delta` and `partial_history`.
 
 ### Fixes
 
@@ -225,6 +225,7 @@ Compare this line and fingerprint with the ones in the README at v0.59.0. Use th
 - **Daemon start on Windows.** About one daemon start in five failed when Windows refused to replace the socket record `daemon.sock` with "Access is denied". The daemon now tries the replace up to 20 times, 50 ms apart.
 - **A daemon of another version.** On Windows, a client that restarted the daemon with another version of rdy could reach the old daemon and lose its session with `E_DAEMON_GONE`. A daemon that is being replaced now takes no new session.
 - **A removal on Windows.** A stop during a removal could leave the project with no search index. The next open now builds the index again.
+- **A compact while another connection reads.** In the 0.59.0 candidate, a project's daemon could stop taking writes when `rdy compact`, or the pass that runs after 64 MiB of new log, ran while another connection read the inbox or replayed events. A reader now holds the span map's lock for one frame at a time. rdy 0.59.0 was not published, so no published release has this bug.
 
 ### Project and build
 
@@ -365,8 +366,8 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
 
 rdy is licensed MIT OR Apache-2.0. The binaries also contain two libraries under the [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/): `imbl` 7.0.2 and `imbl-sized-chunks` 0.2.0. This release attaches the exact source code of each, as its crates.io crate file. Each SHA-256 matches rdy's `Cargo.lock` at this release:
 
-- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.59.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
-- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.59.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
+- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.60.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
+- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.60.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
 
 Each archive's `THIRD-PARTY-NOTICES.txt` gives the license of every library in the binary.
 
@@ -425,11 +426,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.59.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.59.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.59.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.59.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.59.0/bin/rdy' &&
-'/path/to/rdy-0.59.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.60.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.60.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.60.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.60.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.60.0/bin/rdy' &&
+'/path/to/rdy-0.60.0/bin/rdy' '--version'
 ```
 
 On Linux amd64:
@@ -439,11 +440,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.59.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.59.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.59.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.59.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.59.0/bin/rdy' &&
-'/path/to/rdy-0.59.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.60.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.60.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.60.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.60.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.60.0/bin/rdy' &&
+'/path/to/rdy-0.60.0/bin/rdy' '--version'
 ```
 
 On Windows amd64, in PowerShell:
@@ -456,16 +457,16 @@ $s = [IO.File]::Open('C:\path\to\download\release-allowed-signers', [IO.FileMode
 & 'cmd.exe' '/d' '/c' 'ssh-keygen.exe -Y verify -f release-allowed-signers -I rdy-release -n rdy-release-v1 -s SHA256SUMS.sig < SHA256SUMS'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 $n = 0; foreach ($line in [IO.File]::ReadAllLines('C:\path\to\download\SHA256SUMS')) { $want = $line.Substring(0, 64); $name = $line.Substring(66); $file = [IO.Path]::Combine('C:\path\to\download', $name); if (Test-Path -LiteralPath $file) { $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower(); if ($got -cne $want) { throw ($name + ': FAILED') }; [Console]::Out.Write($name + ': OK' + [char]10); $n++ } }; if ($n -eq 0) { throw 'no archive was checked' }
-foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.59.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
-& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.59.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
+foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.60.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
+& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.60.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
-[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.59.0\bin')
-[IO.File]::Copy('C:\path\to\unpack\rdy-0.59.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.59.0\bin\rdy.exe')
-& 'C:\path\to\rdy-0.59.0\bin\rdy.exe' '--version'
+[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.60.0\bin')
+[IO.File]::Copy('C:\path\to\unpack\rdy-0.60.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.60.0\bin\rdy.exe')
+& 'C:\path\to\rdy-0.60.0\bin\rdy.exe' '--version'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 }
 # Add the version's bin directory to PATH in this session:
-# $env:Path = 'C:\path\to\rdy-0.59.0\bin;' + $env:Path
+# $env:Path = 'C:\path\to\rdy-0.60.0\bin;' + $env:Path
 # rdy needs SSH_AUTH_SOCK, even when ssh works without it. Set it to the agent pipe:
 # $env:SSH_AUTH_SOCK = '\\.\pipe\openssh-ssh-agent'
 ```
@@ -479,16 +480,16 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.59.0-aarch64-apple-darwin.tar.gz' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.59.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.59.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.59.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.59.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.59.0/bin/rdy' &&
-'/path/to/rdy-0.59.0/bin/rdy' '--version'
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.60.0-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.60.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.60.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.60.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.60.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.60.0/bin/rdy' &&
+'/path/to/rdy-0.60.0/bin/rdy' '--version'
 ```
 
 Add the version's bin directory to PATH in this shell.
-Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.59.0`:
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.60.0`:
 
 ```sh
 export PATH="<version-prefix>/bin:$PATH"
