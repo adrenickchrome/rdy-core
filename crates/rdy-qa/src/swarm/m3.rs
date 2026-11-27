@@ -1006,7 +1006,12 @@ impl Ctx<'_> {
                 out.join("site"),
             ),
         ];
+        let gate = self.link.gate.clone();
         for (tool, args, at) in jobs {
+            // no landing runs while an output is written: the journal records an attempt when it
+            // ends, so an output that a removal's landing overlapped would sit after the removal
+            // and be checked for text it read before the removal landed (mg10)
+            let _turn = gate.read_turn();
             self.publish("m3_publication_output", tool, args, Some(&at));
         }
     }

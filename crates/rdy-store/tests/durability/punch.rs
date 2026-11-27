@@ -727,18 +727,21 @@ fn wx3_allocated_bytes_are_not_log_length() {
 
     // compaction's on_disk_bytes is the segment files' allocation, never the log's length
     let setup = Setup::new();
+    let allocated = || -> u64 {
+        std::fs::read_dir(setup.path.join("segments"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                let name = p.file_name().unwrap().to_string_lossy();
+                name.starts_with("seg-") && name.ends_with(".log")
+            })
+            .map(|p| pio::allocated_bytes(&std::fs::File::open(p).unwrap()).unwrap())
+            .sum()
+    };
+    let unpunched = allocated();
     let s = Store::open(&setup.path).unwrap();
     let report = s.compact(true).unwrap();
-    let allocated: u64 = std::fs::read_dir(setup.path.join("segments"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| {
-            let name = p.file_name().unwrap().to_string_lossy();
-            name.starts_with("seg-") && name.ends_with(".log")
-        })
-        .map(|p| pio::allocated_bytes(&std::fs::File::open(p).unwrap()).unwrap())
-        .sum();
-    assert_eq!(report.on_disk_bytes, allocated);
+    assert_eq!(report.on_disk_bytes, allocated());
     let lengths: u64 = segment_bytes(&setup.path)
         .values()
         .map(|b| b.len() as u64)
@@ -747,10 +750,13 @@ fn wx3_allocated_bytes_are_not_log_length() {
         report.log_bytes, lengths,
         "log bytes are the segment lengths"
     );
-    // the removed megabyte blob was punched on open, so its allocation is gone
+    // the removed megabyte blob was punched on open, so its allocation is gone. The count is
+    // held to the allocation before the open, not to the log's length: under load APFS can keep
+    // about 1 MiB allocated past the end of the file, which no sync releases, and that alone
+    // can bring the punched file's allocation back up to its length
     assert!(
-        report.on_disk_bytes < report.log_bytes,
-        "{} on disk for {} log bytes",
+        report.on_disk_bytes + 512 * 1024 <= unpunched,
+        "{} on disk after the punch, {unpunched} before, for {} log bytes",
         report.on_disk_bytes,
         report.log_bytes
     );
