@@ -1,3 +1,7 @@
+**Your intent, ready for anyone who needs it.** rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents. Before an agent writes, rdy shows it what governs the change and what depends on it. After the write, rdy shows what the change affected. Nothing joins the accepted design until a person approves it.
+
+In this release, a clone by URL opens for work at the canon tip and fetches the older history after it, when the hub sends the canon state. rdy stores a repeated run of payload bytes once on disk, and stores a new version of a change plan as the answers that changed. Push and the first pull do less work. Search can rank hits by relevance, or find the blocks most like a block or a text, and a small briefing lists similar blocks as advice. Many refusals now name the next step. rdy 0.58.0 was not published, so this release also holds its changes: you can port landed changes from another project into a view, a land checks every pin, and the Linux archive runs on any x86-64 CPU. The first time rdy 0.59.0 opens a 0.57.0 project, even to read it, it upgrades the project after a backup. From then on, the project needs rdy 0.59.0. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
+
 ## What you get
 
 - **Docs and decisions as one project.** Write docs, requirements, terms and decisions as linked blocks, not loose files.
