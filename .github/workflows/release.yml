@@ -422,7 +422,7 @@ jobs:
           path: ${{ runner.temp }}/rdy-release-verifier
       - name: Mint the publisher token
         id: token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2, checked 2026-10-31
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v2, checked 2026-10-31
         with:
           app-id: ${{ vars.RDY_RELEASE_PUBLISHER_APP_ID }}
           private-key: ${{ secrets.RDY_RELEASE_PUBLISHER_APP_PRIVATE_KEY }}
