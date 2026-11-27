@@ -14,7 +14,6 @@ name: release-candidate
 on:
   push:
     tags: ["candidate/v*"]
-  workflow_dispatch:
 permissions: {}
 concurrency:
   group: rdy-core-candidate-${{ github.ref }}
