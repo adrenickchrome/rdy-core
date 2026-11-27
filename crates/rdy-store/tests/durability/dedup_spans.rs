@@ -2501,3 +2501,59 @@ fn r5902_received_rows_load_in_order_and_fail_closed() {
         Err(StoreError::DedupCorrupt)
     ));
 }
+
+/// A reader's walk reads again from inside its callback (as the inbox and events replays do)
+/// while compact on the writer takes the span map's write lock. The walk holds the read lock for
+/// one frame's read only, so neither waits on the other: both finish.
+#[test]
+fn r5902_a_walk_that_reads_inside_its_callback_never_blocks_compact() {
+    use rdy_store::segment::Location;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut s = Store::create(&path).unwrap();
+    let blob = s.put_blob(&b"walk blob ".repeat(1000)).unwrap();
+    let reader = s.reader();
+    let end = s.log_end();
+    let (inside, walking) = mpsc::channel();
+    let (done, finished) = mpsc::channel();
+    let walk_done = done.clone();
+    std::thread::spawn(move || {
+        let mut first = true;
+        let walk = reader.for_each_record_from(
+            Location {
+                segment: 0,
+                offset: 0,
+            },
+            end,
+            |_, _, _| {
+                if first {
+                    first = false;
+                    inside.send(()).unwrap();
+                    // compact asks for the write lock while this callback runs
+                    std::thread::sleep(Duration::from_millis(300));
+                    reader.get_blob(&blob)?;
+                }
+                Ok(())
+            },
+        );
+        walk_done.send(("walk", walk.is_ok())).unwrap();
+    });
+    walking.recv().unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    std::thread::spawn(move || {
+        let compacted = s.compact(false).is_ok();
+        done.send(("compact", compacted)).unwrap();
+    });
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        seen.push(
+            finished
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the walk and compact deadlocked"),
+        );
+    }
+    seen.sort();
+    assert_eq!(seen, [("compact", true), ("walk", true)]);
+}

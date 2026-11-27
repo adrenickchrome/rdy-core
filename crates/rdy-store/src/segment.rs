@@ -679,11 +679,9 @@ impl SegmentReader {
         if from >= upto {
             return Ok(());
         }
-        let map = self.spans.read().unwrap_or_else(|e| e.into_inner());
-        let ov = Ov {
-            map: &map,
-            files: self,
-        };
+        // the span map's read lock is held for one frame's read only, never across `f`: a
+        // callback that reads again would take it a second time, and a writer queued between
+        // the two (compact, a threshold pass) would deadlock both
         for seg in from.segment..=upto.segment {
             if seg == upto.segment && upto.offset == 0 {
                 // nothing of `upto`'s segment is in range
@@ -713,8 +711,15 @@ impl SegmentReader {
                     segment: seg,
                     offset,
                 };
-                let frame = read_frame_or_hole(&file, loc, file_len, holes, Some(ov))?
-                    .ok_or_else(|| refuse_frame(&file, loc, file_len, corrupt_frame(loc)))?;
+                let frame = {
+                    let map = self.spans.read().unwrap_or_else(|e| e.into_inner());
+                    let ov = Ov {
+                        map: &map,
+                        files: self,
+                    };
+                    read_frame_or_hole(&file, loc, file_len, holes, Some(ov))?
+                }
+                .ok_or_else(|| refuse_frame(&file, loc, file_len, corrupt_frame(loc)))?;
                 let next = offset + HEADER + frame.payload_len();
                 if next > end {
                     return Err(corrupt_frame(loc).into());
