@@ -1,6 +1,7 @@
 //! The `release` area of the rdy-qa suite: one test binary (`cargo qa --only release`).
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
+mod release_0590_contract;
 mod release_contract;
 mod release_dark_figure_formats;
 mod release_disclosure_contract;
@@ -9,6 +10,7 @@ mod release_hub_ports_contract;
 mod release_install;
 mod release_install_unix;
 mod release_keys;
+mod release_m5a_contract;
 mod release_m5b_contract;
 mod release_mcp_http_contract;
 mod release_notices;
@@ -18,6 +20,7 @@ mod release_package;
 mod release_package_unix;
 mod release_readme;
 mod release_readme_contract;
+mod release_reduction_fixture;
 mod release_repo_links_contract;
 mod release_repo_links_formats;
 mod release_sample;

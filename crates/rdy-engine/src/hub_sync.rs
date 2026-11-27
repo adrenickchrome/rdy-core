@@ -17,7 +17,15 @@
 //!    or write step: taken and held apply the write reply's rules (a taken tip other than the
 //!    pushed head is fetched first), refused clears it, and unknown stops with the uncertain
 //!    words until the quarantine life has passed since it was sent. A refusal of the lookup
-//!    keeps it. An outcome is never inferred from store facts.
+//!    keeps it. An outcome is never inferred from store facts. While the hub still runs the
+//!    write it answers the lookup `E_HUB_BUSY` with `retry_after`: the lookup waits that many
+//!    seconds (1 to 5) and asks again, for at most 120 seconds and 82 asks, and then stops with
+//!    the uncertain words, with `pending` kept and no write sent. A completed refusal that
+//!    carries the code `E_HUB_BUSY` is a refusal, not a busy reply, and is never waited on. A
+//!    taken or held outcome learned after a busy wait ends the write that the state of step 4
+//!    saw running, so the push or pull takes a new state (steps 4 and 5) before any further
+//!    sync work, and compares local state with that one only. A failure of that capture is
+//!    returned; what the recovery applied stays.
 //! 7. **Push.** One render-input capture per push, at the pushed head's scope, with the gate
 //!    settings of the same read state. Canon first, then each named view in Plan A's push
 //!    order. Each has its own push id, upload, known, put and write; a view write starts only
@@ -45,10 +53,11 @@
 //! code `E_TAG_EXISTS` with the hub's words (rdyhub-design i-B40VF).
 use crate::engine::{Engine, with_writer_result};
 use crate::error::{
-    E_BAD_INPUT, E_DIVERGED, E_STORE_FORMAT, E_TAG_EXISTS, E_UPSTREAM_ACTOR_CLAIM,
-    E_UPSTREAM_UNCERTAIN, RdyError, SYNC_DIVERGED_FIX, SYNC_DIVERGED_MESSAGE, SYNC_MIN_RDY_FIX,
-    SYNC_MIN_RDY_MESSAGE, UPSTREAM_HELD_LOOKUP_FIX, UPSTREAM_HELD_LOOKUP_MESSAGE,
-    W_UPSTREAM_HELD_LOOKUP, sync_uncertain, upstream_auth, upstream_protocol,
+    E_BAD_INPUT, E_DIVERGED, E_INTERNAL, E_IO, E_STORE_FORMAT, E_TAG_EXISTS,
+    E_UPSTREAM_ACTOR_CLAIM, E_UPSTREAM_UNCERTAIN, RdyError, SYNC_DIVERGED_FIX,
+    SYNC_DIVERGED_MESSAGE, SYNC_MIN_RDY_FIX, SYNC_MIN_RDY_MESSAGE, UPSTREAM_HELD_LOOKUP_FIX,
+    UPSTREAM_HELD_LOOKUP_MESSAGE, W_UPSTREAM_HELD_LOOKUP, sync_uncertain, upstream_auth,
+    upstream_protocol,
 };
 use crate::formats::formats;
 use crate::hub_config::{BAD_REMOTE_NAME_FIX, BAD_REMOTE_NAME_MESSAGE, HubConfig, RemoteMode};
@@ -56,14 +65,14 @@ use crate::hub_credentials::HubCredentials;
 use crate::hub_http::UPLOAD_BUFFER_BYTES;
 use crate::hub_publish::{PublishRenderer, not_share_remote, repo_mismatch};
 use crate::hub_publish_stream::{
-    BatchLimits, HistorySent, ObjectWire, PreparedHistory, PushId, missing_with, scratch_error,
-    send_objects, send_root,
+    BatchLimits, HistorySent, ObjectWire, PreparedHistory, PreparedObjectBody, PushId, WorkerMark,
+    missing_with, scratch_error, send_objects, send_root, upload_probe, upload_worker_setup,
 };
 use crate::hub_publish_wire::{MAX_KNOWN_KEYS, ObjectPut, PublishState, UploadContext};
 use crate::hub_sync_wire::{
-    GateSettings, GetRequest, HubRequest, KnownPull, LookupOutcome, ProposeGate, SyncState,
-    SyncStateRequest, SyncWire, WriteFailure, WriteKind, WriteOutcome, WriteReply, WriteRequest,
-    WriteTag, check_view_names, encode_write,
+    GateSettings, GetRequest, HubRequest, KnownPull, LookupOutcome, OutcomeReply, ProposeGate,
+    SyncState, SyncStateRequest, SyncWire, WriteFailure, WriteKind, WriteOutcome, WriteReply,
+    WriteRequest, WriteTag, check_view_names, encode_write,
 };
 use crate::hub_types::{HubClock, HubTransport, Origin, RequestClaim};
 use crate::landing_check::CheckInputs;
@@ -89,9 +98,10 @@ use rdy_store::take_batch::FetchTarget;
 use rdy_store::{StoreError, StoreReader};
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// A push's request: the remote (none for the default one), the named views, and whether it
 /// forces hub canon to local canon's head.
@@ -395,6 +405,7 @@ fn take_and_strict() -> RdyError {
 }
 
 /// The selected remote's install and trust.
+#[derive(Clone)]
 pub(crate) struct Target {
     pub(crate) name: String,
     pub(crate) url: String,
@@ -403,6 +414,49 @@ pub(crate) struct Target {
     claim: RequestClaim,
     bound: RequestClaim,
     account: String,
+}
+
+/// The message of [`capture_start_error`].
+pub const CAPTURE_START_MESSAGE: &str = "the canon input check could not start";
+/// The fix of [`capture_start_error`].
+pub const CAPTURE_START_FIX: &str = "retry the push";
+/// The message of [`capture_failed_error`].
+pub const CAPTURE_FAILED_MESSAGE: &str = "the canon input check failed";
+/// The fix of [`capture_failed_error`].
+pub const CAPTURE_FAILED_FIX: &str = "retry the push; report the error if it repeats";
+
+/// E_IO: the push's canon capture worker could not be started.
+fn capture_start_error() -> RdyError {
+    RdyError::new(E_IO, CAPTURE_START_MESSAGE, CAPTURE_START_FIX)
+}
+
+/// E_INTERNAL: the push's canon capture worker panicked. Its payload is never shown.
+fn capture_failed_error() -> RdyError {
+    RdyError::new(E_INTERNAL, CAPTURE_FAILED_MESSAGE, CAPTURE_FAILED_FIX)
+}
+
+/// A test's hook at the start of a push's canon walk, on the thread that walks.
+type WalkHook = Arc<dyn Fn() + Send + Sync>;
+
+thread_local! {
+    static WALK_HOOK: std::cell::RefCell<Option<WalkHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `hook` called when a push on this thread starts its canon walk, while the
+/// canon capture may run (a test hook; production installs none). The prior hook comes back
+/// when `f` returns or panics.
+#[doc(hidden)]
+pub fn with_canon_walk_hook_for_tests<T>(hook: WalkHook, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<WalkHook>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prior = self.0.take();
+            WALK_HOOK.with(|c| *c.borrow_mut() = prior);
+        }
+    }
+    let prior = WALK_HOOK.with(|c| c.borrow_mut().replace(hook));
+    let _restore = Restore(prior);
+    f()
 }
 
 /// The render inputs a push captured once, with the gate settings of the same read state, and
@@ -419,6 +473,20 @@ enum Slot {
     Canon(PushId),
     View(String, PushId),
     Foreign,
+}
+
+/// What canon's part of a push found before its upload: its end (with whether a forced push
+/// found force not needed), or the history to send and what its write needs.
+enum CanonPrep {
+    End(WriteEnd, bool),
+    Send {
+        head: Hash,
+        base: Option<Hash>,
+        tip: Option<Hash>,
+        holds: bool,
+        history: PreparedHistory,
+        force_not_needed: bool,
+    },
 }
 
 /// One canon or view upload and its write.
@@ -444,9 +512,96 @@ pub struct SyncService<'a> {
     api: &'a dyn HubTransport,
     clock: &'a dyn HubClock,
     pub(crate) wire: &'a dyn SyncWire,
-    pub(crate) renderer: &'a dyn PublishRenderer,
+    /// Shared with a push's one capture worker, so it is `Sync`.
+    pub(crate) renderer: &'a (dyn PublishRenderer + Sync),
     /// Where a restore makes its temporary store: the system temp root when None.
     pub(crate) scratch: Option<PathBuf>,
+    /// The clock of a busy outcome lookup's waits: a private monotonic one when None.
+    poll_clock: Option<&'a dyn OutcomePollClock>,
+}
+
+/// The hub's refusal of an outcome lookup while it still runs the write.
+const HUB_BUSY: &str = "E_HUB_BUSY";
+/// The most time the lookups and waits of one recovery take together, in milliseconds.
+const OUTCOME_POLL_BUDGET_MS: u64 = 120_000;
+/// The time one lookup may take at most (30 seconds and the byte-scaled part of the read
+/// deadline for the largest outcome body and reply), kept free before every request.
+const OUTCOME_LOOKUP_RESERVE_MS: u64 = 39_000;
+/// The most lookups one recovery begins.
+const OUTCOME_POLL_MAX_REQUESTS: u32 = 82;
+/// The shortest and longest wait between two lookups, in seconds.
+const OUTCOME_RETRY_MIN_SECONDS: u64 = 1;
+const OUTCOME_RETRY_MAX_SECONDS: u64 = 5;
+
+/// The monotonic time and the sleep of a busy outcome lookup. Production uses the system's;
+/// a test injects a clock that moves only when it says so.
+#[doc(hidden)]
+pub trait OutcomePollClock: Send + Sync {
+    /// The time since this clock began, never going back.
+    fn now(&self) -> Duration;
+    /// Waits for `delay`.
+    fn wait(&self, delay: Duration);
+}
+
+/// The system's monotonic clock and thread sleep.
+struct SystemPollClock {
+    start: Instant,
+}
+
+impl SystemPollClock {
+    fn new() -> SystemPollClock {
+        SystemPollClock {
+            start: Instant::now(),
+        }
+    }
+}
+
+impl OutcomePollClock for SystemPollClock {
+    fn now(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    fn wait(&self, delay: Duration) {
+        std::thread::sleep(delay);
+    }
+}
+
+/// Asks `ask` for an outcome until it gives one, waiting between the hub's busy refusals. The
+/// 120-second budget covers the asks and waits, and starts here. No ask begins unless 39
+/// seconds (the longest an ask may take) remain and fewer than 82 have begun. A busy refusal
+/// waits its `retry_after` clamped to 1 to 5 seconds, and ends the polling with `None` when that
+/// wait and the next ask's reserve no longer fit. A refusal with another code, and any other
+/// failure, is returned at once. Only the current reply is kept.
+fn poll_outcome(
+    clock: &dyn OutcomePollClock,
+    mut ask: impl FnMut() -> Result<OutcomeReply, RdyError>,
+) -> Result<Option<OutcomeReply>, RdyError> {
+    let budget = Duration::from_millis(OUTCOME_POLL_BUDGET_MS);
+    let reserve = Duration::from_millis(OUTCOME_LOOKUP_RESERVE_MS);
+    let start = clock.now();
+    let remaining = |now: Duration| budget.saturating_sub(now.saturating_sub(start));
+    let mut begun = 0u32;
+    loop {
+        if begun >= OUTCOME_POLL_MAX_REQUESTS || remaining(clock.now()) < reserve {
+            return Ok(None);
+        }
+        begun += 1;
+        let e = match ask() {
+            Ok(reply) => return Ok(Some(reply)),
+            Err(e) if e.code == HUB_BUSY => e,
+            Err(e) => return Err(e),
+        };
+        let seconds = e.upstream_retry_after.ok_or_else(upstream_protocol)?;
+        let delay = Duration::from_secs(
+            seconds.clamp(OUTCOME_RETRY_MIN_SECONDS, OUTCOME_RETRY_MAX_SECONDS),
+        );
+        if begun >= OUTCOME_POLL_MAX_REQUESTS
+            || delay.saturating_add(reserve) > remaining(clock.now())
+        {
+            return Ok(None);
+        }
+        clock.wait(delay);
+    }
 }
 
 /// The sync wire's known and put steps for the history sender.
@@ -470,6 +625,15 @@ impl ObjectWire for SyncObjects<'_> {
         len: u64,
     ) -> Result<ObjectPut, RdyError> {
         self.0.put(cx, push, body, len)
+    }
+
+    fn put_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        self.0.put_prepared(cx, push, body)
     }
 }
 
@@ -499,7 +663,7 @@ impl<'a> SyncService<'a> {
         api: &'a dyn HubTransport,
         clock: &'a dyn HubClock,
         wire: &'a dyn SyncWire,
-        renderer: &'a dyn PublishRenderer,
+        renderer: &'a (dyn PublishRenderer + Sync),
     ) -> SyncService<'a> {
         SyncService {
             project: project.to_path_buf(),
@@ -510,6 +674,7 @@ impl<'a> SyncService<'a> {
             renderer,
             scratch: None,
             projectless: false,
+            poll_clock: None,
         }
     }
 
@@ -521,7 +686,7 @@ impl<'a> SyncService<'a> {
         api: &'a dyn HubTransport,
         clock: &'a dyn HubClock,
         wire: &'a dyn SyncWire,
-        renderer: &'a dyn PublishRenderer,
+        renderer: &'a (dyn PublishRenderer + Sync),
     ) -> SyncService<'a> {
         SyncService {
             projectless: true,
@@ -535,6 +700,46 @@ impl<'a> SyncService<'a> {
     pub fn scratch_in(mut self, root: &Path) -> SyncService<'a> {
         self.scratch = Some(root.to_path_buf());
         self
+    }
+
+    /// This coordinator with its busy outcome lookups timed and paced by `clock` in place of the
+    /// system's monotonic clock and thread sleep (a test's fake clock).
+    #[doc(hidden)]
+    pub fn with_outcome_poll_clock(mut self, clock: &'a dyn OutcomePollClock) -> SyncService<'a> {
+        self.poll_clock = Some(clock);
+        self
+    }
+
+    /// The outcome of write `push`, asked again while the hub still runs it (module docs,
+    /// "Busy outcome lookups"). `Some` is a decoded outcome, `Unknown` among them; `None` means
+    /// the polling budget ran out with the hub still busy; an error is any other failure of the
+    /// lookup. It never sends a write.
+    pub(crate) fn lookup_outcome(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+    ) -> Result<Option<OutcomeReply>, RdyError> {
+        self.lookup_outcome_noted(cx, push).map(|(reply, _)| reply)
+    }
+
+    /// [`SyncService::lookup_outcome`] and whether the hub answered busy at least once, so the
+    /// outcome was learned after a wait.
+    fn lookup_outcome_noted(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+    ) -> Result<(Option<OutcomeReply>, bool), RdyError> {
+        let own = SystemPollClock::new();
+        let clock: &dyn OutcomePollClock = match self.poll_clock {
+            Some(c) => c,
+            None => &own,
+        };
+        let mut asked = 0u32;
+        let reply = poll_outcome(clock, || {
+            asked += 1;
+            self.wire.outcome(cx, push)
+        })?;
+        Ok((reply, asked > 1))
     }
 
     fn credentials(&self) -> HubCredentials<'a> {
@@ -581,7 +786,7 @@ impl<'a> SyncService<'a> {
 
     /// `e` with the settings' warnings, and with the account handle refreshed once when the hub
     /// refused the actor claim (as `rdy publish` does).
-    fn fail(&self, t: Option<&Target>, warnings: &[Issue], mut e: RdyError) -> RdyError {
+    pub(crate) fn fail(&self, t: Option<&Target>, warnings: &[Issue], mut e: RdyError) -> RdyError {
         if e.code == E_UPSTREAM_ACTOR_CLAIM
             && let Some(t) = t
         {
@@ -619,6 +824,19 @@ impl<'a> SyncService<'a> {
         guarded: bool,
         run: impl FnOnce(&Target) -> Result<T, RdyError>,
     ) -> Result<T, RdyError> {
+        let (target, _guard, warnings) = self.resolve_target(session, remote, guarded)?;
+        run(&target).map_err(|e| self.fail(Some(&target), &warnings, e))
+    }
+
+    /// Steps 1 to 3 without the run: the selected remote's target, its guard when `guarded`
+    /// (held by the caller for as long as its sync runs) and the settings' warnings. A history
+    /// fetch keeps all three across its steps ([`crate::history_fetch::HistoryFetch`]).
+    pub(crate) fn resolve_target(
+        &self,
+        session: &Session,
+        remote: Option<&str>,
+        guarded: bool,
+    ) -> Result<(Target, Option<RemoteGuard>, Vec<Issue>), RdyError> {
         // 1. the remote
         if let Some(name) = remote
             && !hub_config::is_remote_name(name)
@@ -639,7 +857,7 @@ impl<'a> SyncService<'a> {
         }
 
         // 2. one push or pull per remote
-        let _guard = if guarded {
+        let guard = if guarded {
             Some(RemoteGuard::take(&self.project, &remote.name)?)
         } else {
             None
@@ -666,7 +884,7 @@ impl<'a> SyncService<'a> {
             bound: first.claim,
             account: first.account,
         };
-        run(&target).map_err(|e| self.fail(Some(&target), &warnings, e))
+        Ok((target, guard, warnings))
     }
 
     /// A URL clone's steps 1 to 3 (D-D5J18): the remote `hub` at `url`, refused with
@@ -798,6 +1016,8 @@ impl<'a> SyncService<'a> {
         request: PushRequest,
     ) -> Result<PushOutcome, RdyError> {
         check_view_names(&request.views)?;
+        // a push sends history the project does not hold yet: refused before any capture
+        engine.read().require_complete_history()?;
         self.with_target(session, request.remote.as_deref(), |t| {
             self.push_exchange(engine, t, &request)
         })
@@ -814,7 +1034,14 @@ impl<'a> SyncService<'a> {
             return Err(take_and_strict());
         }
         check_view_names(&request.views)?;
+        // a view's changes sit on history behind the frontier: refused before any fetch
+        if !request.views.is_empty() {
+            engine.read().require_complete_history()?;
+        }
         self.with_target(session, request.remote.as_deref(), |t| {
+            // the remote's incomplete history comes first, under this pull's own guard; the
+            // pull then reads the hub's state again (D-GGTYA)
+            crate::history_fetch::resume_under_guard(self, engine, session, t)?;
             self.pull_exchange(engine, session, t, &request)
         })
     }
@@ -844,6 +1071,31 @@ impl<'a> SyncService<'a> {
         request: RestoreRequest,
     ) -> Result<RestoreOutcome, RdyError> {
         crate::sync_restore::restore(self, session, &request)
+    }
+
+    /// [`SyncService::restore`] entered from the project of `engine` (`push --restore`): while
+    /// that project's history is still arriving it is E_HISTORY_PENDING, before any capture,
+    /// put or write (D-4PV25's refusal matrix).
+    pub fn restore_from(
+        &self,
+        engine: &dyn Engine,
+        session: &Session,
+        request: RestoreRequest,
+    ) -> Result<RestoreOutcome, RdyError> {
+        engine.read().require_complete_history()?;
+        self.restore(session, request)
+    }
+
+    /// [`SyncService::restore_preview`] entered from the project of `engine`, refused as
+    /// [`SyncService::restore_from`] is while its history is still arriving.
+    pub fn restore_preview_from(
+        &self,
+        engine: &dyn Engine,
+        session: &Session,
+        request: RestoreRequest,
+    ) -> Result<CanonPreview, RdyError> {
+        engine.read().require_complete_history()?;
+        self.restore_preview(session, request)
     }
 
     /// What the restore of `request` would remove from hub canon (see [`CanonPreview`]): the
@@ -884,16 +1136,18 @@ impl<'a> SyncService<'a> {
         Ok((base_url, state))
     }
 
-    /// Step 6 for the `pending` ref found on `t`.
+    /// Step 6 for the `pending` ref found on `t`. The flag is true when a taken or held outcome
+    /// was learned after the hub answered busy: the caller's hub state predates it, and it takes a fresh one
+    /// (`SyncService::recapture`) before any further sync work.
     fn lookup(
         &self,
         engine: &dyn Engine,
         t: &Target,
         base_url: &str,
         state: &SyncState,
-    ) -> Result<Option<Resolved>, RdyError> {
+    ) -> Result<(Option<Resolved>, bool), RdyError> {
         let Some(p) = remote_refs(engine, &t.name)?.pending else {
-            return Ok(None);
+            return Ok((None, false));
         };
         let read = engine.read();
         if p.url != t.url || p.repo_id != read.repo_id()? {
@@ -901,8 +1155,12 @@ impl<'a> SyncService<'a> {
             return Err(busy(&t.name));
         }
         let cx = self.context(t, &read, Some(base_url))?;
-        let reply = self.wire.outcome(&cx, &p.push)?;
+        let (reply, waited) = self.lookup_outcome_noted(&cx, &p.push)?;
         drop(cx);
+        // the hub still runs the write: it may yet complete, so `pending` stays and no write goes
+        let Some(reply) = reply else {
+            return Err(sync_uncertain(&p.push));
+        };
         let want = if p.kind == KIND_VIEW {
             kinds::VIEW_OP
         } else {
@@ -930,13 +1188,33 @@ impl<'a> SyncService<'a> {
                 self.reply_only(engine, t, &p.push)?;
             }
         }
-        Ok(Some(Resolved {
+        // only a taken or held outcome changes what the hub's state means for this store
+        let stale = waited
+            && matches!(
+                reply.outcome,
+                LookupOutcome::Taken { .. } | LookupOutcome::Held { .. }
+            );
+        let resolved = Resolved {
             push: p.push,
             kind: p.kind,
             view: p.view,
             outcome: reply.outcome,
             fetched,
-        }))
+        };
+        Ok((Some(resolved), stale))
+    }
+
+    /// The discovery and state steps again, for the hub state a recovery made stale: the write
+    /// the first capture saw running has ended (D-H0BZN, D-GS59E). A failure is returned; what
+    /// the recovery applied stays.
+    fn recapture(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        views: &[String],
+    ) -> Result<(String, SyncState), RdyError> {
+        let read = engine.read();
+        self.open(t, &read, views)
     }
 
     /// Clears `pending` of push `push`.
@@ -1067,12 +1345,50 @@ impl<'a> SyncService<'a> {
 
     /// The render inputs at the scope of local canon's head and the gate settings, from `read`.
     fn capture(&self, read: &ReadState) -> Result<Capture, RdyError> {
-        let head = read.canon_head();
-        let scope = head.map_or(Scope::Canon, Scope::At);
-        let inputs = self.renderer.capture(read, &scope)?;
-        validate_inputs(&inputs)?;
-        let gate = gate_settings(read, &inputs);
-        Ok(Capture { inputs, gate, head })
+        capture_with(self.renderer, read)
+    }
+
+    /// The push's capture and canon's walk (`walk`), from the one captured `read`: with a local
+    /// canon head, the capture runs on one scoped worker while this thread walks, and both end
+    /// before anything is sent or recorded; with none, they run here in turn. When both fail,
+    /// the capture's error is returned, as when the capture ran first; the worker is always
+    /// joined. On success the read's epoch is checked again.
+    fn capture_and_walk<T>(
+        &self,
+        read: &Arc<ReadState>,
+        walk: impl FnOnce() -> Result<T, RdyError>,
+    ) -> Result<(Capture, T), RdyError> {
+        if read.canon_head().is_none() {
+            let capture = self.capture(read)?;
+            return Ok((capture, walk()?));
+        }
+        let renderer = self.renderer;
+        let setup = upload_worker_setup();
+        let probe = upload_probe();
+        let hook = WALK_HOOK.with(|c| c.borrow().clone());
+        let both = std::thread::scope(|s| {
+            let worker = std::thread::Builder::new()
+                .name("rdy-canon-capture".into())
+                .spawn_scoped(s, move || {
+                    let _guards = setup.as_ref().map(|f| f());
+                    let _mark = WorkerMark::new(probe);
+                    capture_with(renderer, read)
+                })
+                .map_err(|_| capture_start_error())?;
+            if let Some(hook) = &hook {
+                hook();
+            }
+            let walked = walk();
+            let captured = worker
+                .join()
+                .unwrap_or_else(|_| Err(capture_failed_error()));
+            match (captured, walked) {
+                (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+                (Ok(c), Ok(w)) => Ok((c, w)),
+            }
+        })?;
+        read.ensure_current_epoch()?;
+        Ok(both)
     }
 
     /// The tags a write carries that the hub lacks: the TAG records of `pool` (the keys known
@@ -1137,12 +1453,25 @@ impl<'a> SyncService<'a> {
             push_plan(&read, &request.views, &hub_views)?;
         }
         drop(read);
-        let lookup = self.lookup(engine, t, &base_url, &state)?;
+        let (lookup, waited) = self.lookup(engine, t, &base_url, &state)?;
+        // an outcome learned after a busy wait ends the write the capture saw running: the rest
+        // of the push goes on a fresh capture, with the view rules checked again
+        let (base_url, state, hub_views) = if waited {
+            let (base_url, state) = self.recapture(engine, t, &request.views)?;
+            let hub_views = state.hub_views();
+            if !request.views.is_empty() {
+                push_plan(&engine.read(), &request.views, &hub_views)?;
+            }
+            (base_url, state, hub_views)
+        } else {
+            (base_url, state, hub_views)
+        };
 
         let read = engine.read();
-        let capture = self.capture(&read)?;
+        let (capture, prep) =
+            self.capture_and_walk(&read, || self.canon_prepare(t, &read, &state, request))?;
         let (canon, force_not_needed) =
-            self.push_canon(engine, t, &base_url, &read, &state, &capture, request)?;
+            self.push_canon(engine, t, &base_url, &read, &state, &capture, request, prep)?;
         let mut views = Vec::new();
         if !request.views.is_empty() {
             for plan in push_plan(&read, &request.views, &hub_views)? {
@@ -1193,19 +1522,15 @@ impl<'a> SyncService<'a> {
         })
     }
 
-    /// Canon's part of a push: the held rule, the base rule (or force), then its upload and
-    /// write. Returns its end and whether a forced push found force not needed.
-    #[allow(clippy::too_many_arguments)]
-    fn push_canon(
+    /// Canon's part of a push before its upload: the held rule, the base rule (or force), then
+    /// the history's walk from the captured `read`. Nothing is sent or recorded.
+    fn canon_prepare(
         &self,
-        engine: &dyn Engine,
         t: &Target,
-        base_url: &str,
         read: &Arc<ReadState>,
         state: &SyncState,
-        capture: &Capture,
         request: &PushRequest,
-    ) -> Result<(WriteEnd, bool), RdyError> {
+    ) -> Result<CanonPrep, RdyError> {
         let repo_id = read.repo_id()?;
         let head = read.canon_head();
         let tip = state.canon;
@@ -1222,7 +1547,7 @@ impl<'a> SyncService<'a> {
         let force_not_needed = request.force && holds;
         let Some(head) = head else {
             // both are empty: the base rule refused any hub tip
-            return Ok((WriteEnd::UpToDate { tip }, force_not_needed));
+            return Ok(CanonPrep::End(WriteEnd::UpToDate { tip }, force_not_needed));
         };
         // the held rule: at the held head, no write (D-QCE8M)
         let held = read
@@ -1238,11 +1563,46 @@ impl<'a> SyncService<'a> {
                 head,
                 request: h.request,
             };
-            return Ok((end, force_not_needed));
+            return Ok(CanonPrep::End(end, force_not_needed));
         }
         let base = if holds { tip } else { None };
         // at the hub tip, the history is the attachments made since (D-KE83X)
         let history = PreparedHistory::canon(Arc::clone(read), head, base)?;
+        Ok(CanonPrep::Send {
+            head,
+            base,
+            tip,
+            holds,
+            history,
+            force_not_needed,
+        })
+    }
+
+    /// Canon's part of a push after [`SyncService::canon_prepare`]: its upload and write.
+    /// Returns its end and whether a forced push found force not needed.
+    #[allow(clippy::too_many_arguments)]
+    fn push_canon(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+        read: &Arc<ReadState>,
+        state: &SyncState,
+        capture: &Capture,
+        request: &PushRequest,
+        prep: CanonPrep,
+    ) -> Result<(WriteEnd, bool), RdyError> {
+        let (head, base, tip, holds, history, force_not_needed) = match prep {
+            CanonPrep::End(end, force_not_needed) => return Ok((end, force_not_needed)),
+            CanonPrep::Send {
+                head,
+                base,
+                tip,
+                holds,
+                history,
+                force_not_needed,
+            } => (head, base, tip, holds, history, force_not_needed),
+        };
         let at_tip = tip == Some(head);
         let nothing = at_tip && history.keys().is_empty();
         let resumed = match self.slot(engine, t, &request.views)? {
@@ -1313,7 +1673,20 @@ impl<'a> SyncService<'a> {
             self.context(t, read, Some(base_url))
                 .map(|cx| UploadContext { zstd, ..cx })
         };
-        let missing = missing_with(&keys, &push, &wire, &mut context)?;
+        // a new canon push to a hub repo that holds nothing (no repo id, no canon, no view
+        // head) lacks every key: the known step is skipped, and the first put opens the
+        // quarantine (r-H7H64). The final write's compare still decides a racing seed.
+        let empty_hub = job.kind != WriteKind::View
+            && !was_resumed
+            && state.repo_id.is_none()
+            && state.canon.is_none()
+            && state.views.iter().all(|v| v.head.is_none())
+            && !keys.is_empty();
+        let missing = if empty_hub {
+            keys.clone()
+        } else {
+            missing_with(&keys, &push, &wire, &mut context)?
+        };
         let limits = BatchLimits {
             bytes: state.batch_bytes,
             records: state.batch_records,
@@ -1481,7 +1854,20 @@ impl<'a> SyncService<'a> {
                 return Err(view_missing(name, &t.name));
             }
         }
-        let lookup = self.lookup(engine, t, &base_url, &state)?;
+        let (lookup, waited) = self.lookup(engine, t, &base_url, &state)?;
+        // an outcome learned after a busy wait ends the write the capture saw running: the rest
+        // of the pull compares local state with a fresh capture, never the old one
+        let (base_url, state) = if waited {
+            let (base_url, state) = self.recapture(engine, t, &request.views)?;
+            for name in &request.views {
+                if state.view_head(name).is_none() {
+                    return Err(view_missing(name, &t.name));
+                }
+            }
+            (base_url, state)
+        } else {
+            (base_url, state)
+        };
         let held = self.held_lookup(engine, t, &base_url)?;
         let hub = HubState {
             repo_id: state.repo_id,
@@ -1679,30 +2065,9 @@ impl<'a> SyncService<'a> {
         let root_key = ObjectKey { kind, hash: root };
         // the known pages, in the hub's order; the keys this store holds stay home
         let mut want = Vec::new();
-        let mut seen = BTreeSet::new();
-        let mut after = None;
-        loop {
-            let cx = self.context(t, &read, Some(base_url))?;
-            let page = self.wire.known_pull(
-                &cx,
-                &KnownPull {
-                    after,
-                    base,
-                    purpose,
-                    root: root_key,
-                },
-            )?;
-            for k in page.keys {
-                if !seen.insert(k) {
-                    return Err(upstream_protocol());
-                }
-                if !reader.has_kind(k.kind, &k.hash).map_err(store)? {
-                    want.push(k);
-                }
-            }
-            match page.next {
-                None => break,
-                Some(n) => after = Some(n),
+        for k in self.known_listing(&read, t, base_url, purpose, root_key, base)? {
+            if !reader.has_kind(k.kind, &k.hash).map_err(store)? {
+                want.push(k);
             }
         }
         if want.is_empty() {
@@ -1751,16 +2116,108 @@ impl<'a> SyncService<'a> {
             write_steps(engine, &t.name, vec![step])?;
             return Ok(None);
         }
-        let per = usize::try_from(state.batch_records)
-            .unwrap_or(MAX_KNOWN_KEYS)
-            .clamp(1, MAX_KNOWN_KEYS);
+        let files = self.get_all(&read, t, base_url, state, purpose, root_key, &want, repo_id)?;
+        let target = FetchTarget {
+            remote: t.name.clone(),
+            url: t.url.clone(),
+            purpose,
+            root,
+            view: view.map(str::to_string),
+        };
+        drop(read);
+        with_writer_result(engine, move |rdy| {
+            crate::sync_fetch::fetch_checked(rdy, &files, &target)
+        })
+        .map(Some)
+    }
+
+    /// Every key of the known pull pages of `root` (purpose `purpose`, above `base`), in the
+    /// hub's order. A key a page repeats is the hub's protocol error.
+    pub(crate) fn known_listing(
+        &self,
+        read: &ReadState,
+        t: &Target,
+        base_url: &str,
+        purpose: StreamPurpose,
+        root: ObjectKey,
+        base: Option<ObjectKey>,
+    ) -> Result<Vec<ObjectKey>, RdyError> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut after = None;
+        loop {
+            let cx = self.context(t, read, Some(base_url))?;
+            let page = self.wire.known_pull(
+                &cx,
+                &KnownPull {
+                    after,
+                    base,
+                    purpose,
+                    root,
+                },
+            )?;
+            for k in page.keys {
+                if !seen.insert(k) {
+                    return Err(upstream_protocol());
+                }
+                out.push(k);
+            }
+            match page.next {
+                None => break,
+                Some(n) => after = Some(n),
+            }
+        }
+        known_listing_done();
+        Ok(out)
+    }
+
+    /// Gets the keys `want` of `root` (purpose `purpose`) in groups within the hub's limits,
+    /// each streamed to a scratch file and checked once (the take reuses that check).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_all(
+        &self,
+        read: &ReadState,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+        purpose: StreamPurpose,
+        root: ObjectKey,
+        want: &[ObjectKey],
+        repo_id: rdy_model::RepoId,
+    ) -> Result<Vec<crate::stream_check::CheckedBatchFile>, RdyError> {
+        self.get_all_with(
+            read,
+            t,
+            base_url,
+            state,
+            purpose,
+            root,
+            want,
+            &mut |file, written, sizer| check_got(file, repo_id, purpose, root, sizer, written),
+        )
+    }
+
+    /// [`Self::get_all`] with each reply's file and bytes passed to `got`, which checks it (and
+    /// teaches the sizer its records) or keeps it for a check of the files together.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_all_with<T>(
+        &self,
+        read: &ReadState,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+        purpose: StreamPurpose,
+        root: ObjectKey,
+        want: &[ObjectKey],
+        got: &mut dyn FnMut(std::fs::File, u64, &mut GroupSizer) -> Result<T, RdyError>,
+    ) -> Result<Vec<T>, RdyError> {
         // the groups to get (TASK-3869): the known step gives no record's bytes, so each new
         // group is sized from the bytes per kind that the replies so far held (`GroupSizer`),
         // within batch_records. A group whose reply still passes batch_bytes is split in two and
         // its halves got in turn (`split`, last first), down to one key, which is refused.
-        let mut sizer = GroupSizer::new(state.batch_bytes, per);
+        let mut sizer = GroupSizer::for_state(state);
         let mut split: Vec<&[ObjectKey]> = Vec::new();
-        let mut rest: &[ObjectKey] = &want;
+        let mut rest: &[ObjectKey] = want;
         let mut files = Vec::new();
         loop {
             let keys = match split.pop() {
@@ -1773,62 +2230,192 @@ impl<'a> SyncService<'a> {
                 }
             };
             let mut file = tempfile::tempfile().map_err(|_| scratch_error())?;
-            let cx = self.context(t, &read, Some(base_url))?;
-            let request = GetRequest {
-                keys: keys.to_vec(),
-                purpose,
-                root: root_key,
-            };
-            let mut sink = Capped {
-                out: &mut file,
-                cap: state.batch_bytes,
-                bytes: 0,
-                over: false,
-            };
-            // one transport piece of room past the cap: a reply past it always shows its first
-            // byte past the cap to the sink before the transport stops it
-            let limit = state.batch_bytes.saturating_add(UPLOAD_BUFFER_BYTES as u64);
-            let got = self.wire.get(&cx, &request, &mut sink, limit);
-            let over = sink.over;
-            let written = sink.bytes;
-            drop(cx);
-            if over {
-                if keys.len() == 1 {
-                    return Err(upstream_protocol());
+            match self.get_one(read, t, base_url, state, purpose, root, keys, &mut file)? {
+                GetEnd::Split => {
+                    let (front, back) = keys.split_at(keys.len() / 2);
+                    split.push(back);
+                    split.push(front);
                 }
-                let (front, back) = keys.split_at(keys.len() / 2);
-                split.push(back);
-                split.push(front);
-                continue;
+                GetEnd::Got(written) => files.push(got(file, written, &mut sizer)?),
             }
-            got?;
-            file.seek(SeekFrom::Start(0)).map_err(|_| scratch_error())?;
-            let mut records = Vec::new();
-            let report = crate::stream_check::check_batch_tally(
-                BufReader::new(&mut file),
-                Some(repo_id),
-                |kind, at, len| records.push((kind, at, len)),
-            )?;
-            sizer.taken(written, &records);
-            if report.header.purpose != purpose || report.header.root() != root_key {
+        }
+        Ok(files)
+    }
+
+    /// One get of `keys` of `root` (purpose `purpose`) into `file`, within the hub's
+    /// `batch_bytes`. A reply past the cap, or the hub's refusal over its cap with the structured
+    /// marker, asks for a split when it holds two keys or more; one key past the cap is the
+    /// hub's protocol error, and any other refusal is the hub's error as it came.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_one(
+        &self,
+        read: &ReadState,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+        purpose: StreamPurpose,
+        root: ObjectKey,
+        keys: &[ObjectKey],
+        file: &mut std::fs::File,
+    ) -> Result<GetEnd, RdyError> {
+        let cx = self.context(t, read, Some(base_url))?;
+        let request = GetRequest {
+            keys: keys.to_vec(),
+            purpose,
+            root,
+        };
+        let mut sink = Capped {
+            out: file,
+            cap: state.batch_bytes,
+            bytes: 0,
+            over: false,
+        };
+        // one transport piece of room past the cap: a reply past it always shows its first
+        // byte past the cap to the sink before the transport stops it
+        let limit = state.batch_bytes.saturating_add(UPLOAD_BUFFER_BYTES as u64);
+        let got = self.wire.get(&cx, &request, &mut sink, limit);
+        let over = sink.over;
+        let written = sink.bytes;
+        drop(cx);
+        if over {
+            if keys.len() == 1 {
                 return Err(upstream_protocol());
             }
-            file.seek(SeekFrom::Start(0)).map_err(|_| scratch_error())?;
-            files.push(file);
+            return Ok(GetEnd::Split);
         }
+        // a get that the hub refuses over its cap, with its structured marker, is split in
+        // two as a get over `batch_bytes` is; a refusal of one key, or without the marker,
+        // is the hub's error as it came
+        if let Err(e) = &got
+            && e.hub_get_cap.is_some()
+            && keys.len() > 1
+        {
+            return Ok(GetEnd::Split);
+        }
+        got?;
+        Ok(GetEnd::Got(written))
+    }
+
+    /// A URL clone's fetch of hub canon's state at the captured tip of `state` (D-GGTYA, O16):
+    /// the state's known pages and gets (purpose `canon_state`), then every canon history key
+    /// at the same tip, keys only, with no base, written as the one checked key file
+    /// (`.rdy/sync/<remote>/history/keys`) with its exact distinct count, and only then the
+    /// state take: one batch with the state's records, canon at the tip, the remote's canon
+    /// state, and the incomplete history ref naming that count.
+    pub(crate) fn clone_state(
+        &self,
+        engine: &dyn Engine,
+        t: &Target,
+        base_url: &str,
+        state: &SyncState,
+    ) -> Result<FetchOutcome, RdyError> {
+        let tip = state.canon.ok_or_else(upstream_protocol)?;
+        let hub_repo = state.repo_id.ok_or_else(upstream_protocol)?;
+        let read = engine.read();
+        let root = ObjectKey {
+            kind: kinds::LANDING,
+            hash: tip,
+        };
+        let mut want = Vec::new();
+        for k in self.known_listing(&read, t, base_url, StreamPurpose::CanonState, root, None)? {
+            if !read.reader().has_kind(k.kind, &k.hash).map_err(store)? {
+                want.push(k);
+            }
+        }
+        // the state's files are checked together (one header, the state's link table), then
+        // taken by the store, which checks each again
+        let mut files: Vec<std::fs::File> = self.get_all_with(
+            &read,
+            t,
+            base_url,
+            state,
+            StreamPurpose::CanonState,
+            root,
+            &want,
+            &mut |file, _, _| Ok(file),
+        )?;
+        let mut readers = Vec::with_capacity(files.len());
+        for f in &mut files {
+            use std::io::Seek as _;
+            f.seek(std::io::SeekFrom::Start(0))
+                .map_err(|_| scratch_error())?;
+        }
+        for f in &files {
+            readers.push(std::io::BufReader::new(f));
+        }
+        if !readers.is_empty() {
+            let reports = crate::stream_check::check_state_batches(readers, Some(hub_repo))?;
+            if reports.iter().any(|r| r.header.root() != root) {
+                return Err(upstream_protocol());
+            }
+        }
+        // the history's keys at the same tip, before the state take: the denominator of Ready
+        let keys =
+            self.known_listing(&read, t, base_url, StreamPurpose::CanonHistory, root, None)?;
+        let history = crate::history_fetch::write_key_file(
+            read.root(),
+            &t.name,
+            &t.url,
+            hub_repo,
+            tip,
+            keys,
+        )?;
+        drop(read);
         let target = FetchTarget {
             remote: t.name.clone(),
             url: t.url.clone(),
-            purpose,
-            root,
-            view: view.map(str::to_string),
+            purpose: StreamPurpose::CanonState,
+            root: tip,
+            view: None,
         };
-        drop(read);
         with_writer_result(engine, move |rdy| {
-            crate::sync_fetch::fetch(rdy, &files, &target)
+            crate::sync_fetch::take_state(rdy, &files, &target, &history)
         })
-        .map(Some)
     }
+}
+
+/// How one get ended: its reply's bytes in the file, or a split asked for.
+pub(crate) enum GetEnd {
+    Got(u64),
+    Split,
+}
+
+/// Checks the get reply in `file` (`written` bytes) once, as one batch of repo `repo_id` with
+/// purpose `purpose` and root `root`, and teaches `sizer` its records.
+pub(crate) fn check_got(
+    file: std::fs::File,
+    repo_id: rdy_model::RepoId,
+    purpose: StreamPurpose,
+    root: ObjectKey,
+    sizer: &mut GroupSizer,
+    written: u64,
+) -> Result<crate::stream_check::CheckedBatchFile, RdyError> {
+    let mut records = Vec::new();
+    let checked = crate::stream_check::check_batch_file(file, Some(repo_id), |kind, at, len| {
+        records.push((kind, at, len))
+    })?;
+    sizer.taken(written, &records);
+    let header = &checked.report().header;
+    if header.purpose != purpose || header.root() != root {
+        return Err(upstream_protocol());
+    }
+    Ok(checked)
+}
+
+thread_local! {
+    /// This thread's count of known listings that reached their final page.
+    static KNOWN_LISTINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn known_listing_done() {
+    KNOWN_LISTINGS.with(|c| c.set(c.get() + 1));
+}
+
+/// This thread's count of known listings that reached their final page so far. A test reads
+/// the difference over a call.
+#[doc(hidden)]
+pub fn known_listings_for_tests() -> u64 {
+    KNOWN_LISTINGS.with(std::cell::Cell::get)
 }
 
 /// The bytes that a fetch assumes for a key of a kind that no reply has shown yet: a fixed,
@@ -1852,7 +2439,7 @@ const FETCH_GROWTH: u64 = 4;
 /// records). A group takes keys in order while its estimate stays within `FETCH_FILL_FIFTHS` of
 /// `batch_bytes`, and within `FETCH_GROWTH` times the largest reply so far (a mean from a small
 /// sample runs low when later records of a kind grow): at least one key, at most `per`.
-struct GroupSizer {
+pub(crate) struct GroupSizer {
     target: u64,
     per: usize,
     kinds: std::collections::BTreeMap<u8, (u64, u64)>,
@@ -1862,6 +2449,14 @@ struct GroupSizer {
 }
 
 impl GroupSizer {
+    /// The sizer of the hub limits that `state` names.
+    pub(crate) fn for_state(state: &SyncState) -> GroupSizer {
+        let per = usize::try_from(state.batch_records)
+            .unwrap_or(MAX_KNOWN_KEYS)
+            .clamp(1, MAX_KNOWN_KEYS);
+        GroupSizer::new(state.batch_bytes, per)
+    }
+
     fn new(batch_bytes: u64, per: usize) -> GroupSizer {
         GroupSizer {
             target: batch_bytes / 5 * FETCH_FILL_FIFTHS,
@@ -1882,7 +2477,7 @@ impl GroupSizer {
     }
 
     /// How many of `rest`'s first keys the next group takes.
-    fn next(&self, rest: &[ObjectKey]) -> usize {
+    pub(crate) fn next(&self, rest: &[ObjectKey]) -> usize {
         let target = match self.largest {
             0 => self.target,
             l => self.target.min(l.saturating_mul(FETCH_GROWTH)),
@@ -1901,7 +2496,7 @@ impl GroupSizer {
 
     /// A reply within the limit: `bytes` in all, holding `records`, each `(kind, frame start,
     /// payload bytes)` in stream order.
-    fn taken(&mut self, bytes: u64, records: &[(u8, u64, u64)]) {
+    pub(crate) fn taken(&mut self, bytes: u64, records: &[(u8, u64, u64)]) {
         for pair in records.windows(2) {
             let gap = pair[1]
                 .1
@@ -1945,5 +2540,189 @@ impl Write for Capped<'_> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.out.flush()
+    }
+}
+
+/// The render inputs at the scope of `read`'s canon head through `renderer`, checked, with the
+/// gate settings of the same read state.
+fn capture_with(
+    renderer: &(dyn PublishRenderer + Sync),
+    read: &ReadState,
+) -> Result<Capture, RdyError> {
+    let head = read.canon_head();
+    let scope = head.map_or(Scope::Canon, Scope::At);
+    let inputs = renderer.capture(read, &scope)?;
+    validate_inputs(&inputs)?;
+    let gate = gate_settings(read, &inputs);
+    Ok(Capture { inputs, gate, head })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hub_sync_wire::OutcomeReply;
+    use std::sync::Mutex;
+
+    /// A clock that moves only when a lookup or a wait moves it; `slack` is the time each wait
+    /// takes beyond its delay (a late wake).
+    #[derive(Default)]
+    struct Fake {
+        now: Mutex<Duration>,
+        waits: Mutex<Vec<Duration>>,
+        slack: Mutex<Duration>,
+    }
+
+    impl Fake {
+        fn advance(&self, by: Duration) {
+            *self.now.lock().unwrap() += by;
+        }
+
+        fn seconds(&self) -> Vec<u64> {
+            self.waits
+                .lock()
+                .unwrap()
+                .iter()
+                .map(Duration::as_secs)
+                .collect()
+        }
+    }
+
+    impl OutcomePollClock for Fake {
+        fn now(&self) -> Duration {
+            *self.now.lock().unwrap()
+        }
+
+        fn wait(&self, delay: Duration) {
+            self.waits.lock().unwrap().push(delay);
+            let slack = *self.slack.lock().unwrap();
+            self.advance(delay + slack);
+        }
+    }
+
+    fn busy(seconds: Option<u64>) -> RdyError {
+        let mut e = RdyError::new(HUB_BUSY, "busy", "wait");
+        e.upstream_retry_after = seconds;
+        e
+    }
+
+    fn unknown() -> OutcomeReply {
+        OutcomeReply {
+            outcome: LookupOutcome::Unknown,
+            kind: None,
+            view: None,
+            request_state: None,
+        }
+    }
+
+    /// Polls with a hub that is busy for `busy_for` lookups (each taking `cost` and asking for
+    /// `retry` seconds), then answers unknown. Returns the result, the lookups begun and the
+    /// seconds waited.
+    fn run(
+        clock: &Fake,
+        busy_for: usize,
+        retry: Option<u64>,
+        cost: Duration,
+    ) -> (Result<Option<OutcomeReply>, RdyError>, usize, Vec<u64>) {
+        let mut begun = 0;
+        let r = poll_outcome(clock, || {
+            begun += 1;
+            clock.advance(cost);
+            if begun <= busy_for {
+                Err(busy(retry))
+            } else {
+                Ok(unknown())
+            }
+        });
+        (r, begun, clock.seconds())
+    }
+
+    #[test]
+    fn r59016_poll_bounds_and_clock() {
+        let none = Duration::ZERO;
+        let always = usize::MAX;
+
+        // the wait is the hub's retry_after clamped to 1 to 5 seconds
+        for (asked, waited) in [
+            (0, 1),
+            (1, 1),
+            (5, 5),
+            (6, 5),
+            (31_536_000, 5),
+            (u64::MAX, 5),
+        ] {
+            let clock = Fake::default();
+            let (r, begun, seconds) = run(&clock, 1, Some(asked), none);
+            assert!(matches!(r, Ok(Some(_))), "{asked}");
+            assert_eq!((begun, seconds), (2, vec![waited]), "{asked}");
+        }
+
+        // metadata the decoder always sets is missing: the protocol error, no guessed wait
+        let clock = Fake::default();
+        let (r, begun, seconds) = run(&clock, always, None, none);
+        assert_eq!(r.unwrap_err().code, crate::error::E_UPSTREAM_PROTOCOL);
+        assert_eq!((begun, seconds), (1, vec![]));
+
+        // the lookup count and the 120-second budget
+        for (retry, cost, calls, waits) in
+            [(1, 0, 82, 81), (5, 0, 17, 16), (1, 39, 3, 2), (5, 39, 2, 1)]
+        {
+            let clock = Fake::default();
+            let (r, begun, seconds) = run(&clock, always, Some(retry), Duration::from_secs(cost));
+            assert!(matches!(r, Ok(None)), "retry {retry} cost {cost}");
+            assert_eq!(
+                (begun, seconds.len()),
+                (calls, waits),
+                "retry {retry} cost {cost}"
+            );
+            // never past the budget: the last lookup began with its reserve free
+            assert!(
+                clock.now()
+                    <= Duration::from_millis(OUTCOME_POLL_BUDGET_MS) + Duration::from_secs(cost)
+            );
+        }
+
+        // a lookup begins with exactly 39,000 ms left, and not with 38,999
+        for (slack_ms, begins) in [(1_000, 2), (1_001, 1)] {
+            let clock = Fake::default();
+            *clock.slack.lock().unwrap() = Duration::from_millis(slack_ms);
+            // the first lookup takes 79 s; its wait takes 1 s and the slack: 39,000 or 38,999 ms
+            // are left
+            let (r, begun, seconds) = run(&clock, 1, Some(1), Duration::from_secs(79));
+            if begins == 2 {
+                assert!(matches!(r, Ok(Some(_))));
+            } else {
+                assert!(matches!(r, Ok(None)));
+            }
+            assert_eq!((begun, seconds), (begins, vec![1]), "slack {slack_ms}");
+        }
+
+        // the wait itself needs its delay and the next lookup's reserve: 40,000 ms
+        for (cost_ms, waits) in [(80_000, 1), (80_001, 0)] {
+            let clock = Fake::default();
+            let (r, _, seconds) = run(&clock, always, Some(1), Duration::from_millis(cost_ms));
+            assert!(matches!(r, Ok(None)));
+            assert_eq!(seconds.len(), waits, "cost {cost_ms}");
+        }
+
+        // a completed outcome and a failure of another kind stop at once
+        let clock = Fake::default();
+        let (r, begun, seconds) = run(&clock, 0, Some(1), none);
+        assert!(matches!(r, Ok(Some(_))));
+        assert_eq!((begun, seconds), (1, vec![]));
+        let clock = Fake::default();
+        let mut begun = 0;
+        let r = poll_outcome(&clock, || {
+            begun += 1;
+            Err(RdyError::new("E_HUB_NOT_FOUND", "no push", "check it"))
+        });
+        assert_eq!(r.unwrap_err().code, "E_HUB_NOT_FOUND");
+        assert_eq!((begun, clock.seconds()), (1, vec![]));
+
+        // the clock starts with the first lookup, wherever it stands
+        let clock = Fake::default();
+        clock.advance(Duration::from_secs(3_600));
+        let (r, begun, _) = run(&clock, always, Some(1), none);
+        assert!(matches!(r, Ok(None)));
+        assert_eq!(begun, 82);
     }
 }

@@ -8,6 +8,9 @@
 //! injected the engine type repo_link into every resolved pack (repo links plan, Task 4): the
 //! pack digest each assessment records moved, so each landing id and every later `canon_at`
 //! moved with it. Every line kept its text.
+//! Both pages' `cursor` moved by 140 bytes when the span maps of D-1ER84 (0.59.0) arrived: a new
+//! store's log gains two 70-byte `dedup_spans` manifest entries, so it ends later. Every entry
+//! kept its bytes.
 use rdy_engine::inbox::api::{InboxRequest, run_inbox};
 use rdy_engine::inbox::sub::subscribe;
 use rdy_engine::{Local, Session, pin_clock};

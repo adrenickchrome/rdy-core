@@ -10,6 +10,7 @@ mod redaction_fixture;
 mod blob_state;
 mod chain;
 mod closure;
+mod closure_metadata;
 mod display_path;
 mod encoding;
 mod fileid;

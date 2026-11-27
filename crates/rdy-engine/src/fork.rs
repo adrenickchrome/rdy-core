@@ -93,6 +93,7 @@ pub fn fork_holder_at_with(
     dir: &Path,
     hook: ForkHook<'_>,
 ) -> Result<Rdy, RdyError> {
+    read.require_complete_history()?;
     let prepared = prepare_fork(read, tag, dir, &mut *hook)?;
     install_fork(read, prepared, hook)
 }
@@ -245,6 +246,7 @@ pub(crate) fn fork_project_at(
     tag: &str,
     dir: &Path,
 ) -> Result<ProjectFork, RdyError> {
+    read.require_complete_history()?;
     let reader = read.reader();
     if reader.mode()? == StoreMode::Holder {
         return Err(holder_source());

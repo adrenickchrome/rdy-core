@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 #[derive(clap::Args)]
 pub(crate) struct CompactArgs {
-    /// Report the bytes without punching holes: the same fields, and punched bytes 0.
+    /// Report bytes without changing the store.
     #[arg(long)]
     dry_run: bool,
 }
@@ -30,21 +30,24 @@ pub(crate) fn kind_lines(v: &Value) -> Vec<String> {
         .collect()
 }
 
-/// `log bytes:` and `removed bytes:`, then the kind lines: what `rdy fsck` appends.
+/// `log bytes:`, `removed bytes:` and `deduplicated bytes:`, then the kind lines: what
+/// `rdy fsck` appends.
 pub(crate) fn byte_lines(v: &Value) -> Vec<String> {
     let mut lines = vec![
         format!("log bytes: {}", num(&v["log_bytes"])),
         format!("removed bytes: {}", num(&v["removed_bytes"])),
+        format!("deduplicated bytes: {}", num(&v["deduplicated_bytes"])),
     ];
     lines.extend(kind_lines(v));
     lines
 }
 
-/// The text of a compact report: four byte lines, the kind lines, then each note verbatim.
+/// The text of a compact report: five byte lines, the kind lines, then each note verbatim.
 pub(crate) fn report_text(v: &Value) -> String {
     let mut lines = vec![
         format!("log bytes: {}", num(&v["log_bytes"])),
         format!("removed bytes: {}", num(&v["removed_bytes"])),
+        format!("deduplicated bytes: {}", num(&v["deduplicated_bytes"])),
         format!("punched bytes: {}", num(&v["punched_bytes"])),
         format!("on-disk bytes: {}", num(&v["on_disk_bytes"])),
     ];
@@ -69,8 +72,8 @@ pub(crate) fn compact(env: &Env, a: CompactArgs) -> Result<(Value, String), Erro
 mod tests {
     use super::*;
 
-    /// mh7: the four lines in order, a line per kind in the report's order, then each note
-    /// verbatim; an fsck tail has the first two lines and the kinds.
+    /// mh7: the five lines in order, a line per kind in the report's order, then each note
+    /// verbatim; an fsck tail has the first three lines and the kinds.
     #[test]
     fn mh7_the_report_text_has_its_lines_in_order() {
         let notes = [
@@ -79,7 +82,8 @@ mod tests {
             "disk allocation could not be read after punching; on_disk_bytes is the count before this call",
         ];
         let v = json!({
-            "log_bytes": 900, "removed_bytes": 40, "punched_bytes": 0, "on_disk_bytes": 4096,
+            "log_bytes": 900, "removed_bytes": 40, "deduplicated_bytes": 8192,
+            "punched_bytes": 0, "on_disk_bytes": 4096,
             "by_kind": [
                 {"kind": 1, "name": "block", "bytes": 300, "removed_bytes": 40},
                 {"kind": 14, "name": "batch_commit", "bytes": 600, "removed_bytes": 0}
@@ -89,6 +93,7 @@ mod tests {
         let want = [
             "log bytes: 900",
             "removed bytes: 40",
+            "deduplicated bytes: 8192",
             "punched bytes: 0",
             "on-disk bytes: 4096",
             "block: 300 bytes, 40 removed",
@@ -104,6 +109,7 @@ mod tests {
             [
                 "log bytes: 900",
                 "removed bytes: 40",
+                "deduplicated bytes: 8192",
                 "block: 300 bytes, 40 removed",
                 "batch_commit: 600 bytes, 0 removed"
             ]

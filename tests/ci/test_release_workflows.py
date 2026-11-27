@@ -317,6 +317,23 @@ class Boundaries(unittest.TestCase):
         for name in RELEASE_FILES:
             self.assertNotIn('pull_request', text_of(name), name)
 
+    def test_r5904_baseline_check_is_required_on_linux(self):
+        jobs = jobs_of(text_of('release-candidate.yml'))
+        linux = jobs['build-linux']
+        step = linux[linux.index('      - name: Baseline x86-64 emulator\n'):]
+        step = step[:step.index('\n      - ', 10)]
+        self.assertIn('sudo apt-get install -y --no-install-recommends qemu-user\n', step)
+        self.assertNotIn('if:', step)
+        self.assertNotIn('continue-on-error', step)
+        self.assertNotIn('|| true', step)
+        # installed before the build step, which runs the check inside candidate.py
+        self.assertLess(linux.index('qemu-user'), linux.index('candidate.py build'))
+        self.assertIn('--target x86_64-unknown-linux-gnu', linux)
+        for other in ('build-mac', 'build-windows'):
+            self.assertNotIn('qemu', jobs[other], other)
+        source = (ROOT / 'scripts/release/candidate.py').read_text()
+        self.assertIn('if target == LINUX_TARGET:', source)
+
     def test_rsig8_workflow_actions_and_signer_revision_are_pinned(self):
         for name in all_workflows():
             for line in text_of(name).splitlines():

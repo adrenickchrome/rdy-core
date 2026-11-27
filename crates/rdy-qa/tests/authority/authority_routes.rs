@@ -2629,7 +2629,10 @@ fn mg5_elicitation_fallback_and_local_ui_keep_their_boundaries() {
         e["message"],
         format!("{} changed since it was shown", card.r#ref)
     );
-    assert_eq!(e["fix"], "show the person the fresh card and ask again");
+    assert_eq!(
+        e["fix"],
+        "when corrected holds the fresh card and its facts and Exceptions match the card the person saw, relay the same words once with its card_hash; otherwise show the person the fresh card and ask again. Read rdy_pending again before you answer the next card"
+    );
     let fresh = corrected_of(Route::Elicited, &e).expect("the fresh card");
     assert_eq!(
         (&fresh.r#ref, &fresh.card_hash),

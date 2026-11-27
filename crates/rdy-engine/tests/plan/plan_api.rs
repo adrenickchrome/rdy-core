@@ -461,6 +461,7 @@ fn cp8_all_four_selectors_have_closed_shapes() {
             decisions: vec![id(&s.a)],
             items: items.clone(),
         }),
+        read_identity: None,
     };
     let h = put_plan_frames(r.store_mut(), &seal);
     r.invalidate();
@@ -601,7 +602,7 @@ fn cp8_answers_are_atomic_and_do_not_write_blocks() {
         e,
         E_BAD_INPUT,
         "done does not answer a confirm item",
-        "read the plan and use an act the item accepts",
+        "confirm items take: confirm or defer",
     );
     let st = r.read();
     assert_eq!(
@@ -992,7 +993,7 @@ fn cp8_plan_act_matrix_and_duplicate_aliases_are_exact() {
                     got.unwrap_err(),
                     E_BAD_INPUT,
                     &format!("{} does not answer a {} item", act.as_str(), kind.as_str()),
-                    "read the plan and use an act the item accepts",
+                    &rdy_engine::plan::api::act_fix(kind),
                 );
             }
         }
@@ -1342,6 +1343,7 @@ fn cp8_proposal_read_uses_recorded_canon_and_heads() {
         }],
         provenance: prov(),
         seal: None,
+        read_identity: None,
     };
     let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
@@ -1516,9 +1518,14 @@ fn cp8_plan_only_write_logs_no_transition() {
     );
     let frames: Vec<u8> = r.store().last_batch().iter().map(|(k, _)| *k).collect();
     assert_eq!(frames, [kinds::PLAN, kinds::REF_UPDATE]);
+    // (the log's raw kind: an encoding-1 PLAN frame carries the versioned flag)
     assert_eq!(
         walk(&r, end),
-        [kinds::PLAN, kinds::REF_UPDATE, kinds::BATCH_COMMIT],
+        [
+            kinds::PLAN | rdy_store::codec::VERSIONED,
+            kinds::REF_UPDATE,
+            kinds::BATCH_COMMIT
+        ],
         "one batch, its two frames and the marker"
     );
 }
@@ -1603,7 +1610,7 @@ fn cp8_cursor_reuses_briefing_tail_and_digest_width() {
     bad(format!("plan9:1:{digest}:{sel}"));
     bad(format!("plan1:1:{digest}:view:{}", "w".repeat(4096)));
     // a briefing's cursor is still `<token>:<offsets>:<16 hex>:<scope>`, one offset for each
-    // page section: twelve since nb7 put `neighbors` before `base.blocks` (PAGE_SECTIONS)
+    // page section: thirteen since `vector_neighbors` follows `neighbors` (PAGE_SECTIONS)
     let st = r.read();
     let w = Scope::View("w".into());
     let b = st
@@ -1620,7 +1627,7 @@ fn cp8_cursor_reuses_briefing_tail_and_digest_width() {
     let cursor = b.next.clone().expect("a cut briefing");
     let parts: Vec<&str> = cursor.splitn(4, ':').collect();
     assert_eq!(parts[0].len(), 64);
-    assert_eq!(parts[1].split(',').count(), 12);
+    assert_eq!(parts[1].split(',').count(), 13);
     assert_eq!(
         parts[1].split(',').count(),
         rdy_engine::brief::PAGE_SECTIONS.len()
@@ -1774,7 +1781,7 @@ fn cp8_input_limits_have_exact_text() {
             e,
             E_PLAN_ITEM,
             &format!("{item} is not an item of the change plan for view:w"),
-            "read the plan with rdy_plan / rdy plan and pass an item id it lists",
+            &format!("{} Open items: 4.", rdy_engine::plan::PLAN_ITEM_FIX),
         )
     };
     let gone = pi(&s.c, &s.b, PlanKind::Confirm);
@@ -1824,7 +1831,7 @@ fn cp8_input_limits_have_exact_text() {
             .unwrap_err(),
         E_BAD_INPUT,
         "confirm does not answer a update item",
-        "read the plan and use an act the item accepts",
+        "update items take: defer. An update item also closes when you edit its block's content; a repin does not close it",
     );
     assert_eq!(plan_ref(&r, "w"), bound, "nothing refused was written");
     // the bounds hold exactly: 2000 characters (not bytes) are a reason
@@ -1969,6 +1976,7 @@ fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
         }],
         provenance: prov(),
         seal: None,
+        read_identity: None,
     };
     let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();

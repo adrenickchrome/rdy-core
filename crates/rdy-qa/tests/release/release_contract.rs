@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/hub-ports-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/rdy-0590-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -100,12 +100,13 @@ fn workspace_root() -> PathBuf {
 /// The current contract fixture: the earlier fixtures (`release-1.json`, `repo-links-v1.json`,
 /// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json`,
 /// `disclosure-review-v1.json`, `sd1-v1.json`, `sync-client-v1.json`, `sync-client-b-v1.json`,
-/// `m5b-v1.json` and `hub-forks-v1.json`, all frozen) with the additions since. A capture writes
-/// this file, never a baseline. It starts as a byte copy of its predecessor `hub-forks-v1.json`,
-/// whose bytes `release_hub_forks_contract.rs` and `release_disclosure_contract.rs` pin. A later
-/// contract change is a successor fixture.
+/// `m5b-v1.json`, `hub-forks-v1.json`, `hub-ports-v1.json` and `m5a-v1.json`, all frozen) with
+/// the additions since. A capture writes this file, never a baseline. It starts as a byte copy of its
+/// predecessor `hub-ports-v1.json`, whose bytes `release_hub_ports_contract.rs` and
+/// `release_0590_contract.rs` pin; `m5a-v1.json`, frozen beside it, is pinned by
+/// `release_m5a_contract.rs`. A later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/hub-ports-v1.json")
+    qa_root().join("fixtures/contracts/rdy-0590-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -997,11 +998,13 @@ fn store_row() -> Value {
             "assessment": "an ASSESSMENT, or a LANDING whose assessment is set",
             "check_request": "a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or Fail, or an ANSWER with act AcceptVerdict",
             "content_hash_v2": "baseline: every store this rdy writes",
+            "dedup_spans": "baseline: every store this rdy creates; an older store at its upgrade, load or take",
             "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
             "figure_dark": "a figure BLOCK whose dark_blob is set, alone or in a CHANGE's create or update",
             "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
             "hub_canon": "a holder's first move: a batch that writes canon, a view/, a held/ or a replaced/ ref",
             "object_encoding": "any frame of encoding 1 or more",
+            "plan_delta": "any PLAN of encoding 1, a whole version or a delta",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
             "ported_change": "the first stored CHANGE of encoding 3 or 4, or REDACTION_RESIDUE of encoding 2",
             "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
@@ -3194,6 +3197,8 @@ fn cli_runtime() -> Value {
     cli_export_probes(&mut seen, &env);
     cli_clone_probes(&mut seen, &env);
     cli_port_probes(&mut seen, &env);
+    cli_vector_probes(&mut seen, &env);
+    cli_search_mode_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -5090,6 +5095,427 @@ fn mcp_hook_probes(seen: &mut Seen) {
     h.w.stop(h.project.path());
 }
 
+/// The project of the vector probes (D-Y1WEY, D-0ZPAP), landed, tagged `v1.0.0` and landed
+/// again. Section One of doc `vec-alpha` holds two sources that share words and the link target
+/// `$t` with the claims of doc `vec-beta`, so their briefing lists two rows for each source, each
+/// neighbor once, with words and links, sorted together. Doc `vec-many` holds 501 claims, more than 20, so its briefing
+/// scores none and counts 501 skipped sources. Returns the project, the addresses of section One and
+/// of `vec-many`'s section, and a budget whose first page shows some vector rows and cuts the
+/// rest (`omitted.vector_neighbors`).
+fn vector_project() -> (tempfile::TempDir, String, String, usize) {
+    let (dir, mut r) = project();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$g", "fields": {"name": "vec-gamma", "title": "Gamma", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "prose", "id": "$t", "parent": "$g", "body": "The shared target."}),
+        json!({"op": "create", "type": "doc", "id": "$a", "fields": {"name": "vec-alpha", "title": "Alpha", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$sa", "parent": "$a", "fields": {"title": "One"}}),
+        json!({"op": "create", "type": "claim", "id": "$c1", "parent": "$sa", "body": "Zebras graze near the walrus colony.", "links": {"describes": [{"target": "$t"}]}}),
+        json!({"op": "create", "type": "claim", "id": "$c2", "parent": "$sa", "body": "Otters swim past the moose herd.", "links": {"describes": [{"target": "$t"}]}}),
+        json!({"op": "create", "type": "doc", "id": "$b", "fields": {"name": "vec-beta", "title": "Beta", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$sb", "parent": "$b", "fields": {"title": "Two"}}),
+        json!({"op": "create", "type": "claim", "id": "$t1", "parent": "$sb", "body": "Zebras graze by the walrus colony.", "links": {"describes": [{"target": "$t"}]}}),
+        json!({"op": "create", "type": "claim", "id": "$t2", "parent": "$sb", "body": "Otters swim by the moose herd.", "links": {"describes": [{"target": "$t"}]}}),
+        json!({"op": "create", "type": "claim", "id": "$t3", "parent": "$sb", "body": "The walrus colony and the moose herd."}),
+        json!({"op": "create", "type": "claim", "id": "$t4", "parent": "$sb", "body": "Otters swim past the herd."}),
+        json!({"op": "create", "type": "claim", "id": "$t5", "parent": "$sb", "body": "Zebras graze near the colony."}),
+        json!({"op": "create", "type": "doc", "id": "$m", "fields": {"name": "vec-many", "title": "Many", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$sm", "parent": "$m", "fields": {"title": "Rows"}}),
+        json!({"op": "create", "type": "term", "id": "$e", "parent": "$sm", "fields": {"name": "Inventory"}, "body": "Holds the lots."}),
+    ];
+    // each describes the term, so no claim adds a coverage issue past the briefing's cap
+    for k in 0..501 {
+        ops.push(json!({"op": "create", "type": "claim", "parent": "$sm", "body": format!("Entry lot{k} holds."),
+            "links": {"describes": [{"target": "$e"}]}}));
+    }
+    let w = rdy_qa::fixtures::write(&mut r, "vec", Value::Array(ops)).expect("write the vectors");
+    rdy_qa::fixtures::land(&mut r, "vec").expect("land the vectors");
+    r.tag(&rdy_qa::fixtures::approver(), "v1.0.0", None, None)
+        .expect("tag the vectors");
+    // a later landing: the tag is a past landing, and a briefing there has no vector advice
+    rdy_qa::fixtures::write(
+        &mut r,
+        "later",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "vec-delta", "title": "Delta", "doc_type": "overview"}}]),
+    )
+    .expect("write later");
+    rdy_qa::fixtures::land(&mut r, "later").expect("land later");
+    let address = format!("{}#one", w.created["$a"]);
+    let cov = rdy_engine::brief::Coverage {
+        ids: vec![address.clone()],
+        path: None,
+    };
+    let full = r
+        .read()
+        .brief(&Scope::Canon, &cov, Some(1_000_000))
+        .expect("brief section One");
+    assert!(full.vector_neighbors.len() >= 4, "rows of both sources");
+    // the budgets whose first page shows some rows and cuts the rest; the largest one
+    let cuts: Vec<usize> = (1..4_000)
+        .filter(|max| {
+            let b = r
+                .read()
+                .brief(&Scope::Canon, &cov, Some(*max))
+                .expect("a page");
+            !b.vector_neighbors.is_empty() && b.omitted.contains_key("vector_neighbors")
+        })
+        .collect();
+    assert!(!cuts.is_empty(), "some budget cuts the vector rows");
+    let many = format!("{}#rows", w.created["$m"]);
+    r.close().expect("close");
+    std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").expect("the person");
+    (dir, address, many, *cuts.last().unwrap())
+}
+
+/// One briefing on a surface: target, scope, budget and cursor in, the reply's JSON out.
+type BriefCall<'a> = dyn FnMut(&str, Option<&str>, Option<usize>, Option<&str>) -> Value + 'a;
+
+/// The vector probes of one surface: the rows of two sources with words and links, a cut first
+/// page and the rest, a briefing of more than 20 sources, and a past landing with no rows. `brief` runs
+/// one briefing (target, scope, budget, cursor) and returns its JSON.
+fn vector_probes(address: &str, many: &str, cut: usize, brief: &mut BriefCall<'_>) {
+    let full = brief(address, None, None, None);
+    let rows = full["vector_neighbors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("vector rows: {full}"));
+    let fors: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|v| v["for"].as_str()).collect();
+    assert_eq!(fors.len(), 2, "rows of both sources: {full}");
+    for f in &fors {
+        let n = rows.iter().filter(|v| v["for"].as_str() == Some(f)).count();
+        assert!(n <= 2, "at most two rows for {f}: {full}");
+    }
+    let blocks: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|v| v["block"].as_str()).collect();
+    assert_eq!(blocks.len(), rows.len(), "each neighbor once: {full}");
+    assert!(
+        rows.iter()
+            .any(|v| !v["links"].as_array().unwrap().is_empty())
+    );
+    let scores: Vec<f64> = rows.iter().map(|v| v["score"].as_f64().unwrap()).collect();
+    assert!(
+        scores.windows(2).all(|w| w[0] >= w[1]),
+        "one order: {scores:?}"
+    );
+    assert!(full.get("vector_neighbors_skipped").is_none(), "{full}");
+    let first = brief(address, None, Some(cut), None);
+    assert!(
+        first["omitted"]["vector_neighbors"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        "{first}"
+    );
+    if let Some(next) = first["next"].as_str() {
+        brief(address, None, Some(cut), Some(next));
+    }
+    let skipped = brief(many, None, None, None);
+    assert_eq!(skipped["vector_neighbors_skipped"], json!(501), "{skipped}");
+    assert!(skipped.get("vector_neighbors").is_none(), "{skipped}");
+    // a past landing has no rows and no count (the command line has no such scope)
+    let old = brief(address, Some("tag:v1.0.0"), None, None);
+    if !old.is_null() {
+        assert!(old["base"]["token"].is_string(), "{old}");
+        assert!(old.get("vector_neighbors").is_none(), "{old}");
+        assert!(old.get("vector_neighbors_skipped").is_none(), "{old}");
+    }
+}
+
+fn mcp_vector_probes(seen: &mut Seen) {
+    let (dir, address, many, cut) = vector_project();
+    let mut c = isolated_mcp(dir.path());
+    let who = json!({"actor": "agent:vectors", "run": "vectors", "role": "writer"});
+    mcp_probe(seen, &mut c, "rdy_session", "rdy_session", who);
+    vector_probes(&address, &many, cut, &mut |target, scope, max, page| {
+        let args = match page {
+            Some(p) => json!({"page": p, "max_tokens": max}),
+            None => json!({"ids": [target], "scope": scope, "max_tokens": max}),
+        };
+        if scope.is_some() {
+            // checked, not noted: a past landing's briefing also leaves out its coverage, which
+            // would mark `coverage` optional in the shape of every briefing
+            let past = ok_of(&c.call("rdy_brief", args));
+            assert!(past.is_object(), "a past landing's briefing: {past}");
+            return past;
+        }
+        ok_of(&mcp_probe(seen, &mut c, "rdy_brief", "rdy_brief", args))
+    });
+    let section = mcp_write_vector_probes(seen, &mut c, &address);
+    mcp_relevance_probes(seen, &mut c, &address, &section);
+}
+
+/// D-Y1WEY, D-0ZPAP: the vector rows of a write result through MCP. Two claims created in
+/// section One list rows `{for, block, score, words, links, doc}` with words and links, at most
+/// three each; a write of eleven created claims counts the one past ten as skipped. Returns the
+/// section the claims went to.
+fn mcp_write_vector_probes(
+    seen: &mut Seen,
+    c: &mut rdy_qa::mcp::McpClient,
+    address: &str,
+) -> String {
+    let briefed = |c: &mut rdy_qa::mcp::McpClient| {
+        let b = ok_of(&c.call("rdy_brief", json!({"ids": [address]})));
+        assert!(b["base"]["token"].is_string(), "{b}");
+        b
+    };
+    let b = briefed(c);
+    let target = b["vector_neighbors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|v| v["links"].as_array()?.first()?.as_str().map(str::to_string))
+        .expect("a briefing row with a link");
+    // the section of the briefing's first source
+    let source = b["vector_neighbors"][0]["for"]
+        .as_str()
+        .expect("a row")
+        .to_string();
+    let read = ok_of(&c.call("rdy_read", json!({"id": source, "format": "yaml"})));
+    let section = read["text"]
+        .as_str()
+        .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("parent: ")))
+        .map(|p| p.trim_matches('"').to_string())
+        .unwrap_or_else(|| panic!("the source's section: {read}"));
+    let reply = mcp_probe(
+        seen,
+        c,
+        "rdy_write",
+        "rdy_write",
+        json!({"brief": b["base"]["token"], "ops": [
+            {"op": "create", "type": "claim", "id": "$n", "parent": section, "body": "Zebras graze near the walrus colony today.", "links": {"describes": [{"target": target}]}},
+            {"op": "create", "type": "claim", "id": "$k", "parent": section, "body": "Otters swim past the moose herd today.", "links": {"describes": [{"target": target}]}}
+        ]}),
+    );
+    let w = ok_of(&reply);
+    let rows = w["vector_neighbors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("write rows: {reply:?}"))
+        .clone();
+    assert!(!rows.is_empty(), "{w}");
+    assert!(
+        rows.iter()
+            .any(|r| !r["links"].as_array().unwrap().is_empty()
+                && !r["words"].as_array().unwrap().is_empty()),
+        "a row with words and links: {w}"
+    );
+    let fors: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|r| r["for"].as_str()).collect();
+    assert_eq!(fors.len(), 2, "rows of both created claims: {w}");
+    for f in &fors {
+        let n = rows.iter().filter(|r| r["for"].as_str() == Some(f)).count();
+        assert!(n <= 3, "at most three rows for {f}: {w}");
+    }
+    assert!(rows.iter().all(|r| r.get("summary").is_none()), "{w}");
+    assert!(w.get("vector_neighbors_skipped").is_none(), "{w}");
+    let b = briefed(c);
+    let ops: Vec<Value> = (0..11)
+        .map(|k| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Zebras graze near the colony, herd {k}.")}))
+        .collect();
+    let w = ok_of(&mcp_probe(
+        seen,
+        c,
+        "rdy_write",
+        "rdy_write",
+        json!({"brief": b["base"]["token"], "ops": ops}),
+    ));
+    assert_eq!(w["vector_neighbors_skipped"], json!(1), "{w}");
+    let fors: std::collections::BTreeSet<&str> = w["vector_neighbors"]
+        .as_array()
+        .expect("write rows")
+        .iter()
+        .filter_map(|r| r["for"].as_str())
+        .collect();
+    assert!(fors.len() <= 10, "{w}");
+    section
+}
+
+/// vxs6 (D-76Y9H, D-5VGAS): `sort: relevance` through MCP. Two claims in `section` share their
+/// matching line, so one entry carries a `score` and its `also` member its own; a regex or an
+/// unknown sort value is refused.
+fn mcp_relevance_probes(
+    seen: &mut Seen,
+    c: &mut rdy_qa::mcp::McpClient,
+    address: &str,
+    section: &str,
+) {
+    let b = ok_of(&c.call("rdy_brief", json!({"ids": [address]})));
+    let w = ok_of(&c.call(
+        "rdy_write",
+        json!({"brief": b["base"]["token"], "ops": [
+            {"op": "create", "type": "claim", "parent": section, "body": "Walrus pups rest.\nThey sleep on the ice floe all day."},
+            {"op": "create", "type": "claim", "parent": section, "body": "Walrus pups rest.\nOften."}
+        ]}),
+    ));
+    assert!(w.is_object(), "the pups: {w}");
+    let ranked = ok_of(&mcp_probe(
+        seen,
+        c,
+        "rdy_search",
+        "rdy_search relevance",
+        json!({"query": "Walrus pups", "sort": "relevance"}),
+    ));
+    let entry = &ranked["matches"][0];
+    assert!(entry["score"].is_number(), "{ranked}");
+    assert!(entry["also"][0]["score"].is_number(), "{ranked}");
+    for args in [
+        json!({"query": "walrus", "sort": "relevance", "regex": true}),
+        json!({"query": "walrus", "sort": "score"}),
+    ] {
+        let reply = mcp_probe(seen, c, "rdy_search", "rdy_search refused", args);
+        assert!(
+            matches!(reply, rdy_qa::mcp::Reply::ToolError(_)),
+            "{reply:?}"
+        );
+    }
+    mcp_like_probes(seen, c, address, section);
+}
+
+/// vxs7 (D-76Y9H, D-5VGAS): `like` and `like_text` through MCP. Two tusk claims describe one
+/// term; the first is like its twin, whose hit carries `score`, `words` and `links`, and the
+/// result echoes the source; a text that names the term finds both. Two sources, a sort with a
+/// like mode, a long `like_text` and an unknown `like` id are refused.
+fn mcp_like_probes(seen: &mut Seen, c: &mut rdy_qa::mcp::McpClient, address: &str, section: &str) {
+    let b = ok_of(&c.call("rdy_brief", json!({"ids": [address]})));
+    let w = ok_of(&c.call(
+        "rdy_write",
+        json!({"brief": b["base"]["token"], "ops": [
+            {"op": "create", "type": "term", "id": "$t", "parent": section, "fields": {"name": "Tusk sensor"}, "body": "Senses the water."},
+            {"op": "create", "type": "claim", "id": "$a", "parent": section, "body": "Narwhal tusks sense the cold water.", "links": {"describes": [{"target": "$t"}]}},
+            {"op": "create", "type": "claim", "parent": section, "body": "Narwhal tusks sense the salt.", "links": {"describes": [{"target": "$t"}]}}
+        ]}),
+    ));
+    let source = w["created"]["$a"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the tusks: {w}"))
+        .to_string();
+    let source = source.as_str();
+    let like = ok_of(&mcp_probe(
+        seen,
+        c,
+        "rdy_search",
+        "rdy_search like",
+        json!({"like": source}),
+    ));
+    assert_eq!(like["like"], json!(source), "{like}");
+    let hit = &like["matches"][0];
+    assert!(hit["score"].is_number(), "{like}");
+    assert!(
+        hit["words"].as_array().is_some_and(|w| !w.is_empty()),
+        "{like}"
+    );
+    assert!(
+        hit["links"].as_array().is_some_and(|l| !l.is_empty()),
+        "{like}"
+    );
+    let text = ok_of(&mcp_probe(
+        seen,
+        c,
+        "rdy_search",
+        "rdy_search like_text",
+        json!({"like_text": "A Tusk sensor in narwhal tusks."}),
+    ));
+    assert!(text["like_text"].is_string(), "{text}");
+    assert!(text["total"].as_u64().is_some_and(|n| n >= 2), "{text}");
+    for args in [
+        json!({"query": "narwhal", "like": source}),
+        json!({"like_text": "narwhal", "sort": "relevance"}),
+        json!({"like_text": "w".repeat(16_385)}),
+        json!({"like": "c-ZZZZZ"}),
+    ] {
+        let reply = mcp_probe(seen, c, "rdy_search", "rdy_search like refused", args);
+        assert!(
+            matches!(reply, rdy_qa::mcp::Reply::ToolError(_)),
+            "{reply:?}"
+        );
+    }
+}
+
+fn cli_vector_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let (dir, address, many, cut) = vector_project();
+    vector_probes(&address, &many, cut, &mut |target, scope, max, page| {
+        if scope.is_some() || page.is_some() {
+            // the command line briefs a block in canon, one page
+            return Value::Null;
+        }
+        let budget = max.map(|m| m.to_string());
+        let mut args = vec!["brief", target];
+        if let Some(b) = &budget {
+            args.extend(["--max-tokens", b]);
+        }
+        cli_probe(seen, dir.path(), env, "brief", &args)
+    });
+}
+
+/// vxs8 (D-76Y9H, D-5VGAS): the three search modes at the command line, in a project of their
+/// own: two tusk claims describe one term. `--sort relevance` scores each hit; `--like` the
+/// first finds its twin, whose hit carries `score`, `words` and `links`, and the result echoes
+/// the source; a `--like-text` that names the term finds both. Two sources, a sort with a like
+/// mode, a long `--like-text` and an unknown `--like` id are refused.
+fn cli_search_mode_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let (dir, mut r) = project();
+    let w = rdy_qa::fixtures::write(
+        &mut r,
+        "tusks",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "tusks", "title": "Tusks", "doc_type": "overview"}},
+            {"op": "create", "type": "term", "id": "$t", "parent": "$d", "fields": {"name": "Tusk sensor"}, "body": "Senses the water."},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$d", "body": "Narwhal tusks sense the cold water.", "links": {"describes": [{"target": "$t"}]}},
+            {"op": "create", "type": "claim", "parent": "$d", "body": "Narwhal tusks sense the salt.", "links": {"describes": [{"target": "$t"}]}}
+        ]),
+    )
+    .expect("write the tusks");
+    rdy_qa::fixtures::land(&mut r, "tusks").expect("land the tusks");
+    r.close().expect("close");
+    std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").expect("the person");
+    let dir = dir.path();
+    let source = w.created["$a"].clone();
+    let ranked = cli_probe(
+        seen,
+        dir,
+        env,
+        "search relevance",
+        &["search", "Narwhal tusks", "--sort", "relevance"],
+    );
+    assert!(ranked["matches"][0]["score"].is_number(), "{ranked}");
+    // a hit with a score, shared words and a shared link
+    let linked = |v: &Value| {
+        v["matches"].as_array().is_some_and(|m| {
+            m.iter().any(|hit| {
+                hit["score"].is_number()
+                    && hit["words"].as_array().is_some_and(|w| !w.is_empty())
+                    && hit["links"].as_array().is_some_and(|l| !l.is_empty())
+            })
+        })
+    };
+    let like = cli_probe(
+        seen,
+        dir,
+        env,
+        "search like",
+        &["search", "--like", &source],
+    );
+    assert_eq!(like["like"], json!(source), "{like}");
+    assert!(linked(&like), "{like}");
+    let text = cli_probe(
+        seen,
+        dir,
+        env,
+        "search like_text",
+        &["search", "--like-text", "A Tusk sensor in narwhal tusks."],
+    );
+    assert!(text["like_text"].is_string(), "{text}");
+    assert!(text["total"].as_u64().is_some_and(|n| n >= 2), "{text}");
+    assert!(linked(&text), "{text}");
+    let long = "w".repeat(16_385);
+    for args in [
+        vec!["search", "narwhal", "--like", &source],
+        vec!["search", "--like-text", "narwhal", "--sort", "relevance"],
+        vec!["search", "--like-text", &long],
+        vec!["search", "--like", "c-ZZZZZ"],
+    ] {
+        let refused = cli_probe(seen, dir, env, "search like refused", &args);
+        assert!(refused["code"].is_string(), "{args:?}: {refused}");
+    }
+}
+
 fn mcp_row() -> Value {
     use rdy_qa::mcp::Reply;
     let rich = rich_project();
@@ -5102,6 +5528,7 @@ fn mcp_row() -> Value {
     mcp_export_probes(&mut seen);
     mcp_clone_probes(&mut seen);
     mcp_port_probes(&mut seen);
+    mcp_vector_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());
@@ -7635,6 +8062,9 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// hpt5: a port of one change into a view with no other work adds no dependency, removes and
 /// cascades nothing (a replay never does), runs no check and resolves no tension, and its view
 /// holds no conflict; the neighbor rows' `values` are empty as above.
+/// vxs4: the Markdown import creates content blocks, so its reply lists vector rows; its blocks
+/// link to nothing, so those rows share no link (the `rdy_write` rows show the links).
+/// vxs6: a search refusal has no issues. vxs7: nor has a like-mode refusal.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -7813,6 +8243,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_import md/ok/on_change/resolved",
     "mcp/rdy_import md/ok/on_change/tensions",
     "mcp/rdy_import md/ok/suggestions",
+    "mcp/rdy_import md/ok/vector_neighbors[]/links",
     "mcp/rdy_import reader/refused/issues",
     "mcp/rdy_import unknown key/refused/issues",
     "mcp/rdy_import/ok/consequences",
@@ -7896,6 +8327,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_schema/ok/children?",
     "mcp/rdy_schema/ok/fields?/planned/values",
     "mcp/rdy_schema/ok/fields?/since/values",
+    "mcp/rdy_search like refused/refused/issues",
+    "mcp/rdy_search refused/refused/issues",
     "mcp/rdy_supersede/ok/consequences",
     "mcp/rdy_supersede/ok/on_change/checks",
     "mcp/rdy_supersede/ok/on_change/resolved",
@@ -10581,7 +11014,12 @@ fn sdl7_contract_changes_only_delta_surfaces() {
     sorted.sort();
     assert_eq!(
         sorted,
-        ["content_hash_v2", "object_encoding", "snapshot_delta"]
+        [
+            "content_hash_v2",
+            "dedup_spans",
+            "object_encoding",
+            "snapshot_delta"
+        ]
     );
     let t = tempfile::tempdir().unwrap();
     let fresh = t.path().join("fresh");
@@ -10600,7 +11038,8 @@ fn sdl7_contract_changes_only_delta_surfaces() {
     let plan = rdy_engine::maintenance::run(&fresh, true).unwrap();
     assert!(plan.steps.is_empty() && !plan.changed, "{plan:?}");
 
-    // an empty legacy store's upgrade report: the one step, one batch, a receipt and no delta
+    // an empty legacy store's upgrade report: the snapshot-delta step, then span maps' step, one
+    // batch, a receipt and no delta
     let legacy = t.path().join("legacy");
     {
         let _legacy = rdy_store::format::legacy_writer_for_tests();
@@ -10611,7 +11050,13 @@ fn sdl7_contract_changes_only_delta_surfaces() {
     }
     let report = rdy_engine::maintenance::run(&legacy, false).unwrap();
     assert!(report.changed, "{report:?}");
-    assert_eq!(report.steps, ["snapshot_delta".to_string()]);
+    assert_eq!(
+        report.steps,
+        [
+            "snapshot_delta".to_string(),
+            rdy_store::upgrade::DEDUP_SPANS_STEP.to_string()
+        ]
+    );
     assert!(report.batch.is_some() && report.receipt.is_some());
     {
         let s = rdy_store::Store::open_with_policy(

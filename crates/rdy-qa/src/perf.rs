@@ -107,6 +107,12 @@ pub fn spec_ceiling_ms(op: &str) -> Option<f64> {
         "wasm_check_depth3_1k" => 10_000.0,
         "wasm_pending_counts_10k" => 2000.0,
         "wasm_pack_structural_12m" => 1000.0,
+        // The vector rows (D-5BM47, D-Y1WEY, D-76Y9H): fixed p95 ceilings chosen by judgement.
+        // Planning budgets, never baseline-relative; a miss is a finding.
+        "brief_vector_neighbors" => 50.0,
+        "write_vector_neighbors" => 50.0,
+        "search_like" => 100.0,
+        "search_relevance" => 100.0,
         _ => return None,
     })
 }
@@ -124,7 +130,8 @@ pub enum TargetClass {
     /// A stated spec target that is reported, not enforced; compared at 2x.
     Target,
     /// A fixed planning ceiling on p95 ([`spec_ceiling_ms`]) that no baseline row backs: the
-    /// SD1 snapshot-delta rows (D-ANNKF) and the check-module rows ([`WASM_OPS`]). A row over its ceiling is `OverCeiling`; within it, it
+    /// SD1 snapshot-delta rows (D-ANNKF), the check-module rows ([`WASM_OPS`]) and the vector rows
+    /// ([`VECTOR_OPS`]). A row over its ceiling is `OverCeiling`; within it, it
     /// passes with no baseline and never regresses against one.
     FixedCeiling,
     /// A proposed target (ledger F4), not a spec target: reported, never failed.
@@ -223,7 +230,11 @@ pub fn target_class(op: &str) -> Option<TargetClass> {
         | "wasm_check_10k"
         | "wasm_check_depth3_1k"
         | "wasm_pending_counts_10k"
-        | "wasm_pack_structural_12m" => TargetClass::FixedCeiling,
+        | "wasm_pack_structural_12m"
+        | "brief_vector_neighbors"
+        | "write_vector_neighbors"
+        | "search_like"
+        | "search_relevance" => TargetClass::FixedCeiling,
         "diff_since"
         | "site_versions_page"
         | "site_versions_page_warm"
@@ -325,7 +336,9 @@ pub fn target_class(op: &str) -> Option<TargetClass> {
         | "m3_policy_land"
         | "m3_compact"
         | "publication_check"
-        | "render_diagrams_10k" => TargetClass::NoTarget,
+        | "render_diagrams_10k"
+        | "sync_push_500mb"
+        | "sync_pull_full_history_500mb" => TargetClass::NoTarget,
         _ => return None,
     };
     Some(if large && class == TargetClass::Ceiling {
@@ -367,6 +380,19 @@ fn spec_target(op: &str) -> Option<String> {
         "propose_land_500_flat" => {
             "no spec target: one write of 500 docs and its landing (recorded; the < 5 ms write budget is for one op)"
         }
+        // before the write rule below: the vector receipt row times no durable write
+        "brief_vector_neighbors" => {
+            "fixed ceiling < 50 ms p95 (D-5BM47): the briefing of a doc of 20 covered content blocks, each scored against 10,000 claims on a new snapshot, two rows each, each neighbor once"
+        }
+        "write_vector_neighbors" => {
+            "fixed ceiling < 50 ms p95 (D-Y1WEY): the vector rows of ten created claims on the state the write produced, three rows each; the weights and the advice, not the durable write"
+        }
+        "search_like" => {
+            "fixed ceiling < 100 ms p95 (D-76Y9H): like search of one claim over 10,000 claims on a new snapshot, with its words and its link"
+        }
+        "search_relevance" => {
+            "fixed ceiling < 100 ms p95 (D-76Y9H): sort relevance over the 1,000 claims that hold a query word, among 10,000, on a new snapshot"
+        }
         o if (o.starts_with("write") && !o.starts_with("write_batch_"))
             || (o.starts_with("propose") && !o.starts_with("propose_land_")) =>
         {
@@ -392,6 +418,16 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "search_literal" => {
             "no spec target: a full scan of block text, first page (recorded for FW-PR1; semantic search is M5)"
+        }
+        // the two sync rows (D-3PNRK): reported, never a ceiling or a baseline row
+        "sync_push_500mb" => {
+            return Some(format!(
+                "recorded: the real CLI pushes the canon history of a generated 500 MB log to an empty loopback hub, zstd put bodies, five cold runs (reported; no ceiling). {}",
+                crate::sync_perf::PUSH_TARGET
+            ));
+        }
+        "sync_pull_full_history_500mb" => {
+            "recorded: the real CLI clones the same history by URL from a loopback hub into an absent directory, no base and no held history, with fsck, five cold runs (reported; no ceiling)"
         }
         "view_materialize_cold" => "< 50 ms cold (M2 spec 15.1)",
         "view_materialize_incremental" => "< 1 ms incremental (M2 spec 15.1)",
@@ -764,7 +800,8 @@ fn spec_target(op: &str) -> Option<String> {
 /// The ops that end in a durable flush, so their medians move with the disk. The paused rule
 /// (FW-PF3) compares them like every other op; the class is kept for the reports that name it.
 pub fn fsync_bound(op: &str) -> bool {
-    op.starts_with("write")
+    // the vector receipt row times the advice on the produced state, not the write
+    (op.starts_with("write") && op != "write_vector_neighbors")
         || op.starts_with("propose")
         || op.starts_with("new_doc")
         || op.starts_with("daemon_write")
@@ -6965,6 +7002,366 @@ fn tier_wasm_checks(
     facts
 }
 
+// ---- vector advice and ranked search (D-5BM47, D-Y1WEY, D-76Y9H) ----
+
+/// The four vector rows, each with a fixed p95 ceiling ([`spec_ceiling_ms`]) chosen by judgement
+/// and no baseline row: [`tier_vectors`] measures them in the typical workload only.
+pub const VECTOR_OPS: [&str; 4] = [
+    "brief_vector_neighbors",
+    "write_vector_neighbors",
+    "search_like",
+    "search_relevance",
+];
+
+/// The sizes of the vector workloads: [`VECTOR_BENCH`] on the bench, smaller ones in the tests,
+/// which check counts only.
+#[derive(Clone, Copy, Debug)]
+struct VectorRecipe {
+    /// Timed runs of each row.
+    runs: usize,
+    /// The corpus: docs of one section each, and the claims of each section.
+    docs: usize,
+    claims_per_doc: usize,
+    /// The words the claims draw on, and the words of each claim.
+    vocabulary: usize,
+    words_per_claim: usize,
+    /// The terms the corpus claims describe, one each, in turn.
+    terms: usize,
+    /// Every `query_every`th corpus claim starts with the relevance query word.
+    query_every: usize,
+}
+
+/// The bench's recipe: 10,000 claims over 2,000 words and 50 terms; 1,000 of them hold the
+/// relevance query word.
+const VECTOR_BENCH: VectorRecipe = VectorRecipe {
+    runs: 20,
+    docs: 100,
+    claims_per_doc: 100,
+    vocabulary: 2000,
+    words_per_claim: 6,
+    terms: 50,
+    query_every: 10,
+};
+
+/// The covered content blocks of the advice doc: the most a briefing scores (D-5BM47).
+const VECTOR_ADVICE_SOURCES: usize = 20;
+
+/// The created content blocks of the write row: the most a write receipt scores (D-Y1WEY).
+const VECTOR_WRITE_SOURCES: usize = 10;
+
+/// The relevance query: a word that no vocabulary word spells.
+const VECTOR_QUERY: &str = "harbor";
+
+/// What the vector workloads did, counted outside their timers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct VectorFacts {
+    /// The corpus claims, outside the advice doc.
+    corpus: usize,
+    /// The last briefing sample: its rows, the distinct sources they are for, the distinct
+    /// neighbors, and its skipped count.
+    brief_rows: usize,
+    brief_sources: usize,
+    brief_blocks: usize,
+    brief_skipped: usize,
+    /// The advice doc with one more claim: its skipped count and its rows.
+    wide_skipped: usize,
+    wide_rows: usize,
+    /// The last write sample: its rows, their distinct sources, and its skipped count.
+    write_rows: usize,
+    write_sources: usize,
+    write_skipped: usize,
+    /// The hits of the last `like` sample, and how many carry a shared link.
+    like_hits: usize,
+    like_linked: usize,
+    /// The matched hits of the last relevance sample, and the scored entries of its page.
+    relevance_total: usize,
+    relevance_scored: usize,
+}
+
+/// The `k`th vocabulary word: letters only, so every one is a seed word candidate.
+fn vector_word(k: usize) -> String {
+    let mut w = String::from("w");
+    let mut v = k;
+    for _ in 0..3 {
+        w.push((b'a' + (v % 26) as u8) as char);
+        v /= 26;
+    }
+    w
+}
+
+/// A fixed stream of picks: the same recipe gives the same words.
+struct Picks(u64);
+
+impl Picks {
+    fn next(&mut self, n: usize) -> usize {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((self.0 >> 33) % n as u64) as usize
+    }
+
+    /// A claim body of `n` distinct vocabulary words.
+    fn body(&mut self, recipe: &VectorRecipe, n: usize) -> String {
+        let mut words: Vec<String> = vec![];
+        while words.len() < n {
+            let w = vector_word(self.next(recipe.vocabulary));
+            if !words.contains(&w) {
+                words.push(w);
+            }
+        }
+        format!("{}.", words.join(" "))
+    }
+}
+
+/// The vector rows ([`VECTOR_OPS`]), each with a fixed ceiling, on a project of its own under
+/// `parent`, in view `vec`. The corpus is a glossary of terms and `docs` docs of claims drawn
+/// from the vocabulary, each describing a term; the advice doc holds exactly
+/// [`VECTOR_ADVICE_SOURCES`] claims of vocabulary words, with no link. Every read sample first
+/// writes one claim to a scratch doc, outside the timer, so it reads a new snapshot whose weights
+/// are built lazily from the carried counts. Setup stays outside every timer, and nothing here
+/// runs a review.
+fn tier_vectors(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    recipe: &VectorRecipe,
+) -> VectorFacts {
+    use rdy_engine::search::{SearchFilters, SearchInput};
+    use rdy_engine::vector_neighbors::{AdviceCut, vector_neighbors_except};
+    use rdy_engine::vectors::{VectorBudget, WeightScope};
+    let mut facts = VectorFacts::default();
+    let proj = parent.join("vectors");
+    std::fs::create_dir_all(&proj).expect("mkdir");
+    let mut r = Rdy::init(&proj, "rdy-standard").expect("init");
+    let view = "vec";
+    let scope = Scope::View(view.into());
+    let mut picks = Picks(0x7678_7339);
+    // the glossary
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$g", "fields": {"name": "glossary", "title": "Glossary", "doc_type": "overview"}}),
+    ];
+    for t in 0..recipe.terms {
+        ops.push(json!({"op": "create", "type": "term", "id": format!("$t{t}"), "parent": "$g",
+            "fields": {"name": format!("Term {}", vector_word(t))}, "body": "A term of the corpus."}));
+    }
+    let g = write(&mut r, view, json!(ops)).expect("the glossary");
+    let terms: Vec<String> = (0..recipe.terms)
+        .map(|t| g.created[&format!("$t{t}")].clone())
+        .collect();
+    // the corpus: each claim describes a term in turn; every `query_every`th holds the query word
+    let mut linked = String::new();
+    for d in 0..recipe.docs {
+        let mut ops = vec![
+            json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("corpus-{d}"), "title": format!("Corpus {d}"), "doc_type": "overview"}}),
+            json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Claims"}}),
+        ];
+        for c in 0..recipe.claims_per_doc {
+            let k = d * recipe.claims_per_doc + c;
+            let mut body = picks.body(recipe, recipe.words_per_claim);
+            if k.is_multiple_of(recipe.query_every) {
+                body = format!("{VECTOR_QUERY} {body}");
+            }
+            ops.push(json!({"op": "create", "type": "claim", "id": format!("$c{c}"), "parent": "$s", "body": body,
+                "links": {"describes": [{"target": terms[k % recipe.terms]}]}}));
+        }
+        let w = write(&mut r, view, json!(ops)).expect("a corpus doc");
+        if d == 0 {
+            linked = w.created["$c1"].clone();
+        }
+        facts.corpus += recipe.claims_per_doc;
+    }
+    // the advice doc, its section of 20 claims, and the docs the samples write to
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$a", "fields": {"name": "advice", "title": "Advice", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$as", "parent": "$a", "fields": {"title": "Sources"}}),
+        json!({"op": "create", "type": "doc", "id": "$x", "fields": {"name": "scratch", "title": "Scratch", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$xs", "parent": "$x", "fields": {"title": "Notes"}}),
+        json!({"op": "create", "type": "doc", "id": "$f", "fields": {"name": "fresh", "title": "Fresh", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$fs", "parent": "$f", "fields": {"title": "Written"}}),
+    ];
+    for _ in 0..VECTOR_ADVICE_SOURCES {
+        ops.push(json!({"op": "create", "type": "claim", "parent": "$as", "body": picks.body(recipe, recipe.words_per_claim)}));
+    }
+    let w = write(&mut r, view, json!(ops)).expect("the advice doc");
+    let (advice, scratch, fresh) = (
+        w.created["$as"].clone(),
+        w.created["$xs"].clone(),
+        w.created["$fs"].clone(),
+    );
+    let cov = Coverage {
+        ids: vec![],
+        path: Some("advice".into()),
+    };
+    // one claim in the scratch doc: a new snapshot, outside the timer
+    let touch = |r: &mut Rdy, i: usize| {
+        write(
+            r,
+            view,
+            json!([{"op": "create", "type": "claim", "parent": scratch, "body": format!("Scratch {}.", vector_word(i))}]),
+        )
+        .expect("a new snapshot");
+    };
+
+    let like = SearchInput::new(
+        None,
+        Some(linked.clone()),
+        None,
+        false,
+        false,
+        SearchFilters::default(),
+    )
+    .expect("the like input");
+    let relevance = SearchInput::new(
+        Some(VECTOR_QUERY.into()),
+        None,
+        None,
+        false,
+        false,
+        SearchFilters {
+            sort: Some("relevance".into()),
+            ..Default::default()
+        },
+    )
+    .expect("the relevance input");
+    // setup, untimed: the view's first full build (materialized view, graph, lexicon, weights and
+    // search state), so each sample reads a new snapshot that carries them, as brief_doc's do
+    {
+        let st = r.read();
+        st.graph(&scope).expect("the graph");
+        st.brief(&scope, &cov, None).expect("a first briefing");
+        st.search_input(&scope, &like, None, None)
+            .expect("a first like search");
+        st.search_input(&scope, &relevance, None, None)
+            .expect("a first relevance search");
+    }
+
+    // brief_vector_neighbors: the briefing of the advice doc, every covered source scored
+    let mut sample = 0;
+    out.push(measure_timed("brief_vector_neighbors", recipe.runs, |_| {
+        touch(&mut r, sample);
+        sample += 1;
+        let st = r.read();
+        let s = Instant::now();
+        let b = st.brief(&scope, &cov, None).expect("the briefing");
+        let took = s.elapsed();
+        facts.brief_rows = b.vector_neighbors.len();
+        facts.brief_sources = b
+            .vector_neighbors
+            .iter()
+            .map(|v| v.r#for.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        facts.brief_blocks = b
+            .vector_neighbors
+            .iter()
+            .map(|v| v.block.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        facts.brief_skipped = b.vector_neighbors_skipped;
+        took
+    }));
+
+    // write_vector_neighbors: ten created claims, then the receipt's vector work on the state
+    // the write produced; the write, the materialized view and its graph stay outside the timer
+    out.push(measure_timed("write_vector_neighbors", recipe.runs, |_| {
+        let ops: Vec<_> = (0..VECTOR_WRITE_SOURCES)
+            .map(|_| json!({"op": "create", "type": "claim", "parent": fresh, "body": picks.body(recipe, recipe.words_per_claim)}))
+            .collect();
+        let w = write(&mut r, view, json!(ops)).expect("the created claims");
+        let created: Vec<BlockId> = (0..VECTOR_WRITE_SOURCES)
+            .map(|k| BlockId::parse(&w.created[&format!("op{k}")]).expect("an id"))
+            .collect();
+        let st = r.read();
+        let m = st.materialized(&scope).expect("the view");
+        let g = st.graph(&scope).expect("its graph");
+        let written: BTreeSet<&BlockId> = created.iter().collect();
+        let s = Instant::now();
+        let weights = st
+            .vector_weights(WeightScope::Read(&scope))
+            .expect("the weights");
+        let a = vector_neighbors_except(
+            &m,
+            &g,
+            st.pack(),
+            &weights,
+            &created,
+            AdviceCut::WRITE,
+            &mut VectorBudget::write(),
+            &|id| written.contains(id),
+        );
+        let took = s.elapsed();
+        facts.write_rows = a.rows.len();
+        facts.write_sources = a
+            .rows
+            .iter()
+            .map(|r| &r.source)
+            .collect::<BTreeSet<_>>()
+            .len();
+        facts.write_skipped = a.skipped;
+        took
+    }));
+
+    // search_like: one corpus claim with a link, over the whole view
+    out.push(measure_timed("search_like", recipe.runs, |_| {
+        touch(&mut r, sample);
+        sample += 1;
+        let st = r.read();
+        let s = Instant::now();
+        let res = st
+            .search_input(&scope, &like, None, None)
+            .expect("like search");
+        let took = s.elapsed();
+        facts.like_hits = res.total;
+        facts.like_linked = res
+            .matches
+            .iter()
+            .filter(|m| m.links.as_ref().is_some_and(|l| !l.is_empty()))
+            .count();
+        took
+    }));
+
+    // search_relevance: the query word, every matched hit scored against the whole query
+    out.push(measure_timed("search_relevance", recipe.runs, |_| {
+        touch(&mut r, sample);
+        sample += 1;
+        let st = r.read();
+        let s = Instant::now();
+        let res = st
+            .search_input(&scope, &relevance, None, None)
+            .expect("relevance search");
+        let took = s.elapsed();
+        facts.relevance_total = res.total;
+        facts.relevance_scored = res.matches.iter().filter(|m| m.score.is_some()).count();
+        took
+    }));
+
+    // outside every timer: one more claim makes the advice doc 21 covered content blocks, and
+    // its briefing scores none
+    write(
+        &mut r,
+        view,
+        json!([{"op": "create", "type": "claim", "parent": advice, "body": picks.body(recipe, recipe.words_per_claim)}]),
+    )
+    .expect("the twenty-first claim");
+    let wide = r
+        .read()
+        .brief(&scope, &cov, None)
+        .expect("the wide briefing");
+    facts.wide_skipped = wide.vector_neighbors_skipped;
+    facts.wide_rows = wide.vector_neighbors.len();
+    eprintln!(
+        "vectors: {} corpus claims; brief {} rows for {} sources; write {} rows for {} sources; like {} hits; relevance {} hits",
+        facts.corpus,
+        facts.brief_rows,
+        facts.brief_sources,
+        facts.write_rows,
+        facts.write_sources,
+        facts.like_hits,
+        facts.relevance_total
+    );
+    facts
+}
+
 /// What [`run_workload`] keeps under its temp root between tiers: the typical project and the
 /// lagging-index snapshot, which later ops reopen. The deep projects stay until the log ops
 /// close them; every other entry is one tier's own fixture.
@@ -7162,6 +7559,10 @@ pub fn run_workload() -> Vec<Measure> {
     sweep_scratch(dir.path(), &TYPICAL_KEEP);
     // on projects of their own: the check-module rows (D-QVTJ9), each with a fixed ceiling
     tier_wasm_checks(&mut out, dir.path(), &WASM_BENCH);
+    sweep_scratch(dir.path(), &TYPICAL_KEEP);
+    // on a project of its own: the vector rows (D-5BM47, D-Y1WEY, D-76Y9H), each with a fixed
+    // ceiling
+    tier_vectors(&mut out, dir.path(), &VECTOR_BENCH);
     sweep_scratch(dir.path(), &TYPICAL_KEEP);
     tier_change_plan(&mut out, &proj, dir.path(), "", &TYPICAL_RUNS, 5, PLAN_N);
     sweep_scratch(dir.path(), &TYPICAL_KEEP);
@@ -7428,7 +7829,10 @@ fn sd1_upgrade_large(
             report.changed && report.reindexed && report.checked,
             "{report:?}"
         );
-        assert_eq!(report.steps, ["snapshot_delta".to_string()]);
+        assert_eq!(
+            report.steps,
+            ["snapshot_delta".to_string(), "dedup-spans-1".to_string()]
+        );
         assert!(report.backup.is_some() && report.batch.is_some());
         // every hash, after the measured upgrade
         let r = Rdy::open(&work).expect("open the upgraded copy");
@@ -12873,6 +13277,174 @@ mod tests {
         drop(st);
         drop(r);
         rdy_model::unseed_ids_for_tests();
+    }
+
+    /// vxs9 (D-5BM47, D-Y1WEY, D-76Y9H): the four vector rows have their fixed p95 ceilings and
+    /// the fixed class, state them, are measured once each in the typical workload only, and are
+    /// not baselined. Over its ceiling a row fails in every mode, record and not-compared
+    /// included; within it, compare passes it with no op baseline, and an op baseline never turns
+    /// it into a ratio comparison. Then the workloads run on a small recipe, two runs each:
+    /// each row is measured, the briefing scores its 20 covered sources with at most two rows
+    /// each and each neighbor once, 21 score none and count 21 skipped, the write receipt scores
+    /// its ten created claims, `like` finds linked hits and relevance scores every hit of the
+    /// query word. Counts only, never a time. `brief_doc` and its class are unchanged.
+    #[test]
+    fn vxs9_vector_workloads_are_populated_and_classified() {
+        let ceilings = [
+            ("brief_vector_neighbors", 50.0, "50"),
+            ("write_vector_neighbors", 50.0, "50"),
+            ("search_like", 100.0, "100"),
+            ("search_relevance", 100.0, "100"),
+        ];
+        assert_eq!(VECTOR_OPS, ceilings.map(|(op, _, _)| op));
+        let src = include_str!("perf.rs");
+        let body = |f: &str| {
+            let from = src.find(f).expect(f);
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        assert!(
+            body("pub fn run_workload(")
+                .contains("tier_vectors(&mut out, dir.path(), &VECTOR_BENCH);"),
+            "the typical workload measures the rows on the bench recipe"
+        );
+        assert!(
+            !body("fn run_large_tier(").contains("tier_vectors("),
+            "no large-tier variant"
+        );
+        let tier = body("fn tier_vectors(");
+        for call in ["review", "inbox", "queue"] {
+            assert!(
+                !tier.contains(call),
+                "the vector tier runs no {call} operation"
+            );
+        }
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        for (op, c, text) in ceilings {
+            assert_eq!(spec_ceiling_ms(op), Some(c), "{op}");
+            assert_eq!(target_class(op), Some(TargetClass::FixedCeiling), "{op}");
+            assert_ne!(target_class(op), Some(TargetClass::Ceiling), "{op}");
+            let t = spec_target(op).unwrap_or_else(|| panic!("{op} has no text"));
+            assert!(
+                t.starts_with(&format!("fixed ceiling < {text} ms p95 ")),
+                "{op}: {t}"
+            );
+            assert_eq!(
+                src.matches(&format!("measure_timed(\"{op}\"")).count(),
+                1,
+                "{op} is measured exactly once"
+            );
+            assert!(tier.contains(&format!("measure_timed(\"{op}\"")));
+            for class in baseline["classes"].as_object().expect("classes").values() {
+                assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
+                assert!(
+                    class["ops"].get(format!("{op}{LARGE_SUFFIX}")).is_none(),
+                    "{op} has no large row"
+                );
+            }
+            let row = |p95: f64| Measure {
+                op: op.into(),
+                median_ms: c / 4.0,
+                p95_ms: p95,
+                runs: VECTOR_BENCH.runs,
+            };
+            // at the ceiling is within it; a hair past it is over
+            for p95 in [c, c * 0.5] {
+                let v = compare(None, &[row(p95)], Mode::Compare);
+                assert_eq!((v[0].status, v[0].pass), (Status::Pass, true), "{op} {p95}");
+                // an op baseline far below: still no ratio rule
+                let base = mg3_base(&[(op, c / 1000.0)]);
+                let v = compare(Some(&base), &[row(p95)], Mode::Compare);
+                assert_eq!((v[0].status, v[0].pass), (Status::Pass, true), "{op}");
+                let v = compare(Some(&base), &[row(p95)], Mode::Record);
+                assert_eq!((v[0].status, v[0].pass), (Status::Recorded, true), "{op}");
+                let v = not_compared(&[row(p95)]);
+                assert_eq!(
+                    (v[0].status, v[0].pass),
+                    (Status::NotCompared, false),
+                    "{op}"
+                );
+            }
+            let over = row(c + 0.001);
+            let base = mg3_base(&[(op, c)]);
+            for v in [
+                compare(None, std::slice::from_ref(&over), Mode::Compare),
+                compare(Some(&base), std::slice::from_ref(&over), Mode::Compare),
+                compare(None, std::slice::from_ref(&over), Mode::Record),
+                compare(Some(&base), std::slice::from_ref(&over), Mode::Record),
+                not_compared(std::slice::from_ref(&over)),
+            ] {
+                assert_eq!(
+                    (v[0].status, v[0].pass),
+                    (Status::OverCeiling, false),
+                    "{op}"
+                );
+            }
+            // no large-tier ceiling: the rows are measured in the typical tier only
+            assert_eq!(spec_ceiling_ms(&format!("{op}{LARGE_SUFFIX}")), None);
+        }
+        // the receipt row times no durable flush; the reads never do
+        for op in VECTOR_OPS {
+            assert!(!fsync_bound(op), "{op}");
+        }
+        // brief_doc keeps its class and its ceiling
+        assert_eq!(spec_ceiling_ms("brief_doc"), Some(5.0));
+        assert_eq!(target_class("brief_doc"), Some(TargetClass::Ceiling));
+        // the bench recipe is the rows' texts
+        assert_eq!(VECTOR_BENCH.docs * VECTOR_BENCH.claims_per_doc, 10_000);
+        assert_eq!(
+            VECTOR_BENCH.docs * VECTOR_BENCH.claims_per_doc / VECTOR_BENCH.query_every,
+            1000
+        );
+        assert_eq!((VECTOR_ADVICE_SOURCES, VECTOR_WRITE_SOURCES), (20, 10));
+        // the vocabulary words are letters only and distinct, so each can seed
+        let words: BTreeSet<String> = (0..VECTOR_BENCH.vocabulary).map(vector_word).collect();
+        assert_eq!(words.len(), VECTOR_BENCH.vocabulary);
+        assert!(
+            words
+                .iter()
+                .all(|w| w.chars().all(|c| c.is_ascii_lowercase()))
+        );
+        assert!(!words.contains(VECTOR_QUERY));
+
+        // the workloads on a small recipe
+        rdy_model::seed_ids_for_tests(0x7678_7339);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let small = VectorRecipe {
+            runs: 2,
+            docs: 4,
+            claims_per_doc: 25,
+            vocabulary: 40,
+            words_per_claim: 6,
+            terms: 5,
+            query_every: 10,
+        };
+        let mut out = vec![];
+        let facts = tier_vectors(&mut out, dir.path(), &small);
+        rdy_model::unseed_ids_for_tests();
+        assert_eq!(
+            out.iter().map(|m| m.op.as_str()).collect::<Vec<_>>(),
+            VECTOR_OPS
+        );
+        assert!(out.iter().all(|m| m.runs == 2), "{out:?}");
+        assert_eq!(facts.corpus, 100, "{facts:?}");
+        // the briefing: all 20 sources scored, two rows at most each, each neighbor once
+        assert_eq!(facts.brief_skipped, 0, "{facts:?}");
+        assert!(facts.brief_rows > 0, "{facts:?}");
+        assert!(facts.brief_sources >= 2, "{facts:?}");
+        assert!(facts.brief_rows <= 2 * facts.brief_sources, "{facts:?}");
+        assert_eq!(facts.brief_blocks, facts.brief_rows, "{facts:?}");
+        // 21: no rows, and all 21 skipped
+        assert_eq!((facts.wide_skipped, facts.wide_rows), (21, 0), "{facts:?}");
+        // the write receipt: ten created claims, three rows at most each
+        assert_eq!(facts.write_skipped, 0, "{facts:?}");
+        assert!(facts.write_sources >= 2, "{facts:?}");
+        assert!(facts.write_rows <= 3 * facts.write_sources, "{facts:?}");
+        assert!(facts.write_sources <= VECTOR_WRITE_SOURCES, "{facts:?}");
+        // like: hits, some by the shared link; relevance: every hit of the word is scored
+        assert!(facts.like_hits > 0 && facts.like_linked > 0, "{facts:?}");
+        assert_eq!(facts.relevance_total, 10, "{facts:?}");
+        assert_eq!(facts.relevance_scored, 10, "{facts:?}");
     }
 
     /// The nightly tier (`cargo qa --tier nightly`); the release tier does not build these tests.

@@ -10,7 +10,7 @@ use rdy_qa::mcp::McpClient;
 use std::collections::BTreeSet;
 
 /// The server text, one element per entry (agi5, D-GEKKY): the description, then six elements.
-pub(crate) const SHORT: [&str; 7] = [
+pub(crate) const SHORT: [&str; 8] = [
     "rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.",
     "State rdy/actor and rdy/run in _meta, or call rdy_session.",
     "Call rdy_instructions at the start of every task.",
@@ -18,6 +18,7 @@ pub(crate) const SHORT: [&str; 7] = [
     "Read and write through rdy's tools, not the working-copy files.",
     "Never approve, tag or answer on your own judgment. Relay the person's exact words.",
     "If rdy_instructions refuses, follow its fix and call again before you work.",
+    "For ranked text search, pass sort: \"relevance\" to rdy_search.",
 ];
 
 /// The short server text as the host sees it: the elements joined with one space.
@@ -53,6 +54,11 @@ fn agi5_initialize_keeps_session_and_instruction_order() {
     };
     assert!(at("rdy_session") < at("Call rdy_instructions at the start"));
     assert!(at("Call rdy_instructions at the start") < at("rdy_overview"));
+    // D-76Y9H: the one search sentence comes last
+    assert!(
+        got.ends_with("For ranked text search, pass sort: \"relevance\" to rdy_search."),
+        "{got}"
+    );
 }
 
 #[test]

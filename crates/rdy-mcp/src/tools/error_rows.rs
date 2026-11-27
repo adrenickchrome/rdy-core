@@ -33,7 +33,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         "E_CONFLICT_UNRESOLVED",
         "an issue names a conflict the proposal version does not resolve",
-        "write the block from the version you want, then propose again",
+        "read the conflict with rdy_context; update an editable block with base, or take the landed side of a frozen decision with rdy_view resolve and landed true",
     ),
     (
         "E_BLOCKING_TENSION",
@@ -216,6 +216,16 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "open the project with the rdy build named by the refusal",
     ),
     (
+        rdy_engine::E_HISTORY_PENDING,
+        "history is incomplete and the call needs records behind its frontier",
+        rdy_engine::partial_history::HISTORY_PENDING_FIX,
+    ),
+    (
+        rdy_engine::W_HISTORY_PENDING,
+        "history is incomplete and the reply leaves out records behind its frontier",
+        rdy_engine::partial_history::HISTORY_PENDING_FIX,
+    ),
+    (
         E_UPGRADE_MOVED,
         "the store changed after the upgrade was planned",
         "run rdy_upgrade with dry_run true, or rdy upgrade --dry-run, then retry",
@@ -238,7 +248,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         "E_EXCEPTION_OPEN",
         "an approval names a version whose exceptions have no answer",
-        "answer each exception card first",
+        "answer these exception cards first, in order: <refs>. Then relay the approval.",
     ),
     (
         E_VALIDATION,
@@ -544,12 +554,12 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         E_PLAN_ITEM,
         "<id> is not an item of the change plan for <scope>",
-        "read the plan with rdy_plan / rdy plan and pass an item id it lists",
+        "read the plan again after each write. Check counts.open and read every page before answering. An already_written consequence may have no item. One unmatched item or group refuses the whole call.",
     ),
     (
         E_DEFERRAL_OPEN,
         "<n> deferrals of P-x@n have no answer",
-        "answer the deferral card first: defer:P-x@n",
+        "answer the deferral card first: <ref>. Then relay the approval.",
     ),
     (
         rdy_engine::plan::W_PLAN_OPEN,

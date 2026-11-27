@@ -708,6 +708,8 @@ impl<'a> PublishService<'a> {
         request: PublishRequest,
         renderer: &dyn PublishRenderer,
     ) -> Result<PublishResult, RdyError> {
+        // a site renders history the project does not hold yet: refused before any render
+        read.require_complete_history()?;
         // 1. the request, then the tag in this one snapshot
         let PublishRequest {
             tag,

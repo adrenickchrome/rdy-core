@@ -97,14 +97,18 @@ def release_archive(target, binary=b'\x7fELF rdy release binary /rdy/crates/rdy-
     return tar_gz(members)
 
 
+def gate_report_value():
+    return {'revision': S[:9], 'dirty': False, 'pass': True, 'mode': 'skip-perf',
+            'gates': [{'name': 'fmt', 'pass': True, 'detail': ''},
+                      {'name': 'workspace tests', 'pass': True,
+                       'detail': '120 passed, 0 failed, 3 ignored, 0 skipped'},
+                      {'name': 'lib', 'pass': True, 'detail': '40 passed, 0 failed, 0 ignored, 0 skipped'}],
+            'areas': [{'name': 'cli', 'passed': 30, 'failed': 0, 'ignored': 1, 'skipped': 0},
+                      {'name': 'release', 'passed': 10, 'failed': 0, 'ignored': 0, 'skipped': 0}]}
+
+
 def gate_report(**change):
-    report = {'revision': S[:9], 'dirty': False, 'pass': True, 'mode': 'skip-perf',
-              'gates': [{'name': 'fmt', 'pass': True, 'detail': ''},
-                        {'name': 'workspace tests', 'pass': True,
-                         'detail': '120 passed, 0 failed, 3 ignored, 0 skipped'},
-                        {'name': 'lib', 'pass': True, 'detail': '40 passed, 0 failed, 0 ignored, 0 skipped'}],
-              'areas': [{'name': 'cli', 'passed': 30, 'failed': 0, 'ignored': 1, 'skipped': 0},
-                        {'name': 'release', 'passed': 10, 'failed': 0, 'ignored': 0, 'skipped': 0}]}
+    report = gate_report_value()
     report.update(change)
     return json.dumps(report).encode()
 
@@ -341,6 +345,60 @@ class rsig4_Candidate(Fixture):
             self.assemble({MAC: self.build_input(MAC), LINUX: self.build_input(LINUX)}, out)
         self.assertEqual(str(caught.exception), 'the output directory already exists')
 
+    def test_r59022_gate_counts_accepts_a_linked_retried_pass(self):
+        """A pass that needed a retry counts when each retried binary has a flake issue link: the
+        failed test of the first run moves to passed, and nothing is skipped."""
+        workspace = {'name': 'workspace tests', 'pass': False,
+                     'detail': '120 passed, 1 failed, 3 ignored, 0 skipped'}
+        gates = gate_report_value()['gates'][:1] + [workspace] + gate_report_value()['gates'][2:]
+        retried = [{'binary': 'rdy-store/test/sync', 'ok': True, 'exit': 'exit 0', 'passed': 9,
+                    'failed': 0, 'secs': 2.5, 'flake_issue': 'flake-7'},
+                   {'binary': 'rdy-qa/test/cli', 'ok': True, 'exit': 'exit 0', 'passed': 4,
+                    'failed': 0, 'secs': 1.5, 'flake_issue': 'f.8_a-b'}]
+        counts = CANDIDATE.fast_gate_counts(gate_report(gates=gates, retried=retried), S)
+        self.assertEqual(counts, {'passed': FAST_GATE['passed'] + 1, 'failed': 0,
+                                  'ignored': FAST_GATE['ignored'], 'prerequisite_skipped': 0})
+        # an empty or absent retried list changes nothing
+        self.assertEqual(CANDIDATE.fast_gate_counts(gate_report(retried=[]), S), FAST_GATE)
+        self.assertEqual(CANDIDATE.fast_gate_counts(gate_report(), S), FAST_GATE)
+        # a retry never hides a prerequisite skip
+        skipped = [{'name': 'cli', 'passed': 3, 'failed': 0, 'ignored': 0, 'skipped': 2}]
+        with self.assertRaises(ControllerError) as caught:
+            CANDIDATE.fast_gate_counts(gate_report(gates=gates, retried=retried, areas=skipped), S)
+        self.assertEqual(str(caught.exception), 'the native fast gate did not pass with every prerequisite')
+        # a first-run failure with no retry still refuses, as before
+        with self.assertRaises(ControllerError) as caught:
+            CANDIDATE.fast_gate_counts(gate_report(gates=gates), S)
+        self.assertEqual(str(caught.exception), 'the native fast gate did not pass with every prerequisite')
+
+    def test_r59022_gate_counts_refuses_a_retried_pass_without_a_link(self):
+        link = 'the native fast gate passed only on a retry, and a retried binary has no flake issue link'
+        good = {'binary': 'rdy-qa/test/cli', 'ok': True, 'exit': 'exit 0', 'passed': 4, 'failed': 0,
+                'secs': 1.5, 'flake_issue': 'flake-7'}
+        missing = {k: v for k, v in good.items() if k != 'flake_issue'}
+        for row in [dict(good, flake_issue=None), dict(good, flake_issue=''), missing,
+                    dict(good, flake_issue='-flake'), dict(good, flake_issue='a b'),
+                    dict(good, flake_issue='x' * 65), dict(good, flake_issue=7),
+                    dict(good, flake_issue='flake-7\n')]:
+            # one linked row does not cover a second, unlinked one
+            for retried in ([row], [good, row]):
+                with self.subTest(row=row, rows=len(retried)):
+                    with self.assertRaises(ControllerError) as caught:
+                        CANDIDATE.fast_gate_counts(gate_report(retried=retried), S)
+                    self.assertEqual(str(caught.exception), link)
+        # a row that did not pass is no pass
+        for row in [dict(good, ok=False), dict(good, failed=1)]:
+            with self.subTest(row=row):
+                with self.assertRaises(ControllerError) as caught:
+                    CANDIDATE.fast_gate_counts(gate_report(retried=[row]), S)
+                self.assertEqual(str(caught.exception), 'the native fast gate did not pass')
+        # a malformed list is the malformed report
+        for retried in ('cli', {'binary': 'x'}, ['cli'], [None], [dict(good, ok='yes')], [dict(good, failed='0')]):
+            with self.subTest(retried=retried):
+                with self.assertRaises(ControllerError) as caught:
+                    CANDIDATE.fast_gate_counts(gate_report(retried=retried), S)
+                self.assertEqual(str(caught.exception), 'the native fast gate report is malformed')
+
     def test_rsig4_native_jobs_are_required_and_report_counts(self):
         counts = CANDIDATE.fast_gate_counts(gate_report(), S)
         self.assertEqual(counts, FAST_GATE)
@@ -510,12 +568,17 @@ class agi6_Candidate(Fixture):
     """`build` end to end, over a real Git commit and real executables: only cargo and the tools it
     would have built are stand-ins."""
 
-    def source_commit(self, bundle, sidecar=None, table=True):
+    def source_commit(self, bundle, sidecar=None, table=True, sample=True):
         repo = self.tmp / 'repo'
         repo.mkdir()
         git(repo, 'init', '-q')
         (repo / 'release').mkdir()
         (repo / 'release/notes.md').write_text('# rdy\n')
+        if sample:
+            (repo / 'samples/tally').mkdir(parents=True)
+            for name in ('tally.rdydump', 'freeze.json'):
+                (repo / 'samples/tally' / name).write_bytes((ROOT / 'samples/tally' / name).read_bytes())
+            git(repo, 'add', 'samples')
         if table:
             tool_table = repo / 'crates/rdy-engine/kungfu-tools.json'
             tool_table.parent.mkdir(parents=True)
@@ -571,14 +634,55 @@ class agi6_Candidate(Fixture):
             '    for tool in ("qa-release-sources%s", "qa-release-package%s"):\n'
             '        shutil.copy(os.path.join(%r, tool), release)\n'
             % (str(self.tmp / 'cargo-calls.jsonl'), str(tools / 'built-rdy'), exe, exe, exe, str(tools))))
+        if target == LINUX:
+            self.fake_qemu(bin_dir)
         gate = self.tmp / 'fast-gate.json'
         gate.write_bytes(plain_json(FAST_GATE))
         return bin_dir, gate, log
 
-    def build(self, repo, commit, bin_dir, gate, target=LINUX):
+    def fake_qemu(self, bin_dir):
+        """A `qemu-x86_64` that logs its arguments and answers as the packaged rdy would: `--version` runs
+        the extracted binary itself, and the no-daemon load, fsck and dump answer from the frozen record.
+        `self.qemu_mode` picks a failure: signal, nonzero, sleep or version."""
+        freeze = json.loads((ROOT / 'samples/tally/freeze.json').read_text())
+        reply = {'dump_format': freeze['dump_format'], 'store_format': freeze['store_format'],
+                 'landings': 1, 'tags': 1}
+        guide_tests.write_executable(bin_dir / 'qemu-x86_64', (
+            '#!/usr/bin/env python3\n'
+            'import hashlib, json, os, resource, signal, sys, time\n'
+            'resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n'
+            'argv = sys.argv[1:]\n'
+            'binary, args = argv[2], argv[3:]\n'
+            'open(%r, "a").write(json.dumps({"argv": argv, "home": os.environ.get("HOME"),\n'
+            '    "present": os.path.isfile(binary), "sha256": hashlib.sha256(open(binary, "rb").read()).hexdigest()}) + "\\n")\n'
+            'mode = %r\n'
+            'op = args[1] if args[:1] == ["--json"] else args[0]\n'
+            'if mode == "signal" and op == "load":\n'
+            '    os.kill(os.getpid(), signal.SIGILL)\n'
+            'if mode == "nonzero" and op == "load":\n'
+            '    sys.exit(4)\n'
+            'if mode == "sleep" and op == "load":\n'
+            '    time.sleep(30)\n'
+            'if mode == "version" and op == "--version":\n'
+            '    print("rdy 9.9.9")\n'
+            '    sys.exit(0)\n'
+            'if op == "--version":\n'
+            '    os.execv(binary, [binary] + args)\n'
+            'if op == "load":\n'
+            '    print(json.dumps(%r))\n'
+            'elif op == "fsck":\n'
+            '    print("{}")\n'
+            'elif op == "dump":\n'
+            '    open(args[args.index("--out") + 1], "wb").write(b"dump")\n'
+            '    print(json.dumps({"dump_format": %r}))\n'
+            'else:\n'
+            '    sys.exit(64)\n'
+            % (str(self.tmp / 'qemu-calls.jsonl'), getattr(self, 'qemu_mode', 'ok'), reply, freeze['dump_format'])))
+
+    def build(self, repo, commit, bin_dir, gate, target=LINUX, path=None):
         home = self.tmp / 'build-home'
         home.mkdir(exist_ok=True)
-        env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+        env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + (os.environ['PATH'] if path is None else path),
                    CARGO_HOME=str(home / 'cargo'), RUSTUP_HOME=str(home / 'rustup'))
         env['USERPROFILE' if target == WINDOWS else 'HOME'] = str(home)
         return CANDIDATE.build(repo, commit, V, target, self.tmp / 'work', self.tmp / 'out', gate, RUN_ID, ATTEMPT,
@@ -758,6 +862,99 @@ class agi6_Candidate(Fixture):
         self.assertEqual(git(repo, 'show', commit + ':release/agent-guide.sha256'), sha(raw))
         self.assertEqual(receipt['archive']['sha256'], sha((self.tmp / 'out' / name).read_bytes()))
         self.assertEqual(sorted(p.name for p in (self.tmp / 'out').iterdir()), sorted([name, 'build-' + LINUX + '.json']))
+
+    # R5904: the packaged Linux bytes run on baseline x86-64 before any receipt.
+    MASK = 'qemu64,-sse3,-cx16,-lahf-lm'
+
+    def fresh(self, mode='ok', sample=True):
+        """A new source commit and toolchain, after any earlier build of the test."""
+        for entry in self.tmp.iterdir():
+            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        self.qemu_mode = mode
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        repo, commit = self.source_commit(raw, sample=sample)
+        bin_dir, gate, log = self.toolchain(reply, reply)
+        return repo, commit, bin_dir, gate
+
+    def qemu_calls(self):
+        path = self.tmp / 'qemu-calls.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_r5904_baseline_check_runs_packaged_bytes(self):
+        repo, commit, bin_dir, gate = self.fresh()
+        events = []
+        real_receipt = CANDIDATE.build_receipt
+        real_rmtree = shutil.rmtree
+        work = self.tmp / 'work'
+
+        def receipt(*args, **kw):
+            events.append(('receipt', len(self.qemu_calls()), (work / 'guide-check').exists()))
+            return real_receipt(*args, **kw)
+
+        def rmtree(path, *args, **kw):
+            if Path(path) == work / 'guide-check':
+                events.append(('cleanup', len(self.qemu_calls())))
+            return real_rmtree(path, *args, **kw)
+        import unittest.mock as mock
+        with mock.patch.object(CANDIDATE, 'build_receipt', receipt), \
+                mock.patch.object(CANDIDATE.shutil, 'rmtree', rmtree):
+            self.build(repo, commit, bin_dir, gate)
+        calls = self.qemu_calls()
+        binary = str(work / 'guide-check' / 'rdy')
+        prefix = ['-cpu', self.MASK, binary]
+        self.assertEqual([c['argv'][:3] for c in calls], [prefix] * 4)
+        dump_copy, project, out_dump = calls[1]['argv'][6], calls[1]['argv'][7], calls[3]['argv'][-1]
+        self.assertEqual([c['argv'][3:] for c in calls], [
+            ['--version'],
+            ['--json', 'load', '--no-daemon', dump_copy, project],
+            ['--json', 'fsck', '--no-daemon', '--project', project],
+            ['--json', 'dump', '--no-daemon', '--project', project, '--out', out_dump]])
+        # the bytes run are the packaged archive's, the sample is the one of the source archive
+        packaged = (self.tmp / 'tools' / 'packaged-rdy').read_bytes()
+        self.assertEqual({c['sha256'] for c in calls}, {sha(packaged)})
+        self.assertTrue(all(c['present'] for c in calls))
+        self.assertEqual(Path(dump_copy).name, 'tally.rdydump')
+        # an isolated person, not the builder's home
+        self.assertNotIn(str(self.tmp / 'build-home'), {c['home'] for c in calls})
+        self.assertTrue(all(str(work) in c['home'] for c in calls))
+        # both checks, then cleanup of the extracted binary, then the receipt
+        self.assertEqual(events, [('cleanup', 4), ('receipt', 4, False)])
+        self.assertFalse((work / 'guide-check').exists())
+
+    def test_r5904_baseline_check_runs_only_for_linux(self):
+        repo, commit, bin_dir, gate = self.fresh()
+        (bin_dir / 'qemu-x86_64').unlink()
+        raw = guide_tests.valid_bundle(V)
+        import unittest.mock as mock
+        with mock.patch.object(CANDIDATE, 'check_packaged_guide', lambda *a, **k: None), \
+                mock.patch.object(CANDIDATE, 'check_baseline_cpu') as baseline:
+            self.build(repo, commit, bin_dir, gate, MAC)
+        baseline.assert_not_called()
+
+    def test_r5904_sigill_and_missing_emulator_refuse_receipt(self):
+        text = 'the packaged Linux binary failed the baseline x86-64 check'
+        import unittest.mock as mock
+        cases = [('signal', text), ('nonzero', text), ('version', text), ('sleep', text),
+                 ('missing sample', 'the baseline x86-64 check needs the frozen sample dump'),
+                 ('missing emulator', 'baseline x86-64 check needs qemu-x86_64')]
+        for mode, reason in cases:
+            with self.subTest(mode=mode):
+                repo, commit, bin_dir, gate = self.fresh(mode if mode in ('signal', 'nonzero', 'version', 'sleep')
+                                                         else 'ok', sample=mode != 'missing sample')
+                path = None
+                if mode == 'missing emulator':
+                    (bin_dir / 'qemu-x86_64').unlink()
+                    python = self.tmp / 'python-only'
+                    python.mkdir()
+                    (python / 'python3').symlink_to(sys.executable)
+                    path = str(python)
+                with mock.patch.object(CANDIDATE, 'HELPER_DEADLINE', 2 if mode == 'sleep' else CANDIDATE.HELPER_DEADLINE):
+                    with self.assertRaises(ControllerError) as caught:
+                        self.build(repo, commit, bin_dir, gate, path=path)
+                self.assertEqual(str(caught.exception), reason)
+                self.assertFalse((self.tmp / 'out').exists(), 'no receipt and no candidate archive')
+                self.assertFalse((self.tmp / 'work' / 'guide-check').exists(), 'cleanup runs on failure too')
 
     def test_relc2_the_build_compiles_rdy_and_the_two_release_tools_only(self):
         # rdy-qa has nine binaries; the candidate build runs two of them, so it builds only those.

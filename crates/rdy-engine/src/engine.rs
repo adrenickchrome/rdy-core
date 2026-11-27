@@ -47,6 +47,18 @@ pub trait Engine: Send + Sync {
         }))
         .map(|_| ())
     }
+    /// Hands the fetch of the history of the URL clone at `dir`, ready and still arriving, to a
+    /// process that keeps it going between calls (D-GGTYA, O17): the destination project's own
+    /// daemon, started or woken through the existing connect and start steps, and never this
+    /// project's writer. True only once that daemon accepted it. The default has no daemon to
+    /// hand it to and returns false: the caller then says the fetch is paused.
+    fn continue_clone_history(
+        &self,
+        _dir: &Path,
+        _session: &crate::Session,
+    ) -> Result<bool, RdyError> {
+        Ok(false)
+    }
     /// What opening the store did.
     fn open_report(&self) -> OpenReport;
     fn root(&self) -> PathBuf;

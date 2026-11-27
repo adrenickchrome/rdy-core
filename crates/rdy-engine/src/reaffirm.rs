@@ -113,6 +113,13 @@ pub(crate) fn change_fits(
 pub(crate) const FROZEN_REAFFIRM_HINT: &str =
     "For a suspect accepted decision that still holds, re-affirm it with a reaffirm op instead.";
 
+/// The ways past a frozen decision `id`, the base of an `E_FROZEN` fix (no final stop).
+pub(crate) fn frozen_ways(id: &impl std::fmt::Display) -> String {
+    format!(
+        "{id} is frozen. To correct or extend it, write a new decision that refines it. To replace part of it, supersede it with part. To retire it, supersede or revoke it. Only its tracking fields change in place, with editorial, and a repin of it is refused"
+    )
+}
+
 /// One row of a write's `reaffirmed` reply: a decision the write re-affirmed, and the causes
 /// (suspect targets) it re-affirmed it against, sorted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -237,7 +244,8 @@ pub(crate) fn reaffirmable(st: &ReadState, scope: &Scope, id: &BlockId) -> bool 
 /// An `E_FROZEN` fix, with [`FROZEN_REAFFIRM_HINT`] appended when `reaffirmable`.
 pub(crate) fn frozen_fix(fix: String, reaffirmable: bool) -> String {
     if reaffirmable {
-        format!("{fix}. {FROZEN_REAFFIRM_HINT}")
+        let sep = if fix.ends_with('.') { " " } else { ". " };
+        format!("{fix}{sep}{FROZEN_REAFFIRM_HINT}")
     } else {
         fix
     }
@@ -385,7 +393,7 @@ fn select_id(
     if suspects.is_empty() {
         return Err(bad(
             format!("{id} has no suspect; there is nothing to re-affirm"),
-            "read its context and pass a suspect decision",
+            "re-affirm only a decision that rdy_suspects or rdy_plan lists as suspect, and not in the write that causes the suspect; defer a plan item that has no suspect behind it, with a reason",
         ));
     }
     let causes = match wanted {
@@ -431,7 +439,7 @@ fn select_because(
     let Some(first) = out.first() else {
         return Err(bad(
             format!("no decision in this view is suspect on {cause}"),
-            "read the suspects in this view",
+            "read the suspects in this view (rdy_suspects), and re-affirm in a later write than the edit that causes them; defer a plan item that has no suspect behind it, with a reason",
         ));
     };
     if let Some(w) = wanted
@@ -535,7 +543,7 @@ pub(crate) fn card_updates(
             return Err(RdyError::new(
                 E_ITEM_MOVED,
                 format!("{id} changed since its re-affirmation card was shown"),
-                "show the person the fresh card and ask again",
+                crate::answer::FRESH_CARD_HINT,
             ));
         };
         if cur.block_type != decision::DECISION
@@ -612,5 +620,6 @@ pub(crate) fn card_seal(
             decisions: decisions.into_iter().collect(),
             items,
         }),
+        read_identity: None,
     })
 }

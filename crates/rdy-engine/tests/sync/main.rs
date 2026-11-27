@@ -6,6 +6,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod canon_state;
+mod decoded_batch;
 mod follower_guard;
 mod foreign_deviation;
 mod foreign_facts;
@@ -14,6 +16,8 @@ mod foreign_refs;
 mod foreign_signals;
 mod foreign_state;
 mod links;
+mod partial_history;
+mod prepared_pull;
 mod snapshot_delta_checks;
 mod snapshot_delta_reads;
 mod snapshot_delta_upgrade;

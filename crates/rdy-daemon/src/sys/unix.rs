@@ -229,6 +229,13 @@ pub fn no_hard_links(e: &io::Error) -> bool {
 
 // 4b. The project's endpoint and its run files
 
+/// How often `write_run_file` tries to replace a run-dir file: once, as a Unix rename over a
+/// file another process holds open succeeds.
+pub const RUN_FILE_REPLACE_TRIES: u32 = 1;
+
+/// The wait between two tries of the replace, `RUN_FILE_REPLACE_TRIES` of them in about 1 s.
+pub const RUN_FILE_REPLACE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// The longest `daemon.sock`: the socket, its newline, and `u64:u64` with its newline.
 pub const MAX_ENDPOINT_RECORD: usize = MAX_SOCKET_PATH + 1 + 2 * 20 + 2;
 /// The longest `daemon.pid`.

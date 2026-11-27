@@ -18,6 +18,16 @@ pub use process::*;
 pub use run_state::*;
 pub use stop::*;
 
+// Run-dir file replace
+
+/// How often `write_run_file` tries to replace a run-dir file. Windows refuses a rename over a
+/// file that another handle holds open for a moment, such as a reader or a scanner, with
+/// `PermissionDenied`: up to 20 tries, a fixed limit by judgement (D-FPKPS).
+pub const RUN_FILE_REPLACE_TRIES: u32 = 20;
+
+/// The wait between two tries of the replace: 20 tries take about 1 s.
+pub const RUN_FILE_REPLACE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
 // Local hooks
 
 /// The text a hook launcher's shell line names `path` by. Git for Windows runs `commit-msg`

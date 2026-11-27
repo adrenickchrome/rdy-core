@@ -3,7 +3,7 @@
     "approved": "P-9d2f52446bf9@1",
     "approved_by": "human:qa",
     "approved_version": "9d2f52446bf99a300ef282fa3399efbc93e084e9e3dc23905071b4dd2f39cf1c",
-    "assessment": "066b638569f7fffe2972a5e2ea74347a2007f7299f2e8c9371de719f3912446e",
+    "assessment": "de5739293d82729488d850392cf0407349b87a5ae67eb3af5180ba7eb431452f",
     "assurance": "local",
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000033,
@@ -13,7 +13,7 @@
       "state": "none"
     },
     "evidence": null,
-    "landing": "260921e91c6b2c1c33c30465f6843d02192b317c8974269f786e0a9c670ae9ed",
+    "landing": "82d8be923b52e9479b1ef2da38d74ba107d3af918504af88c3d27f5494a49bc4",
     "policy": null,
     "prev": "6176491408377821907a93efb1ff8a5dd3e5b06baa62abf7b56505369d429889",
     "proposal": "9d2f52446bf99a300ef282fa3399efbc93e084e9e3dc23905071b4dd2f39cf1c",

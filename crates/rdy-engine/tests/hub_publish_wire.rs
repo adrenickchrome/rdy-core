@@ -1326,7 +1326,7 @@ fn hpb7_every_core_error_keeps_its_static_code() {
             declared.push(value.to_string());
         }
     }
-    assert_eq!(declared.len(), 119, "{declared:?}");
+    assert_eq!(declared.len(), 120, "{declared:?}");
     for code in [
         "E_STREAM_TRUNCATED",
         "E_STREAM_PURPOSE",
@@ -2225,6 +2225,64 @@ fn np2_publish_replies_ignore_unknown_members() {
         let got = np2_outcome(&np2_run(&mut s, &hub, &step, &body));
         assert_eq!(got, want, "{name}: nested");
         assert!(!got.contains(NP2_MARKER), "{name}: {got}");
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// The hub's error reply may add `key` (a string) and `args` (an object of strings): the client
+/// ignores both. The refusal decodes to the same status class, code, message, fix and request id
+/// as without them, on a read and on a write, and neither member becomes a required field.
+#[test]
+fn r5908_error_key_and_args_are_ignored() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let issues = r#"[{"severity":"error","code":"E_HUB_VALIDATION","block":null,"message":"im","fix":"if"}]"#;
+    let plain = error_body("E_HUB_VALIDATION", "hub says", "hub fix", issues, "");
+    let added = error_body(
+        "E_HUB_VALIDATION",
+        "hub says",
+        "hub fix",
+        issues,
+        r#","key":"repo.write.refused","args":{"repo":"acme/docs","reason":"test"}"#,
+    );
+    for name in ["refusal_read", "refusal_write"] {
+        let step = np2_steps().into_iter().find(|x| x.name == name).unwrap();
+        let want = np2_run(&mut s, &hub, &step, &plain);
+        let got = np2_run(&mut s, &hub, &step, &added);
+        let (want, got) = (
+            want.expect_err("the plain refusal fails"),
+            got.expect_err("the refusal with key and args fails"),
+        );
+        // The same refusal: not a protocol failure for the unknown members.
+        assert_eq!(got.code, "E_HUB_VALIDATION", "{name}: {got:?}");
+        assert_eq!(
+            (got.code, got.message.as_str(), got.fix.as_str()),
+            (want.code, want.message.as_str(), want.fix.as_str()),
+            "{name}"
+        );
+        assert_eq!(
+            (got.message.as_str(), got.fix.as_str()),
+            ("hub says", "hub fix")
+        );
+        assert!(
+            got.issues
+                .iter()
+                .any(|i| i.message == "hub request req_0001"),
+            "{name}: the request id is kept: {got:?}"
+        );
+        assert_ne!(got.code, E_UPSTREAM_PROTOCOL, "{name}");
+        assert_eq!(
+            np2_outcome(&Err(got)),
+            np2_outcome(&Err(want)),
+            "{name}: same decoded refusal"
+        );
+        // The members themselves reach nothing.
+        let again = np2_run(&mut s, &hub, &step, &added).unwrap_err();
+        let text = np2_error_text(&again);
+        assert!(
+            !text.contains("repo.write.refused") && !text.contains("acme/docs"),
+            "{name}: {text}"
+        );
     }
     assert_eq!(s.finish(), 0);
 }

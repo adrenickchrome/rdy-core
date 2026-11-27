@@ -1,0 +1,147 @@
+{
+  "about": [
+    "The state of one canon tip as a sync stream of format 5 (purpose canon_state, D-GGTYA, D-4PV25), frozen once.",
+    "Its source is the frozen format-4 canon history sync4-canon-history.bin: a new holder of its repo takes it as a seed, and the state of its root is written as one batch with every key. The history's keys are the full-history count.",
+    "receiver_features is the manifest the stream's header lists: what a receiver is expected to hold after its take of the state. It is expected only: a later take of the canon state checks it."
+  ],
+  "known_bytes": 722,
+  "purpose": "canon_state",
+  "rdy": "0.59.0",
+  "receiver_features": {
+    "features": [
+      {
+        "class": "incompatible",
+        "name": "assessment",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "object_encoding",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "partial_history",
+        "required_rdy": "0.59.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "snapshot_delta",
+        "required_rdy": "0.52.0"
+      }
+    ],
+    "manifest_version": 1
+  },
+  "receiver_features_status": "expected",
+  "source": {
+    "digest": "8d51365e1d9bd84bf9c00526e672d401298d0128cdf3590d1c09f50eb5f746e4",
+    "fixture": "sync4-canon-history.bin",
+    "full_history_keys": 19,
+    "repo_id": "8a55d733ad6ec262d2fd59d66db4ba8f",
+    "root": {
+      "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+      "kind": 4
+    }
+  },
+  "stream": {
+    "bytes": 1318,
+    "digest": "108f7af7d486a46486d596baf81b894b237a12c45281035abf0b368ca671600b",
+    "header": {
+      "features": {
+        "features": [
+          {
+            "class": "incompatible",
+            "name": "assessment",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "object_encoding",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "partial_history",
+            "required_rdy": "0.59.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "snapshot_delta",
+            "required_rdy": "0.52.0"
+          }
+        ],
+        "manifest_version": 1
+      },
+      "prerequisites": [
+        {
+          "hash": "e8a816a8fffbae2eee78101a411e32316a4a31e17da1328b17146a80584f5b31",
+          "kind": 2
+        },
+        {
+          "hash": "c28db875d1db94f4128227baa16fa81365422d26896d43bce29183400b338c34",
+          "kind": 3
+        },
+        {
+          "hash": "678b577cc940690b7d8dbe734cd15215b73de2eb9ebb119b4558957fda676fd1",
+          "kind": 4
+        },
+        {
+          "hash": "c13e3ac11bd03f12770bc08df446d1f0454f9dd9bea33e38fd915c3f9d90fb2a",
+          "kind": 25
+        },
+        {
+          "hash": "f974cabffd9ef55ab87f75cb249b7d5999c9054b21af5331bfd317407e4f5601",
+          "kind": 30
+        }
+      ],
+      "purpose": "canon_state",
+      "repo_id": "8a55d733ad6ec262d2fd59d66db4ba8f",
+      "stream_format": 5,
+      "tag": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75"
+    },
+    "keys": [
+      {
+        "hash": "d91a816b6a2eed457b598edf90b3684a457fe608f4b12be581201f49f34f4e75",
+        "kind": 4
+      },
+      {
+        "hash": "c0c408ff5302692edc569c1b12fbfc935574715e83ec24d3e66c96b93dad3b07",
+        "kind": 1
+      },
+      {
+        "hash": "621cca36fcf827a6e1d0a2e5ab273946c542d2cbc48ac29532fcce4e11342cd9",
+        "kind": 5
+      },
+      {
+        "hash": "8b19a504c104de64768f717530c758d41189f9f27d98df6ef63296385c652714",
+        "kind": 9
+      },
+      {
+        "hash": "50f8f520a3094ef5948372c78729103ac8618c36c6206f65ab11a489e1a078db",
+        "kind": 30
+      }
+    ],
+    "record_features": {
+      "features": [
+        {
+          "class": "incompatible",
+          "name": "assessment",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "object_encoding",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "snapshot_delta",
+          "required_rdy": "0.52.0"
+        }
+      ],
+      "manifest_version": 1
+    },
+    "records": 5
+  },
+  "stream_format": 5
+}

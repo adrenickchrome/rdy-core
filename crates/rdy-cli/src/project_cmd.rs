@@ -150,6 +150,12 @@ pub(crate) fn fsck(env: &Env, a: FsckArgs) -> Result<(Value, String), ErrorReply
         t.push('\n');
         t.push_str(&line);
     }
+    // D-GGTYA: a history still arriving says how much of it the store holds
+    if let Ok(h) = serde_json::from_value::<HistoryLine>(v["history"].clone())
+        && !h.complete
+    {
+        t.push_str(&format!("\nhistory: partial ({} of {})", h.held, h.total));
+    }
     for state in v["signature_states"].as_array().into_iter().flatten() {
         t.push_str(&format!("\nlanding {}", text(&state["landing"])));
         for line in rdy_engine::signing_read::verified_lines(state) {
@@ -334,4 +340,12 @@ mod tests {
         );
         assert!(in_tree(&tree, &tree, Path::new("new.yaml")));
     }
+}
+
+/// The `history` member of an fsck reply, as the text reads it.
+#[derive(serde::Deserialize)]
+struct HistoryLine {
+    complete: bool,
+    held: u64,
+    total: u64,
 }

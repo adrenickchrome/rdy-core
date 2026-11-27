@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod error;
 pub mod handler;
 pub mod hello;
+pub mod history_fetch;
 pub mod hooks;
 pub mod instructions;
 pub mod layout;
@@ -62,7 +63,7 @@ pub mod serve;
 
 pub use serve::{
     CtlSession, ProfileSiteReady, ServeError, ServeHandler, ServeOptions, ServeRun, serve,
-    serve_with_profile, start,
+    serve_clone_history, serve_with_profile, start,
 };
 pub mod proxy;
 

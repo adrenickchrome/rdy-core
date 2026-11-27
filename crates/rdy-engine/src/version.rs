@@ -144,16 +144,25 @@ pub fn new_version_name_ok(name: &str) -> Result<(), RdyError> {
     Ok(())
 }
 
+/// The fix of a version name that is a 64-character lowercase hex string: a pin hash names
+/// content, not a release or a landing.
+const PIN_HASH_NAME_HINT: &str = "a pin hash names content, not a release or landing. Read the block with rdy_context; choose a version name or a landing hash from rdy_log.";
+
 /// Parses a version name: one optional leading `v`, then a SemVer 2.0.0 version without build
 /// metadata (SemVer ignores build metadata when ordering, so two versions would share a position).
 /// It has no length bound: it judges stored tags too, which keep every name the release that
 /// wrote them accepted (ruling final (1)).
 pub fn parse_version(name: &str) -> Result<semver::Version, RdyError> {
     let bad = |why: String| {
+        let hash = name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
         RdyError::new(
             E_BAD_TAG_NAME,
             format!("{name:?} is not a version: {why}"),
-            "name versions like v1.2.0 or 2.0.0-rc.1 (Semantic Versioning, one optional leading v, no +build metadata)",
+            if hash {
+                PIN_HASH_NAME_HINT
+            } else {
+                "name versions like v1.2.0 or 2.0.0-rc.1 (Semantic Versioning, one optional leading v, no +build metadata)"
+            },
         )
     };
     // the grammar and order are rdy-schema's (D-WJ0SJ), shared with the as-built fields
@@ -320,189 +329,193 @@ fn tag_check_result(problems: Vec<String>, good: usize) -> Result<usize, RdyErro
     ))
 }
 
-impl Rdy {
-    /// Checks every `tag/*` ref (see FsckReport); `chain` is canon's landings, head first.
-    ///
-    /// A tag names a landing of canon's chain, or of a fetched canon closure: a fetch takes a
-    /// history's tags and moves no canon ref (D-3RSCW), so its tags may name landings that canon
-    /// does not hold yet. A fetched canon closure is the closure that the canon history export
-    /// walks from a landing that a canon sync ref named at any time
-    /// (`StoreReader::sync_named_heads`): its prev chain, its provenance branches
-    /// (`rebased_from`), and every other landing its links and attachments reach. A later fetch
-    /// or a fork's origin batch that changes the ref keeps it. A tag may also name a landing of
-    /// the retained local history (`retained_landings`): a pull never moves a tag to a replayed
-    /// landing, so a tag on a replayed source or on a chain that a take replaced stays where it
-    /// was. No two tags denote one version.
-    /// Higher versions name later landings: on canon's chain among the tags of canon, and on
-    /// each prev chain among the tags that canon does not hold. A local tag on canon and a
-    /// fetched tag off it keep no order between them: the pull that applies the history judges
-    /// them.
-    pub(crate) fn check_tags(&self, chain: &[Hash]) -> Result<usize, RdyError> {
-        let mut problems = vec![];
-        let mut all: Vec<(semver::Version, String)> = vec![];
-        let mut on_canon: Vec<TagAt> = vec![];
-        let mut off_canon: Vec<(semver::Version, String, Hash)> = vec![];
-        let mut fetched: Option<BTreeSet<Hash>> = None;
-        let mut retained: Option<BTreeSet<Hash>> = None;
-        for (refname, value) in self.store.refs_with_prefix("tag/")? {
-            let (v, tag) = match check_tag_ref(&self.store, &refname, &value) {
-                Ok(t) => t,
-                Err(p) => {
-                    problems.push(p);
-                    continue;
-                }
-            };
-            if let Some(pos) = chain.iter().position(|c| *c == tag.landing) {
-                all.push((v.clone(), refname.clone()));
-                on_canon.push((v, refname, pos));
+/// Checks every `tag/*` ref (see FsckReport); `chain` is canon's landings, head first.
+///
+/// A tag names a landing of canon's chain, or of a fetched canon closure: a fetch takes a
+/// history's tags and moves no canon ref (D-3RSCW), so its tags may name landings that canon
+/// does not hold yet. A fetched canon closure is the closure that the canon history export
+/// walks from a landing that a canon sync ref named at any time
+/// (`StoreReader::sync_named_heads`): its prev chain, its provenance branches
+/// (`rebased_from`), and every other landing its links and attachments reach. A later fetch
+/// or a fork's origin batch that changes the ref keeps it. A tag may also name a landing of
+/// the retained local history (`retained_landings`): a pull never moves a tag to a replayed
+/// landing, so a tag on a replayed source or on a chain that a take replaced stays where it
+/// was. No two tags denote one version.
+/// Higher versions name later landings: on canon's chain among the tags of canon, and on
+/// each prev chain among the tags that canon does not hold. A local tag on canon and a
+/// fetched tag off it keep no order between them: the pull that applies the history judges
+/// them.
+///
+/// It reads `reader` alone, with no store handle: a full check runs it on a captured read,
+/// off the writer.
+pub(crate) fn check_tags_in(
+    reader: &rdy_store::StoreReader,
+    chain: &[Hash],
+) -> Result<usize, RdyError> {
+    let mut problems = vec![];
+    let mut all: Vec<(semver::Version, String)> = vec![];
+    let mut on_canon: Vec<TagAt> = vec![];
+    let mut off_canon: Vec<(semver::Version, String, Hash)> = vec![];
+    let mut fetched: Option<BTreeSet<Hash>> = None;
+    let mut retained: Option<BTreeSet<Hash>> = None;
+    for (refname, value) in reader.refs_with_prefix("tag/")? {
+        let (v, tag) = match check_tag_ref(reader, &refname, &value) {
+            Ok(t) => t,
+            Err(p) => {
+                problems.push(p);
                 continue;
-            }
-            let landings = match &fetched {
-                Some(f) => f,
-                None => fetched.insert(self.fetched_landings()?),
-            };
-            let kept = match &retained {
-                Some(r) => r,
-                None => retained.insert(self.retained_landings(chain)?),
-            };
-            if !landings.contains(&tag.landing) && !kept.contains(&tag.landing) {
-                problems.push(format!(
-                    "{refname}: landing {} is not in canon's chain",
-                    tag.landing.short()
-                ));
-                continue;
-            }
-            all.push((v.clone(), refname.clone()));
-            off_canon.push((v, refname, tag.landing));
-        }
-        all.sort_by(|a, b| a.0.cmp_precedence(&b.0));
-        for pair in all.windows(2) {
-            let ((lo, lo_ref), (hi, hi_ref)) = (&pair[0], &pair[1]);
-            problems.extend(same_version((lo, lo_ref), (hi, hi_ref)));
-        }
-        let mut order = |mut good: Vec<TagAt>| {
-            good.sort_by(|a, b| a.0.cmp_precedence(&b.0));
-            for pair in good.windows(2) {
-                let ((lo, lo_ref, lo_pos), (hi, hi_ref, hi_pos)) = (&pair[0], &pair[1]);
-                let p = format!("{hi_ref} names an earlier landing than {lo_ref}");
-                if lo.cmp_precedence(hi) != Ordering::Equal
-                    && hi_pos > lo_pos
-                    && !problems.contains(&p)
-                {
-                    problems.push(p);
-                }
             }
         };
-        order(on_canon);
-        for good in self.off_canon_chains(chain, &off_canon)? {
-            order(good);
+        if let Some(pos) = chain.iter().position(|c| *c == tag.landing) {
+            all.push((v.clone(), refname.clone()));
+            on_canon.push((v, refname, pos));
+            continue;
         }
-        tag_check_result(problems, all.len())
+        let landings = match &fetched {
+            Some(f) => f,
+            None => fetched.insert(fetched_landings(reader)?),
+        };
+        let kept = match &retained {
+            Some(r) => r,
+            None => retained.insert(retained_landings(reader, chain)?),
+        };
+        if !landings.contains(&tag.landing) && !kept.contains(&tag.landing) {
+            problems.push(format!(
+                "{refname}: landing {} is not in canon's chain",
+                tag.landing.short()
+            ));
+            continue;
+        }
+        all.push((v.clone(), refname.clone()));
+        off_canon.push((v, refname, tag.landing));
     }
+    all.sort_by(|a, b| a.0.cmp_precedence(&b.0));
+    for pair in all.windows(2) {
+        let ((lo, lo_ref), (hi, hi_ref)) = (&pair[0], &pair[1]);
+        problems.extend(same_version((lo, lo_ref), (hi, hi_ref)));
+    }
+    let mut order = |mut good: Vec<TagAt>| {
+        good.sort_by(|a, b| a.0.cmp_precedence(&b.0));
+        for pair in good.windows(2) {
+            let ((lo, lo_ref, lo_pos), (hi, hi_ref, hi_pos)) = (&pair[0], &pair[1]);
+            let p = format!("{hi_ref} names an earlier landing than {lo_ref}");
+            if lo.cmp_precedence(hi) != Ordering::Equal && hi_pos > lo_pos && !problems.contains(&p)
+            {
+                problems.push(p);
+            }
+        }
+    };
+    order(on_canon);
+    for good in off_canon_chains(reader, chain, &off_canon)? {
+        order(good);
+    }
+    tag_check_result(problems, all.len())
+}
 
-    /// The retained local history: the landings that canon's chain (`chain`) and every landing
-    /// that a `replaced/` mark names reach through `prev` and `rebased_from`, to any depth. A pull
-    /// leaves a tag on its landing (D-KE83X): a clean replay keeps the replayed sources reachable
-    /// through `rebased_from`, and a take, a stop or a hub force keeps the old chain under
-    /// `replaced/`. A walk skips a landing that the store does not hold.
-    fn retained_landings(&self, chain: &[Hash]) -> Result<BTreeSet<Hash>, RdyError> {
-        let reader = self.store.reader();
-        let mut todo: Vec<Hash> = chain.to_vec();
-        for (refname, value) in reader.refs_with_prefix(rdy_store::hub_canon::REPLACED_REF)? {
-            let Ok(mark) = rdy_store::hub_canon::Replaced::decode(&value) else {
-                continue;
+/// The retained local history: the landings that canon's chain (`chain`) and every landing
+/// that a `replaced/` mark names reach through `prev` and `rebased_from`, to any depth. A pull
+/// leaves a tag on its landing (D-KE83X): a clean replay keeps the replayed sources reachable
+/// through `rebased_from`, and a take, a stop or a hub force keeps the old chain under
+/// `replaced/`. A walk skips a landing that the store does not hold.
+fn retained_landings(
+    reader: &rdy_store::StoreReader,
+    chain: &[Hash],
+) -> Result<BTreeSet<Hash>, RdyError> {
+    let mut todo: Vec<Hash> = chain.to_vec();
+    for (refname, value) in reader.refs_with_prefix(rdy_store::hub_canon::REPLACED_REF)? {
+        let Ok(mark) = rdy_store::hub_canon::Replaced::decode(&value) else {
+            continue;
+        };
+        if mark.kind != rdy_store::hub_canon::ReplacedKind::Landing {
+            continue;
+        }
+        if let Ok(h) = refname[rdy_store::hub_canon::REPLACED_REF.len()..].parse::<Hash>() {
+            todo.push(h);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    while let Some(l) = todo.pop() {
+        if seen.contains(&l) || !reader.has_kind(kinds::LANDING, &l)? {
+            continue;
+        }
+        seen.insert(l);
+        let rec = reader.landing(&l)?;
+        todo.extend(rec.prev);
+        todo.extend(rec.rebased_from);
+    }
+    Ok(seen)
+}
+
+/// The landings of the fetched canon closures: the closure that the canon history export
+/// walks from every landing that a canon sync ref named at any time
+/// (`rdy_store::closure::history_landings_before`).
+fn fetched_landings(reader: &rdy_store::StoreReader) -> Result<BTreeSet<Hash>, RdyError> {
+    let named = reader.sync_named_heads()?;
+    rdy_store::closure::history_landings_before(
+        reader,
+        &named.landings,
+        rdy_store::closure::END_OF_LOG,
+    )
+    .map_err(crate::stream_error::to_rdy)
+}
+
+/// The tags `off_canon` (version, ref, landing) that canon's chain (`chain`) does not hold,
+/// grouped by prev chain: one group for each tagged landing that no other tagged landing
+/// has on its prev chain, with each tag on that chain and its position (0 at the group's
+/// landing). A chain's walk ends at a landing of canon, which no such tag names, at a
+/// landing the store does not hold, or at one it met already.
+fn off_canon_chains(
+    reader: &rdy_store::StoreReader,
+    chain: &[Hash],
+    off_canon: &[(semver::Version, String, Hash)],
+) -> Result<Vec<Vec<TagAt>>, RdyError> {
+    if off_canon.len() < 2 {
+        return Ok(vec![]);
+    }
+    let canon: HashSet<&Hash> = chain.iter().collect();
+    let tagged: BTreeSet<Hash> = off_canon.iter().map(|(_, _, l)| *l).collect();
+    // each tagged landing's prev chain: the position of each tagged landing on it
+    let mut on_chain: Vec<(Hash, HashMap<Hash, usize>)> = vec![];
+    for top in &tagged {
+        let mut met: HashSet<Hash> = HashSet::new();
+        let mut found: HashMap<Hash, usize> = HashMap::new();
+        let mut cur = Some(*top);
+        let mut pos = 0usize;
+        while let Some(h) = cur {
+            if canon.contains(&h) || !met.insert(h) {
+                break;
+            }
+            if tagged.contains(&h) {
+                found.insert(h, pos);
+            }
+            pos += 1;
+            cur = match reader.landing(&h) {
+                Ok(l) => l.prev,
+                Err(rdy_store::StoreError::NotFound(_)) => None,
+                Err(e) => return Err(e.into()),
             };
-            if mark.kind != rdy_store::hub_canon::ReplacedKind::Landing {
-                continue;
-            }
-            if let Ok(h) = refname[rdy_store::hub_canon::REPLACED_REF.len()..].parse::<Hash>() {
-                todo.push(h);
-            }
         }
-        let mut seen = BTreeSet::new();
-        while let Some(l) = todo.pop() {
-            if seen.contains(&l) || !reader.has_kind(kinds::LANDING, &l)? {
-                continue;
-            }
-            seen.insert(l);
-            let rec = reader.landing(&l)?;
-            todo.extend(rec.prev);
-            todo.extend(rec.rebased_from);
-        }
-        Ok(seen)
+        on_chain.push((*top, found));
     }
-
-    /// The landings of the fetched canon closures: the closure that the canon history export
-    /// walks from every landing that a canon sync ref named at any time
-    /// (`rdy_store::closure::history_landings_before`).
-    fn fetched_landings(&self) -> Result<BTreeSet<Hash>, RdyError> {
-        let reader = self.store.reader();
-        let named = reader.sync_named_heads()?;
-        rdy_store::closure::history_landings_before(
-            &reader,
-            &named.landings,
-            rdy_store::closure::END_OF_LOG,
-        )
-        .map_err(crate::stream_error::to_rdy)
-    }
-
-    /// The tags `off_canon` (version, ref, landing) that canon's chain (`chain`) does not hold,
-    /// grouped by prev chain: one group for each tagged landing that no other tagged landing
-    /// has on its prev chain, with each tag on that chain and its position (0 at the group's
-    /// landing). A chain's walk ends at a landing of canon, which no such tag names, at a
-    /// landing the store does not hold, or at one it met already.
-    fn off_canon_chains(
-        &self,
-        chain: &[Hash],
-        off_canon: &[(semver::Version, String, Hash)],
-    ) -> Result<Vec<Vec<TagAt>>, RdyError> {
-        if off_canon.len() < 2 {
-            return Ok(vec![]);
+    let mut out = vec![];
+    for (top, found) in &on_chain {
+        let below = on_chain
+            .iter()
+            .any(|(other, f)| other != top && f.contains_key(top));
+        if below {
+            continue;
         }
-        let reader = self.store.reader();
-        let canon: HashSet<&Hash> = chain.iter().collect();
-        let tagged: BTreeSet<Hash> = off_canon.iter().map(|(_, _, l)| *l).collect();
-        // each tagged landing's prev chain: the position of each tagged landing on it
-        let mut on_chain: Vec<(Hash, HashMap<Hash, usize>)> = vec![];
-        for top in &tagged {
-            let mut met: HashSet<Hash> = HashSet::new();
-            let mut found: HashMap<Hash, usize> = HashMap::new();
-            let mut cur = Some(*top);
-            let mut pos = 0usize;
-            while let Some(h) = cur {
-                if canon.contains(&h) || !met.insert(h) {
-                    break;
-                }
-                if tagged.contains(&h) {
-                    found.insert(h, pos);
-                }
-                pos += 1;
-                cur = match reader.landing(&h) {
-                    Ok(l) => l.prev,
-                    Err(rdy_store::StoreError::NotFound(_)) => None,
-                    Err(e) => return Err(e.into()),
-                };
-            }
-            on_chain.push((*top, found));
-        }
-        let mut out = vec![];
-        for (top, found) in &on_chain {
-            let below = on_chain
+        out.push(
+            off_canon
                 .iter()
-                .any(|(other, f)| other != top && f.contains_key(top));
-            if below {
-                continue;
-            }
-            out.push(
-                off_canon
-                    .iter()
-                    .filter_map(|(v, r, l)| found.get(l).map(|pos| (v.clone(), r.clone(), *pos)))
-                    .collect(),
-            );
-        }
-        Ok(out)
+                .filter_map(|(v, r, l)| found.get(l).map(|pos| (v.clone(), r.clone(), *pos)))
+                .collect(),
+        );
     }
+    Ok(out)
+}
 
+impl Rdy {
     /// A holder's `check_tags`: the same rules for each ref and for versions that denote the
     /// same version, with the same texts. A holder has no canon and its tags name divergent
     /// histories, so a tag's landing is not looked up in a chain and versions keep no
@@ -786,10 +799,15 @@ impl ReadState {
     }
 
     /// `landings`, each record read only when the walk reaches it; the walk ends after an error.
+    /// While the history is incomplete the walk ends at its frontier, the oldest landing held:
+    /// it never stops at another landing whose `prev` is missing.
     pub(crate) fn landing_walk(
         &self,
     ) -> impl Iterator<Item = Result<(Hash, LandingRecord), RdyError>> + '_ {
-        let mut failed = self.error.clone();
+        let (mut failed, frontier) = match self.history_frontier() {
+            Ok(f) => (self.error.clone(), f),
+            Err(e) => (Some(e), None),
+        };
         let mut cur = self.canon_head;
         std::iter::from_fn(move || {
             if let Some(e) = failed.take() {
@@ -799,7 +817,7 @@ impl ReadState {
             let h = cur.take()?;
             Some(match self.reader.landing(&h) {
                 Ok(rec) => {
-                    cur = rec.prev;
+                    cur = if frontier == Some(h) { None } else { rec.prev };
                     Ok((h, rec))
                 }
                 Err(e) => Err(e.into()),
@@ -917,6 +935,8 @@ impl ReadState {
                     found.insert(request);
                     continue;
                 }
+                // the frontier's changes are behind an incomplete history's frontier
+                Err(StoreError::NotFound(_)) if self.history_frontier()?.is_some() => continue,
                 Err(e) => return Err(e.into()),
             };
             for op in &change.ops {
@@ -974,6 +994,18 @@ impl ReadState {
     /// In a holder, which has no canon, a landing in the chain of one of its tags.
     pub fn resolve_landing(&self, text: &str) -> Result<Hash, RdyError> {
         match_prefix(&self.landing_ids()?, text)
+    }
+
+    /// `e`, a version or landing that this state does not hold, as E_HISTORY_PENDING while the
+    /// history is incomplete: it may be behind the frontier.
+    pub(crate) fn behind_frontier(&self, e: RdyError) -> RdyError {
+        if e.code != E_NOT_FOUND {
+            return e;
+        }
+        match self.require_complete_history() {
+            Err(pending) if pending.code == E_HISTORY_PENDING => pending,
+            _ => e,
+        }
     }
 
     /// The landings a landing id can name: canon's chain, head first. In a holder, which has no
@@ -1051,10 +1083,14 @@ impl ReadState {
                         format!("no version {name}"),
                         "list versions with rdy tags",
                     )
-                });
+                })
+                .map_err(|e| self.behind_frontier(e));
         }
         if let Some(id) = text.strip_prefix("landing:") {
-            return Ok(Scope::At(self.resolve_landing(id)?));
+            return Ok(Scope::At(
+                self.resolve_landing(id)
+                    .map_err(|e| self.behind_frontier(e))?,
+            ));
         }
         // ls8: a proposal version reads as its base plus its changes
         if let Some(r) = text.strip_prefix("proposal:") {
@@ -1152,6 +1188,8 @@ impl ReadState {
         for (_, t) in self.tags.iter() {
             on.insert(t.landing, t.name.clone());
         }
+        // while the history is incomplete the walk ends at its frontier, the oldest landing held
+        let frontier = self.history_frontier()?;
         let (mut since, mut cur, mut version) = (0u32, base, None);
         while let Some(h) = cur {
             if let Some(name) = on.get(&h) {
@@ -1162,7 +1200,11 @@ impl ReadState {
                 break;
             }
             since += 1;
-            cur = self.reader.landing(&h)?.prev;
+            cur = if frontier == Some(h) {
+                None
+            } else {
+                self.reader.landing(&h)?.prev
+            };
         }
         let frozen = matches!(scope, Scope::At(_));
         Ok(VersionPosition {

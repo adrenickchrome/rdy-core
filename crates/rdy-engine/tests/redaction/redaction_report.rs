@@ -3107,6 +3107,7 @@ fn quoting_plan(field: &str) -> rdy_model::plan::Plan {
                 answer: None,
             }],
         }),
+        read_identity: None,
     }
 }
 
@@ -3340,4 +3341,119 @@ fn hpr1_report_uses_the_stored_residue_id() {
 /// The hash of request `r`, as the store frames it.
 fn req_id(r: &rdy_model::redaction::Redaction) -> Hash {
     Hash::of(&rdy_store::codec::item_new(kinds::REDACTION, r).1)
+}
+
+/// D-3PNRK: a plan answer's reason stays in the record that holds it after a later version
+/// replaces it, and in each version that inherits it through a delta; a sealed item's subject
+/// and edge text are quoted too. The report scans every stored version, whole or delta.
+#[test]
+fn r5906_historical_text_is_still_scanned() {
+    use rdy_model::plan::{Plan, PlanAct, PlanAnswer, PlanKind, PlanOutcome, PlanSeal, SealedItem};
+    const TOKEN: &str = "QQ9tok";
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    let w = write(
+        &mut p.r,
+        &writer(),
+        "work",
+        json!([{"op": "create", "type": "term", "id": "$k", "parent": p.section.to_string(), "fields": {"name": TOKEN}, "body": "A token term."}]),
+        "",
+    );
+    let k = id(&w.created["$k"]);
+    let answer = |n: u8, reason: &str| PlanAnswer {
+        item: Hash([n; 32]),
+        act: PlanAct::Defer,
+        reason: Some(reason.into()),
+        subject: Some(Hash([0x51; 32])),
+        cause: Hash([0x52; 32]),
+        by: prov("agent:a"),
+    };
+    let plan = |stable: Option<Hash>, prev: Option<Hash>, answers: Vec<PlanAnswer>| Plan {
+        stable,
+        prev,
+        view: "work".into(),
+        proposal: None,
+        answers,
+        heads: vec![],
+        provenance: prov("agent:a"),
+        seal: None,
+        read_identity: None,
+    };
+    let s = p.r.store_mut();
+    // the old reason, whole; then a delta that replaces it; then a delta that adds a new one
+    let v1 = s
+        .put_plan(&plan(None, None, vec![answer(1, &format!("old {TOKEN}"))]))
+        .unwrap();
+    let v2 = s
+        .put_plan(&plan(Some(v1), Some(v1), vec![answer(1, "replaced")]))
+        .unwrap();
+    let v3 = s
+        .put_plan(&plan(
+            Some(v1),
+            Some(v2),
+            vec![answer(1, "replaced"), answer(2, &format!("new {TOKEN}"))],
+        ))
+        .unwrap();
+    let v4 = s
+        .put_plan(&plan(
+            Some(v1),
+            Some(v3),
+            vec![
+                answer(1, "replaced"),
+                answer(2, &format!("new {TOKEN}")),
+                answer(3, "plain"),
+            ],
+        ))
+        .unwrap();
+    // v2 to v4 are deltas: each holds only what changed
+    for h in [v2, v3, v4] {
+        let (version, body) = s.get_versioned_body(kinds::PLAN, &h).unwrap();
+        assert_eq!((version, body[0]), (1, 1), "{h} is a delta");
+    }
+    // a sealed item whose subject and edge hold the token, stored raw (no writer seals here)
+    let sealed = Plan {
+        seal: Some(PlanSeal {
+            landing: Hash([0x11; 32]),
+            version: Hash([0x12; 32]),
+            decisions: vec![],
+            items: vec![SealedItem {
+                id: Hash([0x13; 32]),
+                kind: PlanKind::UpdateImplementation,
+                subject: format!("app:src/{TOKEN}.rs"),
+                cause: id("D-00002"),
+                edge: format!("edge-{TOKEN}"),
+                outcome: PlanOutcome::Done,
+                answer: None,
+            }],
+        }),
+        ..plan(None, None, vec![])
+    };
+    let seal = sealed.id();
+    s.write_guarded_for_tests(vec![rdy_store::codec::item_new(kinds::PLAN, &sealed)])
+        .unwrap();
+    p.r.invalidate();
+    let d = dry(&p.r, &[k.to_string()]);
+    let quoted: BTreeSet<String> = d
+        .quotes
+        .iter()
+        .filter(|q| q.kind == ImpactKind::AuditText)
+        .map(|q| q.record.clone())
+        .collect();
+    for (name, h) in [
+        ("old", v1),
+        ("new", v3),
+        ("inherited", v4),
+        ("sealed", seal),
+    ] {
+        assert!(quoted.contains(&h.to_string()), "{name} {h}: {quoted:?}");
+    }
+    assert!(
+        !quoted.contains(&v2.to_string()),
+        "the version that replaced the old reason holds no token"
+    );
+    assert!(
+        d.quotes
+            .iter()
+            .all(|q| q.quote == TOKEN || q.kind != ImpactKind::AuditText)
+    );
 }

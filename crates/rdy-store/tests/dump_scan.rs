@@ -268,8 +268,8 @@ fn patch_header(bytes: &[u8], from: usize, new: &[u8]) -> Vec<u8> {
 }
 
 /// The offsets of a format-4 header payload's fields, after its baseline manifest (SD1 Task 6:
-/// three features).
-const M: usize = 256;
+/// three features; span maps add `dedup_spans`'s 70 bytes).
+const M: usize = 326;
 const H_STORE: usize = 5;
 const H_REPO: usize = 5 + M;
 const H_BASE: usize = 21 + M;

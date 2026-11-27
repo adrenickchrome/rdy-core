@@ -255,6 +255,10 @@ pub enum OpInput {
 pub const OP_FIX: &str =
     "each op needs \"op\" (rdy_schema lists them under \"ops\"); create needs \"type\"";
 
+/// The fix for the op value `edit`, which names no op (W-core-3).
+pub const OP_EDIT_HINT: &str =
+    "use op update to edit an existing block; copy the op fields from rdy_schema";
+
 /// Op `i` of a write, parsed: an unknown field is `E_BAD_INPUT` with a did-you-mean, named by its
 /// path in the op (FW-HD1); an unknown key in a link object gets `link_key_fix`; any other
 /// failure is `E_BAD_INPUT` with `OP_FIX`.
@@ -264,8 +268,13 @@ pub fn parse_op(i: usize, v: serde_json::Value) -> Result<OpInput, RdyError> {
         if let Some(k) = link_key(&msg) {
             return RdyError::new(E_BAD_INPUT, format!("op {i}: {msg}"), link_key_fix(k));
         }
-        crate::did_you_mean::unknown_field_error_in(&format!("op {i}"), &msg, &v)
-            .unwrap_or_else(|| RdyError::new(E_BAD_INPUT, format!("op {i}: {msg}"), OP_FIX))
+        crate::did_you_mean::unknown_field_error_in(&format!("op {i}"), &msg, &v).unwrap_or_else(
+            || {
+                let edit = v.get("op").and_then(serde_json::Value::as_str) == Some("edit");
+                let fix = if edit { OP_EDIT_HINT } else { OP_FIX };
+                RdyError::new(E_BAD_INPUT, format!("op {i}: {msg}"), fix)
+            },
+        )
     })
 }
 
@@ -683,7 +692,7 @@ impl Resolver<'_> {
             return self.placeholders.get(s).cloned().ok_or_else(|| {
                 bad(
                     format!("placeholder ${name} is used before it is created"),
-                    "create the block earlier in the same batch, or use a real id",
+                    placeholder_fix(name),
                 )
             });
         }
@@ -1190,7 +1199,7 @@ fn current_for_edit<'b>(
     if touched.contains(id) && rekeyed_from.is_none() {
         return Err(bad(
             format!("{id} is changed more than once in this write"),
-            "combine the edits into one op",
+            ONCE_PER_WRITE_HINT,
         ));
     }
     if let Some(c) = conflicts.list.iter().find(|c| c.block == *id) {
@@ -1309,7 +1318,7 @@ pub(crate) fn frozen_in_conflict(
 /// `frozen_in_conflict` for an edit: when `reaffirmable` (a suspect accepted decision a reaffirm
 /// op could re-affirm), the fix ends by naming the op, after the landed-side instruction.
 fn frozen_in_conflict_hinted(
-    view: &str,
+    _view: &str,
     id: &BlockId,
     c: &Conflict,
     store: &rdy_store::Store,
@@ -1362,17 +1371,17 @@ fn frozen_in_conflict_hinted(
     let others = match excludable.as_slice() {
         [] => supersede,
         [one] => {
-            format!("exclude the change {one} from the view (rdy view exclude), or {supersede}")
+            format!(
+                "exclude the change {one} from the view (rdy view exclude; rdy_view {{op: \"exclude\", changes: [\"{one}\"]}}), or {supersede}"
+            )
         }
         many => format!(
-            "exclude the changes {} from the view (rdy view exclude), or {supersede}",
+            "exclude the changes {} from the view (rdy view exclude; rdy_view {{op: \"exclude\", changes}}), or {supersede}",
             many.join(", ")
         ),
     };
     let fix = match landed_side(c, store)? {
-        Some(_) => {
-            format!("take the landed side (rdy view resolve {view} {id} --landed), or {others}")
-        }
+        Some(_) => FROZEN_LANDED_HINT.to_string(),
         None => others,
     };
     Err(RdyError::new(
@@ -1383,6 +1392,9 @@ fn frozen_in_conflict_hinted(
         crate::reaffirm::frozen_fix(fix, reaffirmable),
     ))
 }
+
+/// The fix of an edit of a frozen decision in a conflict whose landed side exists.
+const FROZEN_LANDED_HINT: &str = "take the landed side with rdy_view resolve and landed true, or exclude a colliding reaffirm change. Then read the new plan before reaffirming.";
 
 /// Whether any version in conflict `c`, its base or a side, is a frozen decision.
 pub(crate) fn conflict_has_frozen(
@@ -1510,6 +1522,20 @@ fn check_tracking_edit(
     }
 }
 
+/// What a missing local reference or link target may be instead: another project's block. It
+/// asserts nothing about where the id lives.
+const OTHER_PROJECT_HINT: &str = " If the block belongs to another project, use {{alias:id}} in text with a registered project alias, or use plain text.";
+
+/// The fix of a placeholder `name` used before an earlier op of its write creates it.
+fn placeholder_fix(name: &str) -> String {
+    format!(
+        "create ${name} earlier in this write, then use it in a later op. A placeholder does not carry into another write; use the returned block id there."
+    )
+}
+
+/// The fix of a write that changes one block twice.
+const ONCE_PER_WRITE_HINT: &str = "a block changes once per write: put its body, fields and links in one create or update op, and all its repin targets in one repin op; make any other change to it, a repin included, in a later write";
+
 /// `E_FROZEN` for a frozen `cur`; the fix names the reaffirm op when `reaffirmable(id)`.
 fn check_not_frozen(
     id: &BlockId,
@@ -1520,10 +1546,7 @@ fn check_not_frozen(
         return Err(RdyError::new(
             E_FROZEN,
             format!("{id} is an accepted or rejected decision and cannot change"),
-            crate::reaffirm::frozen_fix(
-                format!("write a new decision that supersedes or revokes {id}"),
-                reaffirmable(id),
-            ),
+            crate::reaffirm::frozen_fix(crate::reaffirm::frozen_ways(id), reaffirmable(id)),
         ));
     }
     Ok(())
@@ -1954,6 +1977,7 @@ fn build_ops(
     selection: &crate::reaffirm::Selection,
     reflects: Option<&ReflectsInput>,
     foreign: &ForeignCite<'_>,
+    history_pending: Option<&RdyError>,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
     ov.conflicted = conflicts.list.iter().map(|c| c.block.clone()).collect();
@@ -2040,6 +2064,17 @@ fn build_ops(
                                 ),
                             ));
                         }
+                        // D-GGTYA: while the history is still arriving, an id the view does not
+                        // hold may name a block deleted behind the frontier; its re-creation
+                        // cannot be told apart from a new block, so it waits. A deletion the
+                        // store holds (a local one, or one the state carried) is evidence: that
+                        // re-creation keeps its existing rule
+                        if ov.get(&g).is_none()
+                            && let Some(e) = history_pending
+                            && !store.reader().ever_deleted([&g]).map_err(RdyError::from)?
+                        {
+                            return Err(e.clone());
+                        }
                         created.insert(format!("op{i}"), g.to_string());
                         g
                     }
@@ -2055,7 +2090,7 @@ fn build_ops(
                 if touched.contains(&new_id) {
                     return Err(bad(
                         format!("{new_id} is changed more than once in this write"),
-                        "combine the edits into one op",
+                        ONCE_PER_WRITE_HINT,
                     ));
                 }
                 if ov.get(&new_id).is_some() {
@@ -2388,11 +2423,25 @@ fn build_ops(
                         "update the finding, or record a new finding",
                     ));
                 }
-                if ov.with_sibs(Some(&id), |s| !s.order.is_empty()) {
+                // the children as the write's overlay holds them, in tree order: a child with
+                // children of its own meets this same check when its own delete is judged
+                let (kids, n) = ov.with_sibs(Some(&id), |s| {
+                    let kids: Vec<String> = s
+                        .order
+                        .iter()
+                        .take(crate::error::FIX_LIST_MAX)
+                        .map(|(_, k)| k.to_string())
+                        .collect();
+                    (kids, s.order.len())
+                });
+                if n > 0 {
+                    let (list, more) = crate::error::fix_list(&kids, n);
                     return Err(RdyError::new(
                         E_HAS_CHILDREN,
                         format!("{id} still has children"),
-                        "delete or move its children first",
+                        format!(
+                            "delete or move these children before their parent in the same write: {list}{more}"
+                        ),
                     ));
                 }
                 // the key the view held (a conflicted block's base), not the side's
@@ -2553,7 +2602,7 @@ fn build_ops(
                         format!(
                             "{id} already pins the current version of {what}; nothing to repin"
                         ),
-                        "a superseded or revoked suspect clears only when the citation changes, not by repinning; rdy_context lists the block's suspects",
+                        "read rdy_suspects and the block's own pins before retrying. Drop this repin from the write. A superseded or revoked target needs a changed citation; a reaffirm does not change the target's content version.",
                     ));
                 }
                 // a repin from a conflict's side carries the side's name and key
@@ -2783,7 +2832,7 @@ fn build_ops(
             if let Some(name) = tok.strip_prefix('$') {
                 return Err(bad(
                     format!("placeholder ${name} is used before it is created"),
-                    "create the block earlier in the same batch, or use a real id",
+                    placeholder_fix(name),
                 ));
             }
             if let Some(target) = foreign.link_target(&tok) {
@@ -2814,7 +2863,7 @@ fn build_ops(
                         block.id
                     ),
                     format!(
-                        "fix the id, or create the target in the same write; {}",
+                        "fix the id, or create the target in the same write; {}{OTHER_PROJECT_HINT}",
                         crate::keys::literal_hint(&tok)
                     ),
                 )
@@ -2832,7 +2881,7 @@ fn build_ops(
                         "{} links to {}, which does not exist in this view",
                         block.id, link.target
                     ),
-                    "fix the link target id",
+                    format!("fix the link target id{OTHER_PROJECT_HINT}"),
                 )
             })?;
             targets.push((link.target.clone(), t.content_hash_with(store.tracking())));
@@ -3687,6 +3736,7 @@ impl Rdy {
                 &selection,
                 reflects.as_ref(),
                 &ForeignCite::new(&st, &m),
+                st.require_complete_history().err().as_ref(),
             )?;
         let no_code = BTreeSet::new();
         // D-01QX5: the code state of each reflects block this write creates, re-globs or
@@ -3879,14 +3929,24 @@ pub(crate) fn check_view_access(
                 "view {view:?} is owned by {}",
                 crate::identity::actor_run_text(&o.actor, o.run.as_deref())
             ),
-            if propose && view != s.default_view() {
-                format!(
-                    "propose your own view ({}), or include its changes into your own view and \
-                     propose that",
-                    s.default_view()
-                )
-            } else {
-                own_view_fix(view, s)
+            {
+                let fix = if propose && view != s.default_view() {
+                    format!(
+                        "propose your own view ({}), or include its changes into your own view and \
+                         propose that",
+                        s.default_view()
+                    )
+                } else {
+                    own_view_fix(view, s)
+                };
+                // the same actor under another run: a view belongs to actor and run together
+                match (&o.run, o.actor == s.actor) {
+                    (Some(run), true) => format!(
+                        "{fix}. Your session is {}: to act on this view as its owner, start the session with run {run} (rdy_session run, or RDY_RUN)",
+                        crate::identity::actor_run_text(&s.actor, s.run.as_deref())
+                    ),
+                    _ => fix,
+                }
             },
         )),
     }
@@ -4109,7 +4169,7 @@ fn repin_targets(
         if !cited.contains(&t) {
             return Err(bad(
                 format!("{id} does not reference or link to {t}"),
-                "repin only targets the block cites; rdy_context lists its suspects",
+                "repin the block that holds the citation, with targets from that block's own pins. Read both blocks with rdy_context before retrying.",
             ));
         }
         let h = content(&t).ok_or_else(|| {

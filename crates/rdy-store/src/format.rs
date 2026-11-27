@@ -81,6 +81,13 @@ pub const SYNC_STATE_REQUIRED_RDY: &str = "0.53.0";
 /// The first rdy that knows [`FEATURE_PORTED_CHANGE`]: the release that first stores a port.
 /// It never moves.
 pub const PORTED_CHANGE_REQUIRED_RDY: &str = "0.58.0";
+/// The first rdy that knows [`FEATURE_DEDUP_SPANS`] (D-1ER84): the release that first maps a
+/// repeated byte run.
+pub const DEDUP_SPANS_REQUIRED_RDY: &str = "0.59.0";
+/// The first rdy that knows `plan_delta` (D-3PNRK).
+pub const PLAN_DELTA_REQUIRED_RDY: &str = "0.59.0";
+/// The first rdy that knows [`FEATURE_PARTIAL_HISTORY`].
+pub const PARTIAL_HISTORY_REQUIRED_RDY: &str = "0.59.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -119,19 +126,38 @@ pub const FEATURE_HUB_CANON: &str = "hub_canon";
 /// A project's sync state (D-3RSCW): the first batch that writes a `meta/sync/` ref activates
 /// it, in that batch (`crate::sync_state`). No object turns it on, and no upgrade step writes it.
 pub const FEATURE_SYNC_STATE: &str = "sync_state";
+/// Deduplicated spans (D-1ER84): the store's span map (`crate::dedup`) may give the disk space
+/// of an exact repeated byte run back, so a raw segment read can hold a hole that only the map
+/// fills. A new store and a new holder list it from their first batch ([`baseline_features`]);
+/// in an older store, the optional upgrade step `dedup-spans-1` activates it
+/// (`crate::upgrade::dedup_spans_step`). No object turns it on.
+pub const FEATURE_DEDUP_SPANS: &str = "dedup_spans";
+/// Plan deltas (D-3PNRK): any PLAN frame of encoding 1 (`crate::codec::PLAN_DELTA_ENCODINGS`), a
+/// whole version or the difference from the version before it. The first committed batch that
+/// stores one activates it, a whole version-1 record too. A PLAN of encoding 0 never uses it.
+pub const FEATURE_PLAN_DELTA: &str = "plan_delta";
+/// A partial history (D-GGTYA, D-4PV25): a canon state (sync stream format 5) holds a tip's
+/// state and attachments, and names as prerequisites the frontier edges that a later history
+/// fetch brings. A canon state's header lists it, so its receiver reads those prerequisites by
+/// the state's link table. No record uses it and no new store writes it: a store lists it only
+/// when it takes a canon state, with the history ref that marks it incomplete.
+pub const FEATURE_PARTIAL_HISTORY: &str = "partial_history";
 
 /// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM; D-DZDB7;
-/// D-3RSCW; hub ports, D-RHYNQ), sorted by name. Each is `incompatible` and needs its own
-/// minimum ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 13] = [
+/// D-3RSCW; hub ports, D-RHYNQ; D-GGTYA), sorted by name. Each is `incompatible` and needs its
+/// own minimum ([`required_rdy`]).
+pub const REGISTERED_FEATURES: [&str; 16] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
+    FEATURE_DEDUP_SPANS,
     FEATURE_DISPUTE,
     FEATURE_FIGURE_DARK,
     FEATURE_FOREIGN_COPY,
     FEATURE_HUB_CANON,
     FEATURE_OBJECT_ENCODING,
+    FEATURE_PARTIAL_HISTORY,
+    FEATURE_PLAN_DELTA,
     FEATURE_PLAN_TENSION,
     FEATURE_PORTED_CHANGE,
     FEATURE_SNAPSHOT_DELTA,
@@ -143,7 +169,9 @@ pub const REGISTERED_FEATURES: [&str; 13] = [
 /// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`,
 /// [`SNAPSHOT_DELTA_REQUIRED_RDY`] for `snapshot_delta`, [`HUB_CANON_REQUIRED_RDY`] for
 /// `hub_canon`, [`SYNC_STATE_REQUIRED_RDY`] for `sync_state`, [`PORTED_CHANGE_REQUIRED_RDY`] for
-/// `ported_change`, [`FEATURE_REQUIRED_RDY`] for the seven of O11.
+/// `ported_change`, [`DEDUP_SPANS_REQUIRED_RDY`] for `dedup_spans`, [`PLAN_DELTA_REQUIRED_RDY`]
+/// for `plan_delta`, [`PARTIAL_HISTORY_REQUIRED_RDY`] for `partial_history`,
+/// [`FEATURE_REQUIRED_RDY`] for the seven of O11.
 pub fn required_rdy(name: &str) -> &'static str {
     match name {
         FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
@@ -152,6 +180,9 @@ pub fn required_rdy(name: &str) -> &'static str {
         FEATURE_HUB_CANON => HUB_CANON_REQUIRED_RDY,
         FEATURE_SYNC_STATE => SYNC_STATE_REQUIRED_RDY,
         FEATURE_PORTED_CHANGE => PORTED_CHANGE_REQUIRED_RDY,
+        FEATURE_DEDUP_SPANS => DEDUP_SPANS_REQUIRED_RDY,
+        FEATURE_PLAN_DELTA => PLAN_DELTA_REQUIRED_RDY,
+        FEATURE_PARTIAL_HISTORY => PARTIAL_HISTORY_REQUIRED_RDY,
         _ => FEATURE_REQUIRED_RDY,
     }
 }
@@ -287,6 +318,24 @@ pub fn valid_feature_name(name: &str) -> bool {
         && b[1..]
             .iter()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+/// Whether `id` is a valid upgrade step id: a feature name, or a versioned id — lowercase
+/// words joined by `-` that ends in `-` and a decimal version (`dedup-spans-1`). At most 64
+/// bytes.
+pub fn valid_step_id(id: &str) -> bool {
+    if valid_feature_name(id) {
+        return true;
+    }
+    if id.len() > 64 {
+        return false;
+    }
+    let Some((words, version)) = id.rsplit_once('-') else {
+        return false;
+    };
+    !version.is_empty()
+        && version.bytes().all(|c| c.is_ascii_digit())
+        && words.split('-').all(valid_feature_name)
 }
 
 /// The most bytes of a feature name.
@@ -967,14 +1016,16 @@ fn known_class(name: &str) -> Option<FeatureClass> {
     })
 }
 
-/// The features a new store and a new holder start with, in their first batch (D-8T7PA):
-/// content-2 identity, versioned encodings and snapshot deltas, which every store this rdy
-/// creates uses. A legacy load starts with [`legacy_baseline_features`] instead.
+/// The features a new store and a new holder start with, in their first batch (D-8T7PA,
+/// D-1ER84): content-2 identity, deduplicated spans, versioned encodings and snapshot deltas,
+/// which every store this rdy creates uses. A legacy load starts with
+/// [`legacy_baseline_features`] instead.
 pub fn baseline_features() -> StoreFeatures {
     StoreFeatures {
         manifest_version: 1,
         features: vec![
             registered(FEATURE_CONTENT_HASH_V2),
+            registered(FEATURE_DEDUP_SPANS),
             registered(FEATURE_OBJECT_ENCODING),
             registered(FEATURE_SNAPSHOT_DELTA),
         ],
@@ -1001,6 +1052,12 @@ pub fn legacy_baseline_features() -> StoreFeatures {
 pub(crate) fn creation_baseline() -> StoreFeatures {
     if legacy_writer() {
         legacy_baseline_features()
+    } else if crate::upgrade::registry_lacks_dedup_spans() {
+        // a test's own registry without the span step writes as the rdy before it did, so a
+        // frozen writer recipe keeps its bytes
+        let mut f = baseline_features();
+        f.features.retain(|f| f.name != FEATURE_DEDUP_SPANS);
+        f
     } else {
         baseline_features()
     }
@@ -1056,7 +1113,9 @@ pub fn registered_features() -> Vec<StoreFeature> {
 /// - `view_replay`: a CHANGE whose `links.replayed_from` is set;
 /// - `assessment`: an ASSESSMENT, or a LANDING whose `assessment` is set;
 /// - `plan_tension`: a PLAN with a sealed item of kind Tension or outcome Dismissed, or an answer
-///   with act Dismiss;
+///   with act Dismiss, in the frame itself (a whole version's answers, a delta's set answers; no
+///   predecessor is folded to find one);
+/// - `plan_delta`: any PLAN of encoding 1 (`crate::codec::PLAN_DELTA_ENCODINGS`), whole or delta;
 /// - `dispute`: a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or
 ///   ResolveDispute;
 /// - `check_request`: a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or
@@ -1075,11 +1134,34 @@ pub fn registered_features() -> Vec<StoreFeature> {
 ///
 /// A frame that does not split or decode uses nothing here: its own checks refuse it.
 pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
+    let Ok(o) = crate::codec::split(raw, payload) else {
+        return vec![];
+    };
+    // only the kinds whose features follow their value are decoded; a frame that does not
+    // decode uses what its encoding and kind alone use
+    let typed = matches!(
+        o.kind,
+        crate::kinds::BLOCK
+            | crate::kinds::CHANGE
+            | crate::kinds::PLAN
+            | crate::kinds::ANSWER
+            | crate::kinds::REVIEW
+    ) || (o.kind == crate::kinds::LANDING && o.version >= 1);
+    let value = typed
+        .then(|| crate::decoded_record::DecodedRecord::decode_split(&o).ok())
+        .flatten();
+    features_of(&o, value.as_ref())
+}
+
+/// [`required_features`] of split frame `o` whose typed value is `value` (None when it does not
+/// decode, or is not read): the value's rules read it, never the bytes again.
+pub(crate) fn features_of(
+    o: &crate::codec::ObjectBytes<'_>,
+    value: Option<&crate::decoded_record::DecodedRecord>,
+) -> Vec<StoreFeature> {
+    use crate::decoded_record::DecodedRecord;
     use crate::kinds;
     let mut out: Vec<StoreFeature> = vec![];
-    let Ok(o) = crate::codec::split(raw, payload) else {
-        return out;
-    };
     let mut add = |name: &str| {
         if !out.iter().any(|f| f.name == name) {
             out.push(registered(name));
@@ -1088,14 +1170,13 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
     if o.version >= 1 {
         add(FEATURE_OBJECT_ENCODING);
     }
-    fn typed<T: serde::de::DeserializeOwned + 'static>(
-        o: &crate::codec::ObjectBytes<'_>,
-    ) -> Option<T> {
-        crate::codec::decode_bounded_split(o).ok()
-    }
     // a kind's optional encoding is the foreign copy's alone, by its version
     if o.kind == kinds::FOREIGN || crate::codec::optional(o.kind) == Some(o.version) {
         add(FEATURE_FOREIGN_COPY);
+    }
+    // a plan delta encoding is the plan delta's, by its version, a whole version-1 plan too
+    if crate::codec::is_plan_delta_encoding(o.kind, o.version) {
+        add(FEATURE_PLAN_DELTA);
     }
     // a port encoding is the port's, by its version; a port with a foreign part needs both
     if crate::codec::is_port_encoding(o.kind, o.version) {
@@ -1106,57 +1187,59 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
         }
     }
     // a repo_link block, alone or in a change, turns the foreign copy on (D-2WY7Y); a change
-    // is decoded once, and an encoding-0 one has no carried field
+    // is read once, and an encoding-0 one has no carried field
     let repo_link = |b: &rdy_model::Block| b.block_type == REPO_LINK_TYPE;
-    match o.kind {
-        kinds::BLOCK => {
-            if let Some(b) = typed::<rdy_model::Block>(&o) {
-                if repo_link(&b) {
-                    add(FEATURE_FOREIGN_COPY);
-                }
-                if is_dark_figure(&b) {
-                    add(FEATURE_FIGURE_DARK);
-                }
+    match value {
+        Some(DecodedRecord::Block(b)) if o.kind == kinds::BLOCK => {
+            if repo_link(b) {
+                add(FEATURE_FOREIGN_COPY);
+            }
+            if is_dark_figure(b) {
+                add(FEATURE_FIGURE_DARK);
             }
         }
-        kinds::CHANGE => {
-            if let Some(c) = typed::<rdy_model::Change>(&o) {
-                let written = || {
-                    c.ops.iter().filter_map(|op| match op {
-                        rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } => {
-                            Some(block)
-                        }
-                        rdy_model::Op::Delete { .. } => None,
-                    })
-                };
-                if written().any(repo_link) {
-                    add(FEATURE_FOREIGN_COPY);
-                }
-                if written().any(is_dark_figure) {
-                    add(FEATURE_FIGURE_DARK);
-                }
-                if o.version >= 1 && c.links.replayed_from.is_some() {
-                    add(FEATURE_VIEW_REPLAY);
-                }
+        Some(DecodedRecord::Change(c)) if o.kind == kinds::CHANGE => {
+            let written = || {
+                c.ops.iter().filter_map(|op| match op {
+                    rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } => {
+                        Some(block)
+                    }
+                    rdy_model::Op::Delete { .. } => None,
+                })
+            };
+            if written().any(repo_link) {
+                add(FEATURE_FOREIGN_COPY);
+            }
+            if written().any(is_dark_figure) {
+                add(FEATURE_FIGURE_DARK);
+            }
+            if o.version >= 1 && c.links.replayed_from.is_some() {
+                add(FEATURE_VIEW_REPLAY);
             }
         }
         _ => {}
     }
     match o.kind {
         kinds::LANDING if o.version >= 1 => {
-            if typed::<rdy_model::LandingRecord>(&o).is_some_and(|l| l.assessment.is_some()) {
+            if matches!(value, Some(DecodedRecord::Landing(l)) if l.assessment.is_some()) {
                 add(FEATURE_ASSESSMENT);
             }
         }
         kinds::ASSESSMENT => add(FEATURE_ASSESSMENT),
         kinds::PLAN => {
             use rdy_model::plan::{PlanAct, PlanKind, PlanOutcome};
-            if let Ok(p) = crate::plan::decode_plan(o.body) {
+            // encoding 0 through its frozen reader, encoding 1 through its wire record: this
+            // frame only
+            if let Some(DecodedRecord::Plan(p)) = value {
                 let sealed =
-                    p.seal.iter().flat_map(|s| &s.items).any(|i| {
+                    p.seal().iter().flat_map(|s| &s.items).any(|i| {
                         i.kind == PlanKind::Tension || i.outcome == PlanOutcome::Dismissed
                     });
-                if sealed || p.answers.iter().any(|a| a.act == PlanAct::Dismiss) {
+                if sealed
+                    || p.explicit_answers()
+                        .iter()
+                        .any(|a| a.act == PlanAct::Dismiss)
+                {
                     add(FEATURE_PLAN_TENSION);
                 }
             }
@@ -1164,22 +1247,24 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
         kinds::DISPUTE | kinds::DISPUTE_RESOLUTION => add(FEATURE_DISPUTE),
         kinds::ANSWER => {
             use rdy_model::AnswerAct;
-            match typed::<rdy_model::Answer>(&o).map(|a| a.act) {
-                Some(AnswerAct::Dispute | AnswerAct::ResolveDispute) => add(FEATURE_DISPUTE),
-                Some(AnswerAct::AcceptVerdict) => add(FEATURE_CHECK_REQUEST),
-                _ => {}
+            if let Some(DecodedRecord::Answer(a)) = value {
+                match a.act {
+                    AnswerAct::Dispute | AnswerAct::ResolveDispute => add(FEATURE_DISPUTE),
+                    AnswerAct::AcceptVerdict => add(FEATURE_CHECK_REQUEST),
+                    _ => {}
+                }
             }
         }
         kinds::CHECK_REQUEST => add(FEATURE_CHECK_REQUEST),
         kinds::SNAPSHOT_DELTA => add(FEATURE_SNAPSHOT_DELTA),
         kinds::REVIEW => {
             use rdy_model::Verdict;
-            use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+            use rdy_model::review::ReviewSubjectV1;
             // the wire type reads every encoding of the kind (`crate::codec`)
-            if typed::<ReviewV1>(&o).is_some_and(|r| {
+            if matches!(value, Some(DecodedRecord::Review(r)) if
                 matches!(r.subject, ReviewSubjectV1::Check { .. })
-                    || matches!(r.verdict, Verdict::Pass | Verdict::Concern | Verdict::Fail)
-            }) {
+                    || matches!(r.verdict, Verdict::Pass | Verdict::Concern | Verdict::Fail))
+            {
                 add(FEATURE_CHECK_REQUEST);
             }
         }
@@ -1332,7 +1417,7 @@ impl UpgradeReceipt {
         }
         let mut seen = std::collections::BTreeSet::new();
         for s in &self.steps {
-            if !valid_feature_name(s) || !seen.insert(s.as_str()) {
+            if !valid_step_id(s) || !seen.insert(s.as_str()) {
                 return Err(format!("upgrade receipt step {} is not valid", clip(s)));
             }
         }

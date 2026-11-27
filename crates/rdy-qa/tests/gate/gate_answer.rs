@@ -187,7 +187,7 @@ fn di7_the_relay_table_holds_for_every_act() {
             );
             assert_eq!(
                 e.fix,
-                "drop the relay flags, or let the agent answer with its own RDY_ACTOR"
+                "if you are the person, drop the relay flags. If you relay for the person, set RDY_ACTOR=agent:<name> to your own actor and pass that actor in --relayed-by with the person's words in --evidence"
             );
         }
         // 3. an agent session with no evidence
@@ -706,7 +706,10 @@ fn di7_an_approval_with_an_open_exception_is_refused() {
         );
         assert_eq!(
             e.fix,
-            format!("answer each exception card first: {}", refs.join(", "))
+            format!(
+                "answer these exception cards first, in order: {}. Then relay the approval.",
+                refs.join(", ")
+            )
         );
         let cards: Vec<Value> = ex.iter().map(card_json).collect();
         assert_eq!(e.corrected, Some(json!({"exceptions": cards})));
@@ -1080,7 +1083,7 @@ fn di7_the_daemon_relay_texts_do_not_change() {
         approve(&human, json!({"relayed_by": ME, "evidence": "yes"})),
         E_PERMISSION,
         "a person approves as themselves; only the relaying agent records a relay",
-        "drop --relayed-by to approve yourself, or let the agent run rdy approve with RDY_ACTOR set to its actor",
+        "if you are the person, drop the relay flags. If you relay for the person, set RDY_ACTOR=agent:<name> to your own actor and pass that actor in --relayed-by with the person's words in --evidence",
     );
     check(
         approve(&human, json!({"evidence": "yes"})),

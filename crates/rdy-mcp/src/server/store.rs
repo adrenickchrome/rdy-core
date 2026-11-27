@@ -38,7 +38,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Free disk space used by removed payloads without changing the log. Set dry_run to true to report bytes without punching holes. Requires a writer session."
+        description = "Free disk space used by removed payloads and repeated byte runs. Set dry_run to true to report bytes without changing the store. Requires a writer session."
     )]
     async fn rdy_compact(&self, Parameters(p): Parameters<CompactParams>) -> CallToolResult {
         self.run("rdy_compact", p, tools::rdy_compact).await

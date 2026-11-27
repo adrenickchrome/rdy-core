@@ -4,6 +4,8 @@
 //! - `meta/sync/<remote>/view/<name>` holds [`SyncView`]: the heads of one synced view.
 //! - `meta/sync/<remote>/upload` holds [`SyncUpload`]: an upload whose write was not sent yet.
 //! - `meta/sync/<remote>/pending` holds [`SyncPending`]: a write that was sent and has no reply.
+//! - `meta/sync/<remote>/history` holds [`SyncHistory`]: the frontier of a canon state the
+//!   project took with no history (D-GGTYA, D-4PV25), and whether its history is complete.
 //!
 //! Each value is the postcard encoding of its closed struct, as the `meta/origin` value is, and
 //! at most [`MAX_VALUE_BYTES`] bytes. A value names the hub repo id and the remote's URL in
@@ -121,6 +123,26 @@ pub struct SyncPending {
     pub at_ms: i64,
 }
 
+/// The most records a history ref counts: the upload bound of one history.
+pub const MAX_HISTORY_RECORDS: u64 = 1_000_000;
+
+/// `meta/sync/<remote>/history`: the frontier of a canon state the project took with no history
+/// (D-GGTYA, D-4PV25). `frontier` is the captured canon root, a landing the store holds;
+/// `records` the exact number of distinct canon history keys listed at that frontier (at most
+/// [`MAX_HISTORY_RECORDS`]); `complete` whether every one of them is held. The ref is written
+/// twice only: with `complete` false by the state's take, then true by the history's
+/// completion ([`Store::complete_history`]). How many of the records are held is computed when
+/// it is read, never stored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncHistory {
+    pub repo_id: RepoId,
+    pub url: String,
+    pub frontier: Hash,
+    pub complete: bool,
+    pub records: u64,
+}
+
 /// One sync ref's name: its remote, and which ref of the remote it is.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SyncRefName {
@@ -128,6 +150,7 @@ pub enum SyncRefName {
     View { remote: String, name: String },
     Upload { remote: String },
     Pending { remote: String },
+    History { remote: String },
 }
 
 impl SyncRefName {
@@ -144,6 +167,7 @@ impl SyncRefName {
             "canon" => Some(SyncRefName::Canon { remote }),
             "upload" => Some(SyncRefName::Upload { remote }),
             "pending" => Some(SyncRefName::Pending { remote }),
+            "history" => Some(SyncRefName::History { remote }),
             _ => {
                 let view = rest.strip_prefix("view/")?;
                 is_view_name(view).then(|| SyncRefName::View {
@@ -160,7 +184,8 @@ impl SyncRefName {
             SyncRefName::Canon { remote }
             | SyncRefName::View { remote, .. }
             | SyncRefName::Upload { remote }
-            | SyncRefName::Pending { remote } => remote,
+            | SyncRefName::Pending { remote }
+            | SyncRefName::History { remote } => remote,
         }
     }
 
@@ -171,6 +196,7 @@ impl SyncRefName {
             SyncRefName::View { remote, name } => view_ref(remote, name),
             SyncRefName::Upload { remote } => upload_ref(remote),
             SyncRefName::Pending { remote } => pending_ref(remote),
+            SyncRefName::History { remote } => history_ref(remote),
         }
     }
 }
@@ -193,6 +219,11 @@ pub fn upload_ref(remote: &str) -> String {
 /// `meta/sync/<remote>/pending`.
 pub fn pending_ref(remote: &str) -> String {
     format!("{SYNC_REF}{remote}/pending")
+}
+
+/// `meta/sync/<remote>/history`.
+pub fn history_ref(remote: &str) -> String {
+    format!("{SYNC_REF}{remote}/history")
 }
 
 /// Whether `name` is a sync state ref name (any shape).
@@ -263,6 +294,7 @@ pub enum SyncValue {
     View(SyncView),
     Upload(SyncUpload),
     Pending(SyncPending),
+    History(SyncHistory),
 }
 
 impl SyncValue {
@@ -273,6 +305,7 @@ impl SyncValue {
             SyncValue::View(v) => encode(v),
             SyncValue::Upload(v) => encode(v),
             SyncValue::Pending(v) => encode(v),
+            SyncValue::History(v) => encode(v),
         }
     }
 
@@ -299,6 +332,7 @@ impl SyncValue {
                 let of = if p.kind == KIND_VIEW { op } else { landing };
                 p.expected.iter().chain([&p.head]).map(of).collect()
             }
+            SyncValue::History(h) => vec![landing(&h.frontier)],
         }
     }
 
@@ -309,6 +343,7 @@ impl SyncValue {
             SyncValue::View(v) => (&v.repo_id, &v.url),
             SyncValue::Upload(v) => (&v.repo_id, &v.url),
             SyncValue::Pending(v) => (&v.repo_id, &v.url),
+            SyncValue::History(v) => (&v.repo_id, &v.url),
         }
     }
 }
@@ -346,6 +381,7 @@ pub fn check_ref(name: &str, value: &[u8]) -> Result<Option<SyncValue>, String> 
         SyncRefName::View { .. } => SyncValue::View(decode(value).ok_or_else(bad)?),
         SyncRefName::Upload { .. } => SyncValue::Upload(decode(value).ok_or_else(bad)?),
         SyncRefName::Pending { .. } => SyncValue::Pending(decode(value).ok_or_else(bad)?),
+        SyncRefName::History { .. } => SyncValue::History(decode(value).ok_or_else(bad)?),
     };
     url_rule(v.identity().1).map_err(rule)?;
     match &v {
@@ -363,6 +399,11 @@ pub fn check_ref(name: &str, value: &[u8]) -> Result<Option<SyncValue>, String> 
             }
         }
         SyncValue::View(_) => {}
+        SyncValue::History(h) => {
+            if h.records > MAX_HISTORY_RECORDS {
+                return Err(rule("history records exceed 1000000"));
+            }
+        }
     }
     Ok(Some(v))
 }
@@ -552,6 +593,90 @@ impl StoreReader {
         Ok(out)
     }
 
+    /// `meta/sync/<remote>/history`, when it holds a value. Unlike the other sync reads, a value
+    /// that breaks its rules is an error, never None: a corrupt value, a repo other than the
+    /// store's, a store that does not list `partial_history`, or a frontier landing the store does
+    /// not hold is `StoreError::Decode` with fsck's text, so a damaged ref never reads as a
+    /// complete history.
+    pub fn sync_history(&self, remote: &str) -> Result<Option<SyncHistory>, StoreError> {
+        let name = history_ref(remote);
+        match self.get_ref(&name)? {
+            Some(v) if !v.is_empty() => self.checked_history(&name, &v).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// The incomplete history of the project, if any: at most one exists. Each history ref is
+    /// read as [`StoreReader::sync_history`] reads it; two incomplete ones are
+    /// `StoreError::Decode`.
+    pub fn partial_history(&self) -> Result<Option<SyncHistory>, StoreError> {
+        Ok(self.partial_history_named()?.map(|(_, h)| h))
+    }
+
+    /// [`StoreReader::partial_history`] with the remote whose ref holds it.
+    pub fn partial_history_named(&self) -> Result<Option<(String, SyncHistory)>, StoreError> {
+        Ok(self.histories()?.into_iter().find(|(_, h)| !h.complete))
+    }
+
+    /// Every history ref that holds a value, by remote, each read as
+    /// [`StoreReader::sync_history`] reads it; two incomplete ones are `StoreError::Decode`.
+    pub fn histories(&self) -> Result<Vec<(String, SyncHistory)>, StoreError> {
+        let mut out: Vec<(String, SyncHistory)> = Vec::new();
+        for (name, value) in self.refs_with_prefix(SYNC_REF)? {
+            let Some(SyncRefName::History { remote }) = SyncRefName::parse(&name) else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+            let h = self.checked_history(&name, &value)?;
+            if !h.complete
+                && let Some((other, _)) = out.iter().find(|(_, o)| !o.complete)
+            {
+                return Err(StoreError::Decode(format!(
+                    "ref {name}: the history from remote {other} is still arriving as well"
+                )));
+            }
+            out.push((remote, h));
+        }
+        Ok(out)
+    }
+
+    /// The frontier of the project's incomplete history, if any: where a walk of canon stops
+    /// ([`StoreReader::partial_history`]).
+    pub fn history_frontier(&self) -> Result<Option<Hash>, StoreError> {
+        if self.full_history {
+            return Ok(None);
+        }
+        Ok(self.partial_history()?.map(|h| h.frontier))
+    }
+
+    /// This reader in full-check mode: no incomplete history's frontier
+    /// ([`StoreReader::history_frontier`] is None), so every walk and check takes the whole
+    /// history with no partial-history exception, while the history ref is kept as it stands.
+    /// A completion checks a fully received history with it before it sets `complete`.
+    pub fn full_history_reader(&self) -> StoreReader {
+        let mut r = self.clone();
+        r.full_history = true;
+        r
+    }
+
+    /// Whether this is a full-check reader ([`StoreReader::full_history_reader`]).
+    pub fn is_full_history(&self) -> bool {
+        self.full_history
+    }
+
+    /// The history value `value` of ref `name`, with its store rules (see
+    /// [`StoreReader::sync_history`]).
+    fn checked_history(&self, name: &str, value: &[u8]) -> Result<SyncHistory, StoreError> {
+        let Some(SyncValue::History(h)) = check_ref(name, value).map_err(StoreError::Decode)?
+        else {
+            return Err(StoreError::Decode(format!("ref {name}: not a sync value")));
+        };
+        check_history_value(self, name, &h)?;
+        Ok(h)
+    }
+
     /// The remotes with sync state: each remote that has a sync ref holding a value.
     pub fn sync_remotes(&self) -> Result<Vec<String>, StoreError> {
         let mut out: Vec<String> = Vec::new();
@@ -626,6 +751,44 @@ impl StoreReader {
         }
         Ok(Some(out))
     }
+}
+
+/// The store rules of history value `h` of ref `name`: it names the store's repo, the store lists
+/// `partial_history`, and its frontier is a landing the store holds.
+fn check_history_value(
+    reader: &StoreReader,
+    name: &str,
+    h: &SyncHistory,
+) -> Result<(), StoreError> {
+    let repo = reader.repo_id()?;
+    if repo != Some(h.repo_id) {
+        return Err(StoreError::Decode(format!(
+            "ref {name}: names repo {}, which is not the project's",
+            h.repo_id
+        )));
+    }
+    if !reader
+        .store_features()?
+        .has(crate::format::FEATURE_PARTIAL_HISTORY)
+    {
+        return Err(StoreError::Decode(format!(
+            "ref {name}: the store does not list {}",
+            crate::format::FEATURE_PARTIAL_HISTORY
+        )));
+    }
+    if !reader.has_kind(kinds::LANDING, &h.frontier)? {
+        return Err(StoreError::Decode(format!(
+            "ref {name}: names landing {}, which the store does not hold",
+            h.frontier
+        )));
+    }
+    Ok(())
+}
+
+/// The fsck check of the history refs of a store: each one's store rules
+/// ([`StoreReader::sync_history`]), and at most one incomplete history.
+pub(crate) fn check_history_refs(reader: &StoreReader) -> Result<(), StoreError> {
+    reader.partial_history_named().map(|_| ())
 }
 
 /// The unsent table's walk past its bound.
@@ -732,6 +895,93 @@ impl Store {
         }
         let items = self.ref_items_pub(refs);
         self.write_sync_items(items)
+    }
+
+    /// Completes the history of remote `remote` (D-GGTYA): its history ref, incomplete, with
+    /// frontier `frontier`, is written again with `complete` true, in a sealed batch of its own,
+    /// while the store's redaction epoch is still `epoch`; then the derived state is rebuilt from
+    /// the log ([`Store::reindex`]), so the landing depths and canon rows cover the whole
+    /// history. The ref and `partial_history` stay. An absent or complete ref, another
+    /// frontier, or another epoch is refused, and nothing is written. The caller checks the
+    /// whole history first.
+    pub fn complete_history(
+        &mut self,
+        remote: &str,
+        frontier: Hash,
+        epoch: u64,
+    ) -> Result<(), StoreError> {
+        let items = self.completion_items(remote, frontier, epoch)?;
+        self.write_sync_items(items)?;
+        self.reindex()
+    }
+
+    /// [`Store::complete_history`]'s ref write in a held batch that stays open: the caller
+    /// seals it with what the completion makes visible (a project logs the tension moves of
+    /// the older landings as the batch's last frame), so the completed ref and those moves are
+    /// durable together or not at all. The index applies the ref at once: canon's rows cover
+    /// the whole history for every read before the seal. After the seal the caller rebuilds the
+    /// derived state ([`Store::reindex`]), as [`Store::complete_history`] does. The same
+    /// refusals, and one more: held batches must be on (`set_held`).
+    pub fn complete_history_held(
+        &mut self,
+        remote: &str,
+        frontier: Hash,
+        epoch: u64,
+    ) -> Result<(), StoreError> {
+        if !self.held() {
+            return Err(StoreError::Refused(
+                "a held history completion needs held batches on".into(),
+            ));
+        }
+        let items = self.completion_items(remote, frontier, epoch)?;
+        self.write_refs_as(items, RefWrite::Sync).map(|_| ())
+    }
+
+    /// The refusals of a history completion, then its one ref item: the history ref of
+    /// `remote` with `complete` true.
+    fn completion_items(
+        &mut self,
+        remote: &str,
+        frontier: Hash,
+        epoch: u64,
+    ) -> Result<Vec<(u8, Vec<u8>)>, StoreError> {
+        self.ensure_writable()?;
+        if self.mode()? == StoreMode::Holder {
+            return Err(StoreError::Refused(
+                "a holder store cannot write ref meta/sync/".into(),
+            ));
+        }
+        if !is_remote(remote) {
+            return Err(StoreError::Refused(format!(
+                "{remote:?} is not a remote name"
+            )));
+        }
+        if self.open_batch().is_some() {
+            return Err(batch_open("before a history completion"));
+        }
+        let Some(mut h) = self.reader().sync_history(remote)? else {
+            return Err(StoreError::Refused(format!(
+                "remote {remote} has no history to complete"
+            )));
+        };
+        if h.complete {
+            return Err(StoreError::Refused(format!(
+                "the history from remote {remote} is complete already"
+            )));
+        }
+        if h.frontier != frontier {
+            return Err(StoreError::Refused(format!(
+                "the history from remote {remote} has frontier {}, not {frontier}",
+                h.frontier
+            )));
+        }
+        if self.redaction_epoch() != epoch {
+            return Err(StoreError::Refused(
+                "the redaction epoch changed since the history was checked".into(),
+            ));
+        }
+        h.complete = true;
+        Ok(self.ref_items_pub(vec![(history_ref(remote), SyncValue::History(h).encode())]))
     }
 
     /// Writes ref `items` that may hold sync refs (a sync state batch, a clone's origin batch),

@@ -19,9 +19,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const REPORT_KEYS: [&str; 6] = [
+const REPORT_KEYS: [&str; 7] = [
     "log_bytes",
     "removed_bytes",
+    "deduplicated_bytes",
     "punched_bytes",
     "on_disk_bytes",
     "by_kind",
@@ -111,7 +112,7 @@ fn sorted<const N: usize>(mut names: [&'static str; N]) -> [&'static str; N] {
     names
 }
 
-/// A report has the six keys, and rows of four keys with ascending numeric kinds.
+/// A report has the seven keys, and rows of four keys with ascending numeric kinds.
 fn assert_shape(v: &Value) {
     assert_eq!(keys(v), sorted(REPORT_KEYS), "{v}");
     let rows = v["by_kind"].as_array().unwrap();
@@ -288,7 +289,7 @@ fn mh7_compact_role_and_input_guards_precede_io() {
     assert_eq!(e.message, "no session");
     assert_eq!(
         e.fix,
-        "state rdy/actor and rdy/run in _meta, or call rdy_session"
+        "state rdy/actor and rdy/run in _meta, or call rdy_session with your actor, run and role, then resend the call"
     );
     // a reader: refused with a dry run too
     let mut reader = McpState::new(engine.clone());
@@ -352,7 +353,7 @@ fn mh7_a_compact_through_the_wire_refuses_before_a_claim_and_a_reader() {
     c.alive();
 }
 
-const DESCRIPTION: &str = "Free disk space used by removed payloads without changing the log. Set dry_run to true to report bytes without punching holes. Requires a writer session.";
+const DESCRIPTION: &str = "Free disk space used by removed payloads and repeated byte runs. Set dry_run to true to report bytes without changing the store. Requires a writer session.";
 
 #[test]
 fn mh7_the_tool_is_listed_with_its_description_and_one_property() {
@@ -370,5 +371,124 @@ fn mh7_the_tool_is_listed_with_its_description_and_one_property() {
     assert_eq!(
         props["dry_run"]["description"],
         "true: report bytes without punching holes. Default false."
+    );
+}
+
+/// `n` bytes of text that repeat no 4,096-byte window, from `seed`.
+fn distinct_text(n: usize, seed: u64) -> String {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            char::from(b'a' + (x % 26) as u8)
+        })
+        .collect()
+}
+
+/// The store files of the project at `root`, by name: the segments and the span map.
+fn store_bytes(root: &Path) -> Vec<Vec<u8>> {
+    let store = root.join(".rdy/store");
+    let mut out = segments(root);
+    if let Ok(b) = std::fs::read(store.join(rdy_store::dedup::SPANMAP_FILE)) {
+        out.push(b);
+    }
+    out
+}
+
+/// r5902: the chat tool, the CLI (direct and through the daemon), status JSON, fsck JSON and the
+/// engine report the adapter returns share one deduplicated byte count. A dry run reports the
+/// candidates and changes no file; the real compact maps them, and a repeat maps nothing new.
+#[test]
+fn r5902_reports_match_across_surfaces() {
+    let s = Served::new();
+    s.stop();
+    {
+        let mut r = Rdy::open(s.dir.path()).unwrap();
+        write(
+            &mut r,
+            "work",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": distinct_text(40_000, 3)}
+            ]),
+        )
+        .unwrap();
+        r.close().unwrap();
+    }
+    // a child's first open records its own batches: let each client open once first
+    let mut c = McpClient::start(s.dir.path());
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:qa", "run": "qa", "role": "writer"}),
+    )
+    .ok();
+    let chat_dry = c.call("rdy_compact", json!({"dry_run": true})).ok();
+    drop(c);
+    let before = store_bytes(s.dir.path());
+    let (ok, cli_dry) = s.json(&["--json", "--no-daemon", "compact", "--dry-run"]);
+    assert!(ok, "{cli_dry}");
+    let dry = cli_dry["deduplicated_bytes"].as_u64().unwrap();
+    assert!(dry >= 4096, "{cli_dry}");
+    assert_eq!(
+        chat_dry["deduplicated_bytes"],
+        cli_dry["deduplicated_bytes"]
+    );
+    let (ok, daemon_dry) = s.json(&["--json", "compact", "--dry-run"]);
+    assert!(ok, "{daemon_dry}");
+    s.stop();
+    assert_eq!(
+        daemon_dry["deduplicated_bytes"],
+        cli_dry["deduplicated_bytes"]
+    );
+    assert_eq!(
+        store_bytes(s.dir.path()),
+        before,
+        "a dry run changes no file"
+    );
+    // status and fsck count only existing mappings: none yet
+    let (ok, status) = s.json(&["--json", "--no-daemon", "status"]);
+    assert!(ok, "{status}");
+    assert_eq!(status["deduplicated_bytes"], 0);
+
+    // the real compact maps what the dry run counted
+    let (ok, real) = s.json(&["--json", "--no-daemon", "compact"]);
+    assert!(ok, "{real}");
+    assert_eq!(real["deduplicated_bytes"].as_u64(), Some(dry));
+    let (ok, status) = s.json(&["--json", "--no-daemon", "status"]);
+    assert!(ok, "{status}");
+    let (ok, fsck) = s.json(&["--json", "--no-daemon", "fsck"]);
+    assert!(ok, "{fsck}");
+    let engine = {
+        let r = Rdy::open(s.dir.path()).unwrap();
+        let v = r.store().log_bytes().unwrap().deduplicated_bytes;
+        r.close().unwrap();
+        v
+    };
+    let mut c = McpClient::start(s.dir.path());
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:qa", "run": "qa", "role": "writer"}),
+    )
+    .ok();
+    let chat = c.call("rdy_compact", json!({"dry_run": true})).ok();
+    drop(c);
+    for (what, v) in [
+        ("status", &status),
+        ("fsck", &fsck),
+        ("chat dry run after", &chat),
+    ] {
+        assert_eq!(v["deduplicated_bytes"].as_u64(), Some(dry), "{what}: {v}");
+    }
+    assert_eq!(engine, dry, "the engine report the adapter returns");
+    // a repeat maps nothing new and adds no map row
+    let map_before = std::fs::read(s.dir.path().join(".rdy/store/SPANMAP")).unwrap();
+    let (ok, again) = s.json(&["--json", "--no-daemon", "compact"]);
+    assert!(ok, "{again}");
+    assert_eq!(again["deduplicated_bytes"].as_u64(), Some(dry));
+    assert_eq!(
+        std::fs::read(s.dir.path().join(".rdy/store/SPANMAP")).unwrap(),
+        map_before
     );
 }

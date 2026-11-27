@@ -556,7 +556,10 @@ fn cp16_moved_card_returns_fresh_card_before_writing() {
             e.message,
             format!("{} changed since it was shown", shown.r#ref)
         );
-        assert_eq!(e.fix, "show the person the fresh card and ask again");
+        assert_eq!(
+            e.fix,
+            "when corrected holds the fresh card and its facts and Exceptions match the card the person saw, relay the same words once with its card_hash; otherwise show the person the fresh card and ask again. Read rdy_pending again before you answer the next card"
+        );
         assert_eq!(e.corrected, Some(card_json(&fresh)));
         assert_eq!(log_end(&r), end, "zero new frames");
         assert!(internal_views(&r).is_empty());

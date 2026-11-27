@@ -295,12 +295,15 @@ fn rpl33_release_one_store_opens_without_rekey() {
     let store = root.join(".rdy/store");
     let files = bytes_under(&store);
 
-    // the dry run plans the snapshot-delta step and writes nothing
+    // the dry run plans the snapshot-delta step, then span maps' step, and writes nothing
     let plan = rdy_engine::maintenance::run(&root, true).unwrap();
     assert!(plan.dry_run && !plan.changed, "{plan:?}");
     assert_eq!(
         plan.steps,
-        [rdy_store::format::FEATURE_SNAPSHOT_DELTA],
+        [
+            rdy_store::format::FEATURE_SNAPSHOT_DELTA,
+            rdy_store::upgrade::DEDUP_SPANS_STEP
+        ],
         "{plan:?}"
     );
     assert_eq!(serde_json::to_value(&plan.from).unwrap(), *manifest);
@@ -331,7 +334,8 @@ fn rpl33_release_one_store_opens_without_rekey() {
         }
     }
     let mut extra: Vec<&String> = after.keys().filter(|f| !files.contains_key(*f)).collect();
-    extra.retain(|f| !f.starts_with("index.redb"));
+    // the index and span maps' journal, which the upgrade's map pass writes, are no log
+    extra.retain(|f| !f.starts_with("index.redb") && f.as_str() != rdy_store::dedup::SPANMAP_FILE);
     assert!(extra.is_empty(), "the open wrote {extra:?}");
 }
 

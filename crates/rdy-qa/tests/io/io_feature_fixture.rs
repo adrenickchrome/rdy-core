@@ -495,7 +495,18 @@ struct FirstUse {
 /// receiver; their own tests are `scc2_` in the store area. `ported_change` (D-RHYNQ, D-PKC71,
 /// hub ports Task 5), the first port or the residue of one activates it: the dump pair
 /// `v4-f1-e1-ported-change` and the native store `store/ported-change-1`, whose own tests are
-/// `hpt5_` in the release area.
+/// `hpt5_` in the release area. `dedup_spans` (D-1ER84), the second feature a new store writes
+/// from its first batch that a complete set does not hold: the dump pair `v4-f1-dedup-spans`
+/// and the native store `store/dedup-spans-1` with its span map, whose own tests are `r5902_` in
+/// the io area. `plan_delta` (D-3PNRK), any PLAN of encoding 1 activates it: the dump pair
+/// `v4-f1-reduction`, the dump chain `v4-f1-reduction-chain`, the sync pair `sync4-reduction`
+/// and the native store `store/reduction-1`, whose own tests are `r5906_` in the io and release
+/// areas. `partial_history` (D-GGTYA, D-4PV25), the canon state of format 5 lists it: the sync
+/// pair `sync5-canon-state`, the state of the frozen `sync4-canon-history` root, whose own tests
+/// are `r59017_` in the sync areas, and the native store `store/partial-history-1`, the store
+/// that took it, whose own tests are `r59018_` in the io area. Its expect file's `receiver_features` is the state stream's
+/// header manifest, the manifest a receiver is expected to hold after its take; it is expected
+/// only until the take of a canon state checks it.
 const FIRST_USE: &[FirstUse] = &[
     FirstUse {
         name: "foreign_copy",
@@ -610,7 +621,95 @@ const FIRST_USE: &[FirstUse] = &[
         native: None,
         baseline: false,
     },
+    FirstUse {
+        name: "dedup_spans",
+        dump: &[
+            (
+                "v4-f1-dedup-spans.rdydump",
+                "25ca2264bb1dfaab5f795818d751e33ed5072a8c26b712b0a36739d99cfe19cf",
+            ),
+            (
+                "v4-f1-dedup-spans.expect.json",
+                "cf7643c1e2ad43fbbfcb03c28e25295b816c55842e8abad33b7ce2aaebb50440",
+            ),
+        ],
+        sync: &[],
+        native: Some("fixtures/store/dedup-spans-1/expect.json"),
+        baseline: true,
+    },
+    FirstUse {
+        name: "plan_delta",
+        dump: &[
+            (
+                "v4-f1-reduction.rdydump",
+                "f28b47c0aa917a437595414764d28c63da0555b7c5b48a1f3bbf27a2dc7a7f5e",
+            ),
+            (
+                "v4-f1-reduction.expect.json",
+                "a9f8cb83c0cf518679f0ad2d1dbef4fbb16d39669f73dc72587393ede0c45e39",
+            ),
+            (
+                "v4-f1-reduction-chain-full.rdydump",
+                "df6e09b996a596d872c0182a3473774ce982536a05153e8228ccecfd4f5d899c",
+            ),
+            (
+                "v4-f1-reduction-chain-1.rdydump",
+                "c6af8dfeeaf50d172551a22812d372bb7c0cc044642253918fa70ceb87cc78af",
+            ),
+            (
+                "v4-f1-reduction-chain-2.rdydump",
+                "6738a89812341f7a45c8c3b1fe825ef4ef0ce3bca7ae3b91628c1182af897cfd",
+            ),
+            (
+                "v4-f1-reduction-chain.expect.json",
+                "c8c3e52e9affa20779591bac9b1eb1497002b60152e6f7eff688efcc80adbe8c",
+            ),
+        ],
+        sync: &[
+            (
+                "sync4-reduction.bin",
+                "88826bbea0c7eba4df575915fec0b4cebd19ee840fdedfa1306a1e7712983b07",
+            ),
+            (
+                "sync4-reduction.expect.json",
+                "2d796533cf09c0faede758f5b41dfd6e3c49467953cb0f3d5ac72e1b1295c8ea",
+            ),
+        ],
+        native: Some("fixtures/store/reduction-1/expect.json"),
+        baseline: false,
+    },
+    FirstUse {
+        name: "partial_history",
+        dump: &[],
+        sync: &[
+            (
+                "sync5-canon-state.expect.json",
+                "4ab5dea998333f1ae3426497d7c055ecc097dbca19dc632691a0e7f07831784c",
+            ),
+            (
+                "sync5-canon-state.bin",
+                "bdd142ebcf05c1d9ad83303718f45bf199f545cffa4f60caf961c654f8d5b8af",
+            ),
+        ],
+        native: Some("fixtures/store/partial-history-1/expect.json"),
+        baseline: false,
+    },
 ];
+
+/// The written formats `now` as the baseline first-use fixture at position `at` of
+/// [`FIRST_USE`] recorded them: `now` less each later baseline feature, which a new store
+/// started writing after that fixture was frozen. The registry is append-only, so each frozen
+/// expect file keeps the baseline of its own time.
+fn first_use_formats(now: &Value, at: usize) -> Value {
+    let mut v = now.clone();
+    let features = v["features"]["features"].as_array_mut().unwrap();
+    features.retain(|f| {
+        !FIRST_USE[at + 1..]
+            .iter()
+            .any(|u| u.baseline && f["name"] == json!(u.name))
+    });
+    v
+}
 
 /// The formats the complete sets pin for the written formats `now`: `now` less each
 /// [`FIRST_USE`] feature a new store writes from its first batch. Each of those is frozen in
@@ -643,7 +742,7 @@ fn first_use_members() -> Vec<&'static str> {
 fn all_features() -> StoreFeatures {
     let registered = registered_features();
     let mut covered: Vec<String> = vec![];
-    for f in FIRST_USE {
+    for (at, f) in FIRST_USE.iter().enumerate() {
         let reg = registered
             .iter()
             .find(|r| r.name == f.name)
@@ -668,7 +767,7 @@ fn all_features() -> StoreFeatures {
             assert_eq!(Hash::of(&bytes).to_string(), *digest, "{name}");
         }
         if f.baseline {
-            let now = chain_fixture::current_formats();
+            let now = first_use_formats(&chain_fixture::current_formats(), at);
             for (name, _) in f.dump.iter().filter(|(n, _)| n.ends_with(".expect.json")) {
                 assert_eq!(read_expect(name)["formats"], now, "{name}");
             }
@@ -707,7 +806,16 @@ fn all_features() -> StoreFeatures {
                 &std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap(),
             )
             .unwrap();
-            assert_eq!(native["store"]["manifest"], manifest, "{path}");
+            // a feature only a sync pair freezes records the receiver's expected manifest,
+            // which the store that took it holds with the features its own writer adds
+            if f.dump.is_empty() {
+                let held = native["store"]["manifest"]["features"].as_array().unwrap();
+                for g in features {
+                    assert!(held.contains(g), "{path}: its manifest holds {g}");
+                }
+            } else {
+                assert_eq!(native["store"]["manifest"], manifest, "{path}");
+            }
         }
         for g in features {
             let name = g["name"].as_str().unwrap().to_string();

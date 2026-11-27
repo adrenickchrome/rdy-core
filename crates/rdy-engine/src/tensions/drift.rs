@@ -28,7 +28,6 @@ use super::{DetectCx, DetectScope, Detector, Found, TensionKind, Write};
 use crate::RdyError;
 use rdy_model::{Block, BlockId, Hash, decision};
 use rdy_schema::{Pack, Trait};
-use rdy_store::segment::Location;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -44,7 +43,7 @@ pub struct RestatementDrift;
 
 /// Where the log holds a landing: canon's order, never the clock (POST-LAUNCH 43); `None`
 /// sorts before every landing.
-type LandedAt = Option<Location>;
+type LandedAt = Option<crate::history::LandingOrder>;
 
 /// A body as drift reads it: its word count and its shingles, sorted, each once.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -708,7 +707,10 @@ impl RestatementDrift {
             if cx.landing_writes(&b.id) && before.get(&b.id).is_none() {
                 continue;
             }
-            let s = steps.current(&b.id)?;
+            // a block last written behind an incomplete history's frontier has no steps here
+            let Some(s) = steps.current(&b.id)? else {
+                continue;
+            };
             let (c, step) = (s.0, &s.1);
             if text_of_len(&b.body) >= DRIFT_MIN_WORDS {
                 landings.push(step.landed_at);

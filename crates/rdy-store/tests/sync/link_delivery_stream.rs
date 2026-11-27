@@ -213,7 +213,9 @@ fn rpl6_delivery_has_one_header_manifest_and_trailer() {
     assert_eq!(StreamPurpose::of(1), Some(StreamPurpose::LinkDelivery));
     // bytes 2 and 3 are the format-4 histories since Sync client A Task 2 (D-KE83X)
     assert_eq!(StreamPurpose::of(2), Some(StreamPurpose::CanonHistory));
-    assert_eq!(StreamPurpose::of(4), None);
+    // byte 4 is the format-5 canon state since D-GGTYA
+    assert_eq!(StreamPurpose::of(4), Some(StreamPurpose::CanonState));
+    assert_eq!(StreamPurpose::of(5), None);
     assert_eq!(rec::DELIVERY, 0xF4);
     let records = vec![present(&a), present(&b)];
     let bytes = write(&h, &d, &records);
@@ -748,10 +750,11 @@ fn rpl6_old_sync_fixtures_still_read() {
         ("E_STORE_FORMAT", "sync batch format 1 is not supported")
     );
     let root = Hash([9; 32]);
-    // format 4 is read since Sync client A Task 2 (D-KE83X), so format 5 is the unknown one
-    let five = craft(5, &header_payload(0, root, &[]), &[]);
+    // format 4 is read since the canon and view histories (D-KE83X) and format 5 since canon
+    // states (D-GGTYA), so format 6 is the unknown one
+    let six = craft(6, &header_payload(0, root, &[]), &[]);
     assert_eq!(
-        refusal(check_batch(&five[..]).unwrap_err()),
+        refusal(check_batch(&six[..]).unwrap_err()),
         bad(0, 8, "invalid header")
     );
     // format 2 knows only tag_history, as the released reader does

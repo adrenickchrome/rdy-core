@@ -193,7 +193,7 @@ fn scc2_format4_roots_and_old_formats_are_exact() {
         "a tag history is still written in format 2"
     );
     assert_eq!(HISTORY_FORMAT, 4);
-    assert_eq!(READ_FORMATS, [2, 3, 4]);
+    assert_eq!(READ_FORMATS, [2, 3, 4, 5]);
     for (byte, purpose, name, first, root) in [
         (0, StreamPurpose::TagHistory, "tag_history", 2, kinds::TAG),
         (
@@ -226,7 +226,8 @@ fn scc2_format4_roots_and_old_formats_are_exact() {
             assert_eq!(purpose.root_kind(), root, "{name}");
         }
     }
-    assert_eq!(StreamPurpose::of(4), None);
+    // byte 4 is the format-5 canon state (D-GGTYA)
+    assert_eq!(StreamPurpose::of(5), None);
 
     let (_d, _p, s, [l1, _, l3]) = history();
     let reader = s.reader();
@@ -301,7 +302,7 @@ fn scc2_format4_roots_and_old_formats_are_exact() {
     );
     // a format no rdy reads is a bad header
     assert_eq!(
-        check_batch(&with_format(&canon, 5)[..]).unwrap_err().code,
+        check_batch(&with_format(&canon, 6)[..]).unwrap_err().code,
         "E_BAD_RECORD"
     );
     // the frozen fixtures read as they were written
@@ -563,7 +564,8 @@ fn scc2_upload_features_are_needed_features_only() {
     assert_eq!(again.features, header.features);
     // the upload's minimum is its needs', not the store's
     assert_eq!(header.features.min_rdy(), Some(RdyVersion(0, 52, 0)));
-    assert_eq!(store.min_rdy(), Some(RdyVersion(0, 53, 0)));
+    // the store's own minimum is its baseline's newest: span maps' dedup_spans (0.59.0, was 0.53.0)
+    assert_eq!(store.min_rdy(), Some(RdyVersion(0, 59, 0)));
     // a tag history still names the source store's whole manifest
     drop(reader);
     let t = s
@@ -619,10 +621,10 @@ fn scc2_minimum_ignores_compatible_and_compares_numeric_versions() {
     assert_eq!(RdyVersion::parse("0.53.0"), Some(RdyVersion(0, 53, 0)));
     assert_eq!(RdyVersion::parse("0.53"), None);
     assert_eq!(RdyVersion::parse("v0.53.0"), None);
-    // a new store's own minimum: its baseline features
+    // a new store's own minimum: its baseline features, span maps' dedup_spans the newest
     let d = tempfile::tempdir().unwrap();
     let s = Store::create(&d.path().join("p")).unwrap();
-    assert_eq!(s.features().min_rdy(), Some(RdyVersion(0, 52, 0)));
+    assert_eq!(s.features().min_rdy(), Some(RdyVersion(0, 59, 0)));
 }
 
 /// `bytes` as one batch file.

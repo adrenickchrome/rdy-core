@@ -114,7 +114,8 @@ pub fn on_punch(backend: Option<PunchBackend>) {
 }
 
 /// Gives the bytes at `offset..offset + len` of `file`, which must be open for writing and hold
-/// zeros there, back to the file system. The file's length and every byte that a read returns
+/// zeros there (a durable removal), or be a target range of a durable span map row whose
+/// readers' lock the caller holds (D-1ER84), back to the file system. The file's length and every byte that a read returns
 /// stay as they are. A range that overflows or ends past the file is `InvalidInput` and makes no
 /// call; a zero length makes no call and succeeds. On macOS only the range's aligned interior is
 /// punched, so a span with no aligned interior makes no call. A file system that cannot punch is
@@ -137,6 +138,48 @@ pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
         None => unix::platform_punch(file, offset, len),
         #[cfg(windows)]
         None => windows::platform_punch(file, offset, len),
+    }
+}
+
+/// A test backend of [`dedup_alignment`]: its answer replaces the platform query. None lets
+/// the platform query run.
+#[doc(hidden)]
+pub type AlignmentBackend = Box<dyn FnMut() -> Option<io::Result<Option<u64>>>>;
+
+thread_local! {
+    static ALIGNMENT_BACKEND: std::cell::RefCell<Option<AlignmentBackend>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: every [`dedup_alignment`] on this thread calls `backend`. None removes it.
+#[doc(hidden)]
+pub fn on_dedup_alignment(backend: Option<AlignmentBackend>) {
+    ALIGNMENT_BACKEND.with(|b| *b.borrow_mut() = backend);
+}
+
+/// The alignment of a mapped byte run in `file` (D-1ER84): one whole file system block. Unix is
+/// 4,096 bytes; Windows is the target volume's NTFS cluster size. None when the file system
+/// cannot report a supported alignment: nothing of that file is mapped. A zero or overflowing
+/// answer is `InvalidData`.
+pub fn dedup_alignment(file: &File) -> io::Result<Option<u64>> {
+    let injected = ALIGNMENT_BACKEND.with(|b| b.borrow_mut().as_mut().and_then(|f| f()));
+    let answer = match injected {
+        Some(answer) => answer?,
+        #[cfg(unix)]
+        None => unix::platform_alignment(file)?,
+        #[cfg(windows)]
+        None => windows::platform_alignment(file)?,
+    };
+    match answer {
+        Some(0) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the file system reports a zero block size",
+        )),
+        Some(a) if i64::try_from(a).is_err() => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the file system reports a block size that overflows",
+        )),
+        other => Ok(other),
     }
 }
 

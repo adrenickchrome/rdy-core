@@ -153,6 +153,52 @@ pub(in crate::pio) fn platform_punch(file: &File, offset: u64, len: u64) -> io::
     )
 }
 
+/// The layout of `FILE_FS_SIZE_INFORMATION` (ntifs.h), the answer of a
+/// `FileFsSizeInformation` volume query.
+#[repr(C)]
+#[allow(non_snake_case)]
+#[derive(Default)]
+struct FsSizeInformation {
+    TotalAllocationUnits: i64,
+    AvailableAllocationUnits: i64,
+    SectorsPerAllocationUnit: u32,
+    BytesPerSector: u32,
+}
+
+/// The cluster size of the volume that holds `file`: its sectors per allocation unit times its
+/// bytes per sector, from one volume query of the file's own handle. None when the volume does
+/// not answer the query; a product that overflows is `InvalidData`.
+#[allow(unsafe_code)]
+pub(in crate::pio) fn platform_alignment(file: &File) -> io::Result<Option<u64>> {
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileFsSizeInformation, NtQueryVolumeInformationFile,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+    let mut info = FsSizeInformation::default();
+    // SAFETY: an all-zero IO_STATUS_BLOCK is a valid value of the plain C struct
+    let mut status: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+    let size = u32::try_from(size_of::<FsSizeInformation>()).map_err(io::Error::other)?;
+    // SAFETY: the handle is open for as long as `file` is borrowed; the output buffer is a live
+    // FsSizeInformation of `size` bytes and the status block a live IO_STATUS_BLOCK; the call
+    // is synchronous on a handle not opened for overlapped I/O.
+    let rc = unsafe {
+        NtQueryVolumeInformationFile(
+            file.as_raw_handle(),
+            &mut status,
+            std::ptr::from_mut(&mut info).cast(),
+            size,
+            FileFsSizeInformation,
+        )
+    };
+    if rc < 0 {
+        return Ok(None);
+    }
+    let cluster = u64::from(info.SectorsPerAllocationUnit)
+        .checked_mul(u64::from(info.BytesPerSector))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cluster size overflows"))?;
+    Ok(Some(cluster))
+}
+
 /// A punch from its two steps: no zero-data request before the file is sparse, since on a file
 /// that is not sparse that request writes zeros and frees nothing.
 fn punch_with(

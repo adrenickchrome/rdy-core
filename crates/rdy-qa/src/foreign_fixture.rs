@@ -430,6 +430,22 @@ pub fn store_facts(r: &Rdy) -> Value {
 /// merged into the recorded one, and the upgrade receipt). Every other count grows by that
 /// batch alone.
 pub fn assert_upgraded_facts(r: &Rdy, want: &Value, what: &str) {
+    upgrade_tail(r, want, what, true)
+}
+
+/// The store facts `want` ([`store_facts`] of a store frozen before span maps, with snapshot
+/// deltas) against `r`, the same store after this rdy's writer open ran the `dedup-spans-1` step:
+/// the source log up to its recorded end reads as recorded, and the one upgrade batch after it
+/// holds only ref moves (the manifest, with `dedup_spans` merged into the recorded one, and the
+/// upgrade receipt). Every other count grows by that batch alone; the map itself is no log
+/// record.
+pub fn assert_span_mapped_facts(r: &Rdy, want: &Value, what: &str) {
+    upgrade_tail(r, want, what, false)
+}
+
+/// [`assert_upgraded_facts`] (`deltas`: the tail holds a delta of each landing and merges the
+/// load conversion's features) or [`assert_span_mapped_facts`] (no delta; `dedup_spans` alone).
+fn upgrade_tail(r: &Rdy, want: &Value, what: &str, with_deltas: bool) {
     use rdy_store::format::StoreFeatures;
     let end = Location {
         segment: want["log_end"][0].as_u64().unwrap() as u32,
@@ -470,24 +486,35 @@ pub fn assert_upgraded_facts(r: &Rdy, want: &Value, what: &str) {
         .unwrap();
     assert!(other.is_empty(), "{what}: the upgrade adds {other:?}");
     assert_eq!(markers, 1, "{what}: one upgrade batch");
-    let landings = r.store().reader().project_landings().unwrap();
-    assert_eq!(
-        deltas,
-        landings.len() as u64,
-        "{what}: one delta per landing"
-    );
-    for (l, _) in &landings {
-        assert!(
-            r.store().reader().snapshot_delta_of(l).unwrap().is_some(),
-            "{what}: landing {l} has its delta"
+    if with_deltas {
+        let landings = r.store().reader().project_landings().unwrap();
+        assert_eq!(
+            deltas,
+            landings.len() as u64,
+            "{what}: one delta per landing"
         );
+        for (l, _) in &landings {
+            assert!(
+                r.store().reader().snapshot_delta_of(l).unwrap().is_some(),
+                "{what}: landing {l} has its delta"
+            );
+        }
+    } else {
+        assert_eq!(deltas, 0, "{what}: span maps alone add no delta");
     }
-    let conv = crate::chain_fixture::conversion_features();
+    let conv = if with_deltas {
+        crate::chain_fixture::conversion_features()
+    } else {
+        rdy_store::format::registered_features()
+            .into_iter()
+            .filter(|f| f.name == rdy_store::format::FEATURE_DEDUP_SPANS)
+            .collect()
+    };
     let source: StoreFeatures = serde_json::from_value(want["manifest"].clone()).unwrap();
     assert_eq!(
         got["manifest"],
         json!(source.merged(&conv)),
-        "{what}: the manifest with snapshot_delta"
+        "{what}: the manifest with the step's features"
     );
     // the counts: the batch's frames and its marker
     let added = deltas + refs;
@@ -506,7 +533,9 @@ pub fn assert_upgraded_facts(r: &Rdy, want: &Value, what: &str) {
     let mut objects = want["objects"].clone();
     let r8 = kinds::REF_UPDATE.to_string();
     objects[&r8] = json!(n(&objects[&r8]) + refs);
-    objects[&raw] = json!(deltas);
+    if with_deltas {
+        objects[&raw] = json!(deltas);
+    }
     assert_eq!(got["objects"], objects, "{what}: objects");
     let mut fsck = want["fsck"].clone();
     for member in ["frames", "checked_payloads"] {
@@ -796,6 +825,16 @@ pub fn dump_load_facts(p: &Path, to: &Path) -> Value {
 /// foreign copy read as recorded, and the store reads as recorded in its source prefix, then
 /// holds the one upgrade tail of the load ([`assert_upgraded_facts`], SD1 Task 6).
 pub fn assert_upgraded_dump_load(p: &Path, to: &Path, want: &Value, what: &str) {
+    dump_load_tail(p, to, want, what, true)
+}
+
+/// [`assert_upgraded_dump_load`] for a dump frozen after snapshot deltas and before span maps:
+/// the load's one tail holds only the manifest with `dedup_spans` ([`assert_span_mapped_facts`]).
+pub fn assert_span_mapped_dump_load(p: &Path, to: &Path, want: &Value, what: &str) {
+    dump_load_tail(p, to, want, what, false)
+}
+
+fn dump_load_tail(p: &Path, to: &Path, want: &Value, what: &str, with_deltas: bool) {
     let s = rdy_engine::load::load(p, to).unwrap_or_else(|e| panic!("{what}: load: {e:?}"));
     let mut r = Rdy::open(to).unwrap();
     r.reindex().unwrap();
@@ -817,7 +856,7 @@ pub fn assert_upgraded_dump_load(p: &Path, to: &Path, want: &Value, what: &str) 
         want["foreign"],
         "{what}: the foreign copy"
     );
-    assert_upgraded_facts(&r, &want["store"], what);
+    upgrade_tail(&r, &want["store"], what, with_deltas);
     r.close().unwrap();
 }
 

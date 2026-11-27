@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 
-const NO_SESSION_FIX: &str = "state rdy/actor and rdy/run in _meta, or call rdy_session";
+const NO_SESSION_FIX: &str = "state rdy/actor and rdy/run in _meta, or call rdy_session with your actor, run and role, then resend the call";
 const HTTP_MISMATCH: &str = "rdy_session and _meta name different actors or runs";
 const HTTP_MISMATCH_FIX: &str = "use the same actor and run in rdy_session and _meta";
 

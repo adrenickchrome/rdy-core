@@ -96,6 +96,15 @@ pub(crate) trait Records {
     fn held_delta_of(&mut self, _landing: &Hash) -> Result<Option<Hash>, StreamError> {
         Ok(None)
     }
+    /// The keys of the holder's records of the [`ATTACHING_KINDS`] that are not incoming, when
+    /// the holder's history is incomplete (D-4PV25): a canon state's attachments of its root
+    /// (the root's sealed plan, its tags, answers, signatures and carried shapes) are held, and
+    /// their frontier edges lead into the incoming history, so the closure walk attaches them
+    /// as it attaches incoming ones. Empty for a source with no holder, and for a holder with
+    /// its whole history, which holds the closure of every record it holds.
+    fn held_attachments(&mut self) -> Result<Vec<ObjectKey>, StreamError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The forward links of one record, under the features of the stream or store that holds it:
@@ -146,6 +155,28 @@ pub(crate) fn typed<T: serde::de::DeserializeOwned + 'static>(
             .map(Some)
             .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key))),
         None => Ok(None),
+    }
+}
+
+/// The seal of the PLAN record `key` of `source`, from its own frame (a whole version or a
+/// delta): None when it is absent, removed or seals nothing.
+fn plan_seal_of(
+    source: &mut dyn ObjectSource,
+    key: ObjectKey,
+) -> Result<Option<rdy_model::plan::PlanSeal>, StreamError> {
+    let Some(StreamRecord::Present {
+        key,
+        encoding,
+        payload,
+        ..
+    }) = source.record(key)?
+    else {
+        return Ok(None);
+    };
+    let raw = crate::codec::raw_kind(key.kind, encoding);
+    match crate::plan_record::decode(raw, &payload) {
+        Ok((r, _)) => Ok(r.seal().cloned()),
+        Err(e) => Err(StreamError::from_record(0, 0, &e).with_object(Some(key))),
     }
 }
 
@@ -223,34 +254,36 @@ struct Attachments {
     tags: HashMap<Hash, Vec<ObjectKey>>,
 }
 
-/// Collects the incoming records' attachments: every answer, signature, request and apply they
-/// hold. The root's relay answer is one that targets exactly the root TAG
-/// (`is_relay_answer_of`): an answer to a tag of the same name that targets another tag object
-/// is not attached by name.
-fn attachments(
+/// The kinds whose records a closure walk attaches by what they name, not by a link to them: a
+/// canon history attaches its TAGs this way as well.
+pub(crate) const ATTACHING_KINDS: &[u8] = &[
+    kinds::TAG,
+    kinds::ANSWER,
+    kinds::SIGNATURE,
+    kinds::REDACTION,
+    kinds::REDACTION_APPLY,
+    kinds::PLAN,
+    kinds::DISPUTE,
+    kinds::DISPUTE_RESOLUTION,
+    kinds::CHECK_REQUEST,
+    kinds::REVIEW,
+    kinds::SNAPSHOT_DELTA,
+];
+
+/// Collects the attachments of the records `keys` (the incoming ones, and a partial holder's
+/// [`Records::held_attachments`]): every answer, signature, request and apply they hold. The
+/// root's relay answer is one that targets exactly the root TAG (`is_relay_answer_of`): an
+/// answer to a tag of the same name that targets another tag object is not attached by name.
+fn attachments<'k>(
     source: &mut dyn ObjectSource,
     root_key: ObjectKey,
     root: Option<&Tag>,
-    input_keys: &[ObjectKey],
+    keys: impl Iterator<Item = &'k ObjectKey>,
 ) -> Result<Attachments, StreamError> {
     let mut a = Attachments::default();
     let canon = root_key.kind == kinds::LANDING;
-    let keys = input_keys.iter().filter(|k| {
-        (canon && k.kind == kinds::TAG)
-            || matches!(
-                k.kind,
-                kinds::ANSWER
-                    | kinds::SIGNATURE
-                    | kinds::REDACTION
-                    | kinds::REDACTION_APPLY
-                    | kinds::PLAN
-                    | kinds::DISPUTE
-                    | kinds::DISPUTE_RESOLUTION
-                    | kinds::CHECK_REQUEST
-                    | kinds::REVIEW
-                    | kinds::SNAPSHOT_DELTA
-            )
-    });
+    let keys =
+        keys.filter(|k| (canon || k.kind != kinds::TAG) && ATTACHING_KINDS.contains(&k.kind));
     for k in keys.copied() {
         match k.kind {
             kinds::ANSWER => {
@@ -277,8 +310,8 @@ fn attachments(
                 }
             }
             kinds::PLAN => {
-                if let Some(seal) = typed::<rdy_model::plan::Plan>(source, k)?.and_then(|p| p.seal)
-                {
+                // a whole version or a delta: both hold their seal whole
+                if let Some(seal) = plan_seal_of(source, k)? {
                     a.seals.entry(seal.landing).or_default().push(k);
                 }
             }
@@ -345,7 +378,7 @@ fn attachments(
 
 /// The objects a request names, as the index's request entry names them: its spans' objects,
 /// its versions and its blobs.
-fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
+pub(crate) fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
     let m = &r.manifest;
     m.spans
         .iter()
@@ -407,7 +440,9 @@ pub(crate) fn check_snapshot_deltas(
 /// landings and the resolutions of reached disputes, and the check requests of reached changes
 /// and proposal versions and the reviews of reached requests. The first incoming key outside it, in key order, is
 /// `object is outside the tag closure`. A record of the source that is not incoming (a holder's)
-/// may be reached, and is never required to be.
+/// may be reached, and is never required to be. A holder whose history is incomplete attaches
+/// its own records as well ([`Records::held_attachments`]): its canon state's sealed plan and
+/// the root's other attachments are held, and the older history they link to is incoming.
 ///
 /// The walk expands the keys the source indexes in memory (`Records::in_memory`: a take's
 /// union) before keys only a holder holds, and it ends once every incoming key is reached and
@@ -441,7 +476,13 @@ fn walk_closure(
     max_records: u64,
     max_edges: u64,
 ) -> Result<(), StreamError> {
-    let att = attachments(rec.object_source(), root_key, root, input_keys)?;
+    let held = rec.held_attachments()?;
+    let att = attachments(
+        rec.object_source(),
+        root_key,
+        root,
+        input_keys.iter().chain(&held),
+    )?;
     let mut walk = Walk {
         reached: HashSet::new(),
         wanted: HashSet::new(),
@@ -781,11 +822,34 @@ pub(crate) fn check_typed_context(
         match k.kind {
             kinds::PLAN => {
                 let record = look.rec.get_mut().object_source().record(k)?;
-                let Some(StreamRecord::Present { payload, .. }) = record else {
+                let Some(StreamRecord::Present {
+                    encoding, payload, ..
+                }) = record
+                else {
                     continue;
                 };
-                let p = crate::plan::decode_plan(&payload)
-                    .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?;
+                let raw = crate::codec::raw_kind(k.kind, encoding);
+                // a whole version reads alone; a delta hydrates through the one plan fold over
+                // the incoming records and the holder's, before any check of its version
+                let p = match crate::plan_record::decode(raw, &payload)
+                    .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?
+                {
+                    (crate::plan_record::PlanRecord::Full(p), _) => Ok(p),
+                    (crate::plan_record::PlanRecord::Delta(_), _) => {
+                        crate::plan::hydrate_for_check(&k.hash, &look)
+                    }
+                };
+                let p = match p {
+                    Ok(p) => p,
+                    Err(e) => match e {
+                        crate::plan_record::FoldError::Broken { reason, .. } => {
+                            return Err(look.broken(k, &crate::plan::damage(&k.hash, reason)));
+                        }
+                        crate::plan_record::FoldError::Store(e) => {
+                            return Err(look.failure(e, k));
+                        }
+                    },
+                };
                 let rule = match crate::plan::invalid_record(&p) {
                     Some(rule) => Some(rule),
                     None => crate::plan::invalid_context(&k.hash, &p, &look)
@@ -822,6 +886,54 @@ pub(crate) fn check_typed_context(
                 }
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The PLAN records of a canon state's take (D-4PV25): each whole version or delta decodes, a
+/// delta folds over its carried chain, and each keeps its record rules
+/// (`crate::plan::invalid_record`). Its links to records behind the frontier (`stable`,
+/// `proposal`, its seal's version) are not checked here: the completion's full check checks them.
+pub(crate) fn check_state_plans(
+    rec: &mut dyn Records,
+    incoming: &[ObjectKey],
+) -> Result<(), StreamError> {
+    let look = ContextLookup {
+        rec: RefCell::new(rec),
+        holder: None,
+        incoming,
+        bound: HashMap::new(),
+        sealed: HashMap::new(),
+        landings: RefCell::new(None),
+        failed: RefCell::new(None),
+    };
+    for k in incoming.iter().copied().filter(|k| k.kind == kinds::PLAN) {
+        let record = look.rec.borrow_mut().object_source().record(k)?;
+        let Some(StreamRecord::Present {
+            encoding, payload, ..
+        }) = record
+        else {
+            continue;
+        };
+        let raw = crate::codec::raw_kind(k.kind, encoding);
+        let p = match crate::plan_record::decode(raw, &payload)
+            .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?
+        {
+            (crate::plan_record::PlanRecord::Full(p), _) => Ok(p),
+            (crate::plan_record::PlanRecord::Delta(_), _) => {
+                crate::plan::hydrate_for_check(&k.hash, &look)
+            }
+        };
+        let p = match p {
+            Ok(p) => p,
+            Err(crate::plan_record::FoldError::Broken { reason, .. }) => {
+                return Err(look.broken(k, &crate::plan::damage(&k.hash, reason)));
+            }
+            Err(crate::plan_record::FoldError::Store(e)) => return Err(look.failure(e, k)),
+        };
+        if let Some(rule) = crate::plan::invalid_record(&p) {
+            return Err(look.broken(k, &crate::plan::damage(&k.hash, rule)));
         }
     }
     Ok(())
@@ -878,6 +990,19 @@ pub(crate) fn check_applies(
     let mut out = BTreeMap::new();
     for a in applies {
         out.insert(a, sync_proof::check(rec.object_source(), a)?);
+    }
+    Ok(out)
+}
+
+/// [`check_applies`] of a canon state's take (D-4PV25): each apply by
+/// [`sync_proof::check_carried_state`], whose landing is a frontier edge.
+pub(crate) fn check_state_applies(
+    rec: &mut dyn Records,
+    applies: impl IntoIterator<Item = Hash>,
+) -> Result<BTreeMap<Hash, PortableRemoval>, StreamError> {
+    let mut out = BTreeMap::new();
+    for a in applies {
+        out.insert(a, sync_proof::check_carried_state(rec.object_source(), a)?);
     }
     Ok(out)
 }
@@ -1509,7 +1634,7 @@ fn open_checked<R: Read + Seek, E: From<StreamError>>(
         .seek(SeekFrom::Start(0))
         .map_err(|e| StreamError::io(Some(0), 0, &e))?;
     let mut index: BTreeMap<ObjectKey, Place> = BTreeMap::new();
-    let report = check_batch_with(&mut input, on_header, |n, offset, r| {
+    let report = check_batch_with(&mut input, on_header, |n, offset, r, _| {
         let place = match r {
             StreamRecord::Present {
                 payload, encoding, ..

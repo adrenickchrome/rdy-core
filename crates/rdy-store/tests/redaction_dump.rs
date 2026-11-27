@@ -1265,10 +1265,11 @@ fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
         Hash::of(b"no such apply"),
         None,
     );
-    // ok4: the baseline manifest is 256 bytes (SD1 Task 6 adds snapshot_delta's 73)
+    // ok4: the baseline manifest is 326 bytes (SD1 Task 6 adds snapshot_delta's 73, span maps
+    // dedup_spans's 70)
     assert_eq!(
         stream.len(),
-        848,
+        918,
         "590 bytes in dump format 3, the manifest and the encoding"
     );
     let (_, _, bs) = read_dump(&stream).unwrap();

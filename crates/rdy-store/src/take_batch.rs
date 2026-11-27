@@ -84,14 +84,16 @@ use crate::stream_error::{
 use crate::stream_source::{self, Drop, Records, bad};
 use crate::sync_proof::{ObjectSource, PortableRemoval, RemovalObject};
 use crate::sync_stream::{
-    LIMIT_BATCH_FILES, MAX_BATCH_FILES, MAX_EDGES, MAX_PENDING_DROPPED_BYTES, MAX_PENDING_DROPS,
-    MAX_RECORDS, MAX_STREAM_BYTES, StreamHeader, StreamReader, StreamRecord, check_batch, rec,
+    CheckedBatch, LIMIT_BATCH_FILES, MAX_BATCH_FILES, MAX_EDGES, MAX_PENDING_DROPPED_BYTES,
+    MAX_PENDING_DROPS, MAX_RECORDS, MAX_STREAM_BYTES, StreamHeader, StreamReader, StreamRecord,
+    check_batch, read_checked, rec,
 };
 use rdy_model::redaction::RedactionResidue;
 use rdy_model::signature::Signature;
 use rdy_model::{Change, Hash, RepoId, Tag};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
@@ -353,6 +355,33 @@ struct Entry {
     dropped: Vec<(At, Drop)>,
     /// The features its present record uses (`format::required_features`).
     needs: Vec<StoreFeature>,
+    /// Its present record's index link count, as a batch check of its exact bytes found it
+    /// (`CheckedFrame::index_links`); None when no checked batch gave it.
+    index_links: Option<u64>,
+}
+
+/// The index link counts a batch check found (`sync_stream::CheckedFrame::index_links`), each
+/// keyed by the raw kind and payload hash of the frame it counts: the index reads a count only
+/// for the frame of that key, so a count never moves to another record when a write drops a
+/// duplicate. A frame with no count here is indexed by its own decode (`links_entry`).
+pub(crate) type IndexLinks = HashMap<(u8, Hash), u64>;
+
+thread_local! {
+    /// The index link counts this thread derived from a frame's bytes (`links_entry`).
+    static LINK_DECODES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Notes one index link count derived from a frame's bytes.
+pub(crate) fn count_index_link_decode() {
+    LINK_DECODES.with(|c| c.set(c.get() + 1));
+}
+
+/// For tests: how many index link counts this thread derived from a frame's own bytes so far
+/// (each one decodes the record). A frame whose count a batch check found is not counted. A test
+/// reads the difference over a call.
+#[doc(hidden)]
+pub fn index_link_decodes_for_tests() -> u64 {
+    LINK_DECODES.with(Cell::get)
 }
 
 /// How a planned write is checked again at the append.
@@ -428,6 +457,8 @@ pub(crate) struct Plan {
     pub(crate) features: Option<StoreFeatures>,
     /// The bytes of each [`Write::Generated`] delta, by its key.
     pub(crate) generated: BTreeMap<ObjectKey, Vec<u8>>,
+    /// The index link counts of the present writes that a batch check found ([`IndexLinks`]).
+    pub(crate) index_links: IndexLinks,
 }
 
 /// The holder as the take reads it: its reader, its log's segment files and authorization, the
@@ -623,6 +654,40 @@ impl Records for UploadSource<'_> {
     fn held_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
         self.store.snapshot_delta_of(landing)
     }
+
+    /// A holder whose history is incomplete: its records of the attaching kinds that the union
+    /// does not hold, from the index (a partial holder holds its canon state and its own work).
+    fn held_attachments(&mut self) -> Result<Vec<ObjectKey>, StreamError> {
+        let reader = self.store.reader;
+        if reader
+            .partial_history()
+            .map_err(|e| store_error(e, None))?
+            .is_none()
+        {
+            return Ok(Vec::new());
+        }
+        let mut held: Vec<ObjectKey> = Vec::new();
+        let mut short = false;
+        for &kind in stream_source::ATTACHING_KINDS {
+            let walked = reader.for_each_object_of(kind, |hash| {
+                let k = ObjectKey { kind, hash };
+                if self.union.contains_key(&k) {
+                    return Ok(());
+                }
+                if held.try_reserve(1).is_err() {
+                    short = true;
+                    return Err(StoreError::Refused(String::new()));
+                }
+                held.push(k);
+                Ok(())
+            });
+            if short {
+                return Err(StreamError::allocation(None, 0));
+            }
+            walked.map_err(|e| store_error(e, None))?;
+        }
+        Ok(held)
+    }
 }
 
 impl UploadSource<'_> {
@@ -673,9 +738,16 @@ impl From<StreamError> for IndexError {
 
 /// Checks every file and indexes the union: its records by key, and every file's
 /// prerequisites. The first header must name repo `expected`. Returns the first header.
+///
+/// With `checked` (one checked batch per file, in file order), a file is not checked again: its
+/// bytes are read once more ([`read_checked`]), and only when they are the exact bytes its
+/// checked batch checked are that check's links, features and index link counts indexed. The
+/// header rules, the counts and the union stay this function's.
 fn index_files(
     expected: RepoId,
     files: &[File],
+    checked: Option<&[&CheckedBatch]>,
+    state: bool,
     union: &mut BTreeMap<ObjectKey, Entry>,
     prerequisites: &mut BTreeSet<ObjectKey>,
 ) -> Result<StreamHeader, IndexError> {
@@ -690,7 +762,12 @@ fn index_files(
         }
         let mut handle = f;
         handle.seek(SeekFrom::Start(0)).map_err(io)?;
-        let report = check_batch(handle)?;
+        let capsule = checked.map(|c| c[i]);
+        let report = match capsule {
+            Some(c) => c.report().clone(),
+            None if state => crate::sync_stream::check_canon_state_batch(handle)?,
+            None => check_batch(handle)?,
+        };
         match &first {
             None => {
                 if report.header.repo_id != expected {
@@ -722,97 +799,149 @@ fn index_files(
         }
         // the index pass: each record's place and frame, its links and its descriptor
         handle.seek(SeekFrom::Start(0)).map_err(io)?;
-        let (mut reader, header) = StreamReader::open(handle)?;
-        while let Some(r) = reader.next()? {
-            let (n, offset) = reader.position();
-            let key = r.key();
-            let proof = usize::from(r.proof().is_some());
-            let entry = match union.get_mut(&key) {
-                Some(e) => e,
-                None => union.entry(key).or_default(),
-            };
-            match r {
-                StreamRecord::Present { ref payload, .. } => {
-                    let raw = r.raw_kind();
+        let header = match capsule {
+            Some(c) => read_checked(handle, c, |j, frame, r, (n, offset)| {
+                let facts = match &r {
+                    StreamRecord::Present { .. } => Some((
+                        c.refs(j),
+                        c.features(j).cloned().collect(),
+                        frame.index_links(),
+                    )),
+                    StreamRecord::Dropped { .. } => None,
+                };
+                index_record(&mut counts, union, i, r, n, offset, None, facts)
+                    .map_err(IndexError::from)
+            })?,
+            None => {
+                let (mut reader, header) = StreamReader::open(handle)?;
+                while let Some(r) = reader.next()? {
+                    let (n, offset) = reader.position();
+                    index_record(
+                        &mut counts,
+                        union,
+                        i,
+                        r,
+                        n,
+                        offset,
+                        Some(&header.features),
+                        None,
+                    )?;
+                }
+                reader.finish()?;
+                header
+            }
+        };
+        prerequisites.extend(header.prerequisites.iter().copied());
+    }
+    Ok(first.expect("at least one file"))
+}
+
+/// Indexes record `r` (number `n`, frame at `offset`) of file `file` into `union`, and counts it.
+/// A present record's links, features and index link count are `checked`'s when a batch check
+/// of its exact bytes found them; else its links follow `features`, the features its stream
+/// declares, and it has no checked count.
+#[allow(clippy::too_many_arguments)]
+fn index_record(
+    counts: &mut Counts,
+    union: &mut BTreeMap<ObjectKey, Entry>,
+    file: usize,
+    r: StreamRecord,
+    n: u64,
+    offset: u64,
+    features: Option<&crate::format::StoreFeatures>,
+    checked: Option<(Vec<ObjectRef>, Vec<StoreFeature>, u64)>,
+) -> Result<(), StreamError> {
+    let key = r.key();
+    let proof = usize::from(r.proof().is_some());
+    let entry = match union.get_mut(&key) {
+        Some(e) => e,
+        None => union.entry(key).or_default(),
+    };
+    match r {
+        StreamRecord::Present { ref payload, .. } => {
+            let raw = r.raw_kind();
+            let (refs, needs, index_links) = match (checked, features) {
+                (Some((refs, needs, links)), _) => (refs, needs, Some(links)),
+                (None, Some(features)) => {
                     // an incoming record's links follow the features its stream declares
-                    let refs = portable_refs_of(&header.features, raw, payload)
+                    let refs = portable_refs_of(features, raw, payload)
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
                     // the reader checked the frame splits
                     let needs = crate::codec::split(raw, payload)
                         .map(|_| crate::format::required_features(raw, payload))
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
-                    counts.edges += refs.len() as u64;
-                    if entry.present.is_none() {
-                        entry.present = Some(At {
-                            file: i,
-                            record: n,
-                            offset,
-                            kind: raw,
-                            len: payload.len() as u32,
-                            hash: key.hash,
-                        });
-                        entry.refs = refs;
-                        entry.needs = needs;
-                    }
+                    (refs, needs, None)
                 }
-                StreamRecord::Dropped {
-                    encoding,
-                    original_len,
-                    apply,
-                    residue,
-                    ..
-                } => {
-                    counts.edges += u64::from(residue.is_some()) + proof as u64;
-                    counts.drops += 1;
-                    counts.dropped_bytes += u64::from(original_len);
-                    if counts.drops > MAX_PENDING_DROPS {
-                        return Err(StreamError::limit(Some(n), offset, LIMIT_PENDING_DROPS).into());
-                    }
-                    if counts.dropped_bytes > MAX_PENDING_DROPPED_BYTES {
-                        return Err(StreamError::limit(
-                            Some(n),
-                            offset,
-                            LIMIT_PENDING_DROPPED_BYTES,
-                        )
-                        .into());
-                    }
-                    let body = encoded_dropped_payload(
-                        key.kind,
-                        encoding,
-                        &key.hash,
-                        original_len,
-                        &apply,
-                        residue.as_ref(),
-                    );
-                    let d = Drop {
-                        encoding,
-                        original_len,
-                        apply,
-                        residue,
-                    };
-                    if !entry.dropped.iter().any(|(_, x)| *x == d) {
-                        entry.dropped.push((
-                            At {
-                                file: i,
-                                record: n,
-                                offset,
-                                kind: rec::DROPPED,
-                                len: ENCODED_DROPPED_LEN as u32,
-                                hash: Hash::of(&body),
-                            },
-                            d,
-                        ));
-                    }
-                }
-            }
-            if counts.edges > MAX_EDGES {
-                return Err(StreamError::limit(Some(n), offset, LIMIT_GRAPH_EDGES).into());
+                (None, None) => unreachable!("an unchecked record has its stream's features"),
+            };
+            counts.edges += refs.len() as u64;
+            if entry.present.is_none() {
+                entry.present = Some(At {
+                    file,
+                    record: n,
+                    offset,
+                    kind: raw,
+                    len: payload.len() as u32,
+                    hash: key.hash,
+                });
+                entry.refs = refs;
+                entry.needs = needs;
+                entry.index_links = index_links;
             }
         }
-        reader.finish()?;
-        prerequisites.extend(header.prerequisites.iter().copied());
+        StreamRecord::Dropped {
+            encoding,
+            original_len,
+            apply,
+            residue,
+            ..
+        } => {
+            counts.edges += u64::from(residue.is_some()) + proof as u64;
+            counts.drops += 1;
+            counts.dropped_bytes += u64::from(original_len);
+            if counts.drops > MAX_PENDING_DROPS {
+                return Err(StreamError::limit(Some(n), offset, LIMIT_PENDING_DROPS));
+            }
+            if counts.dropped_bytes > MAX_PENDING_DROPPED_BYTES {
+                return Err(StreamError::limit(
+                    Some(n),
+                    offset,
+                    LIMIT_PENDING_DROPPED_BYTES,
+                ));
+            }
+            let body = encoded_dropped_payload(
+                key.kind,
+                encoding,
+                &key.hash,
+                original_len,
+                &apply,
+                residue.as_ref(),
+            );
+            let d = Drop {
+                encoding,
+                original_len,
+                apply,
+                residue,
+            };
+            if !entry.dropped.iter().any(|(_, x)| *x == d) {
+                entry.dropped.push((
+                    At {
+                        file,
+                        record: n,
+                        offset,
+                        kind: rec::DROPPED,
+                        len: ENCODED_DROPPED_LEN as u32,
+                        hash: Hash::of(&body),
+                    },
+                    d,
+                ));
+            }
+        }
     }
-    Ok(first.expect("at least one file"))
+    if counts.edges > MAX_EDGES {
+        return Err(StreamError::limit(Some(n), offset, LIMIT_GRAPH_EDGES));
+    }
+    Ok(())
 }
 
 /// The residue `r`, from the union's present bytes or the holder's, and the encoding its frame
@@ -1128,13 +1257,17 @@ fn fetch_tag_refs(
 /// `root` as its fetched tip or head and the target's URL. A state of the same hub repo keeps
 /// its applied tip and held request, whatever URL it named; a state of another repo starts
 /// again. A view state's root is the first op of the
-/// fetched head's chain. None when the state holds that value already (a retry).
+/// fetched head's chain. None when the state holds that value already and the take writes no
+/// record (`writes` false: a retry). A take that writes records always carries its sync state,
+/// which marks its batch fetched (`redaction_io::marks_fetched`), so its plans keep the holder's
+/// rules: a canon state's take names its tip before the history behind it arrives (D-GGTYA).
 fn fetch_state_ref(
     reader: &StoreReader,
     source: &mut UploadSource,
     target: &FetchTarget,
     repo_id: RepoId,
     root: ObjectKey,
+    writes: bool,
 ) -> Result<Option<(String, Vec<u8>)>, StreamError> {
     use crate::sync_state::{SyncCanon, SyncValue, SyncView};
     use crate::sync_stream::StreamPurpose;
@@ -1202,7 +1335,7 @@ fn fetch_state_ref(
         _ => return Err(fetch_mismatch(root)),
     };
     let bytes = value.encode();
-    if reader.get_ref(&name).map_err(store)?.as_deref() == Some(&bytes[..]) {
+    if !writes && reader.get_ref(&name).map_err(store)?.as_deref() == Some(&bytes[..]) {
         return Ok(None);
     }
     Ok(Some((name, bytes)))
@@ -1221,6 +1354,13 @@ pub(crate) enum Intake<'a, E> {
     Upload(&'a UploadTarget, UploadCheck<'a, E>),
     Fetch(&'a FetchTarget, FetchCheck<'a, E>),
     History(&'a HistoryTarget),
+    /// A project's take of a canon state (D-GGTYA, D-4PV25): its records, canon at the root,
+    /// the remote's sync state with the root fetched and applied, and the incomplete history ref.
+    State(
+        &'a FetchTarget,
+        &'a crate::sync_state::SyncHistory,
+        FetchCheck<'a, E>,
+    ),
 }
 
 /// A pushed canon or view history a holder takes (D-FNRXT): its purpose and its root (a
@@ -1255,7 +1395,7 @@ pub(crate) fn prepare_history<E>(
     files: &[File],
     target: &HistoryTarget,
 ) -> Result<Plan, TakeError<E>> {
-    prepare_intake(rx, files, rx.repo, Intake::History(target))
+    prepare_intake(rx, files, None, rx.repo, Intake::History(target))
 }
 
 /// Prepares a fresh fork's take of its source's history (D-99CWC): the steps of
@@ -1273,7 +1413,7 @@ pub(crate) fn prepare_fork_history<E>(
             "a fork of repo {source} needs a new repo id"
         ))));
     }
-    prepare_intake(rx, files, source, Intake::History(target))
+    prepare_intake(rx, files, None, source, Intake::History(target))
 }
 
 /// Prepares a take (module docs, steps 1 to 9): every check before anything is written, the
@@ -1284,7 +1424,13 @@ pub(crate) fn prepare<'a, E>(
     target: &'a UploadTarget,
     check: impl FnOnce(&mut dyn ObjectSource, &UploadFacts) -> Result<TagChoice, E> + 'a,
 ) -> Result<Plan, TakeError<E>> {
-    prepare_intake(rx, files, rx.repo, Intake::Upload(target, Box::new(check)))
+    prepare_intake(
+        rx,
+        files,
+        None,
+        rx.repo,
+        Intake::Upload(target, Box::new(check)),
+    )
 }
 
 /// Prepares a project's fetch: the take's steps 1, 2 and 4 to 7 over the project, then the
@@ -1298,28 +1444,78 @@ pub(crate) fn prepare<'a, E>(
 /// is written as a drop, and the project's own copies of what it approves are erased once the
 /// batch is durable. A local change that embeds an approved version and that no approval covers
 /// keeps its bytes: it is no refusal here, and the project's reads warn of it.
-pub(crate) fn prepare_fetch<'a, E>(
+///
+/// With `checked` (one checked batch per file, in file order), the files are not checked again:
+/// a file whose bytes are not the ones its checked batch checked is `input changed during
+/// take`, and every other check keeps its order. None checks each file here.
+pub(crate) fn prepare_fetch_checked<'a, E>(
     rx: &Receiver,
     files: &[File],
+    checked: Option<&[&CheckedBatch]>,
     target: &'a FetchTarget,
     check: impl FnOnce(&mut dyn ObjectSource, &FetchFacts) -> Result<(), E> + 'a,
 ) -> Result<Plan, TakeError<E>> {
-    prepare_intake(rx, files, rx.repo, Intake::Fetch(target, Box::new(check)))
+    prepare_intake(
+        rx,
+        files,
+        checked,
+        rx.repo,
+        Intake::Fetch(target, Box::new(check)),
+    )
 }
 
-/// [`prepare`], [`prepare_fetch`], [`prepare_history`] and [`prepare_fork_history`]. The
+/// Prepares a project's take of a canon state (D-GGTYA, D-4PV25): the fetch's checks, with the
+/// closed state link table in place of the history closure. Each file is a canon state batch
+/// (`crate::sync_stream::check_canon_state_batch`) of the target's root; a prerequisite neither
+/// the union nor the project holds is a frontier edge, and every other link is checked as the
+/// table says (`check_state_union`). `history` names the same repo, URL and root, is
+/// incomplete, and counts at most [`crate::sync_state::MAX_HISTORY_RECORDS`] records. The plan
+/// writes the records, `canon` at the root, the remote's canon state with the root fetched and
+/// applied, and the history ref, in one batch.
+pub(crate) fn prepare_state_checked<'a, E>(
+    rx: &Receiver,
+    files: &[File],
+    checked: Option<&[&CheckedBatch]>,
+    target: &'a FetchTarget,
+    history: &'a crate::sync_state::SyncHistory,
+    check: impl FnOnce(&mut dyn ObjectSource, &FetchFacts) -> Result<(), E> + 'a,
+) -> Result<Plan, TakeError<E>> {
+    prepare_intake(
+        rx,
+        files,
+        checked,
+        rx.repo,
+        Intake::State(target, history, Box::new(check)),
+    )
+}
+
+/// [`prepare`], [`prepare_fetch_checked`], [`prepare_history`] and [`prepare_fork_history`]. The
 /// stream's repo must be `expected`: the receiver's own, except on a fresh fork's path.
 fn prepare_intake<E>(
     rx: &Receiver,
     files: &[File],
+    checked: Option<&[&CheckedBatch]>,
     expected: RepoId,
     intake: Intake<'_, E>,
 ) -> Result<Plan, TakeError<E>> {
-    let fetch = matches!(intake, Intake::Fetch(..));
+    let fetch = matches!(intake, Intake::Fetch(..) | Intake::State(..));
+    let state = matches!(intake, Intake::State(..));
+    if checked.is_some_and(|c| c.len() != files.len()) {
+        return Err(TakeError::Store(StoreError::Refused(
+            "a checked take needs one checked batch for each file".into(),
+        )));
+    }
     // 1. every file alone, and the union's index
     let mut union: BTreeMap<ObjectKey, Entry> = BTreeMap::new();
     let mut prerequisites: BTreeSet<ObjectKey> = BTreeSet::new();
-    let header = match index_files(expected, files, &mut union, &mut prerequisites) {
+    let header = match index_files(
+        expected,
+        files,
+        checked,
+        state,
+        &mut union,
+        &mut prerequisites,
+    ) {
         Ok(h) => h,
         Err(IndexError::Repo(source)) => {
             return Err(TakeError::RepoMismatch {
@@ -1334,6 +1530,7 @@ fn prepare_intake<E>(
         Intake::Upload(..) => header.purpose == crate::sync_stream::StreamPurpose::TagHistory,
         Intake::Fetch(t, _) => header.purpose == t.purpose,
         Intake::History(t) => header.purpose == t.purpose && t.purpose.is_history(),
+        Intake::State(..) => header.purpose == crate::sync_stream::StreamPurpose::CanonState,
     };
     if !expected {
         let want = match &intake {
@@ -1341,6 +1538,7 @@ fn prepare_intake<E>(
             Intake::Fetch(t, _) => t.purpose,
             Intake::History(t) if t.purpose.is_history() => t.purpose,
             Intake::History(_) => crate::sync_stream::StreamPurpose::CanonHistory,
+            Intake::State(..) => crate::sync_stream::StreamPurpose::CanonState,
         };
         return Err(
             StreamError::purpose_for(Some(0), 0, header.purpose.byte(), want.name()).into(),
@@ -1374,8 +1572,11 @@ fn prepare_intake<E>(
         features: rx.features,
     };
     // 2. every prerequisite, from the union or the holder. A placeholder's proof that names a
-    // carried record of the holder is no removal proof (D-0VG72): the placeholder is refused
-    if let Err(e) = stream_source::check_prerequisites(&mut source, &prerequisites) {
+    // carried record of the holder is no removal proof (D-0VG72): the placeholder is refused. A
+    // canon state's prerequisites are its frontier edges: they may be absent (D-4PV25), and its
+    // never-absent links are checked within the union (step 5)
+    if state {
+    } else if let Err(e) = stream_source::check_prerequisites(&mut source, &prerequisites) {
         if let Some(p) = e.object.filter(|_| e.code == "E_UNRESOLVED_REF")
             && let Some(placeholder) = names_carried(rx, &union, &p)?
         {
@@ -1406,6 +1607,16 @@ fn prepare_intake<E>(
             if header.purpose != target.purpose || root_key.hash != target.root {
                 return Err(fetch_mismatch(root_key).into());
             }
+            None
+        }
+        Intake::State(target, history, _) => {
+            if target.purpose != crate::sync_stream::StreamPurpose::CanonState
+                || target.view.is_some()
+                || root_key.hash != target.root
+            {
+                return Err(fetch_mismatch(root_key).into());
+            }
+            check_state_history(history, target, header.repo_id)?;
             None
         }
     };
@@ -1440,8 +1651,12 @@ fn prepare_intake<E>(
         items.push((raw, payload));
         reader.check_new_signatures(&items)?;
     }
-    // 5. the closure
-    stream_source::check_closure(&mut source, root_key, root.as_ref(), &objects)?;
+    // 5. the closure: a canon state's is the closed state link table (D-4PV25)
+    if state {
+        check_state_union(&mut source, &union, &header.features, root_key.hash)?;
+    } else {
+        stream_source::check_closure(&mut source, root_key, root.as_ref(), &objects)?;
+    }
     // 5. and each landing's delta across every file, which an early closure end never skips
     stream_source::check_snapshot_deltas(&mut source, &header.features, &objects)?;
     // 5. and the typed context of the new plans and plan answers, over the union and the holder
@@ -1455,6 +1670,12 @@ fn prepare_intake<E>(
         if !rx.holds(k)? {
             new_keys.push(*k);
         }
+    }
+    if state {
+        // a canon state's plans keep their record rules; their links behind the frontier are
+        // the completion's full check's
+        check_state_plans(&mut source, &new_keys)?;
+        new_keys.retain(|k| k.kind != kinds::PLAN);
     }
     stream_source::check_typed_context(&mut source, Some(reader), &new_keys)?;
     drop(new_keys);
@@ -1471,8 +1692,13 @@ fn prepare_intake<E>(
             new_applies.push(k.hash);
         }
     }
-    let incoming: BTreeMap<Hash, PortableRemoval> =
-        stream_source::check_applies(&mut source, new_applies)?;
+    // a canon state's active applies are carried while their landings are frontier edges
+    // (D-4PV25): the checks that read the landing wait for the history
+    let incoming: BTreeMap<Hash, PortableRemoval> = if state {
+        stream_source::check_state_applies(&mut source, new_applies)?
+    } else {
+        stream_source::check_applies(&mut source, new_applies)?
+    };
     let removal_of = |apply: &Hash| incoming.get(apply).or_else(|| active.removals.get(apply));
     // the approved tuples of each key: the holder's applies in log order, then the upload's
     let held = rx
@@ -1782,7 +2008,9 @@ fn prepare_intake<E>(
                 &mut tags_taken,
                 &mut tags_kept,
             )?;
-            if let Some(r) = fetch_state_ref(reader, &mut source, target, header.repo_id, root_key)?
+            let wrote = !writes.is_empty();
+            if let Some(r) =
+                fetch_state_ref(reader, &mut source, target, header.repo_id, root_key, wrote)?
             {
                 refs.push(r);
             }
@@ -1790,6 +2018,28 @@ fn prepare_intake<E>(
         }
         // a pushed history: its records and removals, and no ref
         Intake::History(_) => (root_key.hash, None),
+        Intake::State(target, history, check) => {
+            let facts = FetchFacts {
+                repo_id: header.repo_id,
+                purpose: header.purpose,
+                root: root_key.hash,
+                objects: objects.clone(),
+                features: header.features.clone(),
+            };
+            check(&mut source, &facts).map_err(TakeError::Validation)?;
+            let relayed = stream_source::relay_answers(&mut source, &objects)?;
+            fetch_tag_refs(
+                reader,
+                &mut source,
+                &objects,
+                &relayed,
+                &mut refs,
+                &mut tags_taken,
+                &mut tags_kept,
+            )?;
+            state_refs(reader, target, history, header.repo_id, &mut refs)?;
+            (root_key.hash, None)
+        }
     };
     // the manifest the holder would hold keeps the manifest's bounds, whichever parts make it up
     merged
@@ -1854,6 +2104,15 @@ fn prepare_intake<E>(
         rx.features.min_rdy(),
         features.as_ref().unwrap_or(rx.features).min_rdy(),
     );
+    // the checked index link count of each present write, by its frame's key
+    let mut index_links = IndexLinks::new();
+    for (w, _) in writes.values() {
+        if let Write::Present { key, at } = w
+            && let Some(n) = union[key].index_links
+        {
+            index_links.insert((at.kind, at.hash), n);
+        }
+    }
     Ok(Plan {
         tags_taken,
         tags_kept,
@@ -1871,5 +2130,276 @@ fn prepare_intake<E>(
         tag,
         features,
         generated,
+        index_links,
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// the take of a canon state (D-GGTYA, D-4PV25)
+
+/// What a record of a canon state's union attaches to, when nothing links to it: the closed
+/// state link table's attachments (D-4PV25).
+enum Attach {
+    None,
+    /// A TAG of this landing.
+    Tag(Hash),
+    /// A SIGNATURE of this subject.
+    Signature(Hash),
+    /// An ANSWER of these targets.
+    Answer(Vec<Hash>),
+    /// A PLAN whose seal names this landing.
+    Seal(Hash),
+    /// A CHECK_REQUEST of this change and proposal version.
+    Check(Option<Hash>, Option<Hash>),
+    /// A REVIEW of this check request.
+    Review(Hash),
+    /// A DISPUTE of this landing.
+    Dispute(Hash),
+    /// A DISPUTE_RESOLUTION of this dispute.
+    Resolution(Hash),
+    /// A REDACTION_APPLY of this request.
+    Apply(Hash),
+    /// A SNAPSHOT_DELTA of this landing.
+    Delta(Hash),
+}
+
+/// The checks of a canon state's union over the receiver (D-4PV25): the root landing, its
+/// canonical SNAPSHOT, its one delta and the map's block ids, every never-absent link resolved
+/// within the union (`crate::canon_state::StateUnion`), and every record of the union carried by
+/// the closed table: reached from the root through its never-absent links, or attached to the
+/// root, a carried tag, a carried request or dispute, or carried content. Any other record is
+/// `object is outside the sync closure`: the missing-link exception covers the table only.
+fn check_state_union(
+    source: &mut UploadSource,
+    union: &BTreeMap<ObjectKey, Entry>,
+    features: &StoreFeatures,
+    root: Hash,
+) -> Result<(), StreamError> {
+    use crate::decoded_record::DecodedRecord;
+    let mut checked = crate::canon_state::StateUnion::new(root, features);
+    let mut by_hash: HashMap<Hash, Vec<ObjectKey>> = HashMap::new();
+    for k in union.keys() {
+        by_hash.entry(k.hash).or_default().push(*k);
+    }
+    let mut required: HashMap<ObjectKey, Vec<ObjectKey>> = HashMap::new();
+    let mut attach: HashMap<ObjectKey, Attach> = HashMap::new();
+    let mut named: HashMap<Hash, BTreeSet<ObjectKey>> = HashMap::new();
+    let mut root_landing: Option<rdy_model::LandingRecord> = None;
+    for (key, e) in union {
+        let (record, (n, offset)) = match (&e.present, e.dropped.first()) {
+            (Some(at), _) => (
+                source.union_record(key)?.expect("a present record"),
+                (at.record, at.offset),
+            ),
+            (None, Some((at, d))) => (
+                StreamRecord::Dropped {
+                    key: *key,
+                    encoding: d.encoding,
+                    original_len: d.original_len,
+                    apply: d.apply,
+                    residue: d.residue,
+                },
+                (at.record, at.offset),
+            ),
+            (None, None) => unreachable!("a union key has a representation"),
+        };
+        let d = DecodedRecord::decode(&record)
+            .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
+        checked.add(n, offset, features, &record, &d)?;
+        let refs = record
+            .refs_decoded(features, &d)
+            .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
+        let mut targets = Vec::new();
+        for r in refs {
+            let candidates: Vec<ObjectKey> = match r.kind {
+                Some(kind) => vec![ObjectKey { kind, hash: r.hash }],
+                None => by_hash.get(&r.hash).cloned().unwrap_or_default(),
+            };
+            for t in candidates {
+                if crate::canon_state::state_link_required(root, *key, &d, t) {
+                    targets.push(t);
+                }
+            }
+        }
+        targets.extend(record.proof());
+        required.insert(*key, targets);
+        let a = match &d {
+            DecodedRecord::Landing(l) if key.hash == root => {
+                root_landing = Some((**l).clone());
+                Attach::None
+            }
+            DecodedRecord::Tag(t) => Attach::Tag(t.landing),
+            DecodedRecord::Signature(g) => Attach::Signature(g.subject),
+            DecodedRecord::Answer(a) => Attach::Answer(a.targets.clone()),
+            DecodedRecord::Plan(p) => match p.seal() {
+                Some(s) => Attach::Seal(s.landing),
+                None => Attach::None,
+            },
+            DecodedRecord::CheckRequest(c) => Attach::Check(c.subject.change, c.subject.version),
+            DecodedRecord::Review(r) => match &r.subject {
+                rdy_model::review::ReviewSubjectV1::Check { request } => Attach::Review(*request),
+                _ => Attach::None,
+            },
+            DecodedRecord::Dispute(x) => Attach::Dispute(x.landing),
+            DecodedRecord::DisputeResolution(x) => Attach::Resolution(x.dispute),
+            DecodedRecord::RedactionApply(x) => Attach::Apply(x.request),
+            DecodedRecord::Redaction(x) => {
+                named.insert(key.hash, stream_source::named_objects(x));
+                Attach::None
+            }
+            DecodedRecord::SnapshotDelta(x) => Attach::Delta(x.landing),
+            _ => Attach::None,
+        };
+        attach.insert(*key, a);
+    }
+    checked.finish()?;
+    let root_key = ObjectKey {
+        kind: kinds::LANDING,
+        hash: root,
+    };
+    let Some(landing) = root_landing else {
+        return Err(StreamError::unresolved(0, 0, root_key));
+    };
+    let versions: HashSet<Hash> = std::iter::once(landing.proposal)
+        .chain(landing.approved_version)
+        .collect();
+    let changes: HashSet<Hash> = landing.changes.iter().copied().collect();
+    let mut reached: HashSet<ObjectKey> = HashSet::new();
+    let mut queue: Vec<ObjectKey> = Vec::new();
+    let reach = |k: ObjectKey, reached: &mut HashSet<ObjectKey>, queue: &mut Vec<ObjectKey>| {
+        if union.contains_key(&k) && reached.insert(k) {
+            queue.push(k);
+        }
+    };
+    reach(root_key, &mut reached, &mut queue);
+    reach(
+        ObjectKey {
+            kind: kinds::SNAPSHOT,
+            hash: landing.state,
+        },
+        &mut reached,
+        &mut queue,
+    );
+    loop {
+        while let Some(k) = queue.pop() {
+            for t in required.get(&k).into_iter().flatten() {
+                reach(*t, &mut reached, &mut queue);
+            }
+        }
+        let tags: HashSet<Hash> = reached
+            .iter()
+            .filter(|k| k.kind == kinds::TAG)
+            .map(|k| k.hash)
+            .collect();
+        let has = |kind: u8, h: &Hash| reached.contains(&ObjectKey { kind, hash: *h });
+        let mut joined: Vec<ObjectKey> = Vec::new();
+        for (k, a) in &attach {
+            if reached.contains(k) {
+                continue;
+            }
+            let subject = |h: &Hash| *h == root || tags.contains(h);
+            let yes = match a {
+                Attach::None => false,
+                Attach::Tag(l) | Attach::Seal(l) | Attach::Dispute(l) | Attach::Delta(l) => {
+                    *l == root
+                }
+                Attach::Signature(s) => subject(s),
+                Attach::Answer(t) => t.iter().any(subject),
+                Attach::Check(c, v) => {
+                    c.is_some_and(|c| changes.contains(&c))
+                        || v.is_some_and(|v| versions.contains(&v))
+                }
+                Attach::Review(r) => has(kinds::CHECK_REQUEST, r),
+                Attach::Resolution(x) => has(kinds::DISPUTE, x),
+                Attach::Apply(r) => named
+                    .get(r)
+                    .is_some_and(|n| n.iter().any(|o| reached.contains(o))),
+            };
+            if yes {
+                joined.push(*k);
+            }
+        }
+        if joined.is_empty() {
+            break;
+        }
+        for k in joined {
+            reach(k, &mut reached, &mut queue);
+        }
+    }
+    match union.keys().find(|k| !reached.contains(k)) {
+        Some(k) => Err(bad(Reason::OutsideSyncClosure, *k)),
+        None => Ok(()),
+    }
+}
+
+/// The new PLAN records of a canon state: each whole version or delta decodes, a delta folds
+/// over its carried chain, and the plan keeps its own record rules (`crate::plan::invalid_record`).
+/// Its `stable`, `proposal` and seal version are frontier edges (D-4PV25): the history's take
+/// and the completion's full check check them.
+fn check_state_plans(source: &mut UploadSource, keys: &[ObjectKey]) -> Result<(), StreamError> {
+    stream_source::check_state_plans(source, keys)
+}
+
+/// The history ref a canon state's take writes: it names the stream's repo, the target's URL
+/// and root, is incomplete, and counts at most [`crate::sync_state::MAX_HISTORY_RECORDS`]
+/// records. Anything else is `history does not match the canon state`.
+fn check_state_history(
+    history: &crate::sync_state::SyncHistory,
+    target: &FetchTarget,
+    repo: RepoId,
+) -> Result<(), StreamError> {
+    let ok = history.repo_id == repo
+        && history.url == target.url
+        && history.frontier == target.root
+        && !history.complete
+        && history.records <= crate::sync_state::MAX_HISTORY_RECORDS;
+    if ok {
+        return Ok(());
+    }
+    Err(StreamError {
+        code: "E_BAD_RECORD",
+        message: "history does not match the canon state".into(),
+        fix: "fetch the history the remote named".into(),
+        record: Some(0),
+        offset: 0,
+        object: Some(ObjectKey {
+            kind: kinds::LANDING,
+            hash: target.root,
+        }),
+    })
+}
+
+/// The refs of a canon state's take beside its records (D-GGTYA): `canon` at the root, the
+/// remote's canon state with the root fetched and applied, and the incomplete history ref. A ref
+/// that holds its value already is not written again (a retry).
+fn state_refs(
+    reader: &StoreReader,
+    target: &FetchTarget,
+    history: &crate::sync_state::SyncHistory,
+    repo_id: RepoId,
+    refs: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), StreamError> {
+    use crate::sync_state::{SyncCanon, SyncValue, canon_ref, history_ref};
+    let store = |e: StoreError| store_error(e, None);
+    let root = target.root;
+    let canon = SyncCanon {
+        repo_id,
+        url: target.url.clone(),
+        fetched: Some(root),
+        applied: Some(root),
+        held: None,
+    };
+    for (name, value) in [
+        ("canon".to_string(), root.0.to_vec()),
+        (canon_ref(&target.remote), SyncValue::Canon(canon).encode()),
+        (
+            history_ref(&target.remote),
+            SyncValue::History(history.clone()).encode(),
+        ),
+    ] {
+        if reader.get_ref(&name).map_err(store)?.as_deref() != Some(&value[..]) {
+            refs.push((name, value));
+        }
+    }
+    Ok(())
 }

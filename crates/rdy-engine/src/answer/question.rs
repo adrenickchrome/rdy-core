@@ -92,8 +92,7 @@ pub(crate) fn act(
     let st = r.read();
     if st.has_view(&view) {
         let held = st
-            .block(&Scope::View(view.clone()), &qid)
-            .ok()
+            .held_block(&Scope::View(view.clone()), &qid)
             .map(|q| q.version_hash().short());
         if held.as_deref() != Some(shown.as_str()) {
             return Err(RdyError::new(

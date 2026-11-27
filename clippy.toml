@@ -1,3 +1,3 @@
-# RdyError carries two optional JSON payloads (`corrected`, `briefing`), boxed warnings and an
-# optional upstream HTTP status: 168 bytes.
-large-error-threshold = 176
+# RdyError carries two optional JSON payloads (`corrected`, `briefing`), boxed warnings, an
+# optional upstream HTTP status, an optional get cap and an optional retry delay: 200 bytes (the lint fires at the threshold).
+large-error-threshold = 201

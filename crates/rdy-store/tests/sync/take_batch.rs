@@ -1611,15 +1611,16 @@ fn ok1_take_refuses_a_merged_manifest_over_its_bounds() {
     // the TAG of every upload first uses the test feature
     let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
     // (holder's unknown features, header's unknown features, refused): each manifest also
-    // names the three baseline features (ok4; SD1 Task 6 adds snapshot_delta), and the take
-    // first uses the test feature, so the merged manifest holds 4 more than the two counts
+    // names the four baseline features (ok4; SD1 Task 6 adds snapshot_delta, span maps
+    // dedup_spans), and the take first uses the test feature, so the merged manifest holds 5
+    // more than the two counts
     let cases: Vec<(usize, usize, bool)> = vec![
-        (0, 253, true),   // a full header and the first use
-        (200, 53, true),  // the holder and the header
-        (252, 1, true),   // the holder, the header and the first use
-        (128, 125, true), // half and half, and the first use
-        (251, 1, false),  // exactly the bound
-        (0, 252, false),  // exactly the bound
+        (0, 252, true),   // a full header and the first use
+        (200, 52, true),  // the holder and the header
+        (251, 1, true),   // the holder, the header and the first use
+        (128, 124, true), // half and half, and the first use
+        (250, 1, false),  // exactly the bound
+        (0, 251, false),  // exactly the bound
     ];
     for (held, carried, refused) in cases {
         let case = format!("holder {held}, header {carried}");

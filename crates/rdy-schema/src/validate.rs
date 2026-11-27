@@ -326,7 +326,13 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
                 block,
                 "E_FIELD_KIND",
                 format!("field {name:?} must be {:?}", fd.kind),
-                format!("write {name} as a {} value", kind_word(fd.kind)),
+                if *v == FieldValue::Null {
+                    format!(
+                        "null does not clear a field; list it in the update op's unset: [\"{name}\"]"
+                    )
+                } else {
+                    format!("write {name} as a {} value", kind_word(fd.kind))
+                },
             )),
             Some(fd)
                 if fd.kind == FieldKind::Enum

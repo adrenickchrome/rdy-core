@@ -1,3 +1,4 @@
+use crate::dedup::{SegmentFiles, SpanMap};
 use crate::error::StoreError;
 use crate::fsutil::sync_dir;
 use crate::kinds::{self, BatchCommit};
@@ -138,6 +139,29 @@ pub struct SegmentLog {
     /// What the log's validated redaction applies authorize: the holes every scan and walk of
     /// this log reads as frames (`redaction_io::bootstrap`).
     auth: Arc<Authorization>,
+    /// The store's span map (`crate::dedup`), shared with every reader of this log: each read
+    /// fills a mapped range from its source before the frame's hash check.
+    spans: Arc<RwLock<SpanMap>>,
+}
+
+/// A read's span map overlay: the map, and the segment files its sources are read from.
+#[derive(Clone, Copy)]
+pub(crate) struct Ov<'a> {
+    pub(crate) map: &'a SpanMap,
+    pub(crate) files: &'a dyn SegmentFiles,
+}
+
+/// The segment files of a log, as an overlay reads its sources.
+pub(crate) struct LogFiles<'a>(pub(crate) &'a [File]);
+
+impl SegmentFiles for LogFiles<'_> {
+    fn read_at(&self, segment: u32, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.0.read_at(segment, buf, offset)
+    }
+
+    fn header(&self, loc: Location) -> io::Result<Option<(u32, u8, Hash)>> {
+        self.0.header(loc)
+    }
 }
 
 /// The most removed spans that one pass visits and tries to punch (TASK-1002 O8).
@@ -359,6 +383,18 @@ fn write_observed(f: &File, bytes: &[u8], at: u64) -> io::Result<()> {
 
 /// Reads the frame at `offset`, or returns None if it is torn or corrupt.
 fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Hash, Vec<u8>)>> {
+    read_frame_ov(f, Location { segment: 0, offset }, file_len, None)
+}
+
+/// `read_frame` of the frame at `loc`, with the mapped ranges of `ov` filled from their sources
+/// before the hash check.
+fn read_frame_ov(
+    f: &File,
+    loc: Location,
+    file_len: u64,
+    ov: Option<Ov<'_>>,
+) -> io::Result<Option<(u8, Hash, Vec<u8>)>> {
+    let offset = loc.offset;
     let Some(payload_start) = offset.checked_add(HEADER).filter(|end| *end <= file_len) else {
         return Ok(None);
     };
@@ -375,6 +411,9 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
     let hash = Hash(header[5..37].try_into().unwrap());
     let mut payload = vec![0u8; len as usize];
     pio::read_exact_at(f, &mut payload, payload_start)?;
+    if let Some(ov) = ov {
+        ov.map.overlay(ov.files, loc, kind, hash, &mut payload)?;
+    }
     count_hashed(payload.len());
     if Hash::of(&payload) != hash {
         return Ok(None);
@@ -416,6 +455,7 @@ fn read_frame_or_hole(
     loc: Location,
     file_len: u64,
     holes: &Holes,
+    ov: Option<Ov<'_>>,
 ) -> io::Result<Option<FrameRead>> {
     // a hole is known by its logical kind; it keeps its header's raw kind (`crate::codec`)
     if let Some(h) = holes.get(&loc)
@@ -424,7 +464,7 @@ fn read_frame_or_hole(
     {
         return Ok(Some(FrameRead::Hole(raw, h.hash, h.len)));
     }
-    Ok(read_frame(f, loc.offset, file_len)?.map(|(k, h, p)| FrameRead::Whole(k, h, p)))
+    Ok(read_frame_ov(f, loc, file_len, ov)?.map(|(k, h, p)| FrameRead::Whole(k, h, p)))
 }
 
 /// A sealed segment (one the log has rolled past) that does not end at a batch marker: the log
@@ -481,6 +521,24 @@ pub fn find_unsealed(dir: &Path) -> io::Result<Option<u32>> {
 pub struct SegmentReader {
     dir: PathBuf,
     files: RwLock<BTreeMap<u32, Arc<File>>>,
+    /// The log's span map, shared with the writer: a read holds its read guard from the payload
+    /// read through the overlay and the hash check.
+    spans: Arc<RwLock<SpanMap>>,
+}
+
+impl SegmentFiles for SegmentReader {
+    fn read_at(&self, segment: u32, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        pio::read_exact_at(&*self.file(segment)?, buf, offset)
+    }
+
+    fn header(&self, loc: Location) -> io::Result<Option<(u32, u8, Hash)>> {
+        let f = match self.file(loc.segment) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        header_at(&f, loc.offset, f.metadata()?.len())
+    }
 }
 
 /// A frame that ends past the end of its file, or whose payload does not match its hash.
@@ -538,9 +596,15 @@ pub(crate) fn sealed_damage(f: &File, seg: u32, offset: u64, file_len: u64) -> S
 impl SegmentReader {
     /// A reader of the segments in `dir`. It opens nothing yet.
     pub fn open(dir: &Path) -> SegmentReader {
+        SegmentReader::open_with(dir, Arc::default())
+    }
+
+    /// A reader of the segments in `dir` that reads through the log's span map `spans`.
+    pub(crate) fn open_with(dir: &Path, spans: Arc<RwLock<SpanMap>>) -> SegmentReader {
         SegmentReader {
             dir: dir.to_path_buf(),
             files: RwLock::new(BTreeMap::new()),
+            spans,
         }
     }
 
@@ -564,7 +628,12 @@ impl SegmentReader {
     /// its hash is `InvalidData`.
     pub fn read_hashed(&self, loc: Location) -> io::Result<(u8, Hash, Vec<u8>)> {
         let f = self.file(loc.segment)?;
-        let (kind, hash, payload, _) = read_frame_at(&f, loc)?;
+        let map = self.spans.read().unwrap_or_else(|e| e.into_inner());
+        let ov = Ov {
+            map: &map,
+            files: self,
+        };
+        let (kind, hash, payload, _) = read_frame_at(&f, loc, Some(ov))?;
         Ok((kind, hash, payload))
     }
 
@@ -610,6 +679,11 @@ impl SegmentReader {
         if from >= upto {
             return Ok(());
         }
+        let map = self.spans.read().unwrap_or_else(|e| e.into_inner());
+        let ov = Ov {
+            map: &map,
+            files: self,
+        };
         for seg in from.segment..=upto.segment {
             if seg == upto.segment && upto.offset == 0 {
                 // nothing of `upto`'s segment is in range
@@ -639,7 +713,7 @@ impl SegmentReader {
                     segment: seg,
                     offset,
                 };
-                let frame = read_frame_or_hole(&file, loc, file_len, holes)?
+                let frame = read_frame_or_hole(&file, loc, file_len, holes, Some(ov))?
                     .ok_or_else(|| refuse_frame(&file, loc, file_len, corrupt_frame(loc)))?;
                 let next = offset + HEADER + frame.payload_len();
                 if next > end {
@@ -675,12 +749,68 @@ impl SegmentReader {
     }
 }
 
+impl SegmentReader {
+    /// [`SegmentLog::verify_frames_counted`] over this reader, up to `upto` (the log's end when
+    /// the check was captured): every frame read and its hash checked (an authorized hole of
+    /// `holes` by its header alone), each batch marker matched against its batch's frames, and a
+    /// sealed segment that does not end at a marker refused. Returns the non-marker frames and,
+    /// of them, the holes.
+    pub(crate) fn verify_frames_upto(
+        &self,
+        upto: Location,
+        holes: &Holes,
+    ) -> io::Result<(usize, usize)> {
+        let origin = Location {
+            segment: 0,
+            offset: 0,
+        };
+        let mut count = 0;
+        let mut dropped = 0;
+        let mut seg = 0u32;
+        // the frames read since the previous valid marker of this segment
+        let mut since: Vec<(u64, Hash)> = vec![];
+        self.for_each_view_from(origin, upto, holes, |loc, v, _| {
+            if loc.segment != seg {
+                seg = loc.segment;
+                since.clear();
+            }
+            match v.payload {
+                Some(payload) if v.kind == kinds::BATCH_COMMIT => {
+                    if !marker_matches(seg, &since, payload) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "batch marker in segment {seg} at offset {} does not match its batch",
+                                loc.offset
+                            ),
+                        ));
+                    }
+                    since.clear();
+                }
+                payload => {
+                    if payload.is_none() {
+                        dropped += 1;
+                    }
+                    since.push((loc.offset, v.hash));
+                    count += 1;
+                }
+            }
+            Ok(())
+        })?;
+        Ok((count, dropped))
+    }
+}
+
 /// The frame at `loc` in `f`, by positioned reads of its header and payload, with the offset just
 /// past it. A frame that does not fit the file or does not match its hash is `InvalidData`, as
 /// `SegmentLog::read_hashed` has it.
-fn read_frame_at(f: &File, loc: Location) -> io::Result<(u8, Hash, Vec<u8>, u64)> {
+fn read_frame_at(
+    f: &File,
+    loc: Location,
+    ov: Option<Ov<'_>>,
+) -> io::Result<(u8, Hash, Vec<u8>, u64)> {
     let file_len = f.metadata()?.len();
-    let (kind, hash, payload) = read_frame(f, loc.offset, file_len)?
+    let (kind, hash, payload) = read_frame_ov(f, loc, file_len, ov)?
         .ok_or_else(|| refuse_frame(f, loc, file_len, corrupt_frame(loc)))?;
     let next = loc.offset + HEADER + payload.len() as u64;
     Ok((kind, hash, payload, next))
@@ -777,7 +907,13 @@ struct Scan {
 
 /// The marker rule's scan of segment `seg`. An authorized hole (`holes`) is a frame like any
 /// other: its header's hash enters the batch digest, and its payload is not hashed.
-fn scan_marked(f: &File, seg: u32, file_len: u64, holes: &Holes) -> io::Result<Scan> {
+fn scan_marked(
+    f: &File,
+    seg: u32,
+    file_len: u64,
+    holes: &Holes,
+    ov: Option<Ov<'_>>,
+) -> io::Result<Scan> {
     let mut offset = 0;
     let mut boundary = None;
     let mut since: Vec<(u64, Hash)> = vec![];
@@ -789,6 +925,7 @@ fn scan_marked(f: &File, seg: u32, file_len: u64, holes: &Holes) -> io::Result<S
         },
         file_len,
         holes,
+        ov,
     )? {
         let end = offset + HEADER + frame.payload_len();
         match frame {
@@ -1046,7 +1183,13 @@ fn refuse_acknowledged_damage(
 pub(crate) fn acknowledged_end(readers: &[File], holes: &Holes) -> io::Result<Location> {
     let last = (readers.len() - 1) as u32;
     let f = &readers[last as usize];
-    let scan = scan_marked(f, last, f.metadata()?.len(), holes)?;
+    let spans = crate::dedup::spans_for(readers);
+    let map = spans
+        .as_ref()
+        .map(|s| s.read().unwrap_or_else(|e| e.into_inner()));
+    let files = LogFiles(readers);
+    let ov = map.as_deref().map(|map| Ov { map, files: &files });
+    let scan = scan_marked(f, last, f.metadata()?.len(), holes, ov)?;
     Ok(match scan.boundary {
         Some(offset) => Location {
             segment: last,
@@ -1274,6 +1417,7 @@ impl SegmentLog {
             fail_sync: false,
             crash: None,
             auth: Arc::default(),
+            spans: Arc::default(),
         };
         Ok(log)
     }
@@ -1292,7 +1436,7 @@ impl SegmentLog {
         max_len: u64,
         floor: Option<Location>,
     ) -> io::Result<(SegmentLog, Vec<PathBuf>)> {
-        SegmentLog::open_authorized(dir, max_len, floor).map_err(|e| match e {
+        SegmentLog::open_authorized(dir, max_len, floor, Arc::default()).map_err(|e| match e {
             StoreError::Io(e) => e,
             other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
         })
@@ -1309,8 +1453,10 @@ impl SegmentLog {
         dir: &Path,
         max_len: u64,
         floor: Option<Location>,
+        spans: Arc<RwLock<SpanMap>>,
     ) -> Result<(SegmentLog, Vec<PathBuf>), StoreError> {
         let mut readers = open_readers(dir)?;
+        crate::dedup::register(&readers, &spans);
         // the mode the first batch sets decides the bootstrap: a holder's applies are checked by
         // their logical tuples (`redaction_import`), a project's by their own spans' places
         let auth = Arc::new(match crate::redaction_import::log_mode(&readers)? {
@@ -1326,15 +1472,31 @@ impl SegmentLog {
             .write(true)
             .open(seg_path(dir, last))?;
         let file_len = writer.metadata()?.len();
-        let scan = scan_marked(&writer, last, file_len, holes)?;
+        let map = spans.read().unwrap_or_else(|e| e.into_inner());
+        let files = LogFiles(&readers);
+        let ov = Some(Ov {
+            map: &map,
+            files: &files,
+        });
+        let scan = scan_marked(&writer, last, file_len, holes, ov)?;
+        let prev_scan = if scan.boundary.is_none() && last > 0 {
+            let prev = File::open(seg_path(dir, last - 1))?;
+            let prev_len = prev.metadata()?.len();
+            Some((
+                prev_len,
+                scan_marked(&prev, last - 1, prev_len, holes, ov)?.boundary,
+            ))
+        } else {
+            None
+        };
+        drop(map);
         let mut quarantined = vec![];
         let len;
         if scan.boundary.is_none() && last > 0 {
             // the last segment is one unacknowledged batch, if the one before it is sealed at a marker
             let prev_path = seg_path(dir, last - 1);
-            let prev = File::open(&prev_path)?;
-            let prev_len = prev.metadata()?.len();
-            if scan_marked(&prev, last - 1, prev_len, holes)?.boundary != Some(prev_len) {
+            let (prev_len, prev_boundary) = prev_scan.expect("the scan of the segment before");
+            if prev_boundary != Some(prev_len) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
@@ -1381,6 +1543,7 @@ impl SegmentLog {
             fail_sync: false,
             crash: None,
             auth,
+            spans,
         };
         Ok((log, quarantined))
     }
@@ -1397,6 +1560,7 @@ impl SegmentLog {
         max_len: u64,
         store_dir: &Path,
         floor: Option<Location>,
+        spans: Arc<RwLock<SpanMap>>,
     ) -> Result<(SegmentLog, bool), StoreError> {
         let mut readers = vec![];
         while let Some(f) = open_if_present(&seg_path(dir, readers.len() as u32))? {
@@ -1408,6 +1572,8 @@ impl SegmentLog {
                 "has a log with no store features",
             ));
         }
+        // the bootstrap reads mapped payloads through the loaded map, as the writable open does
+        crate::dedup::register(&readers, &spans);
         let auth = Arc::new(match crate::redaction_import::log_mode(&readers)? {
             crate::holder::StoreMode::Holder => {
                 crate::redaction_import::bootstrap_holder(&readers)?
@@ -1418,13 +1584,30 @@ impl SegmentLog {
         let last = (readers.len() - 1) as u32;
         let f = &readers[last as usize];
         let file_len = f.metadata()?.len();
-        let scan = scan_marked(f, last, file_len, holes)?;
-        let (boundary, ignored) = if scan.boundary.is_none() && last > 0 {
+        let (scan, prev_boundary) = {
+            let map = spans.read().unwrap_or_else(|e| e.into_inner());
+            let files = LogFiles(&readers);
+            let ov = Some(Ov {
+                map: &map,
+                files: &files,
+            });
+            let scan = scan_marked(f, last, file_len, holes, ov)?;
+            let prev = if scan.boundary.is_none() && last > 0 {
+                let prev = &readers[last as usize - 1];
+                let prev_len = prev.metadata()?.len();
+                Some((
+                    prev_len,
+                    scan_marked(prev, last - 1, prev_len, holes, ov)?.boundary,
+                ))
+            } else {
+                None
+            };
+            (scan, prev)
+        };
+        let (boundary, ignored) = if let Some((prev_len, prev_b)) = prev_boundary {
             // the last segment is one unacknowledged batch, if the one before it is sealed at a
             // marker; the writable open removes it, this one reads the log without it
-            let prev = &readers[last as usize - 1];
-            let prev_len = prev.metadata()?.len();
-            if scan_marked(prev, last - 1, prev_len, holes)?.boundary != Some(prev_len) {
+            if prev_b != Some(prev_len) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
@@ -1434,10 +1617,12 @@ impl SegmentLog {
                 )
                 .into());
             }
+            let f = &readers[last as usize];
             refuse_acknowledged_damage(f, dir, last, &scan, file_len, floor, holes)?;
             readers.pop();
             (prev_len, file_len > 0)
         } else {
+            let f = &readers[last as usize];
             let b = scan.boundary.unwrap_or(0);
             if b < file_len {
                 refuse_acknowledged_damage(f, dir, last, &scan, file_len, floor, holes)?;
@@ -1456,6 +1641,7 @@ impl SegmentLog {
             fail_sync: false,
             crash: None,
             auth,
+            spans,
         };
         Ok((log, ignored))
     }
@@ -1861,7 +2047,13 @@ impl SegmentLog {
             .get(loc.segment as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
         let file_len = self.walk_len(loc.segment, f)?;
-        read_frame(f, loc.offset, file_len)?
+        let map = self.spans.read().unwrap_or_else(|e| e.into_inner());
+        let files = LogFiles(&self.readers);
+        let ov = Some(Ov {
+            map: &map,
+            files: &files,
+        });
+        read_frame_ov(f, loc, file_len, ov)?
             .ok_or_else(|| refuse_frame(f, loc, file_len, corrupt_frame(loc)))
     }
 
@@ -1920,6 +2112,12 @@ impl SegmentLog {
         mut f: impl FnMut(Location, FrameView<'_>, Location) -> Result<(), E>,
     ) -> Result<(), E> {
         let holes = &self.auth.holes;
+        let map = self.spans.read().unwrap_or_else(|e| e.into_inner());
+        let files = LogFiles(&self.readers);
+        let ov = Some(Ov {
+            map: &map,
+            files: &files,
+        });
         for seg in from.segment..=self.current() {
             let file = &self.readers[seg as usize];
             let file_len = self.walk_len(seg, file)?;
@@ -1944,6 +2142,7 @@ impl SegmentLog {
                 },
                 file_len,
                 holes,
+                ov,
             )? {
                 let loc = Location {
                     segment: seg,
@@ -2005,6 +2204,12 @@ impl SegmentLog {
     /// read nor hashed. Returns the non-marker frames and, of them, the holes.
     pub(crate) fn verify_frames_counted(&self) -> io::Result<(usize, usize)> {
         let holes = &self.auth.holes;
+        let map = self.spans.read().unwrap_or_else(|e| e.into_inner());
+        let files = LogFiles(&self.readers);
+        let ov = Some(Ov {
+            map: &map,
+            files: &files,
+        });
         let mut count = 0;
         let mut dropped = 0;
         for seg in 0..=self.current() {
@@ -2021,6 +2226,7 @@ impl SegmentLog {
                 },
                 file_len,
                 holes,
+                ov,
             )? {
                 let end = offset + HEADER + frame.payload_len();
                 match frame {
@@ -2113,12 +2319,31 @@ impl SegmentLog {
         &self.readers
     }
 
+    /// The log's span map, shared with its readers.
+    pub(crate) fn spans(&self) -> &Arc<RwLock<SpanMap>> {
+        &self.spans
+    }
+
+    /// The directory of the log's segments.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// True if a frame (or an authorized hole) starts at `loc`.
     pub(crate) fn frame_readable(&self, loc: Location) -> io::Result<bool> {
         let Some(f) = self.readers.get(loc.segment as usize) else {
             return Ok(false);
         };
-        Ok(read_frame_or_hole(f, loc, self.walk_len(loc.segment, f)?, &self.auth.holes)?.is_some())
+        let map = self.spans.read().unwrap_or_else(|e| e.into_inner());
+        let files = LogFiles(&self.readers);
+        let ov = Some(Ov {
+            map: &map,
+            files: &files,
+        });
+        Ok(
+            read_frame_or_hole(f, loc, self.walk_len(loc.segment, f)?, &self.auth.holes, ov)?
+                .is_some(),
+        )
     }
 
     /// Where `append_batch` would put the first frame of `frames`: the end of the log, or the start
@@ -2151,7 +2376,13 @@ impl SegmentLog {
         if payload_is_zero(f, start, u64::from(hole.len))? {
             return Ok(Some(true));
         }
-        let intact = read_frame(f, loc.offset, f.metadata()?.len())?.is_some_and(|(k, h, p)| {
+        let map = self.spans.read().unwrap_or_else(|e| e.into_inner());
+        let files = LogFiles(&self.readers);
+        let ov = Some(Ov {
+            map: &map,
+            files: &files,
+        });
+        let intact = read_frame_ov(f, loc, f.metadata()?.len(), ov)?.is_some_and(|(k, h, p)| {
             k == hole.kind && h == hole.hash && p.len() == hole.len as usize
         });
         Ok(intact.then_some(false))

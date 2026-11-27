@@ -352,6 +352,7 @@ fn hpt1_feature_appears_in_the_first_committed_port_batch() {
         names(&manifest),
         [
             "content_hash_v2",
+            "dedup_spans",
             "object_encoding",
             "ported_change",
             "snapshot_delta"

@@ -461,20 +461,28 @@ fn sdl6_snapshot_delta_fixture_keeps_hashes_landings_and_tags() {
         .find(|f| f.name == FEATURE_SNAPSHOT_DELTA)
         .unwrap();
     let held = want["store"]["manifest"]["features"].as_array().unwrap();
-    for f in rdy_store::format::baseline_features().features {
+    // span maps' dedup_spans joined the baseline after this fixture
+    for f in rdy_store::format::baseline_features()
+        .features
+        .into_iter()
+        .filter(|f| f.name != rdy_store::format::FEATURE_DEDUP_SPANS)
+    {
         assert!(held.contains(&json!(f)), "the manifest holds {}", f.name);
     }
     assert!(held.contains(&json!(reg)));
 
-    // the open of a copy reads back every recorded fact, and plans no upgrade step
+    // the open of a copy reads back every recorded fact; it plans only the optional span-map
+    // step, whose one batch follows the recorded log
     let (_base, root) = foreign_fixture::project_copy(&dir);
     let plan = rdy_store::upgrade::inspect(&root.join(".rdy/store")).unwrap();
-    assert!(plan.steps.is_empty(), "no step: {:?}", plan.steps);
+    assert_eq!(plan.steps, [rdy_store::upgrade::DEDUP_SPANS_STEP]);
     assert!(!plan.requires_upgrade && !plan.pending_check);
-    let store = opened_facts(&root);
+    opened_facts(&root);
     assert!(root.join(".rdy/store/index.redb").exists(), "rebuilt");
-    for member in want["store"].as_object().unwrap().keys() {
-        assert_eq!(store[member], want["store"][member], "{member}");
+    {
+        let r = Rdy::open(&root).unwrap();
+        foreign_fixture::assert_span_mapped_facts(&r, &want["store"], "the native store");
+        r.close().unwrap();
     }
     let world = &want["world"];
     let mut r = Rdy::open(&root).unwrap();
@@ -500,13 +508,11 @@ fn sdl6_snapshot_delta_fixture_keeps_hashes_landings_and_tags() {
         r.read().block(&Scope::Canon, &gone).is_err(),
         "the deletion landed"
     );
-    // compaction and a reindex keep the recorded identities
+    // compaction and a reindex keep the recorded identities and the upgrade batch
+    let upgraded = foreign_fixture::store_facts(&r)["objects"].clone();
     r.compact(false).unwrap();
     r.reindex().unwrap();
-    assert_eq!(
-        foreign_fixture::store_facts(&r)["objects"],
-        want["store"]["objects"]
-    );
+    assert_eq!(foreign_fixture::store_facts(&r)["objects"], upgraded);
     r.close().unwrap();
     rdy_qa::invariants::check_all(&Rdy::open(&root).unwrap())
         .unwrap_or_else(|v| panic!("invariants: {v:#?}"));
@@ -524,8 +530,8 @@ fn sdl6_snapshot_delta_dump_loads_as_recorded() {
     assert_eq!(foreign_fixture::dump_file_facts(&dump), want["file"]);
     let scratch = tempfile::tempdir().unwrap();
     let to = scratch.path().join("loaded");
-    let got = foreign_fixture::dump_load_facts(&dump, &to);
-    assert_eq!(got, want["whole"]);
+    // the load's tail adds span maps' dedup_spans, which came after this fixture
+    foreign_fixture::assert_span_mapped_dump_load(&dump, &to, &want["whole"], DUMP);
     let r = Rdy::open(&to).unwrap();
     assert_world_deltas(&r, &want["world"], DUMP);
     r.close().unwrap();
@@ -548,5 +554,49 @@ fn sdl6_snapshot_delta_sync_batch_takes_as_recorded() {
     assert_eq!(deltas, want["world"]["landings"].as_array().unwrap().len());
     let landing: Hash = want["taken"]["landing"].as_str().unwrap().parse().unwrap();
     let got = take_facts(&bytes, want["tag"].as_str().unwrap(), landing);
-    assert_eq!(got, want["taken"]);
+    assert_eq!(
+        without_ref_keys(&got),
+        without_ref_keys(&after_span_maps(&want["taken"]))
+    );
+}
+
+/// `facts` with each REF_UPDATE object key replaced by its kind alone: a ref update's payload
+/// holds its value and log position, which the longer manifest moves; the count stays.
+fn without_ref_keys(facts: &Value) -> Value {
+    let mut v = facts.clone();
+    let prefix = format!("{}:", kinds::REF_UPDATE);
+    for k in v["store"]["object_keys"].as_array_mut().unwrap() {
+        if k.as_str().unwrap().starts_with(&prefix) {
+            *k = json!(prefix);
+        }
+    }
+    v
+}
+
+/// The take facts `taken`, recorded before span maps, as a holder this rdy creates states them:
+/// its creation manifest and the take's merged manifest each also name `dedup_spans`, 70 more
+/// bytes in each of those two ref values. Every other fact is the recorded one, the ref
+/// updates' object keys aside ([`without_ref_keys`]).
+fn after_span_maps(taken: &Value) -> Value {
+    use rdy_store::format::{FEATURE_DEDUP_SPANS, REF_STORE_FEATURES, StoreFeatures};
+    let mut v = taken.clone();
+    let store = &mut v["store"];
+    let recorded: StoreFeatures = serde_json::from_value(store["manifest"].clone()).unwrap();
+    let added: Vec<_> = registered_features()
+        .into_iter()
+        .filter(|f| f.name == FEATURE_DEDUP_SPANS)
+        .collect();
+    let now = recorded.merged(&added);
+    let grown = now.to_json().len() - recorded.to_json().len();
+    assert_eq!(grown, 70, "the dedup_spans entry");
+    store["refs"][REF_STORE_FEATURES] = json!(
+        now.to_json()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    store["manifest"] = json!(now);
+    let end = store["log_end"][1].as_u64().unwrap();
+    store["log_end"][1] = json!(end + 2 * grown as u64);
+    v
 }

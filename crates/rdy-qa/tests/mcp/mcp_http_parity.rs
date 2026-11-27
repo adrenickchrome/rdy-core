@@ -38,8 +38,8 @@ const DESIGNED_DIFFERENCES: [&str; 2] = [
 const NORMALIZATIONS: [&str; 9] = [
     "protocol envelope: the modern revision's own `result.resultType: \"complete\"` member is dropped; it is not part of the tool's reply",
     "request ids: the JSON-RPC `id` and `jsonrpc` members are dropped",
-    "fixture paths: each world's project, scratch, home and config folders read `<root>`",
-    "generated identities: a block, landing or proposal id (`d-XXXXX`) reads `<id:n>`; a hash reads `<hex:n>` only where a named member holds it whole (`HASH_MEMBERS`, 64 or 32 hex digits) or where a text anchors it (`P-<hex>@n`, `D-XXXXX@<hex>`, `cq-`, `pi-`, `in-` and `rule-` ids, `canon at <hex>`, `for` or `fit` and a 64-digit hash, a redaction record line); a number of any length is never a hash; a temporary folder's own name (`rdyd...`), which is also the project's name, reads `<tmp:n>`",
+    "fixture paths: each world's project, scratch, home and config folders, as absolute paths in any spelling of their separators, read `<root>`",
+    "generated identities: a block, landing or proposal id (`d-XXXXX`) reads `<id:n>`; a hash reads `<hex:n>` only where a named member holds it whole (`HASH_MEMBERS`, 64 or 32 hex digits) or where a text anchors it (`P-<hex>@n`, `D-XXXXX@<hex>`, `cq-`, `pi-`, `in-` and `rule-` ids, `canon at <hex>`, `for` or `fit` and a 64-digit hash, a redaction record line); a number of any length is never a hash; the name of a supplied temporary folder (`rdyd...`), which is also the project's name, reads `<tmp:n>` wherever it stands alone, and no other text does",
     "the order of the records of one kind in a redaction dry run's `text`: the engine lists them by hash, so each run of one kind compares in the order of the names its JSON part gave them",
     "the pending card an answer leads to (`next` in an `rdy_answer` reply): the engine picks it by a generated id, so it reads `<next>`",
     "the allocation of the log file in an `rdy_compact` reply (`on_disk_bytes`): the filesystem rounds it to its block size, so it reads `<disk>`; `log_bytes` and every other size are kept",
@@ -355,14 +355,12 @@ struct Mask {
 
 /// The generated-identity patterns found inside texts. Each hash is named by the text that
 /// carries it (a proposal ref, a card line, a `canon at`, a signing refusal), never by its
-/// digits alone: a number of eight or more digits is not a hash. Order matters: the folder name
-/// first, since it contains digits and letters of the other kinds; the hashes before the block
-/// ids, since a card line holds both (`D-XXXXX@<hash>`).
+/// digits alone: a number of eight or more digits is not a hash. A temporary folder is not
+/// matched by a pattern here: only the absolute roots a world supplies and the names of those
+/// folders are ([`root_pattern`], [`tmp_names`]), so a block id that holds `RDYD` stays an id. Order matters: the hashes before the block ids,
+/// since a card line holds both (`D-XXXXX@<hash>`).
 fn masks() -> Vec<Mask> {
     [
-        // the test's temp folder (`short_tempdir`: `rdyd` and exactly six letters or digits, any
-        // case on Windows): a generated id can hold `RDYD` (`D-RDYD5`), but never six after it
-        ("tmp", r"(?i)[^\s\x22']*rdyd[0-9a-z]{6}\b", 0),
         // a proposal ref: `P-<12 hex>@n`
         ("hex", r"\bP-([0-9a-f]{12})@\d+", 1),
         // a pinned block ref: `D-XXXXX@<hash>`
@@ -497,9 +495,68 @@ const ID_ORDERED: [&str; 13] = [
     "/report/inside",
 ];
 
+/// The spellings of the absolute path `root` that a reply can hold: as given, with `/` or `\`
+/// for every separator, and each of those with its backslashes doubled, as in a JSON text.
+fn root_spellings(root: &str) -> Vec<String> {
+    let mut all = vec![];
+    for plain in [
+        root.to_string(),
+        root.replace('\\', "/"),
+        root.replace('/', "\\"),
+    ] {
+        let doubled = plain.replace('\\', "\\\\");
+        for spelling in [plain, doubled] {
+            if !all.contains(&spelling) {
+                all.push(spelling);
+            }
+        }
+    }
+    all
+}
+
+/// The names of the temporary folders among `roots`: the last part of a root that starts with
+/// `rdyd` and holds letters and digits only. These are the names a world's project and its
+/// folders carry; no other text is a name.
+fn tmp_names(roots: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = roots
+        .iter()
+        .filter_map(|r| r.rsplit(['/', '\\']).find(|part| !part.is_empty()))
+        .filter(|n| {
+            n.len() > 4
+                && n[..4].eq_ignore_ascii_case("rdyd")
+                && n.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+        .map(str::to_ascii_lowercase)
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
+/// One pattern for every spelling of every root: the literal path, escaped, and then a
+/// character that cannot continue a name (or the end), so a longer name that starts like a root
+/// is no match. The longest spelling comes first. `next` holds the character that follows.
+fn root_pattern(roots: &[String]) -> Option<regex::Regex> {
+    let mut all: Vec<String> = roots
+        .iter()
+        .filter(|r| !r.is_empty())
+        .flat_map(|r| root_spellings(r))
+        .collect();
+    if all.is_empty() {
+        return None;
+    }
+    all.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    all.dedup();
+    let alts: Vec<String> = all.iter().map(|p| regex::escape(p)).collect();
+    Some(regex::Regex::new(&format!(r"(?:{})(?P<next>[^0-9A-Za-z_]|$)", alts.join("|"))).unwrap())
+}
+
 /// One world's normalizer.
 struct Norm<'a> {
-    roots: &'a [String],
+    /// The roots of the world, as one pattern ([`root_pattern`]); `None` with no root.
+    roots: Option<regex::Regex>,
+    /// The names of the supplied temporary folders ([`tmp_names`]).
+    names: Vec<String>,
     masks: &'a [Mask],
     seen: &'a Seen,
     time: regex::Regex,
@@ -511,7 +568,8 @@ struct Norm<'a> {
 /// [`NORMALIZATIONS`], applied. Nothing else is masked.
 fn normalized(v: &Value, roots: &[String], masks: &[Mask], seen: &Seen) -> Value {
     let n = Norm {
-        roots,
+        roots: root_pattern(roots),
+        names: tmp_names(roots),
         masks,
         seen,
         time: regex::Regex::new(r"\d{4}-\d{2}-\d{2}[T ][0-9:.]+Z?").unwrap(),
@@ -523,13 +581,48 @@ fn normalized(v: &Value, roots: &[String], masks: &[Mask], seen: &Seen) -> Value
 }
 
 impl Norm<'_> {
+    /// `s` with each supplied temporary folder's name, in any letter case, where it stands alone
+    /// (no letter, digit or `_` on either side), replaced by `f(name)`; `name` is in lower case,
+    /// so one folder is one value whatever case a text spells it in (the project's name starts
+    /// with a capital).
+    fn named(&self, s: &str, f: &dyn Fn(&str) -> String) -> String {
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        let mut out = String::new();
+        let mut at = 0;
+        let lower = s.to_ascii_lowercase();
+        let mut found: Vec<(usize, &str)> = self
+            .names
+            .iter()
+            .flat_map(|n| lower.match_indices(n.as_str()))
+            .collect();
+        found.sort();
+        for (i, name) in found {
+            let end = i + name.len();
+            if i < at || word(s[..i].chars().next_back()) || word(s[end..].chars().next()) {
+                continue;
+            }
+            out.push_str(&s[at..i]);
+            out.push_str(&f(name));
+            at = end;
+        }
+        out.push_str(&s[at..]);
+        out
+    }
+
+    /// `s` with each supplied root read `<root>`.
+    fn rooted(&self, s: &str) -> String {
+        match &self.roots {
+            Some(re) => re
+                .replace_all(s, |c: &regex::Captures| format!("<root>{}", &c["next"]))
+                .into_owned(),
+            None => s.to_string(),
+        }
+    }
+
     /// A text with its roots, generated identities, times and ports masked. `hashes` is false
     /// where the text is documentation, whose example values are the same in every world.
     fn text(&self, s: &str, hashes: bool) -> String {
-        let mut s = s.to_string();
-        for r in self.roots {
-            s = s.replace(r, "<root>");
-        }
+        let mut s = self.named(&self.rooted(s), &|v| identity(self.seen, "tmp", v));
         for m in self.masks.iter().filter(|m| hashes || m.kind != "hex") {
             s = replace_group(m, &s, &|v| identity(self.seen, m.kind, v));
         }
@@ -544,8 +637,10 @@ impl Norm<'_> {
         const MARKERS: [(&str, &str); 3] = [
             (" new: ", ", "),
             (" omitted: ", "; "),
-            (" card first: ", ", "),
+            (" cards first, in order: ", ", "),
         ];
+        // the sentence that ends the exceptions' fix, after the list
+        const THEN_RELAY: &str = ". Then relay the approval.";
         s.split('\n')
             .map(|line| {
                 let Some((marker, sep)) = MARKERS.iter().find(|(m, _)| line.contains(m)) else {
@@ -553,6 +648,10 @@ impl Norm<'_> {
                 };
                 let at = line.find(marker).unwrap() + marker.len();
                 let (head, list) = line.split_at(at);
+                let (list, tail) = match list.find(THEN_RELAY) {
+                    Some(i) => list.split_at(i),
+                    None => (list, ""),
+                };
                 let starts: Vec<usize> = std::iter::once(0)
                     .chain(self.list_start.captures_iter(list).filter_map(|c| {
                         let m = c.get(0).unwrap();
@@ -568,7 +667,7 @@ impl Norm<'_> {
                     })
                     .collect();
                 entries.sort_by_cached_key(|e| self.sort_key(e));
-                format!("{head}{}", entries.join(sep))
+                format!("{head}{}{tail}", entries.join(sep))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -599,10 +698,15 @@ impl Norm<'_> {
     /// A text with the fixture's blocks named and every other generated value reduced to its kind:
     /// the order of a list the engine sorts by generated id.
     fn sort_key(&self, s: &str) -> String {
-        let mut s = s.to_string();
-        for r in self.roots {
-            s = s.replace(r, "<root>");
-        }
+        let mut s = self.named(&self.rooted(s), &|v| match self
+            .seen
+            .borrow()
+            .of
+            .get(&("tmp", v.to_string()))
+        {
+            Some(name) => format!("<tmp:{name}>"),
+            None => "<tmp>".to_string(),
+        });
         for m in self.masks {
             s = replace_group(
                 m,
@@ -1895,4 +1999,60 @@ fn mht8_normalization_keeps_what_is_not_generated() {
         json!({"url": "http://127.0.0.1:41234/x", "n": 7}),
         json!({"url": "http://127.0.0.1:51234/x", "n": 8})
     ));
+}
+
+#[test]
+fn r5903_tmp_normalizer_keeps_rdyd_block_ids() {
+    let unix = "/var/folders/ab/T/rdydQ1x9Zk";
+    let win = r"C:\Users\runner\AppData\Local\Temp\rdydQ1x9Zk";
+    let roots = vec![unix.to_string(), win.to_string()];
+    let hash = "a".repeat(12);
+    let reply = json!({"result": {"content": [{"text": {
+        // a block id that holds `RDYD`, and a ref to it
+        "created": {"$c30": "p-RDYD1"},
+        "line": format!("builds on {{{{p-RDYD1}}}} and p-RDYD1@{hash}"),
+        // the folder's own name, where it stands alone (the project's name)
+        "project": {"name": "RdydQ1x9Zk"},
+        "name_in_text": "project rdydQ1x9Zk is open; rdydQ1x9Zk2 is not it",
+        // a bare `rdyd` that is neither a root nor an id stays as written
+        "literal": "literal-rdyd123",
+        "word": "the rdyd daemon",
+        // the supplied roots, in every spelling of their separators
+        "unix": format!("{unix}/docs/a.md"),
+        "unix_back": unix.replace('/', "\\") + "\\docs\\a.md",
+        "win": format!(r"{win}\docs\a.md"),
+        "win_fwd": format!("{}/docs/a.md", win.replace('\\', "/")),
+        "win_json": format!("{}\\\\docs", win.replace('\\', "\\\\")),
+        // a path that is no root stays, and so does a longer name that starts like a root
+        "other": "/home/me/work/file.txt",
+        "longer": format!("{unix}X/docs/a.md"),
+    }}]}});
+    let got = normalized(&reply, &roots, &masks(), &Seen::default());
+    let text = &got["result"]["content"][0]["text"];
+    assert_eq!(text["created"]["$c30"], json!("<id:1>"), "{text}");
+    assert_eq!(
+        text["line"],
+        json!("builds on {{<id:1>}} and <id:1>@<hex:1>"),
+        "{text}"
+    );
+    assert_eq!(text["project"]["name"], json!("<tmp:1>"), "{text}");
+    assert_eq!(
+        text["name_in_text"],
+        json!("project <tmp:1> is open; rdydQ1x9Zk2 is not it"),
+        "{text}"
+    );
+    assert_eq!(text["literal"], json!("literal-rdyd123"), "{text}");
+    assert_eq!(text["word"], json!("the rdyd daemon"), "{text}");
+    assert_eq!(text["unix"], json!("<root>/docs/a.md"), "{text}");
+    assert_eq!(text["unix_back"], json!("<root>\\docs\\a.md"), "{text}");
+    assert_eq!(text["win"], json!("<root>\\docs\\a.md"), "{text}");
+    assert_eq!(text["win_fwd"], json!("<root>/docs/a.md"), "{text}");
+    assert_eq!(text["win_json"], json!("<root>\\\\docs"), "{text}");
+    assert_eq!(text["other"], json!("/home/me/work/file.txt"), "{text}");
+    assert_eq!(
+        text["longer"],
+        json!(format!("{unix}X/docs/a.md")),
+        "{text}"
+    );
+    assert_eq!(text.to_string().matches("<tmp:").count(), 2, "{text}");
 }

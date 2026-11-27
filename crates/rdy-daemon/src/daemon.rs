@@ -47,7 +47,25 @@ pub(crate) fn log(text: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let _ = writeln!(io::stderr().lock(), "{ms} rdy serve: {text}");
+    let mut sink = LOG_SINK.lock().unwrap_or_else(|e| e.into_inner());
+    match sink.as_mut() {
+        Some(f) => {
+            let _ = writeln!(f, "{ms} rdy serve: {text}");
+        }
+        None => {
+            let _ = writeln!(io::stderr().lock(), "{ms} rdy serve: {text}");
+        }
+    }
+}
+
+/// Where [`log`] writes instead of stderr while it is set: the run dir's `daemon.log` of a
+/// daemon that serves inside a command's own process ([`crate::serve::serve_clone_history`]),
+/// whose stderr is that command's.
+static LOG_SINK: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// Sends every [`log`] line to `file` from now on, or back to stderr with `None`.
+pub(crate) fn log_to(file: Option<std::fs::File>) {
+    *LOG_SINK.lock().unwrap_or_else(|e| e.into_inner()) = file;
 }
 
 /// The live [`LogCapture`]s: each one's expected texts and the lines it took.

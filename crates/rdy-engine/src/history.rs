@@ -161,15 +161,27 @@ pub(crate) fn author(p: &Provenance) -> Author {
     }
 }
 
-/// One version of a canon block (restatement drift, FW-CH2): the version, where the log holds
-/// the landing that carried it (`None` when its change has not landed), and the version before
-/// it (`None` after a create). Landings compare by their place in the log, which is the canon
-/// chain's order, never by the approver's clock (POST-LAUNCH 43).
+/// One version of a canon block (restatement drift, FW-CH2): the version, where the landing
+/// that carried it stands in canon's order (`None` when its change has not landed), and the
+/// version before it (`None` after a create). Landings compare by canon's ancestry, never by
+/// the approver's clock (POST-LAUNCH 43).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionStep {
     pub version: Hash,
-    pub landed_at: Option<Location>,
+    pub landed_at: Option<LandingOrder>,
     pub base: Option<Hash>,
+}
+
+/// Where a landing stands in canon's order: its chain depth, which the index derives from the
+/// `prev` links whatever order the log holds the chain in, then its place in the log. A URL
+/// clone's state take writes the tip before the older landings its history brings
+/// (D-GGTYA), so after that history arrives the log's order is not the chain's; the depth is.
+/// While that history is incomplete no landing at or after its frontier has a depth (the
+/// chain is not all held) and the log's order is the chain's again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LandingOrder {
+    pub depth: Option<u64>,
+    pub at: Location,
 }
 
 /// What one call has already decoded: changes by hash (and each one's ops by block), landing
@@ -186,6 +198,9 @@ struct Memo<'a> {
     landings: HashMap<Hash, LandingRef>,
     /// The state's log end: the bound of the carriers it reads.
     end: Location,
+    /// Whether the history is incomplete: a version with no producer held is behind the
+    /// frontier, so its entry is left out (W_HISTORY_PENDING), never index damage.
+    partial: bool,
 }
 
 fn no_writer(version: &Hash, id: &BlockId) -> RdyError {
@@ -225,6 +240,7 @@ impl<'a> Memo<'a> {
             landed: HashMap::new(),
             landings: HashMap::new(),
             end: state.seq(),
+            partial: state.history_frontier()?.is_some(),
         })
     }
 
@@ -238,8 +254,26 @@ impl<'a> Memo<'a> {
         id: &BlockId,
         used: &HashSet<Hash>,
     ) -> Result<Option<Hash>, RdyError> {
-        let all = self.reader.producers(version)?;
+        let mut all = self.reader.producers(version)?;
+        if self.partial {
+            // canon's rows stop at the frontier while the history is incomplete: a change held
+            // behind it (a completion's take holds the older landings' changes before the
+            // history ref is complete) that no canon landing carries and that the scope does not
+            // include is not canon's yet, so it reads as not held, as before the take
+            let mut kept = Vec::with_capacity(all.len());
+            for c in all {
+                if self.included.as_ref().is_some_and(|s| s.contains(&c))
+                    || self.reader.landing_of(&c)?.is_some()
+                {
+                    kept.push(c);
+                }
+            }
+            all = kept;
+        }
         if all.is_empty() {
+            if self.partial {
+                return Ok(None);
+            }
             return Err(no_writer(version, id));
         }
         let free: Vec<Hash> = all.into_iter().filter(|c| !used.contains(c)).collect();
@@ -343,13 +377,16 @@ impl<'a> Memo<'a> {
         Ok((entry, prev))
     }
 
-    /// Where the log holds the landing that carried change `c`, when it landed: canon's order,
-    /// never the clock (POST-LAUNCH 43).
-    fn landed_at(&mut self, c: &Hash) -> Result<Option<Location>, RdyError> {
+    /// Where the landing that carried change `c` stands in canon's order, when it landed:
+    /// canon's ancestry ([`LandingOrder`]), never the clock (POST-LAUNCH 43).
+    fn landed_at(&mut self, c: &Hash) -> Result<Option<LandingOrder>, RdyError> {
         let Some(h) = self.landing_id(c)? else {
             return Ok(None);
         };
-        Ok(Some(self.reader.landing_location(&h)?))
+        Ok(Some(LandingOrder {
+            depth: self.reader.landing_depth(&h)?,
+            at: self.reader.landing_location(&h)?,
+        }))
     }
 
     /// The step for `version` of `id` and the change that wrote it there, never one in `used`
@@ -404,12 +441,15 @@ impl<'a> Memo<'a> {
         )))
     }
 
-    /// The newest entry for `version` of `id`.
-    fn last(&mut self, version: &Hash, id: &BlockId) -> Result<HistoryEntry, RdyError> {
-        let c = self
-            .writer_of(version, id, &HashSet::new())?
-            .ok_or_else(|| no_writer(version, id))?;
-        Ok(self.entry(c, version, id)?.0)
+    /// The newest entry for `version` of `id`; None when the change that wrote it is behind an
+    /// incomplete history's frontier.
+    fn last(&mut self, version: &Hash, id: &BlockId) -> Result<Option<HistoryEntry>, RdyError> {
+        let c = match self.writer_of(version, id, &HashSet::new())? {
+            Some(c) => c,
+            None if self.partial => return Ok(None),
+            None => return Err(no_writer(version, id)),
+        };
+        Ok(Some(self.entry(c, version, id)?.0))
     }
 
     /// Follows each update's base from `start`, never taking a change twice: a block written back
@@ -419,9 +459,16 @@ impl<'a> Memo<'a> {
         let mut entries = Vec::new();
         let mut used = HashSet::new();
         let mut version = start;
-        let mut c = self
-            .writer_of(&version, id, &used)?
-            .ok_or_else(|| no_writer(&version, id))?;
+        let mut c = match self.writer_of(&version, id, &used)? {
+            Some(c) => c,
+            None if self.partial => {
+                return Ok(History {
+                    entries,
+                    more: false,
+                });
+            }
+            None => return Err(no_writer(&version, id)),
+        };
         loop {
             used.insert(c);
             let (entry, prev) = self.entry(c, &version, id)?;
@@ -462,7 +509,8 @@ fn version_in(m: &Materialized, id: &BlockId) -> Result<Hash, RdyError> {
 
 impl ReadState {
     /// `id`'s versions in `scope`, newest first, at most `limit` (1..=`HISTORY_MAX`). The walk
-    /// follows each update's base and ends at the block's create.
+    /// follows each update's base and ends at the block's create, or, while the history is
+    /// incomplete, at the first version whose change is behind the frontier.
     pub fn history(&self, scope: &Scope, id: &BlockId, limit: usize) -> Result<History, RdyError> {
         if !(1..=HISTORY_MAX).contains(&limit) {
             return Err(RdyError::new(
@@ -482,7 +530,9 @@ impl ReadState {
         Memo::new(self, scope)?.walk(version, id, limit)
     }
 
-    /// For each distinct id, the entry `history(scope, id, 1)` gives, sharing one memo.
+    /// For each distinct id, the entry `history(scope, id, 1)` gives, sharing one memo. While
+    /// the history is incomplete an id whose last change is behind the frontier has no entry;
+    /// the reply carries [`ReadState::history_warning`].
     pub fn last_changes(
         &self,
         scope: &Scope,
@@ -496,7 +546,9 @@ impl ReadState {
                 continue;
             }
             let version = version_in(&m, id)?;
-            out.insert(id.clone(), memo.last(&version, id)?);
+            if let Some(entry) = memo.last(&version, id)? {
+                out.insert(id.clone(), entry);
+            }
         }
         Ok(out)
     }
@@ -661,11 +713,15 @@ impl Drop for CanonSteps<'_> {
 }
 
 impl CanonSteps<'_> {
-    /// The step for `id`'s canon version and the change that wrote it.
-    pub(crate) fn current(&mut self, id: &BlockId) -> Result<Step, RdyError> {
+    /// The step for `id`'s canon version and the change that wrote it; None when that change is
+    /// behind an incomplete history's frontier.
+    pub(crate) fn current(&mut self, id: &BlockId) -> Result<Option<Step>, RdyError> {
         let version = version_in(&self.m, id)?;
-        self.step(&version, id, &HashSet::new())?
-            .ok_or_else(|| no_writer(&version, id))
+        match self.step(&version, id, &HashSet::new())? {
+            Some(s) => Ok(Some(s)),
+            None if self.memo.partial => Ok(None),
+            None => Err(no_writer(&version, id)),
+        }
     }
 
     /// The step for `version` of `id` and the change that wrote it, never one in `used`; `None`

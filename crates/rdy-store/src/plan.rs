@@ -49,6 +49,7 @@ use crate::error::StoreError;
 use crate::holder::StoreMode;
 use crate::index::IndexEntry;
 use crate::kinds;
+use crate::plan_record::{self, FoldError, PlanRecord};
 use crate::redaction::StoredFrame;
 use crate::segment::{HEADER as FRAME_HEADER, Location};
 use crate::store::{Frames, StoreReader};
@@ -60,6 +61,7 @@ use rdy_model::plan::{
 };
 use rdy_model::{Answer, AnswerAct, BlockId, Hash, LandingRecord, Proposal};
 use serde::{Deserialize, Serialize};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub use crate::state::{
@@ -270,6 +272,12 @@ pub(crate) trait PlanLookup {
     fn landing_here(&self, p: &Hash) -> Result<Option<Hash>, StoreError>;
     /// Whether the store is a holder: its chains and seals arrive by take, with no view.
     fn holder(&self) -> bool;
+    /// Whether the store holds the object of `kind` and hash `h` anywhere in its log, later
+    /// records included: a full check asks it of a carried plan's frontier links, which a
+    /// history's later batches bring (D-4PV25). Only the store's check answers true.
+    fn held_anywhere(&self, _kind: u8, _h: &Hash) -> Result<bool, StoreError> {
+        Ok(false)
+    }
 }
 
 /// The typed record of `kind` that `look` reads; None when it does not decode.
@@ -292,39 +300,79 @@ fn typed<T: serde::de::DeserializeOwned + 'static>(
     }
 }
 
-/// The proposal version that the chain with the latest version `plan` last bound: the
-/// `proposal` of the newest version from `plan` back through `prev` that names one (a seal names
-/// its landed version), or `None` when no version of the chain does. `read` gives the version of
-/// a hash (`None`: none that decodes, which ends the walk). The walk reads each answer-only
-/// version after the last bound one, and no more.
+/// The PLAN frames `look` reads, as the plan fold reads them (`crate::plan_record`): a missing
+/// one is None.
+fn frames_of(look: &dyn PlanLookup) -> impl Fn(&Hash) -> PlanFrame + '_ {
+    move |h| match look.read(kinds::PLAN, h) {
+        Ok(v) => Ok(Some(v)),
+        Err(StoreError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// One PLAN frame read: its encoding and body, None when there is none.
+type PlanFrame = Result<Option<(u16, Vec<u8>)>, StoreError>;
+
+/// The plan version `h` that `look` reads, hydrated (`plan_record::fold`); None when it is
+/// missing, does not decode or breaks its chain rule (the walk that asks ends there).
+fn hydrate(look: &dyn PlanLookup, h: &Hash) -> Result<Option<Plan>, StoreError> {
+    match plan_record::fold(h, &frames_of(look)) {
+        Ok(p) => Ok(Some(p)),
+        Err(FoldError::Broken { .. }) | Err(FoldError::Store(StoreError::NotFound(_))) => Ok(None),
+        Err(FoldError::Store(e)) => Err(e),
+    }
+}
+
+/// The plan version `h` that `look` reads, hydrated for a record check: a broken chain or a
+/// missing predecessor is `invalid chain` (a missing record is a broken chain here, as the
+/// record itself was found), any other read error the lookup's own.
+pub(crate) fn hydrate_for_check(h: &Hash, look: &dyn PlanLookup) -> Result<Plan, FoldError> {
+    match plan_record::fold(h, &frames_of(look)) {
+        Err(FoldError::Store(StoreError::NotFound(_))) => Err(FoldError::Broken {
+            plan: *h,
+            reason: INVALID_CHAIN,
+        }),
+        r => r,
+    }
+}
+
+/// The proposal version that the chain with a version whose `proposal` and `prev` are given last
+/// bound: the `proposal` of the newest version from it back through `prev` that names one (a
+/// seal names its landed version), or `None` when no version of the chain does. `read` gives
+/// the frames; a missing one, or one that does not decode, ends the walk. The walk reads the
+/// metadata of each answer-only version after the last bound one, each frame once, and no more.
 fn last_bound(
-    plan: &Plan,
-    read: &dyn Fn(&Hash) -> Result<Option<Plan>, StoreError>,
+    proposal: Option<Hash>,
+    prev: Option<Hash>,
+    read: &plan_record::ReadFrame<'_>,
 ) -> Result<Option<Hash>, StoreError> {
-    let (mut proposal, mut prev) = (plan.proposal, plan.prev);
+    let (mut proposal, mut prev) = (proposal, prev);
     while proposal.is_none() {
         let Some(at) = prev else {
             return Ok(None);
         };
-        let Some(p) = read(&at)? else {
+        let Some(r) = plan_record::meta(&at, read)? else {
             return Ok(None);
         };
-        (proposal, prev) = (p.proposal, p.prev);
+        (proposal, prev) = (r.proposal(), r.prev());
     }
     Ok(proposal)
 }
 
-/// Whether the chain whose latest version is `head` has ended (O6): it is sealed, or the
-/// proposal version its chain last bound landed (before the plan being checked) without a seal,
-/// also when answer-only versions follow the bound one.
-fn chain_ended(look: &dyn PlanLookup, head: &Plan) -> Result<bool, StoreError> {
-    if head.seal.is_some() {
+/// Whether the chain whose latest version is sealed (`sealed`) or names `proposal` and `prev`
+/// has ended (O6): it is sealed, or the proposal version its chain last bound landed (before the
+/// plan being checked) without a seal, also when answer-only versions follow the bound one. It
+/// reads metadata only.
+fn chain_ended(
+    look: &dyn PlanLookup,
+    sealed: bool,
+    proposal: Option<Hash>,
+    prev: Option<Hash>,
+) -> Result<bool, StoreError> {
+    if sealed {
         return Ok(true);
     }
-    let read = |h: &Hash| -> Result<Option<Plan>, StoreError> {
-        look.read(kinds::PLAN, h).map(|(_, b)| decode_plan(&b).ok())
-    };
-    match last_bound(head, &read)? {
+    match last_bound(proposal, prev, &frames_of(look))? {
         Some(v) => look.landed(&v),
         None => Ok(false),
     }
@@ -335,9 +383,15 @@ fn chain_ended(look: &dyn PlanLookup, head: &Plan) -> Result<bool, StoreError> {
 /// newest version from `q` (`p`'s predecessor) back through `prev` that names a proposal other
 /// than the final version, when it binds the approved version. A landing's plans carry that
 /// binding's answers, not answers the view recorded after it (D-4JMPH, p-8D6ES). `None`: `p` is
-/// no landing's plan, or no such binding precedes it. The walk reads the answer-only versions
-/// after the binding, as `last_bound` does.
-fn approved_binding(look: &dyn PlanLookup, p: &Plan, q: &Plan) -> Result<Option<Plan>, StoreError> {
+/// no landing's plan, or no such binding precedes it. The walk reads the metadata of the
+/// answer-only versions after the binding, as `last_bound` does, and hydrates only the binding
+/// it selects (`q` itself, the hydrated version `q_hash`, needs no fold).
+fn approved_binding(
+    look: &dyn PlanLookup,
+    p: &Plan,
+    q_hash: Hash,
+    q: &Plan,
+) -> Result<Option<Plan>, StoreError> {
     let landing = match (&p.seal, p.proposal) {
         (Some(seal), _) => Some(seal.landing),
         (None, Some(v)) => look.landing_here(&v)?,
@@ -350,25 +404,32 @@ fn approved_binding(look: &dyn PlanLookup, p: &Plan, q: &Plan) -> Result<Option<
         return Ok(None);
     };
     let approved = landed.approved_version.unwrap_or(landed.proposal);
-    let mut at = q.clone();
+    let read = frames_of(look);
+    let (mut at, mut proposal, mut sealed, mut prev) =
+        (q_hash, q.proposal, q.seal.is_some(), q.prev);
     loop {
-        match at.proposal {
-            Some(v) if v == approved => return Ok(at.seal.is_none().then_some(at)),
+        match proposal {
+            Some(v) if v == approved => {
+                if sealed {
+                    return Ok(None);
+                }
+                if at == q_hash {
+                    return Ok(Some(q.clone()));
+                }
+                return hydrate(look, &at);
+            }
             // the binding of the final version, earlier in the landing's batch
             Some(v) if v == landed.proposal => {}
             Some(_) => return Ok(None),
             None => {}
         }
-        let Some(prev) = at.prev else {
+        let Some(h) = prev else {
             return Ok(None);
         };
-        let Some(next) = look
-            .read(kinds::PLAN, &prev)
-            .map(|(_, b)| decode_plan(&b).ok())?
-        else {
+        let Some(r) = plan_record::meta(&h, &read)? else {
             return Ok(None);
         };
-        at = next;
+        (at, proposal, sealed, prev) = (h, r.proposal(), r.seal().is_some(), r.prev());
     }
 }
 
@@ -399,21 +460,85 @@ pub(crate) fn invalid_context(
     p: &Plan,
     look: &dyn PlanLookup,
 ) -> Result<Option<&'static str>, StoreError> {
+    invalid_context_deferring(h, p, look, None)
+}
+
+/// A PLAN of the carried chain of a history ref's frontier (the closed state link table,
+/// D-4PV25): the root's sealed PLAN, or a record of its `prev` chain back to and including the
+/// nearest Full record. Its frontier links may be absent while the history is incomplete: its
+/// `proposal` and `seal.version`, and the Full record's own `prev`. Every other rule, and each
+/// frontier link that is held, is checked as for any plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CarriedPlan {
+    /// Whether the record is the chain's Full record (a whole version), whose own `prev` is a
+    /// frontier link; a delta's `prev` is never absent.
+    pub(crate) full: bool,
+    /// Whether the full rule holds (a complete history ref, or the full check of
+    /// `StoreReader::full_history_reader`): no link is deferred, and each frontier link must
+    /// be held, in the log before the plan or in the history's later batches, and keep its
+    /// rules.
+    pub(crate) full_check: bool,
+}
+
+/// Where a carried plan's frontier link stands ([`invalid_context_deferring`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Link {
+    /// Held where the ordinary rule reads it, or (a full check) in a later batch.
+    Held,
+    /// Absent while the history is incomplete: deferred to the full check.
+    Deferred,
+    /// Absent where a record must hold it.
+    Missing,
+}
+
+/// [`invalid_context`] of plan `p`, with the frontier links of `carried` deferred when it is a
+/// record of the carried chain ([`CarriedPlan`]).
+pub(crate) fn invalid_context_deferring(
+    h: &Hash,
+    p: &Plan,
+    look: &dyn PlanLookup,
+    carried: Option<CarriedPlan>,
+) -> Result<Option<&'static str>, StoreError> {
     let holder = look.holder();
     let here = |place: Place| match place {
         Place::Batch => true,
         Place::Log => holder,
         Place::Missing => false,
     };
+    // a frontier link of the carried chain: held as the ordinary rule reads it; else
+    // deferred while the history is incomplete, or, in the full check, held in a later batch
+    // of the history (then checked as held) or missing
+    let link = |kind: u8, h: &Hash, ordinary: bool| -> Result<Link, StoreError> {
+        if ordinary {
+            return Ok(Link::Held);
+        }
+        Ok(match carried {
+            Some(c) if c.full_check && look.held_anywhere(kind, h)? => Link::Held,
+            Some(c) if !c.full_check && look.place(kind, h)? == Place::Missing => Link::Deferred,
+            _ => Link::Missing,
+        })
+    };
+    // the carried chain's Full record: its own `prev` is a frontier link
+    let frontier_prev = carried.is_some_and(|c| c.full);
     match p.prev {
+        Some(prev)
+            if frontier_prev
+                && link(
+                    kinds::PLAN,
+                    &prev,
+                    look.place(kinds::PLAN, &prev)? != Place::Missing,
+                )? == Link::Deferred => {}
         Some(prev) => {
-            if look.place(kinds::PLAN, &prev)? == Place::Missing {
+            let ordinary = look.place(kinds::PLAN, &prev)? != Place::Missing;
+            let held = if frontier_prev {
+                link(kinds::PLAN, &prev, ordinary)? == Link::Held
+            } else {
+                ordinary
+            };
+            if !held {
                 return Ok(Some(INVALID_CHAIN));
             }
-            let Some(q) = look
-                .read(kinds::PLAN, &prev)
-                .map(|(_, b)| decode_plan(&b).ok())?
-            else {
+            let Some(q) = hydrate(look, &prev)? else {
                 return Ok(Some(INVALID_CHAIN));
             };
             // answers are cumulative: each of the predecessor's items keeps an answer (its act
@@ -421,7 +546,7 @@ pub(crate) fn invalid_context(
             // landing's plans keep each item of the approved version's binding instead: an
             // answer the view recorded after that propose is not the version's
             let keeps = |item: &Hash| p.answers.binary_search_by(|a| a.item.cmp(item)).is_ok();
-            let anchor = approved_binding(look, p, &q)?;
+            let anchor = approved_binding(look, p, prev, &q)?;
             let kept = &anchor.as_ref().unwrap_or(&q).answers;
             if q.view != p.view
                 || q.seal.is_some()
@@ -437,7 +562,10 @@ pub(crate) fn invalid_context(
             }
             // an unsealed version never continues a chain whose last bound proposal landed
             // without a seal (O6): the view's next version starts a chain
-            if !holder && p.seal.is_none() && chain_ended(look, &q)? {
+            if !holder
+                && p.seal.is_none()
+                && chain_ended(look, q.seal.is_some(), q.proposal, q.prev)?
+            {
                 return Ok(Some(INVALID_CHAIN));
             }
         }
@@ -447,11 +575,9 @@ pub(crate) fn invalid_context(
         // proposal's seal names no chain at all
         None if p.seal.is_none() && !holder && !binds_after_unbound(look, p)? => {
             if let Some(l) = look.latest(&p.view)? {
-                let q = look
-                    .read(kinds::PLAN, &l)
-                    .map(|(_, b)| decode_plan(&b).ok())?;
+                let q = plan_record::meta(&l, &frames_of(look))?;
                 let ended = match q {
-                    Some(q) => chain_ended(look, &q)?,
+                    Some(q) => chain_ended(look, q.seal().is_some(), q.proposal(), q.prev())?,
                     None => false,
                 };
                 if !ended {
@@ -466,8 +592,9 @@ pub(crate) fn invalid_context(
             return Ok(Some(INVALID_SEAL));
         }
         let landed = typed::<LandingRecord>(look, kinds::LANDING, &seal.landing)?;
+        let ordinary = look.place(kinds::PROPOSAL, &seal.version)? != Place::Missing;
         if landed.is_none_or(|l| l.proposal != seal.version)
-            || look.place(kinds::PROPOSAL, &seal.version)? == Place::Missing
+            || link(kinds::PROPOSAL, &seal.version, ordinary)? == Link::Missing
         {
             return Ok(Some(INVALID_SEAL));
         }
@@ -486,12 +613,17 @@ pub(crate) fn invalid_context(
             return Ok(Some(DUPLICATE_LANDING_SEAL));
         }
     } else if let Some(prop) = p.proposal {
-        if !here(look.place(kinds::PROPOSAL, &prop)?) {
-            return Ok(Some(INVALID_PROPOSAL));
-        }
-        let version = typed::<Proposal>(look, kinds::PROPOSAL, &prop)?;
-        if version.is_none_or(|v| v.view != p.view) {
-            return Ok(Some(INVALID_PROPOSAL));
+        // a carried record's bound proposal behind the frontier: its view is the full check's
+        let ordinary = here(look.place(kinds::PROPOSAL, &prop)?);
+        match link(kinds::PROPOSAL, &prop, ordinary)? {
+            Link::Deferred => {}
+            Link::Missing => return Ok(Some(INVALID_PROPOSAL)),
+            Link::Held => {
+                let version = typed::<Proposal>(look, kinds::PROPOSAL, &prop)?;
+                if version.is_none_or(|v| v.view != p.view) {
+                    return Ok(Some(INVALID_PROPOSAL));
+                }
+            }
         }
         if let Some(other) = look.bound(&prop)?
             && other != *h
@@ -690,7 +822,7 @@ pub(crate) fn entries(
     r: &Resolver<'_>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
     match kind {
-        kinds::PLAN => plan_entries(hash, loc, payload, r),
+        kinds::PLAN => plan_entries(hash, loc, 0, payload, r),
         kinds::ANSWER => answer_entries(hash, loc, payload, r),
         kinds::TRANSITION => Ok(
             match crate::codec::decode_record::<TransitionsV1>(kinds::TRANSITION, payload) {
@@ -700,6 +832,7 @@ pub(crate) fn entries(
         ),
         // a marked frame (a record in an optional encoding): its logical kind and its body
         raw if crate::codec::logical_kind(raw) != raw => match crate::codec::split(raw, payload) {
+            Ok(o) if o.kind == kinds::PLAN => plan_entries(hash, loc, o.version, o.body, r),
             Ok(o) if o.kind == kinds::TRANSITION => {
                 Ok(match crate::codec::decode_split::<TransitionsV1>(&o) {
                     Ok(t) => transition_entries(&t, loc),
@@ -712,19 +845,23 @@ pub(crate) fn entries(
     }
 }
 
-/// A PLAN's entries: an unsealed version's bound proposal; a seal's landing, each of its
-/// decisions at the landing's position, and each deferred non-code item it seals with an
-/// accepting ANSWER. A record that decodes and breaks a rule still gives them (fsck reports it).
+/// A PLAN's entries, from its frame of encoding `version` and body `body` alone (a whole
+/// version or a delta: both hold the metadata whole, so no predecessor is read): an unsealed
+/// version's bound proposal; a seal's landing, each of its decisions at the landing's position,
+/// and each deferred non-code item it seals with an accepting ANSWER. A record that decodes and
+/// breaks a rule still gives them (fsck reports it).
 pub(crate) fn plan_entries(
     hash: Hash,
     loc: Location,
-    payload: &[u8],
+    version: u16,
+    body: &[u8],
     r: &Resolver<'_>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
-    let p = decode_plan(payload).map_err(|_| StoreError::Decode(damage(&hash, INVALID_FIELDS)))?;
+    let (p, _) = plan_record::decode_body(version, body)
+        .map_err(|_| StoreError::Decode(damage(&hash, INVALID_FIELDS)))?;
     let mut out = vec![];
-    let Some(seal) = &p.seal else {
-        if let Some(proposal) = p.proposal {
+    let Some(seal) = p.seal() else {
+        if let Some(proposal) = p.proposal() {
             out.push(IndexEntry::PlanProposal {
                 proposal,
                 plan: hash,
@@ -852,14 +989,15 @@ impl WriteLookup<'_> {
             .and_then(|(k, p)| crate::codec::split(*k, p).ok().map(|o| (o.version, o.body)))
     }
 
-    /// The plans among `items`, in order.
-    fn item_plans(&self) -> impl Iterator<Item = (Hash, Plan)> + '_ {
+    /// The plans among `items`, in order, by their frames' metadata.
+    fn item_plans(&self) -> impl Iterator<Item = (Hash, PlanRecord)> + '_ {
         self.items
             .iter()
             .filter(|(k, _)| crate::codec::logical_kind(*k) == kinds::PLAN)
             .filter_map(|(k, p)| {
-                let body = crate::codec::split(*k, p).ok()?.body;
-                decode_plan(body).ok().map(|plan| (Hash::of(p), plan))
+                plan_record::decode(*k, p)
+                    .ok()
+                    .map(|(plan, _)| (Hash::of(p), plan))
             })
     }
 }
@@ -891,7 +1029,7 @@ impl PlanLookup for WriteLookup<'_> {
     }
 
     fn latest(&self, view: &str) -> Result<Option<Hash>, StoreError> {
-        if let Some((h, _)) = self.item_plans().filter(|(_, p)| p.view == view).last() {
+        if let Some((h, _)) = self.item_plans().filter(|(_, p)| p.view() == view).last() {
             return Ok(Some(h));
         }
         self.store
@@ -902,7 +1040,7 @@ impl PlanLookup for WriteLookup<'_> {
 
     fn bound(&self, p: &Hash) -> Result<Option<Hash>, StoreError> {
         let mut plans = self.item_plans();
-        if let Some((h, _)) = plans.find(|(_, q)| q.seal.is_none() && q.proposal == Some(*p)) {
+        if let Some((h, _)) = plans.find(|(_, q)| q.seal().is_none() && q.proposal() == Some(*p)) {
             return Ok(Some(h));
         }
         Ok(self.store.index().plan_proposal(p)?.map(|(h, _)| h))
@@ -910,8 +1048,7 @@ impl PlanLookup for WriteLookup<'_> {
 
     fn sealed(&self, l: &Hash) -> Result<Option<Hash>, StoreError> {
         let mut plans = self.item_plans();
-        if let Some((h, _)) = plans.find(|(_, q)| q.seal.as_ref().is_some_and(|s| s.landing == *l))
-        {
+        if let Some((h, _)) = plans.find(|(_, q)| q.seal().is_some_and(|s| s.landing == *l)) {
             return Ok(Some(h));
         }
         Ok(self.store.index().plan_seal(l)?.map(|(h, _)| h))
@@ -946,16 +1083,65 @@ impl PlanLookup for WriteLookup<'_> {
     }
 }
 
-/// The hash a plan version is stored under: its frame's, in the PLAN kind's latest encoding.
+/// The draft id of a plan version that names it in a writer's early refusals: the hash of its
+/// whole version-1 frame (`Plan::id`). A stored version and every reference to it use its
+/// prepared frame's hash instead ([`Store::prepare_plan`]).
 pub(crate) fn plan_hash(plan: &Plan) -> Hash {
-    crate::codec::encode_new(kinds::PLAN, plan).hash()
+    plan.id()
+}
+
+/// A plan version prepared for a write: `value` carries the selected frame's identity, and
+/// `frame` is that frame. Its id (`value.id()`, `frame.hash()`) is the one a ref and a seal name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedPlan {
+    pub value: Plan,
+    pub frame: crate::codec::EncodedObject,
+}
+
+/// The frame of `plan` as the plan writer stores it after what `look` reads (D-3PNRK): a whole
+/// version-1 frame for a chain's first version, after [`MAX_PLAN_DELTA_DEPTH`] consecutive
+/// deltas, or when the delta frame would be at least as large; else the delta from its
+/// predecessor. A predecessor that cannot be read or hydrated gives a whole frame, which the
+/// plan check then refuses.
+fn select_frame(
+    plan: &Plan,
+    look: &dyn PlanLookup,
+) -> Result<crate::codec::EncodedObject, StoreError> {
+    use rdy_model::encoding::PLAN_DELTA_ENCODING;
+    use rdy_model::plan_encoding::{PlanDeltaV1, delta_body, full_body};
+    let framed = |body: Vec<u8>| crate::codec::EncodedObject {
+        kind: kinds::PLAN,
+        version: PLAN_DELTA_ENCODING,
+        payload: [&PLAN_DELTA_ENCODING.to_le_bytes()[..], &body].concat(),
+    };
+    let full = framed(full_body(plan));
+    let (Some(stable), Some(prev)) = (plan.stable, plan.prev) else {
+        return Ok(full);
+    };
+    let read = frames_of(look);
+    match plan_record::delta_depth(&prev, &read)? {
+        Some(depth) if depth < rdy_model::plan_encoding::MAX_PLAN_DELTA_DEPTH => {}
+        _ => return Ok(full),
+    }
+    let Some(q) = hydrate(look, &prev)? else {
+        return Ok(full);
+    };
+    let delta = framed(delta_body(&PlanDeltaV1::between(
+        stable, prev, &q.answers, plan,
+    )));
+    Ok(if delta.payload.len() < full.payload.len() {
+        delta
+    } else {
+        full
+    })
 }
 
 impl Store {
     /// Writes the answer-only plan version `plan` and moves `plan/<view>` to it, in one batch
-    /// (D-4JMPH). Returns its id. A version that binds a proposal or carries a seal is refused:
-    /// only the proposal and landing composition writes those, beside their own records. A
-    /// version that breaks a rule is refused (`plan <hash>: <reason>`), with nothing written.
+    /// (D-4JMPH). Returns its id, its prepared frame's hash. A version that binds a proposal or
+    /// carries a seal is refused: only the proposal and landing composition writes those,
+    /// beside their own records. A version that breaks a rule is refused (`plan <hash>:
+    /// <reason>`), with nothing written.
     pub fn put_plan(&mut self, plan: &Plan) -> Result<Hash, StoreError> {
         self.ensure_writable()?;
         let id = plan_hash(plan);
@@ -971,46 +1157,79 @@ impl Store {
     }
 
     /// The frames that write `plan` after `batch` (the earlier frames of its own write): the
-    /// PLAN, then `plan/<view>` naming it. The plan is checked first (`check_plan`); nothing is
-    /// written. The proposal and landing composition put these frames in their own batch.
+    /// PLAN frame [`Store::prepare_plan`] selects, then `plan/<view>` naming its hash. Nothing
+    /// is written. The proposal and landing composition put these frames in their own batch.
     pub(crate) fn plan_frames(
         &self,
         plan: &Plan,
         batch: &[(u8, Vec<u8>)],
     ) -> Result<(Hash, Frames), StoreError> {
-        let id = self.check_plan(plan, batch)?;
-        let mut items = vec![crate::codec::item_new(kinds::PLAN, plan)];
+        let prepared = self.prepare_plan(plan, batch)?;
+        let id = prepared.frame.hash();
+        let mut items = vec![prepared.frame.into_item()];
         items.extend(self.ref_items_pub(vec![(plan_ref(&plan.view), id.0.to_vec())]));
         Ok((id, items))
     }
 
-    /// Checks `plan` as the frame after `batch`: its encoding within the bounded decoder's
-    /// limits, its own rules and its chain, bound proposal and seal against the store and the
-    /// batch. Returns its id; a broken rule is `Refused` with `plan <hash>: <reason>`.
-    pub(crate) fn check_plan(
+    /// The frame the plan writer would store `plan` in after `batch`, unchecked: a whole
+    /// version or the delta from its predecessor (see [`Store::prepare_plan`]). A test names a
+    /// refused version's hash by it.
+    #[doc(hidden)]
+    pub fn select_plan_frame(
         &self,
         plan: &Plan,
         batch: &[(u8, Vec<u8>)],
-    ) -> Result<Hash, StoreError> {
-        let frame = crate::codec::encode_new(kinds::PLAN, plan);
+    ) -> Result<crate::codec::EncodedObject, StoreError> {
+        let look = WriteLookup {
+            store: self,
+            items: batch,
+        };
+        select_frame(plan, &look)
+    }
+
+    /// How many consecutive deltas the stored plan version `h` ends, as the writer's frame
+    /// choice counts them (metadata only): a test's view of the 128-delta rule.
+    #[doc(hidden)]
+    pub fn plan_delta_depth_for_tests(&self, h: &Hash) -> Result<Option<usize>, StoreError> {
+        plan_record::delta_depth(h, &self.reader().plan_frames_read())
+    }
+
+    /// Prepares `plan` as the frame after `batch` (D-3PNRK): selects its frame (a whole version
+    /// or a delta, whichever the writer's rule chooses; a caller's `read_identity` is ignored)
+    /// and checks it: the frame within the record bounds, the version's own rules and its
+    /// chain, bound proposal and seal against the store and the batch. The prepared value
+    /// carries the frame's identity, the id every ref and seal names. A broken rule is
+    /// `Refused` with `plan <hash>: <reason>`, the hash the selected frame's. Writes nothing.
+    pub fn prepare_plan(
+        &self,
+        plan: &Plan,
+        batch: &[(u8, Vec<u8>)],
+    ) -> Result<PreparedPlan, StoreError> {
+        let look = WriteLookup {
+            store: self,
+            items: batch,
+        };
+        let frame = select_frame(plan, &look)?;
         let id = frame.hash();
-        let body = crate::codec::split(frame.raw_kind(), &frame.payload)
-            .map_err(|e| StoreError::Decode(e.to_string()))?
-            .body;
-        if decode_plan(body).is_err() {
+        // the whole version within the bounds, whatever form stores it: a delta's version
+        // reconstructs to it
+        let whole = rdy_model::plan_encoding::full_body(plan);
+        let body = &frame.payload[2..];
+        if whole.len() > MAX_PLAN_BYTES
+            || plan_record::decode_body(frame.version, body).is_err()
+            || bounded::decode::<rdy_model::plan_encoding::PlanRecordV1>(&whole).is_err()
+        {
             return Err(refused(&id, INVALID_FIELDS));
         }
         if let Some(reason) = invalid_record(plan) {
             return Err(refused(&id, reason));
         }
-        let look = WriteLookup {
-            store: self,
-            items: batch,
-        };
         if let Some(reason) = invalid_context(&id, plan, &look)? {
             return Err(refused(&id, reason));
         }
-        Ok(id)
+        let mut value = plan.clone();
+        value.read_identity = Some(frame.identity());
+        Ok(PreparedPlan { value, frame })
     }
 }
 
@@ -1018,25 +1237,39 @@ impl Store {
 // the reads
 
 impl StoreReader {
-    /// The plan version `h`, decoded within its bounds (`plan <h>: invalid fields` otherwise).
+    /// The PLAN frames this reader holds, as the plan fold reads them.
+    pub(crate) fn plan_frames_read(&self) -> impl Fn(&Hash) -> PlanFrame + '_ {
+        move |h| match self.get_versioned_body(kinds::PLAN, h) {
+            Ok(v) => Ok(Some(v)),
+            Err(StoreError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The plan version `h`, hydrated within its bounds through the one plan fold
+    /// (`crate::plan_record::fold`): a whole version, or the whole version it follows with each
+    /// delta after it applied. It keeps `h`'s stored identity. A record that does not decode is
+    /// `plan <h>: invalid fields`, a broken chain `plan <h'>: invalid chain`.
     pub fn plan(&self, h: &Hash) -> Result<Plan, StoreError> {
-        let payload = match self.get_kind(kinds::PLAN, h) {
+        match self.get_versioned_body(kinds::PLAN, h) {
             Err(StoreError::NotFound(_)) if self.has(h)? => {
                 let (k, _) = self.get_raw(h)?;
                 return Err(StoreError::Decode(format!(
                     "{h} is not a plan (object kind {k})"
                 )));
             }
-            r => r?,
-        };
-        decode_plan(&payload).map_err(|_| StoreError::Decode(damage(h, INVALID_FIELDS)))
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+        plan_record::fold(h, &self.plan_frames_read()).map_err(FoldError::into_store)
     }
 
     /// The proposal version that the chain with the latest version `plan` last bound: the
     /// `proposal` of the newest version from `plan` back through `prev` that names one, or
-    /// `None` when none does (O6). It reads each answer-only version after the last bound one.
+    /// `None` when none does (O6). It reads the metadata of each answer-only version after the
+    /// last bound one, each frame once, and hydrates none.
     pub fn last_bound_proposal(&self, plan: &Plan) -> Result<Option<Hash>, StoreError> {
-        last_bound(plan, &|h| self.plan(h).map(Some))
+        last_bound(plan.proposal, plan.prev, &self.plan_frames_read())
     }
 
     /// The unsealed version bound to proposal version `proposal` whose frame lies before `end`
@@ -1183,6 +1416,68 @@ impl StoreReader {
 // -------------------------------------------------------------------------------------------
 // fsck
 
+/// The most proposals one checked batch's landing lookup maps ([`BatchLandings`]).
+pub const MAX_BATCH_LANDING_PROPOSALS: usize = 1_000_000;
+
+thread_local! {
+    /// A test's smaller cap of [`BatchLandings`], on this thread.
+    static BATCH_LANDING_CAP: Cell<Option<usize>> = const { Cell::new(None) };
+    /// How many LANDING records this thread's plan checks decoded to find a plan's landing.
+    static LANDING_DECODES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Test hook: until the guard drops, the batch landing lookup of this thread's plan checks maps
+/// at most `cap` proposals. No environment, CLI or MCP path reaches it.
+#[doc(hidden)]
+pub fn batch_landing_cap_for_tests(cap: usize) -> BatchLandingCap {
+    BATCH_LANDING_CAP.with(|c| c.set(Some(cap)));
+    BatchLandingCap(())
+}
+
+/// The guard of [`batch_landing_cap_for_tests`].
+#[doc(hidden)]
+#[must_use]
+pub struct BatchLandingCap(());
+
+impl Drop for BatchLandingCap {
+    fn drop(&mut self) {
+        BATCH_LANDING_CAP.with(|c| c.set(None));
+    }
+}
+
+/// How many LANDING records this thread's plan checks decoded to find a plan's landing since the
+/// last call, which resets the count: a test's counting reader.
+#[doc(hidden)]
+pub fn take_landing_decodes_for_tests() -> u64 {
+    LANDING_DECODES.with(|c| c.replace(0))
+}
+
+/// The proposal-to-landing map of one checked batch (revision 2): each proposal version maps to
+/// the first landing of the batch, in log order, that lands it. It is filled lazily from the
+/// batch's landings already met, in log order, so each landing is decoded once per batch and a
+/// later landing never answers for an earlier plan; a malformed landing maps nothing, as the
+/// scan skips it, and a read error stops the check where the scan would. At most
+/// [`MAX_BATCH_LANDING_PROPOSALS`] proposals are mapped; past that cap a proposal absent from
+/// the map is found by the scan, as before. It lives for one check call and is cleared at each
+/// batch's commit marker.
+#[derive(Default)]
+struct BatchLandings {
+    /// proposal version -> its first landing in the batch
+    first: HashMap<Hash, Hash>,
+    /// How many of the batch's landings were decoded into `first`.
+    decoded: usize,
+    /// Whether the cap stopped an insertion: a missing proposal may then be past it.
+    capped: bool,
+}
+
+impl BatchLandings {
+    fn clear(&mut self) {
+        self.first.clear();
+        self.decoded = 0;
+        self.capped = false;
+    }
+}
+
 /// fsck's view of the log at one plan's frame: the frames of the plan's batch before it, and
 /// what the walk folded from the plans before it.
 struct CheckLookup<'a> {
@@ -1193,6 +1488,69 @@ struct CheckLookup<'a> {
     latest: &'a HashMap<String, Hash>,
     bound: &'a HashMap<Hash, Hash>,
     sealed: &'a HashMap<Hash, Hash>,
+    landings: &'a RefCell<BatchLandings>,
+}
+
+impl CheckLookup<'_> {
+    /// The landing `l` read for a plan's landing lookup: its record, None when it does not
+    /// decode (the scan skips it). Counted for tests.
+    fn landing(&self, l: &Hash) -> Result<Option<LandingRecord>, StoreError> {
+        LANDING_DECODES.with(|c| c.set(c.get() + 1));
+        typed::<LandingRecord>(self, kinds::LANDING, l)
+    }
+
+    /// The first landing of the plan's batch, before it, that lands proposal version `p`: from
+    /// the batch's map, which decodes the landings not yet met in log order; past the map's cap,
+    /// the scan of every earlier landing of the batch.
+    fn batch_landing(&self, p: &Hash) -> Result<Option<Hash>, StoreError> {
+        let cap = BATCH_LANDING_CAP
+            .with(Cell::get)
+            .unwrap_or(MAX_BATCH_LANDING_PROPOSALS);
+        let mut map = self.landings.borrow_mut();
+        if let Some(l) = map.first.get(p) {
+            return Ok(Some(*l));
+        }
+        let batch_landings = self
+            .batch
+            .iter()
+            .filter(|(k, _)| crate::codec::logical_kind(*k) == kinds::LANDING)
+            .map(|(_, l)| *l);
+        for l in batch_landings.skip(map.decoded) {
+            let landed = self.landing(&l)?;
+            map.decoded += 1;
+            let Some(landed) = landed else {
+                continue;
+            };
+            if !map.first.contains_key(&landed.proposal) {
+                if map.first.len() >= cap {
+                    map.capped = true;
+                } else {
+                    map.first
+                        .try_reserve(1)
+                        .map_err(|_| StoreError::Refused("the plan check could not grow".into()))?;
+                    map.first.insert(landed.proposal, l);
+                }
+            }
+            if landed.proposal == *p {
+                return Ok(Some(map.first.get(p).copied().unwrap_or(l)));
+            }
+        }
+        if !map.capped {
+            return Ok(None);
+        }
+        drop(map);
+        // past the cap: the scan, in log order, as before the map
+        for (_, l) in self
+            .batch
+            .iter()
+            .filter(|(k, _)| crate::codec::logical_kind(*k) == kinds::LANDING)
+        {
+            if self.landing(l)?.is_some_and(|x| x.proposal == *p) {
+                return Ok(Some(*l));
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl PlanLookup for CheckLookup<'_> {
@@ -1244,14 +1602,8 @@ impl PlanLookup for CheckLookup<'_> {
         let lands = |l: &Hash| -> Result<bool, StoreError> {
             Ok(typed::<LandingRecord>(self, kinds::LANDING, l)?.is_some_and(|x| x.proposal == *p))
         };
-        for (_, l) in self
-            .batch
-            .iter()
-            .filter(|(k, _)| crate::codec::logical_kind(*k) == kinds::LANDING)
-        {
-            if lands(l)? {
-                return Ok(Some(*l));
-            }
+        if let Some(l) = self.batch_landing(p)? {
+            return Ok(Some(l));
         }
         if !self.holder {
             return Ok(None);
@@ -1272,6 +1624,10 @@ impl PlanLookup for CheckLookup<'_> {
 
     fn holder(&self) -> bool {
         self.holder
+    }
+
+    fn held_anywhere(&self, kind: u8, h: &Hash) -> Result<bool, StoreError> {
+        Ok(self.reader.index().typed(kind, h)?.is_some())
     }
 }
 
@@ -1296,6 +1652,11 @@ impl StoreReader {
         let mut latest: HashMap<String, Hash> = HashMap::new();
         let mut bound: HashMap<Hash, Hash> = HashMap::new();
         let mut sealed: HashMap<Hash, Hash> = HashMap::new();
+        let landings = RefCell::new(BatchLandings::default());
+        // the carried chains of the history refs (D-4PV25): an incomplete ref's frontier links
+        // may be absent; a complete ref's, or any in a full check, must be held, perhaps in a
+        // later batch of the history
+        let carried = self.carried_plan_chain()?;
         // the derived rows the log gives, from the same entries and reducer as the index
         let want = crate::index::Index::in_memory()?;
         let mut rows: Vec<IndexEntry> = vec![];
@@ -1329,6 +1690,7 @@ impl StoreReader {
                 batch.clear();
                 batch_start = next;
                 r.clear();
+                landings.borrow_mut().clear();
                 return Ok(());
             }
             if batch.is_empty() {
@@ -1346,9 +1708,10 @@ impl StoreReader {
             };
             if let Some(payload) = payload {
                 if matches!(kind, kinds::PLAN | kinds::ANSWER | kinds::TRANSITION) {
-                    // a TRANSITION by its stored frame, so its encoding is read (repo links)
+                    // a TRANSITION and a PLAN by their stored frames, so their encodings are read
+                    // (repo links, plan deltas)
                     let es = match (kind, stored) {
-                        (kinds::TRANSITION, Some(p)) => entries(raw, hash, at, p, &r),
+                        (kinds::TRANSITION | kinds::PLAN, Some(p)) => entries(raw, hash, at, p, &r),
                         _ => entries(kind, hash, at, payload, &r),
                     };
                     let es = match es {
@@ -1361,11 +1724,6 @@ impl StoreReader {
                     rows.extend(es);
                 }
                 if kind == kinds::PLAN {
-                    let p = decode_plan(payload)
-                        .map_err(|_| StoreError::Decode(damage(&hash, INVALID_FIELDS)))?;
-                    if let Some(reason) = invalid_record(&p) {
-                        return Err(StoreError::Decode(damage(&hash, reason)));
-                    }
                     let from_fetch = fetched.contains(&batch_start);
                     let look = CheckLookup {
                         reader: self,
@@ -1375,8 +1733,28 @@ impl StoreReader {
                         latest: &latest,
                         bound: &bound,
                         sealed: &sealed,
+                        landings: &landings,
                     };
-                    if let Some(reason) = invalid_context(&hash, &p, &look)? {
+                    // a whole version reads alone; a delta hydrates through the one plan fold
+                    let stored = stored.unwrap_or_default();
+                    let p = match plan_record::decode(raw, stored) {
+                        Ok((PlanRecord::Full(p), _)) => p,
+                        Ok((PlanRecord::Delta(_), _)) => {
+                            plan_record::fold(&hash, &frames_of(&look)).map_err(|e| match e {
+                                FoldError::Store(StoreError::NotFound(_)) => {
+                                    StoreError::Decode(damage(&hash, INVALID_CHAIN))
+                                }
+                                e => e.into_store(),
+                            })?
+                        }
+                        Err(_) => return Err(StoreError::Decode(damage(&hash, INVALID_FIELDS))),
+                    };
+                    if let Some(reason) = invalid_record(&p) {
+                        return Err(StoreError::Decode(damage(&hash, reason)));
+                    }
+                    let carried_plan = carried.get(&hash).copied();
+                    if let Some(reason) = invalid_context_deferring(&hash, &p, &look, carried_plan)?
+                    {
                         return Err(StoreError::Decode(damage(&hash, reason)));
                     }
                     // a fetched plan names no local view's chain: no `plan/` ref names it
@@ -1436,6 +1814,49 @@ impl StoreReader {
         self.check_readiness_rows(&want, upto)?;
         self.check_dispute_rows(&want, upto)?;
         Ok(n)
+    }
+
+    /// The carried PLAN chains of the project's history refs (the closed state link table,
+    /// D-4PV25): for each ref's frontier, the seal of the frontier landing, then its `prev`
+    /// chain back to and including the nearest Full record, at most `MAX_PLAN_DELTA_DEPTH`
+    /// deltas and that record; each marked whether it is the Full record ([`CarriedPlan`]).
+    /// The state take wrote these records before the history that holds their frontier links,
+    /// so the chain is known for as long as its ref stands, complete or not. An incomplete
+    /// ref's links may be absent, except in a full check (`StoreReader::full_history_reader`);
+    /// a complete ref's links must all be held, and may stand in a later batch than the plan.
+    /// Empty with no history ref, or when no frontier has a sealed plan. A record that does
+    /// not read ends the walk: the plan checks report it.
+    fn carried_plan_chain(&self) -> Result<HashMap<Hash, CarriedPlan>, StoreError> {
+        let mut out: HashMap<Hash, CarriedPlan> = HashMap::new();
+        for (_, history) in self.histories()? {
+            let full_check = history.complete || self.is_full_history();
+            let mut chain: HashMap<Hash, CarriedPlan> = HashMap::new();
+            let mut at = self.plan_of_landing(&history.frontier, crate::closure::END_OF_LOG)?;
+            while let Some(h) = at {
+                if chain.len() > rdy_model::plan_encoding::MAX_PLAN_DELTA_DEPTH
+                    || chain.contains_key(&h)
+                {
+                    break;
+                }
+                let Ok((version, body)) = self.get_versioned_body(kinds::PLAN, &h) else {
+                    break;
+                };
+                let (full, next) = match plan_record::decode_body(version, &body) {
+                    Ok((PlanRecord::Full(_), _)) => (true, None),
+                    Ok((PlanRecord::Delta(d), _)) => (false, PlanRecord::Delta(d).prev()),
+                    Err(_) => break,
+                };
+                chain.insert(h, CarriedPlan { full, full_check });
+                at = next;
+            }
+            // a record two chains carry takes the stricter rule: no link deferred
+            for (h, c) in chain {
+                out.entry(h)
+                    .and_modify(|o| o.full_check |= c.full_check)
+                    .or_insert(c);
+            }
+        }
+        Ok(out)
     }
 
     /// The starts of the project batches in `from..upto` that a fetch or a fork's take wrote:

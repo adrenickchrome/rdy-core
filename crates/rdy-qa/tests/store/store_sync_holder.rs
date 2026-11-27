@@ -486,8 +486,11 @@ fn scc1_holder_dump_load_reindex_and_compact_keep_every_root() {
     assert_eq!(want["required_rdy"], json!(HUB_CANON_REQUIRED_RDY));
     assert_eq!(foreign_fixture::dump_file_facts(&dump), want["file"]);
     let to = scratch.path().join("frozen");
-    assert_eq!(holder_load_facts(&dump, &to), want["whole"]);
+    // the load's tail adds span maps' dedup_spans, which came after this fixture
+    let got = holder_load_facts(&dump, &to);
+    assert_eq!(got["summary"], want["whole"]["summary"]);
     let f = Rdy::open_holder(&to).unwrap();
+    foreign_fixture::assert_span_mapped_facts(&f, &want["whole"]["store"], DUMP);
     assert_roots(f.store(), &want["world"], DUMP);
     f.close().unwrap();
 }
@@ -559,32 +562,34 @@ fn scc1_native_fixture_pins_feature_and_minimum() {
         .unwrap();
     assert_eq!(reg.required_rdy, HUB_CANON_REQUIRED_RDY);
     let held = want["store"]["manifest"]["features"].as_array().unwrap();
-    for f in rdy_store::format::baseline_features().features {
+    // span maps' dedup_spans joined the baseline after this fixture
+    for f in rdy_store::format::baseline_features()
+        .features
+        .into_iter()
+        .filter(|f| f.name != rdy_store::format::FEATURE_DEDUP_SPANS)
+    {
         assert!(held.contains(&json!(f)), "the manifest holds {}", f.name);
     }
     assert!(held.contains(&json!(reg)));
     let features = std::fs::read_to_string(dir.join("FEATURES")).unwrap();
     assert!(features.contains("\"hub_canon\""), "{features}");
 
-    // the open of a copy reads back every recorded fact, and plans no upgrade step
+    // the open of a copy reads back every recorded fact; it plans only the optional span-map
+    // step, whose one batch follows the recorded log
     let (_base, root) = holder_copy(&dir);
     let plan = rdy_store::upgrade::inspect(&root.join(".rdy/store")).unwrap();
-    assert!(plan.steps.is_empty(), "no step: {:?}", plan.steps);
+    assert_eq!(plan.steps, [rdy_store::upgrade::DEDUP_SPANS_STEP]);
     assert!(!plan.requires_upgrade && !plan.pending_check);
-    let store = opened_facts(&root);
+    opened_facts(&root);
     assert!(root.join(".rdy/store/index.redb").exists(), "rebuilt");
-    for member in want["store"].as_object().unwrap().keys() {
-        assert_eq!(store[member], want["store"][member], "{member}");
-    }
     let mut r = Rdy::open_holder(&root).unwrap();
+    foreign_fixture::assert_span_mapped_facts(&r, &want["store"], "the native holder");
     assert_roots(r.store(), &want["world"], "the native holder");
+    let upgraded = foreign_fixture::store_facts(&r)["objects"].clone();
     r.compact(false).unwrap();
     r.reindex().unwrap();
     assert_roots(r.store(), &want["world"], "after compact and reindex");
-    assert_eq!(
-        foreign_fixture::store_facts(&r)["objects"],
-        want["store"]["objects"]
-    );
+    assert_eq!(foreign_fixture::store_facts(&r)["objects"], upgraded);
     r.close().unwrap();
     assert_eq!(source_digests(), before);
 }

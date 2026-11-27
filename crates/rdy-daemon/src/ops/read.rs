@@ -139,6 +139,22 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
     for w in &uncovered {
         warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
     }
+    // a history still arriving (D-GGTYA): its progress, said once after the others. A key file
+    // missing or damaged never fails the status: its error is the corruption warning, and the
+    // progress counts only what it can prove
+    let history = match st.history_status()? {
+        Some((p, damage)) => {
+            if let Some(e) = damage {
+                warnings.push(format!("{}: {}; {}", e.code, e.message, e.fix));
+            }
+            if !p.complete {
+                let w = p.warning();
+                warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
+            }
+            Some(p)
+        }
+        None => None,
+    };
     let suspects = st.suspect_details(&Scope::Canon)?.len();
     // cc15 (FW-CH3a): the current score, its dimensions, the issue count and the kinds, from
     // the memoised summary; the pages, areas and issues are `rdy coverage`'s. A coverage read
@@ -159,6 +175,9 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
         "open_report": open_report_json(&cx.engine.open_report()),
         "quarantine": quarantine(&cx.engine.root()),
     });
+    if let Some(p) = history {
+        v["history"] = to_json(&p);
+    }
     // MCP over HTTP: the setting, the endpoint while it serves, and what it does now; never the
     // token. Left out of a run with no daemon.
     if let Some(h) = cx.engine.mcp_http() {
@@ -323,6 +342,8 @@ pub(super) fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
         .map_or(Value::Null, |e| to_json(&e.justification));
     v["history"] = to_json(&h.entries);
     v["history_more"] = Value::Bool(h.more);
+    // a history still arriving leaves out the entries behind its frontier: the context's
+    // warnings say so once, after its as-built warnings
     Ok(v)
 }
 
@@ -346,7 +367,16 @@ pub(super) fn log(cx: &OpContext, a: LogArgs) -> Result<Value, RdyError> {
         );
     }
     let st = cx.engine.read();
-    Ok(to_json(&st.log_page(a.since.as_deref(), a.limit)?))
+    let rows = to_json(&st.log_page(a.since.as_deref(), a.limit)?);
+    // the log stops at an incomplete history's frontier and says so once: the rows go under
+    // `items` beside the warning
+    Ok(match st.history_warning()? {
+        Some(w) => json!({
+            "items": rows,
+            "warnings": [{"code": w.code, "message": w.message, "fix": w.fix}],
+        }),
+        None => rows,
+    })
 }
 
 pub(super) fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {

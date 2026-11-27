@@ -183,6 +183,12 @@ pub trait SnapshotSource {
         Ok(false)
     }
 
+    /// The frontier of an incomplete history (D-GGTYA): the one landing whose `prev` the source
+    /// may lack. None for every other source.
+    fn frontier(&mut self) -> Result<Option<Hash>, Self::Error> {
+        Ok(None)
+    }
+
     /// The source's error for `refusal`.
     fn refused(&mut self, refusal: FoldRefusal) -> Self::Error;
 }
@@ -702,6 +708,10 @@ pub(crate) struct StoreSnapshots<'a> {
 impl SnapshotSource for StoreSnapshots<'_> {
     type Error = crate::StoreError;
 
+    fn frontier(&mut self) -> Result<Option<Hash>, crate::StoreError> {
+        self.reader.history_frontier()
+    }
+
     fn landing(&mut self, landing: &Hash) -> Result<Option<LandingRecord>, crate::StoreError> {
         match self.reader.landing(landing) {
             Err(crate::StoreError::NotFound(h)) if h == *landing => Ok(None),
@@ -903,19 +913,31 @@ where
     drop(pos);
     let mut visited = 0usize;
     let mut reached = vec![false; order.len()];
+    let frontier = source.frontier()?;
     for r in roots {
         let (l, rec) = order[r];
-        // the map and delta of the landing before the walk: none at a first landing, else the
-        // source's own read of a landing outside the set
-        let (mut map, before) = match rec.prev {
-            None => (BlockMap::new(), None),
-            Some(p) => {
-                let m = read_snapshot(source, None, &p)?.blocks;
-                (m, source.delta_of(&p)?)
-            }
+        // an incomplete history's frontier, whose `prev` is behind it: its own map and delta
+        // are checked against each other, and the walk goes on from them
+        let at_frontier = match rec.prev {
+            Some(p) if frontier == Some(l) => source.landing(&p)?.is_none(),
+            _ => false,
+        };
+        let (mut map, dh) = if at_frontier {
+            check_frontier(source, &l, rec)?
+        } else {
+            // the map and delta of the landing before the walk: none at a first landing, else
+            // the source's own read of a landing outside the set
+            let (mut map, before) = match rec.prev {
+                None => (BlockMap::new(), None),
+                Some(p) => {
+                    let m = read_snapshot(source, None, &p)?.blocks;
+                    (m, source.delta_of(&p)?)
+                }
+            };
+            let dh = check_landing(source, &l, rec, before, &mut map, None, block_of)?;
+            (map, dh)
         };
         let mut undo: Vec<Edit> = Vec::new();
-        let dh = check_landing(source, &l, rec, before, &mut map, None, block_of)?;
         reached[r] = true;
         visited += 1;
         visit(source, &l, rec, &map)?;
@@ -963,6 +985,38 @@ where
         return Err(source.refused(FoldRefusal::Cycle(order[i].0)).into());
     }
     Ok(())
+}
+
+/// The checks of an incomplete history's frontier `landing` (record `rec`), whose previous map
+/// is behind the frontier: exactly one delta, naming the landing and its full; a base (the
+/// landing has a `prev`); `set` and `drop` sorted and distinct, each `set` entry the version
+/// the landing's own map holds and each dropped id absent from it. Checking the delta against
+/// the previous map is deferred until the history is complete. Returns the landing's map and
+/// delta.
+fn check_frontier<S: SnapshotSource + ?Sized>(
+    source: &mut S,
+    landing: &Hash,
+    rec: &LandingRecord,
+) -> Result<(BlockMap, Hash), S::Error> {
+    let Some(dh) = source.delta_of(landing)? else {
+        return Err(source.refused(FoldRefusal::MissingDelta { landing: *landing }));
+    };
+    let delta = source.delta(&dh)?;
+    if delta.landing != *landing || delta.full != rec.state {
+        return Err(source.refused(FoldRefusal::Identity { delta: dh }));
+    }
+    if delta.base.is_none() {
+        return Err(source.refused(FoldRefusal::Base { delta: dh }));
+    }
+    let map = read_landing_snapshot(source, None, landing, rec)?.blocks;
+    let set_sorted = delta.set.windows(2).all(|w| w[0].0 < w[1].0);
+    let drop_sorted = delta.drop.windows(2).all(|w| w[0] < w[1]);
+    let agrees = delta.set.iter().all(|(k, v)| map.get(k) == Some(v))
+        && delta.drop.iter().all(|k| !map.contains_key(k));
+    if !(set_sorted && drop_sorted && agrees) {
+        return Err(source.refused(FoldRefusal::Mismatch { delta: dh }));
+    }
+    Ok((map, dh))
 }
 
 /// Undoes the edits after `mark`, newest first.

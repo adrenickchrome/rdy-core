@@ -9,7 +9,7 @@ use redb::{
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// hash -> the location of the first frame written with that hash, of whatever kind (untyped reads).
 const OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");
@@ -407,6 +407,8 @@ pub struct Index {
     /// Whether the active redaction mask may hold a row: false only while it is empty, so the
     /// reads of a store with no applied redaction never open its tables.
     redacted: AtomicBool,
+    /// The read transactions this index began (a test hook; [`Index::read_transactions`]).
+    reads: AtomicU64,
     /// The file to overwrite with zeros once the database is closed (`erase_on_close`).
     /// Declared after `db`, so the database is closed, and has written all it writes, first.
     eraser: Eraser,
@@ -1281,6 +1283,18 @@ const CANON_REF: &str = "canon";
 /// Canon's head and the landed rows as (change, landing) ([`Index::canon_and_landed`]).
 pub(crate) type CanonRows = (Option<Hash>, Vec<(Hash, Hash)>);
 
+/// Whether ref `name` set to `value` is a complete history ref (`meta/sync/<remote>/history`,
+/// D-GGTYA): the write that completes a history.
+fn completes_history(name: &str, value: &[u8]) -> bool {
+    if !name.starts_with(crate::sync_state::SYNC_REF) {
+        return false;
+    }
+    matches!(
+        crate::sync_state::check_ref(name, value),
+        Ok(Some(crate::sync_state::SyncValue::History(h))) if h.complete
+    )
+}
+
 /// The landing a `canon` ref value names: None for an empty value, and for a value that is no
 /// hash (fsck reports that ref; no landing reads landed on it).
 fn canon_value(v: &[u8]) -> Option<Hash> {
@@ -1513,6 +1527,7 @@ impl Index {
         Ok(Index {
             db: database,
             redacted: AtomicBool::new(redacted),
+            reads: AtomicU64::new(0),
             eraser: Eraser::default(),
         })
     }
@@ -1662,7 +1677,23 @@ impl Index {
                                     .map_err(db)?;
                             }
                         }
-                        if let Some(was) = was {
+                        // a history completion (D-GGTYA): canon's rows were kept to the
+                        // frontier while the history was arriving; its records are held now,
+                        // so the rows are rebuilt over canon's whole chain
+                        let completes = completes_history(name, value);
+                        let moves = match was {
+                            Some(was) => Some((was, canon_value(value))),
+                            None if completes => {
+                                landed.retain(|_, _| false).map_err(db)?;
+                                let head = refs
+                                    .get(CANON_REF)
+                                    .map_err(db)?
+                                    .and_then(|v| canon_value(v.value()));
+                                Some((None, head))
+                            }
+                            None => None,
+                        };
+                        if let Some((was, now)) = moves {
                             if carries.is_none() {
                                 carries = Some(w.open_table(LANDING_CARRIES).map_err(db)?);
                             }
@@ -1674,7 +1705,7 @@ impl Index {
                                 carries.as_ref().expect("opened above"),
                                 replays.as_ref().expect("opened above"),
                                 was,
-                                canon_value(value),
+                                now,
                             )?;
                         }
                     }
@@ -1953,7 +1984,7 @@ impl Index {
     }
 
     pub fn object(&self, h: &Hash) -> Result<Option<Location>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(OBJECTS).map_err(db)?;
         match t.get(&h.0[..]).map_err(db)? {
             Some(v) => Ok(Some(dec(v.value())?)),
@@ -1963,17 +1994,12 @@ impl Index {
 
     /// The location of the object of `kind` with hash `h`.
     pub fn typed(&self, kind: u8, h: &Hash) -> Result<Option<Location>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(TYPED).map_err(db)?;
-        match t.get(&typed_key(kind, h)[..]).map_err(db)? {
-            Some(v) => Ok(Some(dec(v.value())?)),
-            None => Ok(None),
-        }
+        typed_in(&self.begin_read()?, kind, h)
     }
 
     /// The changes with an op that produces `version`, in ascending hash order.
     pub fn producers(&self, version: &Hash) -> Result<Vec<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(PRODUCERS).map_err(db)?;
         let mut out = vec![];
         for item in t.range(&version.0[..]..).map_err(db)? {
@@ -1994,9 +2020,49 @@ impl Index {
     pub fn for_each_object_of(
         &self,
         kind: u8,
-        mut f: impl FnMut(Hash) -> Result<(), StoreError>,
+        f: impl FnMut(Hash) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        for_each_object_of_in(&self.begin_read()?, kind, f)
+    }
+
+    /// A read transaction of the index, counted ([`Index::read_transactions`]).
+    fn begin_read(&self) -> Result<redb::ReadTransaction, StoreError> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.db.begin_read().map_err(db)
+    }
+
+    /// The read transactions this index has begun (a test hook: a closure walk begins one).
+    #[doc(hidden)]
+    pub fn read_transactions(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    /// One read transaction for a closure walk ([`IndexRead`]): every query of the walk reads
+    /// the index as it stood when this began.
+    pub(crate) fn read_for_closure(&self) -> Result<IndexRead, StoreError> {
+        let txn = self.begin_read()?;
+        // an apply sets the flag before its commit, so a row this transaction sees is flagged
+        let redacted = self.any_redaction_active();
+        Ok(IndexRead { txn, redacted })
+    }
+}
+
+/// The location of the object of `kind` with hash `h`, read in `r`.
+fn typed_in(r: &redb::ReadTransaction, kind: u8, h: &Hash) -> Result<Option<Location>, StoreError> {
+    let t = r.open_table(TYPED).map_err(db)?;
+    match t.get(&typed_key(kind, h)[..]).map_err(db)? {
+        Some(v) => Ok(Some(dec(v.value())?)),
+        None => Ok(None),
+    }
+}
+
+/// [`Index::for_each_object_of`] in the read transaction `r`.
+fn for_each_object_of_in(
+    r: &redb::ReadTransaction,
+    kind: u8,
+    mut f: impl FnMut(Hash) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    {
         let t = r.open_table(TYPED).map_err(db)?;
         for item in t.iter().map_err(db)? {
             let (k, _) = item.map_err(db)?;
@@ -2012,9 +2078,11 @@ impl Index {
                 f(hash_from(&key[..32], "typed entry")?)?;
             }
         }
-        Ok(())
     }
+    Ok(())
+}
 
+impl Index {
     /// [`Index::for_each_object_of`] for the objects of `kind` whose hash's lower-case hex
     /// starts with `hex`: a range read of the typed table from the prefix's whole bytes, not a
     /// walk of the whole table. A `hex` that is not lower-case hex names no object.
@@ -2035,7 +2103,7 @@ impl Index {
             .iter()
             .map(|&[hi, lo]| (nibble(hi) << 4) | nibble(lo))
             .collect();
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(TYPED).map_err(db)?;
         for item in t.range(&whole[..]..).map_err(db)? {
             let (k, _) = item.map_err(db)?;
@@ -2065,14 +2133,14 @@ impl Index {
 
     /// The ops of `view`'s chain, in ascending hash order.
     pub fn view_ops(&self, view: &str) -> Result<Vec<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(VIEW_OPS).map_err(db)?;
         hashes_under(&t, view, "view op entry")
     }
 
     /// The changes with an op that deletes `block`, in ascending hash order.
     pub fn deleters(&self, block: &BlockId) -> Result<Vec<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(DELETERS).map_err(db)?;
         hashes_under(&t, block.as_str(), "deleter entry")
     }
@@ -2089,7 +2157,7 @@ impl Index {
         if blocks.peek().is_none() {
             return Ok(BTreeMap::new());
         }
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let deleters = r.open_table(DELETERS).map_err(db)?;
         let mut out = BTreeMap::new();
         let mut tables = None;
@@ -2132,7 +2200,7 @@ impl Index {
     /// change whose `replayed_from` chain reaches it (D-NME32); None for any other change. A
     /// reader that needs the first carrier in log order reads the log.
     pub fn landing_of(&self, change: &Hash) -> Result<Option<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(LANDED).map_err(db)?;
         match t.get(&change.0[..]).map_err(db)? {
             Some(v) => Ok(Some(hash_from(v.value(), "landed entry")?)),
@@ -2143,7 +2211,7 @@ impl Index {
     /// Every landing whose LANDING frame carries `change`, on canon or not, in ascending hash
     /// order. It follows no replay.
     pub fn carriers(&self, change: &Hash) -> Result<Vec<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(CARRIERS).map_err(db)?;
         let mut lo = change.0.to_vec();
         lo.extend_from_slice(&[0u8; 32]);
@@ -2166,7 +2234,7 @@ impl Index {
         change: &Hash,
         before: Option<Location>,
     ) -> Result<Option<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(CARRIERS).map_err(db)?;
         let typed = r.open_table(TYPED).map_err(db)?;
         let mut lo = change.0.to_vec();
@@ -2198,7 +2266,7 @@ impl Index {
     /// Canon's head and every landed row as (change, landing), in change order, from one read:
     /// the rows that head gives, while a writer moves canon.
     pub(crate) fn canon_and_landed(&self) -> Result<CanonRows, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let head = r
             .open_table(REFS)
             .map_err(db)?
@@ -2266,7 +2334,7 @@ impl Index {
     /// Every table's rows, from one read transaction.
     #[doc(hidden)]
     pub fn dump(&self) -> Result<IndexDump, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let named = |def: TableDefinition<&'static str, &'static [u8]>| {
             let mut out = BTreeMap::new();
             for item in r.open_table(def).map_err(db)?.iter().map_err(db)? {
@@ -2322,7 +2390,7 @@ impl Index {
     /// The capacity counts (TASK-2340): the distinct portable objects the index holds and the
     /// sum of their object links ([`HOLDER_COUNTS`]).
     pub fn holder_counts(&self) -> Result<(u64, u64), StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(HOLDER_COUNTS).map_err(db)?;
         let get = |key: &[u8]| -> Result<u64, StoreError> {
             t.get(key)
@@ -2341,7 +2409,7 @@ impl Index {
         &self,
         features: &crate::format::StoreFeatures,
     ) -> Result<(u64, u64), StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(HOLDER_COUNTS).map_err(db)?;
         let get = |key: &[u8]| -> Result<u64, StoreError> {
             t.get(key)
@@ -2364,7 +2432,7 @@ impl Index {
     /// The chain depth of `landing` ([`LANDING_DEPTHS`]), if the index holds it and its whole
     /// chain.
     pub fn landing_depth(&self, landing: &Hash) -> Result<Option<u64>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(LANDING_DEPTHS).map_err(db)?;
         t.get(&landing.0[..])
             .map_err(db)?
@@ -2374,22 +2442,12 @@ impl Index {
 
     /// The snapshot delta of `landing` and its location, if one is indexed ([`SNAPSHOT_DELTAS`]).
     pub fn snapshot_delta(&self, landing: &Hash) -> Result<Option<(Hash, Location)>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(SNAPSHOT_DELTAS).map_err(db)?;
-        match t.get(&landing.0[..]).map_err(db)? {
-            Some(v) => Ok(Some(hash_at_from(v.value(), "snapshot delta entry")?)),
-            None => Ok(None),
-        }
+        snapshot_delta_in(&self.begin_read()?, landing)
     }
 
     /// The seal of `landing` and its location, if one is indexed.
     pub(crate) fn plan_seal(&self, landing: &Hash) -> Result<Option<(Hash, Location)>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(PLAN_SEALS).map_err(db)?;
-        match t.get(&landing.0[..]).map_err(db)? {
-            Some(v) => Ok(Some(hash_at_from(v.value(), "plan seal entry")?)),
-            None => Ok(None),
-        }
+        plan_seal_in(&self.begin_read()?, landing)
     }
 
     /// The bound plan of proposal version `proposal` and its location, if one is indexed.
@@ -2397,7 +2455,7 @@ impl Index {
         &self,
         proposal: &Hash,
     ) -> Result<Option<(Hash, Location)>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(PLAN_PROPOSALS).map_err(db)?;
         match t.get(&proposal.0[..]).map_err(db)? {
             Some(v) => Ok(Some(hash_at_from(v.value(), "plan proposal entry")?)),
@@ -2411,7 +2469,7 @@ impl Index {
         proposal: &Hash,
         end: Location,
     ) -> Result<Option<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(ASSESSMENT_PROPOSALS).map_err(db)?;
         let from = version_at_key(
             proposal,
@@ -2440,7 +2498,7 @@ impl Index {
         max: usize,
         what: &str,
     ) -> Result<Vec<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(def).map_err(db)?;
         let from = hash_at_value(
             subject,
@@ -2497,7 +2555,7 @@ impl Index {
         end: Location,
         max: usize,
     ) -> Result<(Vec<Hash>, usize), StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let mut kept: BTreeMap<Location, Hash> = BTreeMap::new();
         let mut omitted = 0usize;
         for item in r
@@ -2523,7 +2581,7 @@ impl Index {
     /// Every row of the two dispute tables, decoded: (landing, the dispute's location) -> the
     /// dispute, and (dispute, the resolution's location) -> the resolution.
     pub(crate) fn dispute_rows(&self) -> Result<DisputeRows, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let rows = |def: TableDefinition<&'static [u8], &'static [u8]>, what: &str| {
             let mut out = BTreeMap::new();
             for item in r.open_table(def).map_err(db)?.iter().map_err(db)? {
@@ -2540,7 +2598,7 @@ impl Index {
 
     /// The location of the log's first CHANGE whose links record a briefing, if one is indexed.
     pub(crate) fn first_briefed_change(&self) -> Result<Option<Location>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(META).map_err(db)?;
         match t.get(FIRST_BRIEFED_CHANGE_KEY).map_err(db)? {
             Some(v) => Ok(Some(dec(v.value())?)),
@@ -2551,7 +2609,7 @@ impl Index {
     /// Every row of the assessment table, decoded: (version, the assessment's location) -> the
     /// assessment.
     pub(crate) fn assessment_rows(&self) -> Result<BTreeMap<(Hash, Location), Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let mut out = BTreeMap::new();
         for item in r
             .open_table(ASSESSMENT_PROPOSALS)
@@ -2573,7 +2631,7 @@ impl Index {
         &self,
         decision: &BlockId,
     ) -> Result<Vec<(Hash, Location)>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(PLAN_DECISIONS).map_err(db)?;
         let prefix = name_prefix(decision.as_str());
         let mut out = vec![];
@@ -2596,7 +2654,7 @@ impl Index {
         block: &BlockId,
         cause: &BlockId,
     ) -> Result<Option<crate::plan::DeferralRow>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(PLAN_DEFERRALS).map_err(db)?;
         match t.get(&pair_key(block, cause)[..]).map_err(db)? {
             Some(v) => Ok(Some(deferral_from(v.value())?)),
@@ -2606,7 +2664,7 @@ impl Index {
 
     /// Every row of the four plan tables, decoded, from one read transaction.
     pub(crate) fn plan_rows(&self) -> Result<crate::plan::PlanRows, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let mut out = crate::plan::PlanRows::default();
         for item in r.open_table(PLAN_SEALS).map_err(db)?.iter().map_err(db)? {
             let (k, v) = item.map_err(db)?;
@@ -2665,7 +2723,7 @@ impl Index {
     /// The signatures of `subject`, in ascending hash order: at most `cap`. Reading one more
     /// entry stops the read with `signing input exceeds {cap} signatures per subject`.
     pub fn signatures_of(&self, subject: &Hash, cap: usize) -> Result<Vec<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(SIGNATURES).map_err(db)?;
         let mut out = vec![];
         for item in t.range(&subject.0[..]..).map_err(db)? {
@@ -2693,30 +2751,7 @@ impl Index {
         cap: usize,
         end: Location,
     ) -> Result<Vec<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(SIGNATURES).map_err(db)?;
-        let typed = r.open_table(TYPED).map_err(db)?;
-        let mut out = vec![];
-        for item in t.range(&subject.0[..]..).map_err(db)? {
-            let (k, _) = item.map_err(db)?;
-            let key = k.value();
-            if !key.starts_with(&subject.0) {
-                break;
-            }
-            let id = signature_from(key)?.1;
-            let at = typed
-                .get(&typed_key(crate::kinds::SIGNATURE, &id)[..])
-                .map_err(db)?
-                .ok_or(StoreError::NotFound(id))?;
-            if dec(at.value())? >= end {
-                continue;
-            }
-            if out.len() == cap {
-                return Err(crate::signature::over_per_subject());
-            }
-            out.push(id);
-        }
-        Ok(out)
+        signatures_before_in(&self.begin_read()?, subject, cap, end)
     }
 
     /// Calls `f` with the hash of every signature, in subject then hash order, from one read
@@ -2725,7 +2760,7 @@ impl Index {
         &self,
         f: &mut dyn FnMut(Hash) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(SIGNATURES).map_err(db)?;
         for item in t.iter().map_err(db)? {
             let (k, _) = item.map_err(db)?;
@@ -2741,7 +2776,7 @@ impl Index {
         &self,
         subject_of: &mut dyn FnMut(Hash) -> Result<Hash, StoreError>,
     ) -> Result<bool, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let typed = r.open_table(TYPED).map_err(db)?;
         let rows = r.open_table(SIGNATURES).map_err(db)?;
         let mut n: u64 = 0;
@@ -2851,7 +2886,7 @@ impl Index {
     /// (`erase_due` in `meta`): its file may then hold text the removal erased, such as a cached
     /// drawing (D-6H0ZX; ruling task-7 Round 2, F3).
     pub(crate) fn erase_due(&self) -> Result<bool, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let meta = r.open_table(META).map_err(db)?;
         Ok(meta.get(ERASE_DUE_KEY).map_err(db)?.is_some())
     }
@@ -2905,7 +2940,7 @@ impl Index {
     /// The cached drawing under `key`, as stored (D-XM8MP; `diagram_cache` decodes it). One
     /// read transaction.
     pub(crate) fn diagram(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(DIAGRAMS).map_err(db)?;
         Ok(t.get(key).map_err(db)?.map(|v| v.value().to_vec()))
     }
@@ -2955,7 +2990,7 @@ impl Index {
     /// The diagram cache's rows, and its `meta` count (None when the key is missing or not 8
     /// bytes long).
     pub(crate) fn diagram_counts(&self) -> Result<(usize, Option<u64>), StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let rows = r.open_table(DIAGRAMS).map_err(db)?.len().map_err(db)?;
         let meta = r.open_table(META).map_err(db)?;
         let count = diagram_count(&meta)?;
@@ -2993,7 +3028,7 @@ impl Index {
         def: TableDefinition<&'static [u8], &'static [u8]>,
         what: &str,
     ) -> Result<Vec<(Hash, Hash)>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(def).map_err(db)?;
         let mut out = vec![];
         for item in t.iter().map_err(db)? {
@@ -3028,7 +3063,7 @@ impl Index {
     /// The rows of the seven redaction tables, from one read transaction: carriers, items,
     /// objects, applied, active, spans, carried places.
     pub(crate) fn redaction_rows(&self) -> Result<RedactionRows, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         Ok([
             dump_table(&r, REDACTION_CARRIERS)?,
             dump_table(&r, REDACTION_ITEMS)?,
@@ -3102,7 +3137,7 @@ impl Index {
         if !self.any_redaction_active() {
             return Ok(vec![]);
         }
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(REDACTION_ACTIVE).map_err(db)?;
         let mut out = vec![];
         for item in t.iter().map_err(db)? {
@@ -3123,12 +3158,7 @@ impl Index {
 
     /// The request logged for carrier change `carrier`, if one was.
     pub fn redaction_carrier(&self, carrier: &Hash) -> Result<Option<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(REDACTION_CARRIERS).map_err(db)?;
-        match t.get(&carrier.0[..]).map_err(db)? {
-            Some(v) => Ok(Some(hash_from(v.value(), "redaction carrier entry")?)),
-            None => Ok(None),
-        }
+        redaction_carrier_in(&self.begin_read()?, carrier)
     }
 
     /// The active mask's row for the object of `kind` with hash `h`.
@@ -3136,7 +3166,7 @@ impl Index {
         if !self.any_redaction_active() {
             return Ok(None);
         }
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(REDACTION_ACTIVE).map_err(db)?;
         match t.get(&typed_key(kind, h)[..]).map_err(db)? {
             Some(v) => Ok(Some(active_object_from(v.value())?)),
@@ -3154,7 +3184,7 @@ impl Index {
         if hashes.is_empty() || !self.any_redaction_active() {
             return Ok(None);
         }
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(REDACTION_ACTIVE).map_err(db)?;
         for h in hashes {
             let lo = typed_key(0, h);
@@ -3177,7 +3207,7 @@ impl Index {
         if from >= upto || !self.any_redaction_active() {
             return Ok(out);
         }
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(REDACTION_SPANS).map_err(db)?;
         let (lo, hi) = (loc_key(&from), loc_key(&upto));
         for item in t.range(&lo[..]..&hi[..]).map_err(db)? {
@@ -3203,51 +3233,17 @@ impl Index {
             .map(|r| r.active))
     }
 
-    /// Calls `f` with the place and hash of every carried record frame that starts before
-    /// `before`, in physical order: one range read of the carried-place rows, no log walk.
-    pub(crate) fn for_each_carried_place(
-        &self,
-        before: Location,
-        mut f: impl FnMut(Location, Hash) -> Result<(), StoreError>,
-    ) -> Result<(), StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(REDACTION_CARRIED_AT).map_err(db)?;
-        for item in t.range(..&loc_key(&before)[..]).map_err(db)? {
-            let (k, v) = item.map_err(db)?;
-            let loc = loc_from(k.value(), "carried place entry")?;
-            f(loc, hash_from(v.value(), "carried place entry")?)?;
-        }
-        Ok(())
-    }
-
     /// The `redaction_spans` row of the frame at `loc`, masking or not.
     pub(crate) fn redaction_span_row_at(
         &self,
         loc: &Location,
     ) -> Result<Option<SpanRow>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(REDACTION_SPANS).map_err(db)?;
-        match t.get(&loc_key(loc)[..]).map_err(db)? {
-            Some(v) => Ok(Some(span_row_from(*loc, v.value())?)),
-            None => Ok(None),
-        }
+        redaction_span_row_at_in(&self.begin_read()?, loc)
     }
 
     /// The requests that name the object of `kind` with hash `h`, applied or not, ascending.
     pub fn redaction_requests_naming(&self, kind: u8, h: &Hash) -> Result<Vec<Hash>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(REDACTION_OBJECTS).map_err(db)?;
-        let prefix = typed_key(kind, h);
-        let mut out = vec![];
-        for item in t.range(&prefix[..]..).map_err(db)? {
-            let (k, _) = item.map_err(db)?;
-            let key = k.value();
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            out.push(hash_from(&key[33..], "redaction object entry")?);
-        }
-        Ok(out)
+        redaction_requests_naming_in(&self.begin_read()?, kind, h)
     }
 
     /// Request `request`'s items: the objects it removes or names (kind, hash, residue), and the
@@ -3257,7 +3253,7 @@ impl Index {
         &self,
         request: &Hash,
     ) -> Result<(Vec<(u8, Hash, Option<Hash>)>, Vec<RedactedSpan>), StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(REDACTION_ITEMS).map_err(db)?;
         let (lo, mid, hi) = (
             item_prefix(request, 0),
@@ -3288,34 +3284,15 @@ impl Index {
         &self,
         request: &Hash,
     ) -> Result<Option<(Hash, Location)>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(REDACTION_APPLIED).map_err(db)?;
-        match t.get(&request.0[..]).map_err(db)? {
-            Some(v) => {
-                let v = v.value();
-                if v.len() != 44 {
-                    return Err(StoreError::Decode(format!(
-                        "redaction apply entry is {} bytes",
-                        v.len()
-                    )));
-                }
-                Ok(Some((
-                    hash_from(&v[..32], "redaction apply entry")?,
-                    loc_from(&v[32..], "redaction apply entry")?,
-                )))
-            }
-            None => Ok(None),
-        }
+        redaction_applied_in(&self.begin_read()?, request)
     }
 
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(REFS).map_err(db)?;
-        Ok(t.get(name).map_err(db)?.map(|v| v.value().to_vec()))
+        get_ref_in(&self.begin_read()?, name)
     }
 
     pub fn refs_with_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(REFS).map_err(db)?;
         let mut out = vec![];
         for item in t.range(prefix..).map_err(db)? {
@@ -3332,7 +3309,7 @@ impl Index {
     /// `refs_with_prefix("open/")` gives less the empty ones, read from [`OPEN_PROPOSALS`], so
     /// the cost follows the open proposals, not every view that ever proposed.
     pub fn open_proposal_refs(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(OPEN_PROPOSALS).map_err(db)?;
         let mut out = vec![];
         for item in t.iter().map_err(db)? {
@@ -3346,7 +3323,7 @@ impl Index {
     /// read in one read transaction: a writer that proposes or lands between two reads would
     /// make a sound index look damaged (rdr1).
     pub fn open_proposals_match_refs(&self) -> Result<bool, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let refs = r.open_table(REFS).map_err(db)?;
         let mut named = vec![];
         for item in refs.range(OPEN_PREFIX..).map_err(db)? {
@@ -3369,7 +3346,7 @@ impl Index {
 
     /// How many refs start with `prefix`, counted without reading their values.
     pub fn count_refs(&self, prefix: &str) -> Result<usize, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(REFS).map_err(db)?;
         let mut n = 0;
         for item in t.range(prefix..).map_err(db)? {
@@ -3387,7 +3364,7 @@ impl Index {
     /// them (known issue 2309). The store's open then rebuilds the index from the log; the index
     /// is not damaged, so its `indexed_upto` is still the log's floor.
     pub fn counts_behind(&self) -> Result<bool, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(META).map_err(db)?;
         let at = |key: &str| -> Result<Option<Vec<u8>>, StoreError> {
             Ok(t.get(key).map_err(db)?.map(|v| v.value().to_vec()))
@@ -3400,7 +3377,7 @@ impl Index {
     /// them, with rows by its own rule. The store's open then rebuilds the index from the log,
     /// as it does for counts behind ([`Index::counts_behind`]).
     pub fn landed_behind(&self) -> Result<bool, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
+        let r = self.begin_read()?;
         let t = r.open_table(META).map_err(db)?;
         let at = |key: &str| -> Result<Option<Vec<u8>>, StoreError> {
             Ok(t.get(key).map_err(db)?.map(|v| v.value().to_vec()))
@@ -3410,12 +3387,7 @@ impl Index {
 
     /// The acknowledged end of the log, or None if this index has never applied a write.
     pub fn acknowledged(&self) -> Result<Option<Location>, StoreError> {
-        let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(META).map_err(db)?;
-        t.get("indexed_upto")
-            .map_err(db)?
-            .map(|v| dec(v.value()))
-            .transpose()
+        acknowledged_in(&self.begin_read()?)
     }
 
     pub fn indexed_upto(&self) -> Result<Location, StoreError> {
@@ -3462,4 +3434,264 @@ fn u64_from(v: &[u8]) -> Result<u64, StoreError> {
     <[u8; 8]>::try_from(v)
         .map(u64::from_le_bytes)
         .map_err(|_| StoreError::Db("a capacity count is not 8 bytes".into()))
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn snapshot_delta_in(
+    r: &redb::ReadTransaction,
+    landing: &Hash,
+) -> Result<Option<(Hash, Location)>, StoreError> {
+    let t = r.open_table(SNAPSHOT_DELTAS).map_err(db)?;
+    match t.get(&landing.0[..]).map_err(db)? {
+        Some(v) => Ok(Some(hash_at_from(v.value(), "snapshot delta entry")?)),
+        None => Ok(None),
+    }
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn plan_seal_in(
+    r: &redb::ReadTransaction,
+    landing: &Hash,
+) -> Result<Option<(Hash, Location)>, StoreError> {
+    let t = r.open_table(PLAN_SEALS).map_err(db)?;
+    match t.get(&landing.0[..]).map_err(db)? {
+        Some(v) => Ok(Some(hash_at_from(v.value(), "plan seal entry")?)),
+        None => Ok(None),
+    }
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn signatures_before_in(
+    r: &redb::ReadTransaction,
+    subject: &Hash,
+    cap: usize,
+    end: Location,
+) -> Result<Vec<Hash>, StoreError> {
+    let t = r.open_table(SIGNATURES).map_err(db)?;
+    let typed = r.open_table(TYPED).map_err(db)?;
+    let mut out = vec![];
+    for item in t.range(&subject.0[..]..).map_err(db)? {
+        let (k, _) = item.map_err(db)?;
+        let key = k.value();
+        if !key.starts_with(&subject.0) {
+            break;
+        }
+        let id = signature_from(key)?.1;
+        let at = typed
+            .get(&typed_key(crate::kinds::SIGNATURE, &id)[..])
+            .map_err(db)?
+            .ok_or(StoreError::NotFound(id))?;
+        if dec(at.value())? >= end {
+            continue;
+        }
+        if out.len() == cap {
+            return Err(crate::signature::over_per_subject());
+        }
+        out.push(id);
+    }
+    Ok(out)
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn redaction_carrier_in(
+    r: &redb::ReadTransaction,
+    carrier: &Hash,
+) -> Result<Option<Hash>, StoreError> {
+    let t = r.open_table(REDACTION_CARRIERS).map_err(db)?;
+    match t.get(&carrier.0[..]).map_err(db)? {
+        Some(v) => Ok(Some(hash_from(v.value(), "redaction carrier entry")?)),
+        None => Ok(None),
+    }
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn for_each_carried_place_in(
+    r: &redb::ReadTransaction,
+    before: Location,
+    mut f: impl FnMut(Location, Hash) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    let t = r.open_table(REDACTION_CARRIED_AT).map_err(db)?;
+    for item in t.range(..&loc_key(&before)[..]).map_err(db)? {
+        let (k, v) = item.map_err(db)?;
+        let loc = loc_from(k.value(), "carried place entry")?;
+        f(loc, hash_from(v.value(), "carried place entry")?)?;
+    }
+    Ok(())
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn redaction_span_row_at_in(
+    r: &redb::ReadTransaction,
+    loc: &Location,
+) -> Result<Option<SpanRow>, StoreError> {
+    let t = r.open_table(REDACTION_SPANS).map_err(db)?;
+    match t.get(&loc_key(loc)[..]).map_err(db)? {
+        Some(v) => Ok(Some(span_row_from(*loc, v.value())?)),
+        None => Ok(None),
+    }
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn redaction_requests_naming_in(
+    r: &redb::ReadTransaction,
+    kind: u8,
+    h: &Hash,
+) -> Result<Vec<Hash>, StoreError> {
+    let t = r.open_table(REDACTION_OBJECTS).map_err(db)?;
+    let prefix = typed_key(kind, h);
+    let mut out = vec![];
+    for item in t.range(&prefix[..]..).map_err(db)? {
+        let (k, _) = item.map_err(db)?;
+        let key = k.value();
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        out.push(hash_from(&key[33..], "redaction object entry")?);
+    }
+    Ok(out)
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn redaction_applied_in(
+    r: &redb::ReadTransaction,
+    request: &Hash,
+) -> Result<Option<(Hash, Location)>, StoreError> {
+    let t = r.open_table(REDACTION_APPLIED).map_err(db)?;
+    match t.get(&request.0[..]).map_err(db)? {
+        Some(v) => {
+            let v = v.value();
+            if v.len() != 44 {
+                return Err(StoreError::Decode(format!(
+                    "redaction apply entry is {} bytes",
+                    v.len()
+                )));
+            }
+            Ok(Some((
+                hash_from(&v[..32], "redaction apply entry")?,
+                loc_from(&v[32..], "redaction apply entry")?,
+            )))
+        }
+        None => Ok(None),
+    }
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn get_ref_in(r: &redb::ReadTransaction, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
+    let t = r.open_table(REFS).map_err(db)?;
+    Ok(t.get(name).map_err(db)?.map(|v| v.value().to_vec()))
+}
+
+/// [`Index`]'s query of the same name, in the read transaction `r`.
+fn acknowledged_in(r: &redb::ReadTransaction) -> Result<Option<Location>, StoreError> {
+    let t = r.open_table(META).map_err(db)?;
+    t.get("indexed_upto")
+        .map_err(db)?
+        .map(|v| dec(v.value()))
+        .transpose()
+}
+
+/// One read transaction of the index that a closure walk owns from its first query to its
+/// return ([`Index::read_for_closure`]): every typed location, typed-kind pass, ref, seal,
+/// delta, signature and removal row of the walk reads the index as it stood when it began. Each
+/// query is the [`Index`] query of the same name, with the same key parsing and row checks.
+pub(crate) struct IndexRead {
+    txn: redb::ReadTransaction,
+    /// Whether the active mask may hold a row, as [`Index::any_redaction_active`] read it once
+    /// the transaction began.
+    redacted: bool,
+}
+
+impl IndexRead {
+    pub(crate) fn typed(&self, kind: u8, h: &Hash) -> Result<Option<Location>, StoreError> {
+        typed_in(&self.txn, kind, h)
+    }
+
+    pub(crate) fn for_each_object_of(
+        &self,
+        kind: u8,
+        f: impl FnMut(Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        for_each_object_of_in(&self.txn, kind, f)
+    }
+
+    pub(crate) fn indexed_upto(&self) -> Result<Location, StoreError> {
+        Ok(acknowledged_in(&self.txn)?.unwrap_or(Location {
+            segment: 0,
+            offset: 0,
+        }))
+    }
+
+    pub(crate) fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        get_ref_in(&self.txn, name)
+    }
+
+    pub(crate) fn plan_seal(&self, landing: &Hash) -> Result<Option<(Hash, Location)>, StoreError> {
+        plan_seal_in(&self.txn, landing)
+    }
+
+    pub(crate) fn snapshot_delta(
+        &self,
+        landing: &Hash,
+    ) -> Result<Option<(Hash, Location)>, StoreError> {
+        snapshot_delta_in(&self.txn, landing)
+    }
+
+    pub(crate) fn signatures_before(
+        &self,
+        subject: &Hash,
+        cap: usize,
+        end: Location,
+    ) -> Result<Vec<Hash>, StoreError> {
+        signatures_before_in(&self.txn, subject, cap, end)
+    }
+
+    pub(crate) fn redaction_span_row_at(
+        &self,
+        loc: &Location,
+    ) -> Result<Option<SpanRow>, StoreError> {
+        redaction_span_row_at_in(&self.txn, loc)
+    }
+
+    /// [`Index::redaction_span_at`] in this transaction.
+    pub(crate) fn redaction_span_at(
+        &self,
+        loc: &Location,
+    ) -> Result<Option<ActiveSpan>, StoreError> {
+        if !self.redacted {
+            return Ok(None);
+        }
+        Ok(self
+            .redaction_span_row_at(loc)?
+            .filter(SpanRow::masks)
+            .map(|r| r.active))
+    }
+
+    pub(crate) fn redaction_applied(
+        &self,
+        request: &Hash,
+    ) -> Result<Option<(Hash, Location)>, StoreError> {
+        redaction_applied_in(&self.txn, request)
+    }
+
+    pub(crate) fn redaction_carrier(&self, carrier: &Hash) -> Result<Option<Hash>, StoreError> {
+        redaction_carrier_in(&self.txn, carrier)
+    }
+
+    pub(crate) fn redaction_requests_naming(
+        &self,
+        kind: u8,
+        h: &Hash,
+    ) -> Result<Vec<Hash>, StoreError> {
+        redaction_requests_naming_in(&self.txn, kind, h)
+    }
+
+    /// Calls `f` with the place and hash of every carried record frame that starts before
+    /// `before`, in physical order: one range read of the carried-place rows, no log walk.
+    pub(crate) fn for_each_carried_place(
+        &self,
+        before: Location,
+        f: impl FnMut(Location, Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        for_each_carried_place_in(&self.txn, before, f)
+    }
 }

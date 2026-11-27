@@ -7,7 +7,10 @@ mod carried_fixture;
 #[path = "../support/redaction.rs"]
 mod redaction_fixture;
 
+mod canon_state;
 mod carried_records;
+mod checked_reuse;
+mod decoded_batch;
 mod dump_chain;
 mod foreign_compatibility;
 mod foreign_frozen;
@@ -23,6 +26,7 @@ mod hub_canon;
 mod hub_ports;
 mod ingest_chain;
 mod link_delivery_stream;
+mod partial_history;
 mod port_merge;
 mod reflects_stream;
 mod snapshot_delta;

@@ -5,8 +5,15 @@ use serde_json::{Value, json};
 
 #[derive(clap::Args)]
 pub(crate) struct SearchArgs {
-    /// The text to find (a pattern with --regex).
-    query: String,
+    /// The text to find (a pattern with --regex). Leave it out with --like or --like-text.
+    #[arg(required_unless_present_any = ["like", "like_text"])]
+    query: Option<String>,
+    /// Find the blocks most like this block, in score order.
+    #[arg(long, value_name = "ID")]
+    like: Option<String>,
+    /// Find the blocks most like this text, in score order.
+    #[arg(long = "like-text", value_name = "TEXT")]
+    like_text: Option<String>,
     /// Treat the query as a regular expression.
     #[arg(long)]
     regex: bool,
@@ -61,7 +68,7 @@ pub(crate) struct SearchArgs {
     /// Keep hits whose block coverage score is under this (0 to 100).
     #[arg(long = "coverage-below")]
     coverage_below: Option<u32>,
-    /// coverage: list the hits with the lowest coverage first.
+    /// coverage (lowest coverage first), relevance (best score first) or reading (reading order).
     #[arg(long)]
     sort: Option<String>,
 }
@@ -69,6 +76,8 @@ pub(crate) struct SearchArgs {
 pub(crate) fn search(env: &Env, a: SearchArgs) -> Result<(Value, String), ErrorReply> {
     let SearchArgs {
         query,
+        like,
+        like_text,
         regex,
         ignore_case,
         scope,
@@ -95,7 +104,7 @@ pub(crate) fn search(env: &Env, a: SearchArgs) -> Result<(Value, String), ErrorR
     let v = call(
         env,
         "search",
-        json!({"query": query, "regex": regex, "ignore_case": ignore_case, "scope": scope, "max_tokens": max_tokens, "page": page,
+        json!({"query": query, "like": like, "like_text": like_text, "regex": regex, "ignore_case": ignore_case, "scope": scope, "max_tokens": max_tokens, "page": page,
                 "types": list(types), "traits": list(traits), "path": path, "lifecycle": lifecycle, "changed_since": changed_since,
                 "exclude_history": flag(exclude_history), "governed_by": governed_by, "describes": describes, "linked_to": linked_to,
                 "mentions": mentions, "suspect": flag(suspect), "tension": flag(tension),
@@ -183,6 +192,26 @@ fn sheet_lines(sheet: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// vxs8 (D-76Y9H): what a like hit shares with its source, `words a, b; links X`; `None` for a
+/// hit of the other modes, which carries neither list.
+fn shared(m: &Value) -> Option<String> {
+    let list = |k: &str| {
+        m[k].as_array()
+            .map(|a| a.iter().map(text).collect::<Vec<_>>().join(", "))
+    };
+    let (words, links) = (list("words"), list("links"));
+    if words.is_none() && links.is_none() {
+        return None;
+    }
+    let parts: Vec<String> = [("words", words), ("links", links)]
+        .into_iter()
+        .filter_map(|(k, l)| l.filter(|l| !l.is_empty()).map(|l| format!("{k} {l}")))
+        .collect();
+    Some(parts.join("; "))
+}
+
+/// csrch1: the hits, one header per block and its matching lines under it; vxs8: a ranked hit's
+/// header ends with its score, and a like hit's next line names what it shares.
 fn search_text(v: &Value) -> String {
     let mut out = vec![format!("{} matching blocks", num(&v["total"]))];
     let docs = v["totals"]["docs"].as_array().cloned().unwrap_or_default();
@@ -232,7 +261,13 @@ fn search_text(v: &Value) -> String {
                 num(&m["issues"])
             ));
         }
+        if let Some(score) = m["score"].as_f64() {
+            head.push_str(&format!("  score={score:.3}"));
+        }
         out.push(head);
+        if let Some(shared) = shared(m) {
+            out.push(format!("  shares: {shared}"));
+        }
         for l in m["lines"].as_array().into_iter().flatten() {
             out.push(format!(
                 "  {}:{}: {}",
@@ -250,7 +285,17 @@ fn search_text(v: &Value) -> String {
             out.push(format!(
                 "  also: {}",
                 also.iter()
-                    .map(|a| format!("{} {}", a["path"].as_str().unwrap_or("-"), text(&a["id"])))
+                    .map(|a| {
+                        let mut member =
+                            format!("{} {}", a["path"].as_str().unwrap_or("-"), text(&a["id"]));
+                        if let Some(score) = a["score"].as_f64() {
+                            member.push_str(&format!(" score={score:.3}"));
+                        }
+                        if let Some(shared) = shared(a) {
+                            member.push_str(&format!(" ({shared})"));
+                        }
+                        member
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             ));

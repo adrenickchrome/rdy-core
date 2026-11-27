@@ -1,11 +1,14 @@
 //! A scope off canon holds only what differs from canon. Reading an old landing, a proposal
 //! version or a view after a landing, with its graph and lexicon, adds a small part of what
-//! canon's own build holds, not a private copy of the whole project. Its own binary: the global
-//! allocator below counts the live bytes of the whole process, and no other test shares it.
+//! canon's own build holds, not a private copy of the whole project. The vector weights a
+//! briefing and a search fill count too (D-AT49D). Its own binary: the global allocator below
+//! counts the live bytes of the whole process, and no other test shares it.
 use rdy_engine::testkit::rebuilt_scope_for_tests;
+use rdy_engine::vectors::{Doc, WeightScope};
 use rdy_engine::*;
 use rdy_model::*;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 /// A global allocator that keeps the live bytes of the process.
 mod live_alloc {
@@ -112,6 +115,64 @@ fn read_cost(st: &ReadState, scope: &Scope) -> isize {
     })
 }
 
+/// The live bytes filling `scope`'s vector weights adds to `st`, the way a briefing and a search
+/// read them. The briefing reads the blocks whose body starts with `source` (one doc's notes):
+/// each one's two vectors, and the norms of every block that shares a seed word or a seed
+/// target with it (every seed, a superset of the 64 heaviest a briefing takes). The search
+/// ranks every block that holds a word of `query`, which reads each one's lexical norm.
+fn weight_cost(st: &ReadState, scope: &Scope, source: &str, query: &[&str]) -> isize {
+    let m = st.materialized(scope).unwrap();
+    let lexicon = st.lexicon(scope).unwrap();
+    let sources: Vec<BlockId> = m
+        .iter()
+        .filter(|b| b.body.starts_with(source))
+        .map(|b| b.id.clone())
+        .collect();
+    assert!(!sources.is_empty(), "{source}: the briefing has sources");
+    live_alloc::kept_by(|| {
+        let w = st.vector_weights(WeightScope::Read(scope)).unwrap();
+        let mut norms = 0;
+        for id in &sources {
+            let d = Doc::Block(id);
+            w.lexical(d).unwrap();
+            w.link(d).unwrap();
+            let words: Option<Vec<String>> = w
+                .counts(d)
+                .map(|c| c.iter().map(|(k, _)| k.to_string()).collect());
+            for word in words.unwrap_or_default() {
+                if w.word_is_seed(&word) {
+                    for cand in lexicon.word_blocks_of(&word).into_iter().flatten() {
+                        w.lexical_norm(Doc::Block(cand)).unwrap();
+                        norms += 1;
+                    }
+                }
+            }
+            for t in w
+                .targets(d)
+                .map(|t| t.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+            {
+                if w.target_is_seed(&t) {
+                    for cand in lexicon.pointing_at(&t).into_iter().flatten() {
+                        w.link_norm(Doc::Block(cand)).unwrap();
+                        norms += 1;
+                    }
+                }
+            }
+        }
+        for word in query {
+            for hit in lexicon.word_blocks_of(word).into_iter().flatten() {
+                w.lexical_norm(Doc::Block(hit)).unwrap();
+                norms += 1;
+            }
+        }
+        assert!(
+            norms > 1000,
+            "the reads fill the weights: {norms} norm reads"
+        );
+    })
+}
+
 #[test]
 fn scopes_off_canon_add_under_a_tenth_of_canon() {
     let dir = tempfile::tempdir().unwrap();
@@ -169,12 +230,33 @@ fn scopes_off_canon_add_under_a_tenth_of_canon() {
     for v in &views {
         scopes.push((v.clone(), Scope::View(v.clone())));
     }
+    let mut costs: BTreeMap<String, isize> = BTreeMap::new();
     for (what, scope) in &scopes {
         let added = read_cost(&st, scope);
         eprintln!("{what}: {added} bytes (canon {canon})");
         assert!(
             added * 10 < canon,
             "{what} added {added} bytes: canon holds {canon}"
+        );
+        costs.insert(what.clone(), added);
+    }
+    // D-AT49D: on an old landing and on views read after a landing (one that merges cleanly,
+    // one that conflicts), a briefing and a search fill the weights. All the scope holds beyond
+    // canon's build, its blocks, graph, lexicon and weights, stays under a tenth of canon's.
+    let weighed = [
+        (landings[0].clone(), "The Widget 100 "),
+        ("v0".to_string(), "The Widget 200 "),
+        ("v2".to_string(), "The Widget 202 "),
+    ];
+    for (what, source) in weighed {
+        let scope = &scopes.iter().find(|(w, _)| *w == what).unwrap().1;
+        let weights = weight_cost(&st, scope, source, &["gateway", "ledger"]);
+        let added = costs[&what] + weights;
+        eprintln!("{what}: {weights} weight bytes, {added} in all (canon {canon})");
+        assert!(weights > 0, "{what}: the reads cached weights");
+        assert!(
+            added * 10 < canon,
+            "{what} added {added} bytes with its weights: canon holds {canon}"
         );
     }
 }

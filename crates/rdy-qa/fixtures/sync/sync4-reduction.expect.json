@@ -1,0 +1,190 @@
+{
+  "base": "4a6d78c3063ab4872017d7049a409a69e2715dad9a9c1ed242486f078857fb14",
+  "fetch": {
+    "canon_moved": false,
+    "frames_written": 12,
+    "min_rdy_after": "0.59.0",
+    "min_rdy_before": "0.59.0",
+    "plans_taken": 5,
+    "records_taken": 10,
+    "tags_kept": [],
+    "tags_taken": []
+  },
+  "published": false,
+  "purpose": "canon_history",
+  "rdy": "0.58.0",
+  "receiver_features": {
+    "features": [
+      {
+        "class": "incompatible",
+        "name": "assessment",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "content_hash_v2",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "dedup_spans",
+        "required_rdy": "0.59.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "object_encoding",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "plan_delta",
+        "required_rdy": "0.59.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "ported_change",
+        "required_rdy": "0.58.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "snapshot_delta",
+        "required_rdy": "0.52.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "sync_state",
+        "required_rdy": "0.53.0"
+      }
+    ],
+    "manifest_version": 1
+  },
+  "required_rdy": "0.59.0",
+  "root": "1ba1e237cb59da7fc80020f6c1c58ed7808929287b3b70a2f68636316e0f4571",
+  "stream": {
+    "bytes": 15246,
+    "digest": "1f1b62c76c7434bfa4ee9d1c5ef9b588a01357f2203814ef30926887fe1e640a",
+    "header": {
+      "features": {
+        "features": [
+          {
+            "class": "incompatible",
+            "name": "object_encoding",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "plan_delta",
+            "required_rdy": "0.59.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "snapshot_delta",
+            "required_rdy": "0.52.0"
+          }
+        ],
+        "manifest_version": 1
+      },
+      "prerequisites": [
+        {
+          "hash": "7bebff6f14b34f4040fa16f30e61be09ef85f3819e428ce5ed844ebf2aa6fb69",
+          "kind": 3
+        },
+        {
+          "hash": "4a6d78c3063ab4872017d7049a409a69e2715dad9a9c1ed242486f078857fb14",
+          "kind": 4
+        },
+        {
+          "hash": "727edd16546432814cbe6b98ff9014fe52a470a1329e51e77efc0a9650e13dd6",
+          "kind": 4
+        },
+        {
+          "hash": "295f42f58886654c6474a7ee865786794370fec330e688ba8a6d5732f1b77be5",
+          "kind": 20
+        },
+        {
+          "hash": "b8932e98b75ad6bbfba0c9ee6904c84408f977c0aad4059d4bb21e4125264760",
+          "kind": 30
+        }
+      ],
+      "purpose": "canon_history",
+      "repo_id": "8da73f39edc3d4851347a96f2f7be474",
+      "stream_format": 4,
+      "tag": "1ba1e237cb59da7fc80020f6c1c58ed7808929287b3b70a2f68636316e0f4571"
+    },
+    "keys": [
+      {
+        "hash": "c946f2104862192c5de54dd0bebed991392d82a00072371d047e82bf91fcca15",
+        "kind": 1
+      },
+      {
+        "hash": "fcb2d90c2356047dc12247e7ff88db0e69fdd9ec8a963557bbab94d0a8c2e9d0",
+        "kind": 2
+      },
+      {
+        "hash": "41b83d4e56e2bc258f54ec2866d5d136c6f0fce79a467a8e454162cd1c147693",
+        "kind": 3
+      },
+      {
+        "hash": "1ba1e237cb59da7fc80020f6c1c58ed7808929287b3b70a2f68636316e0f4571",
+        "kind": 4
+      },
+      {
+        "hash": "5f768422327b20c7e4fd36e9b013aa45c58e3095728cbd42677abc1f1e7d4b16",
+        "kind": 22
+      },
+      {
+        "hash": "6f98b4390d1d658bac81e8ea3f1717694bcaf4487524bd04eda0daac1082df6d",
+        "kind": 24
+      },
+      {
+        "hash": "174a36e1d7a04357cd2c93f204e14564e2810e9b4338e5cd576778acc124e3c5",
+        "kind": 24
+      },
+      {
+        "hash": "5c3d1ae584511d9798874b796a5d3dd6ba5c2d3ab7d63be374d7217af01821f0",
+        "kind": 24
+      },
+      {
+        "hash": "75b6e9df20ef5fda9023b260929a8f4c06c843e7a9c1f22404b397edc42933ce",
+        "kind": 24
+      },
+      {
+        "hash": "475f10b98de42fa197256891bfc7254177310f72cf5e48a2b92fa0134ea732e5",
+        "kind": 24
+      },
+      {
+        "hash": "f394d44ddf1c22c584bed7dfdfc8f5c392016f39ece2956cafe40c4b12070177",
+        "kind": 24
+      },
+      {
+        "hash": "a14dce2897ff314d1669f399279e909b495b2312d3f7d287a993284305f3455a",
+        "kind": 24
+      },
+      {
+        "hash": "c8a93923b921d536ec7214efd2e22fc6c672e8babe0956e6f0cfb7e3a3017f2c",
+        "kind": 30
+      }
+    ],
+    "record_features": {
+      "features": [
+        {
+          "class": "incompatible",
+          "name": "object_encoding",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "plan_delta",
+          "required_rdy": "0.59.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "snapshot_delta",
+          "required_rdy": "0.52.0"
+        }
+      ],
+      "manifest_version": 1
+    },
+    "records": 13
+  }
+}

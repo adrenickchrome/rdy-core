@@ -462,7 +462,7 @@ fn di10_a_human_session_cannot_relay_a_hand_over() {
     let (_d, mut r) = project_with_views();
     let before = head(&r, "a");
     let said = "a person answers as themselves; only the relaying agent records a relay";
-    let fix = "drop the relay flags, or let the agent answer with its own RDY_ACTOR";
+    let fix = "if you are the person, drop the relay flags. If you relay for the person, set RDY_ACTOR=agent:<name> to your own actor and pass that actor in --relayed-by with the person's words in --evidence";
     let me = human_writer();
     for relay in [
         words("Give a to b"),

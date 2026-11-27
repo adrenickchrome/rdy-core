@@ -528,6 +528,7 @@ fn bare_plan(view: &str, v: Hash) -> rdy_model::plan::Plan {
         }],
         provenance: writer(),
         seal: None,
+        read_identity: None,
     }
 }
 

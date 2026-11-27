@@ -104,6 +104,9 @@ impl Rdy {
                     lease_ttl_ms: prev.lease_ttl_ms,
                     coverage_memo: Default::default(),
                     memo: Default::default(),
+                    history: Arc::new(crate::partial_history::HistoryCell::capture(
+                        &self.store.reader(),
+                    )),
                     detectors: self.detectors,
                     error: Some(e.clone()),
                 }));
@@ -693,6 +696,9 @@ impl Rdy {
             lease_ttl_ms,
             coverage_memo,
             memo: Default::default(),
+            history: Arc::new(crate::partial_history::HistoryCell::capture(
+                &self.store.reader(),
+            )),
             detectors: self.detectors,
             error: None,
         })
@@ -995,6 +1001,7 @@ impl Rdy {
             propose_changes: cfg.propose_changes(),
             decisions_home: cfg.decisions_home(),
             site_base_path: cfg.site.base_path.clone(),
+            history: Arc::new(crate::partial_history::HistoryCell::capture(&reader)),
             reader,
             as_of: caches.as_of,
             vpos: caches.vpos,
@@ -1016,6 +1023,16 @@ impl Rdy {
             detectors: self.detectors,
             error: None,
         })
+    }
+
+    /// A private state of the store as it stands, over a full-check reader
+    /// (`StoreReader::full_history_reader`): every canon walk and check takes the whole history
+    /// with no partial-history exception, while the incomplete history ref is kept. The full
+    /// check reads it; it is never published.
+    pub(crate) fn full_history_state(&self) -> Result<ReadState, RdyError> {
+        let reader = self.store.reader().full_history_reader();
+        let prev = self.state.load_full();
+        self.full_state(&prev, reader, &CoordHeads::default(), EpochCaches::new())
     }
 
     /// The private masked preview of a removal (plan Redaction, Task 10): the state as it will
@@ -1163,6 +1180,9 @@ impl Rdy {
             lease_ttl_ms: prev.lease_ttl_ms,
             coverage_memo: Default::default(),
             memo: Default::default(),
+            history: Arc::new(crate::partial_history::HistoryCell::capture(
+                &self.store.reader(),
+            )),
             detectors: self.detectors,
             error: Some(e),
         }));

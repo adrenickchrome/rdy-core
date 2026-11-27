@@ -112,7 +112,8 @@ impl Store {
         let held = self.held();
         // no batch is open, so turning held batches off seals nothing: the seed is one batch
         self.set_held(false)?;
-        let wrote = self.write_guarded(items);
+        // a seed receives history: it maps nothing (the next compact maps it)
+        let wrote = self.without_map_pass(|s| s.write_guarded(items));
         self.set_held(held)?;
         wrote.map(drop)
     }

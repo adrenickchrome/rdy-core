@@ -47,7 +47,7 @@ const SUCCESSOR_SHA: &str = "956044b4b5e6a51a9810f31a4c0c16ad81aa9a035d735ed4d8b
 
 /// The current fixture, which every selector names: a later successor of [`SUCCESSOR`].
 /// `sdl7_contract_changes_only_delta_surfaces` in `release_contract.rs` closes SD1's changes.
-const CURRENT: &str = "hub-ports-v1.json";
+const CURRENT: &str = "rdy-0590-v1.json";
 
 /// The predecessor of this plan's fixture, which every selector named before this plan.
 const PREDECESSOR: &str = "readme-from-rdy-v1.json";
@@ -99,6 +99,14 @@ const FROZEN: &[(&str, &str)] = &[
     (
         "hub-forks-v1.json",
         "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252",
+    ),
+    (
+        "hub-ports-v1.json",
+        "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab",
+    ),
+    (
+        "m5a-v1.json",
+        "b18e1992465210f6af99eabafb0290fb9b12f2288db5d5ac83bfa4f1a44bc4ec",
     ),
 ];
 

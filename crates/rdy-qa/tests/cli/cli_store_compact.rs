@@ -77,14 +77,18 @@ fn mh7_compact_prints_four_lines_the_kind_rows_and_the_notes() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], format!("log bytes: {}", dry["log_bytes"]));
     assert_eq!(lines[1], format!("removed bytes: {}", dry["removed_bytes"]));
-    assert_eq!(lines[2], "punched bytes: 0");
-    assert_eq!(lines[3], format!("on-disk bytes: {}", dry["on_disk_bytes"]));
+    assert_eq!(
+        lines[2],
+        format!("deduplicated bytes: {}", dry["deduplicated_bytes"])
+    );
+    assert_eq!(lines[3], "punched bytes: 0");
+    assert_eq!(lines[4], format!("on-disk bytes: {}", dry["on_disk_bytes"]));
     let kinds = kind_lines(&dry);
     assert!(kinds.len() > 3, "{kinds:?}");
-    assert_eq!(&lines[4..4 + kinds.len()], &kinds[..], "{out}");
+    assert_eq!(&lines[5..5 + kinds.len()], &kinds[..], "{out}");
     let notes = dry["notes"].as_array().unwrap();
-    assert_eq!(lines.len(), 4 + kinds.len() + notes.len(), "{out}");
-    for (line, note) in lines[4 + kinds.len()..].iter().zip(notes) {
+    assert_eq!(lines.len(), 5 + kinds.len() + notes.len(), "{out}");
+    for (line, note) in lines[5 + kinds.len()..].iter().zip(notes) {
         assert_eq!(Some(*line), note.as_str());
     }
     // a real run keeps the log and the removed bytes; only the disk numbers may move
@@ -111,7 +115,7 @@ fn mh7_compact_help_and_flags_are_closed() {
     let s = Served::new();
     let help = text_of(&s.rdy(&["compact", "--help"]));
     assert!(
-        help.contains("Free disk space used by removed payloads. The chat path is rdy_compact."),
+        help.contains("Free disk space used by removed payloads and repeated byte runs. The chat path is rdy_compact."),
         "{help}"
     );
     assert!(help.contains("--dry-run"), "{help}");
@@ -119,7 +123,7 @@ fn mh7_compact_help_and_flags_are_closed() {
     assert!(!o.status.success());
     let top = text_of(&s.rdy(&["--help"]));
     assert!(
-        top.contains("Free disk space used by removed payloads. The chat path is rdy_compact."),
+        top.contains("Free disk space used by removed payloads and repeated byte runs. The chat path is rdy_compact."),
         "{top}"
     );
 }
@@ -163,14 +167,19 @@ fn mh7_status_and_fsck_add_counts_without_losing_keys() {
     ] {
         assert!(status.get(key).is_some(), "status lost {key}: {status}");
     }
-    for key in ["log_bytes", "removed_bytes", "by_kind"] {
+    for key in [
+        "log_bytes",
+        "removed_bytes",
+        "deduplicated_bytes",
+        "by_kind",
+    ] {
         assert_eq!(status[key], fsck[key], "status and fsck agree on {key}");
     }
     // the text: the first line, then the lines that were already there, then the byte lines
     let out = text_of(&s.rdy(&["fsck"]));
     let lines: Vec<&str> = out.lines().collect();
     let kinds = kind_lines(&fsck);
-    let tail = 2 + kinds.len();
+    let tail = 3 + kinds.len();
     assert!(lines[0].starts_with("ok: "), "{out}");
     assert_eq!(
         lines[lines.len() - tail],
@@ -179,6 +188,10 @@ fn mh7_status_and_fsck_add_counts_without_losing_keys() {
     assert_eq!(
         lines[lines.len() - tail + 1],
         format!("removed bytes: {}", fsck["removed_bytes"])
+    );
+    assert_eq!(
+        lines[lines.len() - tail + 2],
+        format!("deduplicated bytes: {}", fsck["deduplicated_bytes"])
     );
     assert_eq!(&lines[lines.len() - kinds.len()..], &kinds[..], "{out}");
     // the status text is unchanged: it gains no byte line

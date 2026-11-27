@@ -1,8 +1,9 @@
 //! hfp5 (D-TXFHR; D-99CWC, D-HX6BX, D-B2AC3, D-RDH1C): the contract fixture of hub forks, Part 1.
 //!
 //! `hub-forks-v1.json` is this plan's fixture. It started as a byte copy of the frozen
-//! `m5b-v1.json`, and every selector named it until its successor `hub-ports-v1.json`, which
-//! the selectors name now. It is frozen since. One capture wrote its delta: the fork flag of
+//! `m5b-v1.json`, and every selector named it until its successor `hub-ports-v1.json`. It is
+//! frozen since, and so are `hub-ports-v1.json` and `m5a-v1.json`, each since its own successor;
+//! the selectors name `rdy-0590-v1.json` now. One capture wrote its delta: the fork flag of
 //! `rdy clone`, its populated probes, the hidden-list form, and the semantic probes of a fork
 //! and its lineage. The tests here pin that delta leaf by leaf, keep every earlier fixture and
 //! every released format and vector as it was, and show that a fork keeps its identities
@@ -44,8 +45,22 @@ const CURRENT: &str = "hub-forks-v1.json";
 /// successor.
 const CURRENT_SHA: &str = "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252";
 
-/// The successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen since.
-const SELECTED: &str = "hub-ports-v1.json";
+/// The successors of [`CURRENT`] before [`SELECTED`], in order, each frozen since its own
+/// successor, with the sha256 that its successor copied.
+const LATER: [(&str, &str); 2] = [
+    (
+        "hub-ports-v1.json",
+        "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab",
+    ),
+    (
+        "m5a-v1.json",
+        "b18e1992465210f6af99eabafb0290fb9b12f2288db5d5ac83bfa4f1a44bc4ec",
+    ),
+];
+
+/// The latest successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen
+/// since its first successor.
+const SELECTED: &str = "rdy-0590-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -200,8 +215,9 @@ fn at<'a>(v: &'a Value, path: &str) -> &'a Value {
     cur
 }
 
-/// hfp5: every selector names the successor of this plan's fixture, and none names this plan's
-/// fixture, `m5b-v1.json` or `sync-client-b-v1.json`, the fixtures the selectors named before it.
+/// hfp5: every selector names the latest successor of this plan's fixture, and none names this
+/// plan's fixture, its earlier successors, `m5b-v1.json` or `sync-client-b-v1.json`, the fixtures
+/// the selectors named before it.
 #[test]
 fn hfp5_selectors_name_the_current_fixture_only() {
     for file in SELECTORS {
@@ -211,7 +227,10 @@ fn hfp5_selectors_name_the_current_fixture_only() {
             text.contains(&format!("fixtures/contracts/{SELECTED}\"")),
             "{file} selects {SELECTED}"
         );
-        for earlier in [PREDECESSOR, "sync-client-b-v1.json", CURRENT] {
+        for earlier in [PREDECESSOR, "sync-client-b-v1.json", CURRENT]
+            .into_iter()
+            .chain(LATER.map(|(n, _)| n))
+        {
             assert!(
                 !text.contains(&format!("contracts/{earlier}\"")),
                 "{file} no longer selects {earlier}"
@@ -221,8 +240,9 @@ fn hfp5_selectors_name_the_current_fixture_only() {
 }
 
 /// hfp5: the successor keeps every earlier fixture as it was. Each frozen file keeps its bytes,
-/// the folder holds those, this plan's fixture and its successor and no other, and this plan's
-/// fixture differs from its predecessor and keeps its bytes.
+/// the folder holds those, this plan's fixture and its successors and no other, each earlier
+/// successor keeps its bytes, and this plan's fixture differs from its predecessor and keeps its
+/// bytes.
 #[test]
 fn hfp5_successor_preserves_every_frozen_fixture() {
     for (name, want) in FROZEN {
@@ -233,15 +253,19 @@ fn hfp5_successor_preserves_every_frozen_fixture() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
+    for (name, want) in LATER {
+        assert_eq!(sha(&bytes(name)), want, "{name} is frozen");
+    }
     let mut want: Vec<&str> = FROZEN
         .iter()
+        .chain(LATER.iter())
         .map(|(n, _)| *n)
         .chain([CURRENT, SELECTED])
         .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds every frozen fixture, {CURRENT} and {SELECTED}"
+        "the folder holds every frozen fixture, {CURRENT}, its successors and {SELECTED}"
     );
     let now = sha(&bytes(CURRENT));
     assert_ne!(now, PREDECESSOR_SHA, "{CURRENT} is a successor, not a copy");
@@ -1332,8 +1356,8 @@ const DUMP_FIXTURES_DIGEST: (usize, &str) = (
     "232ec8e9db5e8f4b582e82c3a4543c42743cdd59d82a36b3d39f75f7fe6a5d8e",
 );
 const STORE_FIXTURES_DIGEST: (usize, &str) = (
-    85,
-    "e5c48b33394612a9d4acc0f8325eaaa880953eb9dfa3ae723527b89853443fc8",
+    90,
+    "7971edb0e04087185b8c0342eb1abf3fea00b96e252a0af50dccc7f59a781d8d",
 );
 
 fn tree_digest(dir: &Path) -> (usize, String) {
@@ -1355,9 +1379,19 @@ fn tree_digest(dir: &Path) -> (usize, String) {
     }
     let mut files = vec![];
     walk(dir, "", &mut files);
-    // the first-use fixtures of `ported_change` (hub ports) came after this plan's release
+    // the first-use fixtures of `ported_change` (hub ports), `dedup_spans` (span maps) and
+    // `plan_delta` (plan deltas) came after this plan's release
     files.retain(|(path, _)| {
-        !path.starts_with("v4-f1-e1-ported-change") && !path.starts_with("ported-change-1")
+        ![
+            "v4-f1-e1-ported-change",
+            "ported-change-1",
+            "v4-f1-dedup-spans",
+            "dedup-spans-1",
+            "v4-f1-reduction",
+            "reduction-1",
+        ]
+        .iter()
+        .any(|later| path.starts_with(later))
     });
     files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let lines: String = files
@@ -1446,26 +1480,33 @@ fn hfp5_no_format_or_feature_moves() {
         (2, 3, 4),
         "the stream formats"
     );
-    assert_eq!(rdy_store::sync_stream::READ_FORMATS, [2, 3, 4]);
-    // the registry less the feature a later plan registered (hub ports, `ported_change`) is the
-    // 12 features of this plan, and that feature is the only addition
+    // format 5 (the canon state) came later; this release read 2, 3 and 4
+    assert_eq!(rdy_store::sync_stream::READ_FORMATS[..3], [2, 3, 4]);
+    // the registry less the features later plans registered (hub ports, `ported_change`; span
+    // maps, `dedup_spans`; plan deltas, `plan_delta`; canon states, `partial_history`) is the 12
+    // features of this plan, and those are the only additions
     let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
         .iter()
         .copied()
-        .filter(|n| *n != "ported_change")
+        .filter(|n| {
+            *n != "ported_change"
+                && *n != "dedup_spans"
+                && *n != "plan_delta"
+                && *n != "partial_history"
+        })
         .collect();
     assert_eq!(live.len(), 12);
     assert_eq!(
         rdy_store::format::REGISTERED_FEATURES.len(),
-        live.len() + 1,
-        "ported_change is the only addition"
+        live.len() + 4,
+        "ported_change, dedup_spans, plan_delta and partial_history are the only additions"
     );
     assert!(rdy_store::format::REGISTERED_FEATURES.contains(&"hub_canon"));
     let (was, now) = (read(PREDECESSOR), read(CURRENT));
     assert_eq!(
         now["store"]["registered_names"],
         json!(live),
-        "the store registers what the contract lists, and ported_change"
+        "the store registers what the contract lists, and the later additions"
     );
     assert_eq!(
         was["store"]["registered_names"],

@@ -27,7 +27,8 @@
 //!   `E_HUB_NOT_FOUND`.
 use crate::error::{E_BAD_INPUT, E_UPSTREAM_UNCERTAIN, RdyError, actor_unbound, upstream_protocol};
 use crate::formats::formats;
-use crate::hub_http::HttpHubTransport;
+use crate::hub_http::{HttpHubTransport, ReplyEncoding};
+use crate::hub_publish_stream::PreparedObjectBody;
 use crate::hub_publish_wire::{
     Discovery, Effect, HttpPublishWire, KNOWN_REPLY_BYTES, KNOWN_REQUEST_BYTES, KeyWire,
     MAX_JSON_VALUES, MAX_KNOWN_KEYS, ObjectPut, PostError, PublishState, PublishWire, REPLY_BYTES,
@@ -137,6 +138,14 @@ impl SyncState {
                 ))
             })
             .collect()
+    }
+
+    /// Whether the hub sends a canon tip's state (stream format 5, D-GGTYA): its reply's
+    /// `stream_write` lists format 5. The request still names format 4 alone.
+    pub fn sends_canon_state(&self) -> bool {
+        self.state
+            .stream_write
+            .contains(&rdy_store::sync_stream::CANON_STATE_FORMAT)
     }
 
     /// The hub's head of the named view `name`; None when the hub lacks it or it was not named.
@@ -696,10 +705,23 @@ pub trait SyncWire: Send + Sync {
         body: &mut dyn Read,
         len: u64,
     ) -> Result<ObjectPut, RdyError>;
+    /// `POST <base>/objects/put?push=<push>`: one prepared batch. The default sends the batch's
+    /// own bytes through [`SyncWire::put`].
+    fn put_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        let (raw, len) = body.identity()?;
+        self.put(cx, push, raw, len)
+    }
     /// `POST <base>/known`, pull form: one page.
     fn known_pull(&self, cx: &UploadContext, request: &KnownPull) -> Result<KnownPage, RdyError>;
     /// `POST <base>/objects/get`: the batch streamed to `sink`, at most `limit` bytes. Returns
-    /// its bytes. The reply streams in pieces of at most
+    /// its bytes. The request offers zstd (`Accept-Encoding: zstd`); a reply that takes the offer
+    /// is decoded as it arrives, and `limit` and the returned count are decoded bytes. The reply
+    /// streams in pieces of at most
     /// [`UPLOAD_BUFFER_BYTES`](crate::hub_http::UPLOAD_BUFFER_BYTES), each written while the
     /// bytes so far are within `limit`; the first piece past it fails the get unwritten.
     fn get(
@@ -794,17 +816,19 @@ fn check_request(cx: &UploadContext, r: &SyncStateRequest) -> Result<(), RdyErro
 }
 
 /// A history request's own checks: a canon or view history whose root (and base) are its root
-/// kind.
+/// kind, or a canon state (D-GGTYA) of a landing, which has no base.
 fn check_history(
     purpose: StreamPurpose,
     root: &ObjectKey,
     base: Option<&ObjectKey>,
 ) -> Result<(), RdyError> {
-    let ok = matches!(
-        purpose,
-        StreamPurpose::CanonHistory | StreamPurpose::ViewHistory
-    ) && root.kind == purpose.root_kind()
-        && base.is_none_or(|b| b.kind == purpose.root_kind());
+    let ok = match purpose {
+        StreamPurpose::CanonHistory | StreamPurpose::ViewHistory => {
+            base.is_none_or(|b| b.kind == purpose.root_kind())
+        }
+        StreamPurpose::CanonState => base.is_none(),
+        _ => false,
+    } && root.kind == purpose.root_kind();
     if !ok {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -847,6 +871,15 @@ impl SyncWire for HttpSyncWire {
         self.inner.put_objects(cx, push, body, len)
     }
 
+    fn put_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        self.inner.put_objects_prepared(cx, push, body)
+    }
+
     fn known_pull(&self, cx: &UploadContext, request: &KnownPull) -> Result<KnownPage, RdyError> {
         check_history(request.purpose, &request.root, request.base.as_ref())?;
         let json = encode(request, KNOWN_REQUEST_BYTES)?;
@@ -867,8 +900,15 @@ impl SyncWire for HttpSyncWire {
         }
         let json = encode(request, KNOWN_REQUEST_BYTES)?;
         let url = route(cx, &["objects", "get"], &[])?;
-        self.inner
-            .post_streamed(cx, &url, SYNC_MEDIA_TYPE, json, sink, limit)
+        self.inner.post_streamed(
+            cx,
+            &url,
+            SYNC_MEDIA_TYPE,
+            json,
+            sink,
+            limit,
+            ReplyEncoding::ZstdOrIdentity,
+        )
     }
 
     fn write(
@@ -923,7 +963,14 @@ impl SyncWire for HttpSyncWire {
         crate::sync_dump::check_dump_id(&request.dump)?;
         let json = encode(request, REPLY_BYTES)?;
         let url = route(cx, &["dump"], &[])?;
-        self.inner
-            .post_streamed(cx, &url, SYNC_MEDIA_TYPE, json, sink, limit)
+        self.inner.post_streamed(
+            cx,
+            &url,
+            SYNC_MEDIA_TYPE,
+            json,
+            sink,
+            limit,
+            ReplyEncoding::Identity,
+        )
     }
 }

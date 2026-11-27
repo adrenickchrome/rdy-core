@@ -31,13 +31,23 @@ const CURRENT_SHA: &str = "d00807ccc5ed37448eb81fec8addd240633596f73aa288b1dc54d
 
 /// The successors of [`CURRENT`] before [`SELECTED`], in order, each frozen since its own
 /// successor, with the sha256 that its successor copied.
-const LATER: [(&str, &str); 1] = [(
-    "hub-forks-v1.json",
-    "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252",
-)];
+const LATER: [(&str, &str); 3] = [
+    (
+        "hub-forks-v1.json",
+        "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252",
+    ),
+    (
+        "hub-ports-v1.json",
+        "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab",
+    ),
+    (
+        "m5a-v1.json",
+        "b18e1992465210f6af99eabafb0290fb9b12f2288db5d5ac83bfa4f1a44bc4ec",
+    ),
+];
 
 /// The latest successor of [`CURRENT`], which every selector names now.
-const SELECTED: &str = "hub-ports-v1.json";
+const SELECTED: &str = "rdy-0590-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -408,8 +418,8 @@ const DUMP_FIXTURES_DIGEST: (usize, &str) = (
     "232ec8e9db5e8f4b582e82c3a4543c42743cdd59d82a36b3d39f75f7fe6a5d8e",
 );
 const STORE_FIXTURES_DIGEST: (usize, &str) = (
-    85,
-    "e5c48b33394612a9d4acc0f8325eaaa880953eb9dfa3ae723527b89853443fc8",
+    90,
+    "7971edb0e04087185b8c0342eb1abf3fea00b96e252a0af50dccc7f59a781d8d",
 );
 
 /// The files under `dir`, and the sha256 of one line per file in byte order of its `/` path:
@@ -433,9 +443,19 @@ fn tree_digest(dir: &Path) -> (usize, String) {
     }
     let mut files = vec![];
     walk(dir, "", &mut files);
-    // the first-use fixtures of `ported_change` (hub ports) came after this plan's release
+    // the first-use fixtures of `ported_change` (hub ports), `dedup_spans` (span maps) and
+    // `plan_delta` (plan deltas) came after this plan's release
     files.retain(|(path, _)| {
-        !path.starts_with("v4-f1-e1-ported-change") && !path.starts_with("ported-change-1")
+        ![
+            "v4-f1-e1-ported-change",
+            "ported-change-1",
+            "v4-f1-dedup-spans",
+            "dedup-spans-1",
+            "v4-f1-reduction",
+            "reduction-1",
+        ]
+        .iter()
+        .any(|later| path.starts_with(later))
     });
     files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let lines: String = files
@@ -509,22 +529,28 @@ fn wck9_old_packs_formats_and_contract_hashes_stay_equal() {
     );
 
     // the store registry and the formats: no feature, store format or dump format is new, but
-    // the one a later plan registered (hub ports, `ported_change`): the registry less it is what
-    // this fixture lists, and it is the only addition
+    // the ones later plans registered (hub ports, `ported_change`; span maps, `dedup_spans`;
+    // plan deltas, `plan_delta`; canon states, `partial_history`):
+    // the registry less them is what this fixture lists, and they are the only additions
     let live: Vec<&str> = rdy_store::format::REGISTERED_FEATURES
         .iter()
         .copied()
-        .filter(|n| *n != "ported_change")
+        .filter(|n| {
+            *n != "ported_change"
+                && *n != "dedup_spans"
+                && *n != "plan_delta"
+                && *n != "partial_history"
+        })
         .collect();
     assert_eq!(
         now["store"]["registered_names"],
         serde_json::json!(live),
-        "the store registers what the contract lists, and ported_change"
+        "the store registers what the contract lists, and the later additions"
     );
     assert_eq!(
-        live.len() + 1,
+        live.len() + 4,
         rdy_store::format::REGISTERED_FEATURES.len(),
-        "ported_change is the only addition"
+        "ported_change, dedup_spans, plan_delta and partial_history are the only additions"
     );
     assert_eq!(
         now["dump_load"]["dump_format"],

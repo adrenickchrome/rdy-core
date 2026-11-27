@@ -94,10 +94,11 @@ jobs:
         if: steps.gate.outputs.status != '0'
         env:
           CARGO_NET_OFFLINE: "true"
+          GATE_FLAKE_LINKS: ${{ vars.RDY_GATE_FLAKE_LINKS }}
         run: |
           left=$(( GATE_CEILING_SECS - ($(date +%s) - GATE_START) ))
           if [ "$left" -le 0 ]; then echo "No time is left on the gate clock for a retry"; exit 1; fi
-          cargo qa --tier release --budget-secs "$left" --ceiling-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json
+          cargo qa --tier release --budget-secs "$left" --ceiling-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json ${GATE_FLAKE_LINKS:+--flake-links "$GATE_FLAKE_LINKS"}
       - name: Failing tests
         if: always() && steps.gate.outputs.status != '0'
         run: |
@@ -189,10 +190,11 @@ jobs:
         if: steps.gate.outputs.status != '0'
         env:
           CARGO_NET_OFFLINE: "true"
+          GATE_FLAKE_LINKS: ${{ vars.RDY_GATE_FLAKE_LINKS }}
         run: |
           left=$(( GATE_CEILING_SECS - ($(date +%s) - GATE_START) ))
           if [ "$left" -le 0 ]; then echo "No time is left on the gate clock for a retry"; exit 1; fi
-          cargo qa --tier release --budget-secs "$left" --ceiling-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json
+          cargo qa --tier release --budget-secs "$left" --ceiling-secs "$left" --require-all --tmp-root "$GATE_TMP" --retry-failed target/qa/report.json ${GATE_FLAKE_LINKS:+--flake-links "$GATE_FLAKE_LINKS"}
       - name: Failing tests
         if: always() && steps.gate.outputs.status != '0'
         run: |
@@ -321,10 +323,13 @@ jobs:
         shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         env:
           CARGO_NET_OFFLINE: "true"
+          GATE_FLAKE_LINKS: ${{ vars.RDY_GATE_FLAKE_LINKS }}
         run: |
           $left = [int]$env:GATE_CEILING_SECS - ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$env:GATE_START)
           if ($left -le 0) { Write-Output 'No time is left on the gate clock for a retry'; exit 1 }
-          cargo qa --tier release --platform-tier windows --budget-secs $left --ceiling-secs $left --require-all --tmp-root $env:GATE_TMP --retry-failed target\qa\report.json
+          $flake = @()
+          if ($env:GATE_FLAKE_LINKS) { $flake = @('--flake-links', $env:GATE_FLAKE_LINKS) }
+          cargo qa --tier release --platform-tier windows --budget-secs $left --ceiling-secs $left --require-all --tmp-root $env:GATE_TMP --retry-failed target\qa\report.json @flake
           exit $LASTEXITCODE
       - name: Hosted proof under a standard account (Windows tier)
         # The hosted runner only: a temporary standard account, a private checkout and

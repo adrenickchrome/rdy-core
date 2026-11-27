@@ -229,7 +229,9 @@ impl HubClock for Clock {
 
 use rdy_engine::hub_publish::{PublishRenderer, RenderedUpload};
 use rdy_engine::hub_publish_wire::{Discovery, ObjectPut, PublishState, UploadContext};
-use rdy_engine::hub_sync::{PullOutcome, PullRequest, PushOutcome, PushRequest, SyncService};
+use rdy_engine::hub_sync::{
+    OutcomePollClock, PullOutcome, PullRequest, PushOutcome, PushRequest, SyncService,
+};
 use rdy_engine::hub_sync_wire::{
     DumpRequest, GetRequest, HubRequest, KnownPage, KnownPull, LookupOutcome, OutcomeReply,
     SyncState, SyncStateRequest, SyncWire, WriteFailure, WriteKind, WriteOutcome, WriteReply,
@@ -240,6 +242,67 @@ use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_stream::StreamPurpose;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
+
+type WaitProbe = Box<dyn Fn(Duration) + Send + std::marker::Sync>;
+
+/// The fake monotonic clock of a busy outcome lookup's waits (r59016). It moves only when a test
+/// advances it or a wait runs, and a wait never sleeps: it records the delay, runs the probe
+/// (which a test uses to look at the hub while the lookup waits), then moves the clock on.
+#[derive(Default)]
+pub struct PollClock {
+    now: Mutex<Duration>,
+    /// Each wait's delay, in order.
+    pub delays: Mutex<Vec<Duration>>,
+    probe: Mutex<Option<WaitProbe>>,
+}
+
+impl PollClock {
+    pub fn advance(&self, by: Duration) {
+        *self.now.lock().unwrap() += by;
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        *self.now.lock().unwrap()
+    }
+
+    /// Runs `f` with the delay at the start of every wait.
+    pub fn on_wait(&self, f: impl Fn(Duration) + Send + std::marker::Sync + 'static) {
+        *self.probe.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// The delays waited, in whole seconds.
+    pub fn seconds(&self) -> Vec<u64> {
+        self.delays
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Duration::as_secs)
+            .collect()
+    }
+}
+
+impl OutcomePollClock for PollClock {
+    fn now(&self) -> Duration {
+        self.elapsed()
+    }
+
+    fn wait(&self, delay: Duration) {
+        self.delays.lock().unwrap().push(delay);
+        if let Some(f) = self.probe.lock().unwrap().as_ref() {
+            f(delay);
+        }
+        self.advance(delay);
+    }
+}
+
+/// A hub refusal of the outcome lookup while the hub still runs the write: `E_HUB_BUSY` with the
+/// `retry_after` its error object validated to `seconds`.
+pub fn busy_refusal(seconds: u64) -> RdyError {
+    let mut e = RdyError::new("E_HUB_BUSY", "the hub is busy", "wait before trying again");
+    e.upstream_retry_after = Some(seconds);
+    e
+}
 
 /// One wire request as the fake hub saw it.
 #[derive(Clone, Debug)]
@@ -285,6 +348,8 @@ pub struct Hub {
     pub bytes: Mutex<BTreeMap<String, u64>>,
     pub fail: Mutex<BTreeMap<(&'static str, usize), RdyError>>,
     pub hook: Mutex<Option<(&'static str, Hook)>>,
+    /// Runs at the start of every request of its step.
+    pub each: Mutex<Option<(&'static str, Hook)>>,
     pub calls: Mutex<Vec<Call>>,
     /// Each put's push id and the keys its batch carried, in order.
     pub puts: Mutex<Vec<(String, Vec<ObjectKey>)>>,
@@ -310,6 +375,10 @@ pub struct Hub {
     /// When set, the next get of two or more keys has its reply padded one byte past the state's
     /// `batch_bytes` (the client must split it), and the knob clears.
     pub pad_get: Mutex<bool>,
+    /// When set to `(cap, marker)`, a get whose export passes `cap` bytes is refused as the hub
+    /// refuses a get over its batch cap: `E_HUB_VALIDATION`, with the structured over-cap marker
+    /// on the error when `marker` is set.
+    pub refuse_get_over: Mutex<Option<(u64, bool)>>,
     /// A get reply served once in place of the store's batch.
     pub get_bytes: Mutex<Option<Vec<u8>>>,
     /// The dump files the dump step serves, by id (D-7CDEQ); an id with none is refused as
@@ -317,6 +386,8 @@ pub struct Hub {
     pub dumps: Mutex<BTreeMap<String, Vec<u8>>>,
     /// The id of each dump step, in order.
     pub dump_ids: Mutex<Vec<String>>,
+    /// The canon state the hub serves (stream format 5), prepared once for its root.
+    pub canon_state: Mutex<Option<Arc<rdy_engine::canon_state_export::PreparedCanonState>>>,
 }
 
 pub fn base_state() -> PublishState {
@@ -349,6 +420,8 @@ impl Hub {
             bytes: Mutex::default(),
             fail: Mutex::default(),
             hook: Mutex::default(),
+            each: Mutex::default(),
+            canon_state: Mutex::default(),
             calls: Mutex::default(),
             puts: Mutex::default(),
             roots: Mutex::default(),
@@ -364,6 +437,7 @@ impl Hub {
             gets: Mutex::default(),
             get_replies: Mutex::default(),
             pad_get: Mutex::default(),
+            refuse_get_over: Mutex::default(),
             get_bytes: Mutex::default(),
             dumps: Mutex::default(),
             dump_ids: Mutex::default(),
@@ -417,6 +491,30 @@ impl Hub {
     pub fn serve(&self, read: Arc<ReadState>) {
         self.state.lock().unwrap().repo_id = read.reader().repo_id().unwrap();
         *self.store.lock().unwrap() = Some(read);
+    }
+
+    /// Makes the hub send a canon tip's state (stream format 5) of what it serves.
+    pub fn send_canon_state(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.stream_read = vec![2, 4, 5];
+        st.stream_write = vec![2, 4, 5];
+    }
+
+    /// The canon state at `root` the hub serves, prepared on its first use.
+    pub fn prepared_state(
+        &self,
+        root: Hash,
+    ) -> Result<Arc<rdy_engine::canon_state_export::PreparedCanonState>, RdyError> {
+        let mut slot = self.canon_state.lock().unwrap();
+        if let Some(p) = slot.as_ref().filter(|p| p.root() == root) {
+            return Ok(Arc::clone(p));
+        }
+        let read = self.store.lock().unwrap().clone().expect("a hub store");
+        let p = Arc::new(rdy_engine::canon_state_export::PreparedCanonState::new(
+            read, root,
+        )?);
+        *slot = Some(Arc::clone(&p));
+        Ok(p)
     }
 
     pub fn steps(&self) -> Vec<&'static str> {
@@ -475,6 +573,11 @@ impl Hub {
             }
         };
         if let Some((_, mut f)) = hook {
+            f(step);
+        }
+        if let Some((s, f)) = self.each.lock().unwrap().as_mut()
+            && *s == step
+        {
             f(step);
         }
         match self.fail.lock().unwrap().remove(&(step, n)) {
@@ -643,6 +746,16 @@ impl SyncWire for Hub {
     fn known_pull(&self, cx: &UploadContext, request: &KnownPull) -> Result<KnownPage, RdyError> {
         self.enter("known_pull", cx, None, None)?;
         self.pulls.lock().unwrap().push(request.clone());
+        if request.purpose == StreamPurpose::CanonState {
+            let size = *self.page.lock().unwrap();
+            let p = self
+                .prepared_state(request.root.hash)?
+                .page(request.after, size.min(rdy_engine::history_facts::MAX_KEYS))?;
+            return Ok(KnownPage {
+                keys: p.keys,
+                next: p.next,
+            });
+        }
         let read = self.store.lock().unwrap().clone().expect("a hub store");
         let reader = read.reader();
         if !reader
@@ -698,6 +811,12 @@ impl SyncWire for Hub {
         self.gets.lock().unwrap().push(request.clone());
         let mut bytes = match self.get_bytes.lock().unwrap().take() {
             Some(b) => b,
+            None if request.purpose == StreamPurpose::CanonState => {
+                let mut out = Vec::new();
+                self.prepared_state(request.root.hash)?
+                    .write_keys(&request.keys, &mut out)?;
+                out
+            }
             None => {
                 // the hub's export of exactly the keys asked for (the core read a hub serves)
                 let read = self.store.lock().unwrap().clone().expect("a hub store");
@@ -718,6 +837,24 @@ impl SyncWire for Hub {
             if bytes.len() < past {
                 bytes.resize(past, 0);
             }
+        }
+        let refusal = *self.refuse_get_over.lock().unwrap();
+        if let Some((cap, marker)) = refusal
+            && bytes.len() as u64 > cap
+        {
+            self.get_replies
+                .lock()
+                .unwrap()
+                .push((bytes.len() as u64, 0));
+            let mut e = RdyError::new(
+                "E_HUB_VALIDATION",
+                format!("the records you asked for are larger than {cap} bytes"),
+                "ask for fewer records in each get",
+            );
+            if marker {
+                e.hub_get_cap = Some(cap);
+            }
+            return Err(e);
         }
         // as the transport streams a reply: piece by piece, each written while the bytes so far
         // are within `limit`; the first piece past it fails the get
@@ -797,6 +934,18 @@ impl SyncWire for Hub {
         }
     }
 
+    fn settings(
+        &self,
+        cx: &UploadContext,
+    ) -> Result<rdy_engine::hub_sync_wire::SettingsBundle, RdyError> {
+        self.enter("settings", cx, None, None)?;
+        // fixture v2's "none" case: the hub holds no settings
+        Ok(rdy_engine::hub_sync_wire::SettingsBundle {
+            pack_reason: Some(rdy_engine::hub_sync_wire::PackReason::None),
+            ..Default::default()
+        })
+    }
+
     fn outcome(&self, cx: &UploadContext, push: &str) -> Result<OutcomeReply, RdyError> {
         self.enter("outcome", cx, Some(push), None)?;
         Ok(self
@@ -849,6 +998,8 @@ pub struct Sync<'a> {
     pub api: NoApi,
     pub clock: Clock,
     pub renderer: Renderer,
+    /// The fake clock of the service's busy outcome lookups.
+    pub poll: Arc<PollClock>,
 }
 
 impl<'a> Sync<'a> {
@@ -859,6 +1010,7 @@ impl<'a> Sync<'a> {
             api: NoApi::default(),
             clock: Clock::at(T0),
             renderer: Renderer::default(),
+            poll: Arc::default(),
         }
     }
 
@@ -871,6 +1023,7 @@ impl<'a> Sync<'a> {
             self.hub,
             &self.renderer,
         )
+        .with_outcome_poll_clock(&*self.poll)
     }
 
     pub fn push(&self, request: PushRequest) -> Result<PushOutcome, RdyError> {

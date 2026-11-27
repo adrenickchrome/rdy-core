@@ -209,8 +209,9 @@ fn rfr2_feature_activates_in_the_first_durable_batch() {
     assert_eq!(f.required_rdy, FIGURE_DARK_REQUIRED_RDY);
     assert_eq!(FIGURE_DARK_REQUIRED_RDY, "0.51.0");
     // nine before snapshot_delta (SD1 Task 6), then hub_canon (Sync client A Task 1b),
-    // sync_state (Sync client A Task 2) and ported_change (hub ports)
-    assert_eq!(reg.len(), 13);
+    // sync_state (Sync client A Task 2), ported_change (hub ports), dedup_spans (span maps),
+    // plan_delta (plan answer deltas) and partial_history (canon state clones)
+    assert_eq!(reg.len(), 16);
 
     // a store with no dark figure never turns it on: light figures, edits, landings, tags
     let (d, mut r, s, light, _dark) = base();

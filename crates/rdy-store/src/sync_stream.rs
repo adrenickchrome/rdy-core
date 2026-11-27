@@ -102,13 +102,35 @@
 //!   the same list in every batch of one upload, never the source store's whole manifest. Its
 //!   minimum (`StoreFeatures::min_rdy`) is then the minimum that the pushed records need.
 //! - **Order and limits:** as format 2's.
+//!
+//! # Stream format 5
+//!
+//! Format 5 (D-GGTYA, D-4PV25) keeps format 2's prelude, frames, header and trailer, and adds one
+//! download purpose, `canon_state` (byte 4): the state of one canon tip, which a hub sends to a
+//! receiver that has no history yet. Only format 5 knows it, and format 5 knows no other purpose:
+//! a canon state in an older format, and another purpose in format 5, are E_STREAM_PURPOSE.
+//!
+//! - **Root:** the header's root field holds the tip `LANDING`, a record of the batch or a
+//!   prerequisite (`root landing is not in the batch or its prerequisites`).
+//! - **Records:** the selection of `crate::canon_state`: the tip landing, its canonical SNAPSHOT
+//!   (made from the map for the stream: no store need hold it), every BLOCK that the map names
+//!   with its blobs, the tip's snapshot delta, and the tip's attachments. A link outside that
+//!   selection is a frontier edge, which the header lists as a prerequisite.
+//! - **Features:** the records' needs, as format 4 lists them, and `partial_history`: the
+//!   receiver must read the prerequisites as edges a later history fetch brings.
+//! - **Checks:** a canon state is no history: [`check_batch`] refuses it at its header, so no
+//!   holder push, publication, view or fork take admits it. [`check_canon_state_batch`] checks
+//!   one file with the same rules, and `crate::canon_state::StateUnion` checks the files of one
+//!   fetch against the state's link table.
 use crate::bounded::{CHUNK_BYTES, MAX_CHUNK_BYTES, MAX_RECORD_BYTES, RECORD_BYTES, RecordError};
+use crate::decoded_record::DecodedRecord;
 use crate::dump::{
     ENCODED_DROPPED_LEN, Frame, LINK_LEN, check_dropped, encoded_dropped_payload, link,
     parse_encoded_dropped,
 };
 use crate::format::{
-    MAX_MANIFEST_BYTES, StoreFeature, StoreFeatures, check_features, required_features,
+    FEATURE_SNAPSHOT_DELTA, MAX_MANIFEST_BYTES, StoreFeature, StoreFeatures, check_features,
+    required_features,
 };
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef, portable_refs_of};
@@ -121,6 +143,7 @@ use crate::stream_error::{
 use rdy_model::foreign::{ForeignPublication, ForeignVersion};
 use rdy_model::{Block, Hash, RepoId};
 use serde::{Deserialize, Serialize, Serializer};
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Read, Write};
 
@@ -136,8 +159,16 @@ pub const LINK_DELIVERY_FORMAT: u32 = 3;
 /// The stream format a canon or view history is written in: the first that knows the purposes
 /// `canon_history` and `view_history` (D-KE83X).
 pub const HISTORY_FORMAT: u32 = 4;
+/// The stream format a canon state is written in: the only one that knows the purpose
+/// `canon_state` (D-GGTYA).
+pub const CANON_STATE_FORMAT: u32 = 5;
 /// The stream formats this rdy reads: every format released from Release 1 on.
-pub const READ_FORMATS: [u32; 3] = [STREAM_FORMAT, LINK_DELIVERY_FORMAT, HISTORY_FORMAT];
+pub const READ_FORMATS: [u32; 4] = [
+    STREAM_FORMAT,
+    LINK_DELIVERY_FORMAT,
+    HISTORY_FORMAT,
+    CANON_STATE_FORMAT,
+];
 
 /// The frame kinds of the stream's own records. Object frames keep their store kinds.
 pub mod rec {
@@ -231,7 +262,8 @@ pub fn is_sync_kind(kind: u8) -> bool {
 /// What a stream carries: a tag's history, written `tag_history` and as the byte 0, a link
 /// delivery, written `link_delivery` and as the byte 1 (stream format 3 on), a canon history
 /// rooted at a landing, `canon_history` and the byte 2, or one view's history rooted at a view
-/// op, `view_history` and the byte 3 (stream format 4 on, D-KE83X).
+/// op, `view_history` and the byte 3 (stream format 4 on, D-KE83X), or the state of one canon
+/// tip, `canon_state` and the byte 4 (stream format 5 only, D-GGTYA).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamPurpose {
@@ -239,6 +271,7 @@ pub enum StreamPurpose {
     LinkDelivery,
     CanonHistory,
     ViewHistory,
+    CanonState,
 }
 
 impl StreamPurpose {
@@ -249,6 +282,7 @@ impl StreamPurpose {
             StreamPurpose::LinkDelivery => 1,
             StreamPurpose::CanonHistory => 2,
             StreamPurpose::ViewHistory => 3,
+            StreamPurpose::CanonState => 4,
         }
     }
 
@@ -259,6 +293,7 @@ impl StreamPurpose {
             1 => Some(StreamPurpose::LinkDelivery),
             2 => Some(StreamPurpose::CanonHistory),
             3 => Some(StreamPurpose::ViewHistory),
+            4 => Some(StreamPurpose::CanonState),
             _ => None,
         }
     }
@@ -270,6 +305,7 @@ impl StreamPurpose {
             StreamPurpose::LinkDelivery => "link_delivery",
             StreamPurpose::CanonHistory => "canon_history",
             StreamPurpose::ViewHistory => "view_history",
+            StreamPurpose::CanonState => "canon_state",
         }
     }
 
@@ -279,13 +315,28 @@ impl StreamPurpose {
             StreamPurpose::TagHistory => STREAM_FORMAT,
             StreamPurpose::LinkDelivery => LINK_DELIVERY_FORMAT,
             StreamPurpose::CanonHistory | StreamPurpose::ViewHistory => HISTORY_FORMAT,
+            StreamPurpose::CanonState => CANON_STATE_FORMAT,
         }
     }
 
     /// Whether the purpose carries a history of portable objects: a tag, canon or view history.
-    /// Only a link delivery does not.
+    /// A link delivery and a canon state do not: a canon state is a download only, so no take of
+    /// a history admits it.
     pub fn is_history(self) -> bool {
-        self != StreamPurpose::LinkDelivery
+        !matches!(
+            self,
+            StreamPurpose::LinkDelivery | StreamPurpose::CanonState
+        )
+    }
+
+    /// Whether a stream of format `format` may carry the purpose: format 5 carries only a canon
+    /// state, which no other format carries; formats 2 to 4 carry each purpose from its first
+    /// format on.
+    pub fn in_format(self, format: u32) -> bool {
+        if self == StreamPurpose::CanonState || format == CANON_STATE_FORMAT {
+            return self == StreamPurpose::CanonState && format == CANON_STATE_FORMAT;
+        }
+        format >= self.first_format()
     }
 
     /// The store kind of the purpose's root object: a `TAG`, a `LANDING` or a `VIEW_OP`. A link
@@ -293,7 +344,7 @@ impl StreamPurpose {
     pub fn root_kind(self) -> u8 {
         match self {
             StreamPurpose::TagHistory | StreamPurpose::LinkDelivery => kinds::TAG,
-            StreamPurpose::CanonHistory => kinds::LANDING,
+            StreamPurpose::CanonHistory | StreamPurpose::CanonState => kinds::LANDING,
             StreamPurpose::ViewHistory => kinds::VIEW_OP,
         }
     }
@@ -301,7 +352,7 @@ impl StreamPurpose {
     /// The refusal reason of a history batch whose root is neither a record nor a prerequisite.
     fn root_not_listed(self) -> Reason {
         match self {
-            StreamPurpose::CanonHistory => Reason::RootLandingNotListed,
+            StreamPurpose::CanonHistory | StreamPurpose::CanonState => Reason::RootLandingNotListed,
             StreamPurpose::ViewHistory => Reason::RootViewOpNotListed,
             StreamPurpose::TagHistory | StreamPurpose::LinkDelivery => Reason::RootTagNotListed,
         }
@@ -458,6 +509,25 @@ impl StreamHeader {
         }
     }
 
+    /// The header of a canon state (stream format 5, D-GGTYA) for `repo_id`, rooted at the tip
+    /// LANDING `landing`. `features` are the features that the state's records need, with
+    /// `partial_history`; `prerequisites` are the frontier edges the state omits.
+    pub fn canon_state(
+        features: StoreFeatures,
+        repo_id: RepoId,
+        landing: Hash,
+        prerequisites: Vec<ObjectKey>,
+    ) -> Self {
+        StreamHeader {
+            stream_format: CANON_STATE_FORMAT,
+            features,
+            repo_id,
+            purpose: StreamPurpose::CanonState,
+            tag: landing,
+            prerequisites,
+        }
+    }
+
     /// The upload's root: the object the root field names, of the purpose's root kind
     /// ([`StreamPurpose::root_kind`]). A link delivery's tag is provenance.
     pub fn root(&self) -> ObjectKey {
@@ -566,6 +636,35 @@ impl StreamRecord {
 }
 
 impl StreamRecord {
+    /// [`StreamRecord::refs`] of the record whose one decoded value is `d`
+    /// ([`DecodedRecord::decode`] of this record): the same links, read from the value.
+    pub(crate) fn refs_decoded(
+        &self,
+        features: &StoreFeatures,
+        d: &DecodedRecord,
+    ) -> Result<Vec<ObjectRef>, RecordError> {
+        match self {
+            StreamRecord::Present { .. } => {
+                crate::object_refs::portable_refs_of_decoded(features, d)
+            }
+            StreamRecord::Dropped { .. } => self.refs(features),
+        }
+    }
+
+    /// The features the record uses (`format::required_features`), read from its one decoded
+    /// value `d`; a dropped record uses none.
+    pub(crate) fn features_decoded(&self, d: &DecodedRecord) -> Vec<StoreFeature> {
+        match self {
+            StreamRecord::Present { payload, .. } => {
+                match crate::codec::split(self.raw_kind(), payload) {
+                    Ok(o) => crate::format::features_of(&o, Some(d)),
+                    Err(_) => vec![],
+                }
+            }
+            StreamRecord::Dropped { .. } => vec![],
+        }
+    }
+
     /// The removal proof a dropped record names: its apply. It is a reference, but no forward
     /// dependency: an apply of the same batch may come before or after the record (a removal
     /// proof follows what it removes), and an absent one is a prerequisite.
@@ -628,9 +727,50 @@ impl RecordFeatures {
         }
     }
 
+    /// Adds `used`, the features one record needs.
+    fn add_all(&mut self, used: Vec<StoreFeature>) {
+        for f in used {
+            if !self.0.iter().any(|g| g.name == f.name) {
+                self.0.push(f);
+            }
+        }
+    }
+
+    /// The place of `f` in the union, in the order of first use: added when new. A union past
+    /// `u16` places is refused (no registered set comes near it).
+    fn index_of(&mut self, f: &StoreFeature) -> Result<u16, ()> {
+        let i = match self.0.iter().position(|g| g.name == f.name) {
+            Some(i) => i,
+            None => {
+                self.0.try_reserve(1).map_err(|_| ())?;
+                self.0.push(f.clone());
+                self.0.len() - 1
+            }
+        };
+        u16::try_from(i).map_err(|_| ())
+    }
+
     /// The union, as a manifest sorted by name.
     pub fn finish(self) -> StoreFeatures {
         StoreFeatures::of(self.0)
+    }
+
+    /// [`RecordFeatures::finish`], and for each feature in the order of first use its place in
+    /// the sorted manifest.
+    fn finish_with_order(self) -> (StoreFeatures, Vec<u16>) {
+        let manifest = StoreFeatures::of(self.0.clone());
+        let order = self
+            .0
+            .iter()
+            .map(|f| {
+                manifest
+                    .features
+                    .iter()
+                    .position(|g| g.name == f.name)
+                    .expect("the manifest holds the union") as u16
+            })
+            .collect();
+        (manifest, order)
     }
 }
 
@@ -679,6 +819,7 @@ fn header_payload(h: &StreamHeader) -> Vec<u8> {
 /// Whether an object record of logical kind `kind` may stand in a stream of `purpose`: a sync
 /// kind in a tag, canon or view history, a `BLOCK` alone in a link delivery.
 fn purpose_kind(purpose: StreamPurpose, kind: u8) -> bool {
+    // a canon state carries sync kinds, as a history does
     match purpose {
         StreamPurpose::LinkDelivery => kind == kinds::BLOCK,
         _ => is_sync_kind(kind),
@@ -692,14 +833,15 @@ fn bad_header() -> StreamError {
 
 /// The rules of a header's fields, shared by the writer and the reader: a stream format this rdy
 /// reads, a purpose that format knows (E_STREAM_PURPOSE otherwise: format 2 knows only
-/// `tag_history`, format 3 adds `link_delivery`, format 4 `canon_history` and `view_history`), a manifest this rdy reads (E_STORE_FORMAT otherwise), at most
+/// `tag_history`, format 3 adds `link_delivery`, format 4 `canon_history` and `view_history`,
+/// format 5 knows `canon_state` alone), a manifest this rdy reads (E_STORE_FORMAT otherwise), at most
 /// [`MAX_PREREQUISITES`] prerequisites, each of a sync kind, strictly ascending, and none for a
 /// link delivery.
 fn check_header(h: &StreamHeader) -> Result<(), StreamError> {
     if !READ_FORMATS.contains(&h.stream_format) {
         return Err(bad_header());
     }
-    if h.stream_format < h.purpose.first_format() {
+    if !h.purpose.in_format(h.stream_format) {
         return Err(StreamError::purpose(Some(0), PRELUDE, h.purpose.byte()));
     }
     check_features(&h.features).map_err(|e| StreamError::store_format(Some(0), PRELUDE, &e))?;
@@ -761,7 +903,7 @@ fn parse_header(
     let purpose = StreamPurpose::of(p[20]).ok_or_else(|| wrong_purpose(p[20], expected))?;
     let tag = Hash(p[21..53].try_into().expect("32 bytes"));
     let count = u32::from_le_bytes(p[53..57].try_into().expect("4 bytes")) as usize;
-    if count > MAX_PREREQUISITES {
+    if count > caps().prerequisites {
         return Err(StreamError::limit(Some(0), PRELUDE, LIMIT_PREREQUISITES));
     }
     if p.len() != HEADER_FIXED + count * KEY_LEN {
@@ -831,16 +973,26 @@ fn payload_bound(record: u64, at: u64, kind: u8, len: u64) -> Result<(), StreamE
 
 /// The dropped-record budget of one batch: [`MAX_PENDING_DROPS`] records claiming at most
 /// [`MAX_PENDING_DROPPED_BYTES`] original bytes.
-#[derive(Default)]
 struct Pending {
     drops: u64,
     bytes: u64,
+    max_drops: u64,
+}
+
+impl Default for Pending {
+    fn default() -> Self {
+        Pending {
+            drops: 0,
+            bytes: 0,
+            max_drops: MAX_PENDING_DROPS,
+        }
+    }
 }
 
 impl Pending {
     fn add(&mut self, record: u64, at: u64, len: u32) -> Result<(), StreamError> {
         let drops = self.drops + 1;
-        if drops > MAX_PENDING_DROPS {
+        if drops > self.max_drops {
             return Err(StreamError::limit(Some(record), at, LIMIT_PENDING_DROPS));
         }
         let bytes = self.bytes + u64::from(len);
@@ -874,13 +1026,13 @@ pub struct StreamWriter<W: Write> {
 }
 
 impl<W: Write> StreamWriter<W> {
-    /// Writes the prelude and `header`, a tag, canon or view history's, in its stream format.
-    /// Refuses a link delivery (E_STREAM_PURPOSE: it starts with [`StreamWriter::new_delivery`]), a
+    /// Writes the prelude and `header`, a tag, canon or view history's or a canon state's, in its
+    /// stream format. Refuses a link delivery (E_STREAM_PURPOSE: it starts with [`StreamWriter::new_delivery`]), a
     /// header of a stream or store format this rdy does not read, more than
     /// [`MAX_PREREQUISITES`] prerequisites, or prerequisites of a kind that is not a sync kind
     /// or not strictly ascending.
     pub fn new(w: W, header: &StreamHeader) -> Result<Self, StreamError> {
-        if !header.purpose.is_history() {
+        if !header.purpose.is_history() && header.purpose != StreamPurpose::CanonState {
             return Err(wrong_purpose(
                 header.purpose.byte(),
                 StreamPurpose::TagHistory,
@@ -1089,6 +1241,9 @@ pub struct StreamReader<R: Read> {
     chain: Chain,
     failed: Option<StreamError>,
     totals: Option<StreamTotals>,
+    /// The frame kind and hash of the last object record `next` returned.
+    last_frame: (u8, Hash),
+    caps: CheckCaps,
 }
 
 impl<R: Read> StreamReader<R> {
@@ -1123,6 +1278,7 @@ impl<R: Read> StreamReader<R> {
     }
 
     fn open_inner(r: R, expected: Option<Expect>) -> Result<(Self, StreamHeader), StreamError> {
+        let caps = caps();
         let mut me = StreamReader {
             r,
             purpose: StreamPurpose::TagHistory,
@@ -1130,10 +1286,15 @@ impl<R: Read> StreamReader<R> {
             offset: 0,
             records: 0,
             last: (0, PRELUDE),
-            pending: Pending::default(),
+            pending: Pending {
+                max_drops: caps.pending_drops,
+                ..Pending::default()
+            },
             chain: Chain::default(),
             failed: None,
             totals: None,
+            last_frame: (0, Hash([0; 32])),
+            caps,
         };
         let mut magic = [0u8; MAGIC.len()];
         let got = me.fill(&mut magic, 0, 0)?;
@@ -1197,7 +1358,7 @@ impl<R: Read> StreamReader<R> {
             return Err(StreamError::bad_record(1, at, Reason::DeliveryOutOfOrder));
         }
         payload_bound(1, at, kind, len)?;
-        if at + FRAME_HEADER + len > MAX_STREAM_BYTES {
+        if at + FRAME_HEADER + len > self.caps.total_bytes {
             return Err(StreamError::limit(Some(1), at, LIMIT_TOTAL_BYTES));
         }
         let p = self.payload(1, at, len, &hash)?;
@@ -1240,6 +1401,12 @@ impl<R: Read> StreamReader<R> {
         self.last
     }
 
+    /// The frame kind (a raw object kind, or `DROPPED`) and the verified frame hash of the last
+    /// object record `next` returned.
+    pub(crate) fn last_frame(&self) -> (u8, Hash) {
+        self.last_frame
+    }
+
     fn step(&mut self) -> Result<Option<StreamRecord>, StreamError> {
         let n = self.records + 1;
         let at = self.offset;
@@ -1248,7 +1415,7 @@ impl<R: Read> StreamReader<R> {
             if len != TRAILER_LEN as u64 {
                 return Err(StreamError::truncated(Some(n), at));
             }
-            if at + FRAME_HEADER + len > MAX_STREAM_BYTES {
+            if at + FRAME_HEADER + len > self.caps.total_bytes {
                 return Err(StreamError::limit(Some(n), at, LIMIT_TOTAL_BYTES));
             }
             let p = self.payload(n, at, len, &hash)?;
@@ -1279,10 +1446,10 @@ impl<R: Read> StreamReader<R> {
         if kind != rec::DROPPED && !purpose_kind(self.purpose, crate::codec::logical_kind(kind)) {
             return Err(bad(Reason::UnknownKind));
         }
-        if n > MAX_RECORDS {
+        if n > self.caps.records {
             return Err(StreamError::limit(Some(n), at, LIMIT_OBJECT_RECORDS));
         }
-        if at + FRAME_HEADER + len > MAX_STREAM_BYTES {
+        if at + FRAME_HEADER + len > self.caps.total_bytes {
             return Err(StreamError::limit(Some(n), at, LIMIT_TOTAL_BYTES));
         }
         let record = if kind == rec::DROPPED {
@@ -1343,6 +1510,7 @@ impl<R: Read> StreamReader<R> {
             }
         };
         self.chain.add(n, at, kind, len, &hash)?;
+        self.last_frame = (kind, hash);
         self.records = n;
         self.last = (n, at);
         self.offset = at + FRAME_HEADER + len;
@@ -1414,11 +1582,82 @@ pub(crate) fn depth_of(
     at: u64,
     deps: impl IntoIterator<Item = u64>,
 ) -> Result<u64, StreamError> {
+    depth_within(record, at, deps, MAX_HISTORY_DEPTH)
+}
+
+/// [`depth_of`] within `max` (a batch check's [`CheckCaps::depth`]), with the bound's text.
+fn depth_within(
+    record: u64,
+    at: u64,
+    deps: impl IntoIterator<Item = u64>,
+    max: u64,
+) -> Result<u64, StreamError> {
     let d = deps.into_iter().max().map_or(1, |d| d + 1);
-    if d > MAX_HISTORY_DEPTH {
+    if d > max {
         return Err(StreamError::limit(Some(record), at, LIMIT_HISTORY_DEPTH));
     }
     Ok(d)
+}
+
+/// The count and byte bounds a batch read ([`StreamReader`]) and check ([`check_batch`])
+/// keep: [`CheckCaps::RELEASED`], the constants of this module, unless a test lowers them on its
+/// thread ([`lower_caps_for_tests`]). A lowered bound keeps the released bound's text.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckCaps {
+    /// [`MAX_RECORDS`].
+    pub records: u64,
+    /// [`MAX_EDGES`].
+    pub edges: u64,
+    /// [`MAX_HISTORY_DEPTH`].
+    pub depth: u64,
+    /// [`MAX_PREREQUISITES`].
+    pub prerequisites: usize,
+    /// [`MAX_PENDING_DROPS`].
+    pub pending_drops: u64,
+    /// [`MAX_STREAM_BYTES`].
+    pub total_bytes: u64,
+}
+
+impl CheckCaps {
+    /// The bounds every batch keeps.
+    pub const RELEASED: CheckCaps = CheckCaps {
+        records: MAX_RECORDS,
+        edges: MAX_EDGES,
+        depth: MAX_HISTORY_DEPTH,
+        prerequisites: MAX_PREREQUISITES,
+        pending_drops: MAX_PENDING_DROPS,
+        total_bytes: MAX_STREAM_BYTES,
+    };
+}
+
+thread_local! {
+    /// The bounds of this thread's batch reads and checks.
+    static CAPS: Cell<CheckCaps> = const { Cell::new(CheckCaps::RELEASED) };
+}
+
+/// The bounds of this thread's batch reads and checks.
+pub(crate) fn caps() -> CheckCaps {
+    CAPS.with(Cell::get)
+}
+
+/// While held, this thread's batch reads and checks keep the earlier bounds again on drop.
+#[doc(hidden)]
+#[must_use]
+pub struct CapsGuard(CheckCaps);
+
+impl Drop for CapsGuard {
+    fn drop(&mut self) {
+        CAPS.with(|c| c.set(self.0));
+    }
+}
+
+/// Test hook: this thread's batch reads and checks keep `caps` until the guard drops, so a
+/// test can reach a bound and pass it by one with a small batch. A writer keeps the released
+/// bounds. Production never lowers them.
+#[doc(hidden)]
+pub fn lower_caps_for_tests(caps: CheckCaps) -> CapsGuard {
+    CapsGuard(CAPS.with(|c| c.replace(caps)))
 }
 
 /// The rules the store keeps for every record of a kind, whatever the log around it, that a
@@ -1430,7 +1669,87 @@ pub(crate) fn depth_of(
 /// KeepSuspect's BLOCK targets) are the whole upload's (`crate::stream_source`). A take checks
 /// every file of an upload this way, and the upload whole, so no take keeps an answer or a plan
 /// that the holder's fsck would refuse.
-fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError> {
+///
+/// The rules read `d`, the record's one decoded value ([`DecodedRecord`]); a canonical-byte
+/// check compares that value with the record's own bytes.
+fn record_rules(
+    n: u64,
+    offset: u64,
+    r: &StreamRecord,
+    d: &DecodedRecord,
+) -> Result<(), StreamError> {
+    let StreamRecord::Present { key, payload, .. } = r else {
+        return Ok(());
+    };
+    let split = || {
+        crate::codec::split(r.raw_kind(), payload)
+            .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))
+    };
+    match d {
+        // a SNAPSHOT's bytes are the canonical encoding of its map, with or without the
+        // feature: postcard also decodes aliases (non-minimal varints, keys out of order or
+        // repeated) that a landing's `state` could never fold to (SD1, D-7K4Z0)
+        DecodedRecord::Snapshot(s) => {
+            if crate::codec::is_canonical(&split()?, s.as_ref()) {
+                return Ok(());
+            }
+            Err(StreamError::broken_rule(
+                n,
+                offset,
+                &crate::snapshot::noncanonical_snapshot(&key.hash),
+            )
+            .with_object(Some(*key)))
+        }
+        DecodedRecord::SnapshotDelta(s) => {
+            if crate::codec::is_canonical(&split()?, s.as_ref()) {
+                return Ok(());
+            }
+            Err(StreamError::from_record(n, offset, &RecordError::Decode).with_object(Some(*key)))
+        }
+        // the plan record rules (`crate::plan`), with fsck's own text, of the frame alone: a
+        // whole version's, or a delta's own fields and answer lists; its chain, bound proposal
+        // and seal, and a delta's hydrated version, need the records around it, which the
+        // whole-upload check (`crate::stream_source::check_typed_context`) checks before a take
+        // appends
+        DecodedRecord::Plan(p) => {
+            let rule = match p.as_ref() {
+                crate::plan_record::PlanRecord::Delta(d) if !d.lists_valid() => {
+                    Some(crate::plan::INVALID_CHAIN)
+                }
+                p => crate::plan::invalid_record(&p.as_record_plan()),
+            };
+            match rule {
+                Some(rule) => {
+                    Err(
+                        StreamError::broken_rule(n, offset, &crate::plan::damage(&key.hash, rule))
+                            .with_object(Some(*key)),
+                    )
+                }
+                None => Ok(()),
+            }
+        }
+        DecodedRecord::Answer(a) => match crate::answer::invalid(a) {
+            Some(rule) => {
+                Err(
+                    StreamError::broken_rule(n, offset, &crate::answer::damage(&key.hash, rule))
+                        .with_object(Some(*key)),
+                )
+            }
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// The record rules of a present record as the batch check applied them before it shared one
+/// decoded value: each rule decodes the record's bytes again. A test's baseline for the
+/// refusals of the shared check ([`record_rules`]); no check calls it.
+#[doc(hidden)]
+pub fn record_rules_decoding_again_for_tests(
+    n: u64,
+    offset: u64,
+    r: &StreamRecord,
+) -> Result<(), StreamError> {
     let StreamRecord::Present { key, payload, .. } = r else {
         return Ok(());
     };
@@ -1465,16 +1784,24 @@ fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError
             .map(|_| ())
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)));
     }
-    let payload = crate::codec::split(r.raw_kind(), payload)
-        .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?
-        .body;
+    let split = crate::codec::split(r.raw_kind(), payload)
+        .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
+    let payload = split.body;
     if key.kind == crate::kinds::PLAN {
-        // the plan record rules (`crate::plan`), with fsck's own text; its chain, bound
-        // proposal and seal need the records around it, which the whole-upload check
-        // (`crate::stream_source::check_typed_context`) checks before a take appends
-        let p = crate::plan::decode_plan(payload)
+        // the plan record rules (`crate::plan`), with fsck's own text, of the frame alone: a
+        // whole version's, or a delta's own fields and answer lists; its chain, bound proposal
+        // and seal, and a delta's hydrated version, need the records around it, which the
+        // whole-upload check (`crate::stream_source::check_typed_context`) checks before a take
+        // appends
+        let (p, _) = crate::plan_record::decode_body(split.version, payload)
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
-        return match crate::plan::invalid_record(&p) {
+        let rule = match &p {
+            crate::plan_record::PlanRecord::Delta(d) if !d.lists_valid() => {
+                Some(crate::plan::INVALID_CHAIN)
+            }
+            _ => crate::plan::invalid_record(&p.as_record_plan()),
+        };
+        return match rule {
             Some(rule) => {
                 Err(
                     StreamError::broken_rule(n, offset, &crate::plan::damage(&key.hash, rule))
@@ -1520,14 +1847,16 @@ fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError
 /// `invalid header` stays for a header's own fields. No order between batch files is required,
 /// and E_UNRESOLVED_REF is never returned here: that needs the whole upload.
 pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
-    check_batch_with(input, |_| Ok(()), |_, _, _| Ok(()))
+    check_batch_with(input, |_| Ok(()), |_, _, _, _| Ok(()))
 }
 
 /// [`check_batch`] with two checks of the caller's own, in the same single pass: `on_header`
 /// runs once the header is read, before any object record; `on_record` runs on every object
-/// record once its frame, its typed decode and its key pass, with the record's number and frame
-/// offset, before the next record is read. Either one's error ends the check, and no report is
-/// returned. The record buffer is still the reader's one buffer: `on_record` borrows the record.
+/// record once its frame, its typed decode, its edges and its record rules pass, with the
+/// record's number, its frame offset and its one decoded value ([`DecodedRecord`]), before the
+/// next record is read. Either one's error ends the check, and no report is returned. The record
+/// buffer is still the reader's one buffer, and the value the check's one value: `on_record`
+/// borrows both, and both are dropped before the next frame is read.
 ///
 /// A batch is a tag, canon or view history: a link delivery is E_STREAM_PURPOSE at its header,
 /// before `on_header` runs ([`check_delivery`] checks it). A canon or view history's root is its
@@ -1535,10 +1864,360 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
 pub fn check_batch_with<R: Read, E: From<StreamError>>(
     input: R,
     on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
-    mut on_record: impl FnMut(u64, u64, &StreamRecord) -> Result<(), E>,
+    on_record: impl FnMut(u64, u64, &StreamRecord, &DecodedRecord) -> Result<(), E>,
 ) -> Result<BatchReport, E> {
+    check_inner(input, on_header, on_record, false, false).map(|(report, _)| report)
+}
+
+/// [`check_batch_with`] that also keeps what the check found, for a later stage of the same
+/// operation: a [`CheckedBatch`], made only once every check of the batch passes. It keeps the
+/// facts of each frame, never a decoded value or a payload.
+pub fn check_batch_prepared_with<R: Read, E: From<StreamError>>(
+    input: R,
+    on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
+    on_record: impl FnMut(u64, u64, &StreamRecord, &DecodedRecord) -> Result<(), E>,
+) -> Result<CheckedBatch, E> {
+    let (report, facts) = check_inner(input, on_header, on_record, true, false)?;
+    let facts = facts.expect("a prepared check keeps its facts");
+    Ok(CheckedBatch { report, facts })
+}
+
+/// Checks one complete canon state (stream format 5, D-GGTYA) as [`check_batch`] checks a
+/// history: the framing, each record's bounded typed decode and record rules, no repeated key,
+/// the edge bound and the dependency rules, the root landing among the records or the
+/// prerequisites, and no unneeded prerequisite. Another purpose is E_STREAM_PURPOSE naming
+/// `canon_state`, at its header. It says only that this file is valid: the files of one fetch
+/// are checked against the state's link table together (`crate::canon_state::StateUnion`).
+pub fn check_canon_state_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
+    check_inner(input, |_| Ok(()), |_, _, _, _| Ok(()), false, true).map(|(report, _)| report)
+}
+
+/// [`check_canon_state_batch`] with the caller's two checks of [`check_batch_with`], that also
+/// keeps what the check found ([`CheckedBatch`]), as [`check_batch_prepared_with`] keeps it.
+pub fn check_canon_state_prepared_with<R: Read, E: From<StreamError>>(
+    input: R,
+    on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
+    on_record: impl FnMut(u64, u64, &StreamRecord, &DecodedRecord) -> Result<(), E>,
+) -> Result<CheckedBatch, E> {
+    let (report, facts) = check_inner(input, on_header, on_record, true, true)?;
+    let facts = facts.expect("a prepared check keeps its facts");
+    Ok(CheckedBatch { report, facts })
+}
+
+/// What a batch check found of one frame, as a [`CheckedBatch`] keeps it: no payload and no
+/// decoded value.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CheckedFrame {
+    raw_kind: u8,
+    key: ObjectKey,
+    offset: u64,
+    frame_len: u32,
+    frame_hash: Hash,
+    dropped: bool,
+    proof: Option<ObjectKey>,
+    index_links: u64,
+    links_end: u32,
+    features_end: u32,
+}
+
+impl CheckedFrame {
+    /// The record's raw kind: its logical kind, with the high bit when it is versioned
+    /// ([`StreamRecord::raw_kind`]); a dropped record's names the encoding it was dropped in.
+    pub fn raw_kind(&self) -> u8 {
+        self.raw_kind
+    }
+
+    /// The record's logical key.
+    pub fn key(&self) -> ObjectKey {
+        self.key
+    }
+
+    /// The byte at which the record's frame starts.
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// The bytes of the frame's payload: the object's, or the 104 of a `DROPPED` record.
+    pub fn frame_len(&self) -> u32 {
+        self.frame_len
+    }
+
+    /// The frame's hash: `Hash::of` its payload, as its frame header states it and the check
+    /// verified.
+    pub fn frame_hash(&self) -> Hash {
+        self.frame_hash
+    }
+
+    /// Whether the frame is a `DROPPED` record.
+    pub fn is_dropped(&self) -> bool {
+        self.dropped
+    }
+
+    /// The removal proof a dropped record names ([`StreamRecord::proof`]).
+    pub fn proof(&self) -> Option<ObjectKey> {
+        self.proof
+    }
+
+    /// The record's object links as a store's index counts them: `portable_refs_of` with no
+    /// feature, so a LANDING counts its `state` under `snapshot_delta` too (the holder's edge
+    /// count, `links_entry`); 0 for a dropped record and a blob chunk. It is not the number of
+    /// the record's portable links ([`CheckedBatch::links`]).
+    pub fn index_links(&self) -> u64 {
+        self.index_links
+    }
+}
+
+/// The facts a prepared check keeps besides its report: each frame's, each frame's resolved
+/// links and needed features (flat, each frame's end in its own entry), the input's exact length
+/// and its byte binding.
+#[derive(Debug, PartialEq, Eq)]
+struct Facts {
+    frames: Vec<CheckedFrame>,
+    links: Vec<ObjectKey>,
+    /// The places in `links` (ascending) of the links whose own ref named no kind: the check
+    /// resolved them within the batch and its prerequisites only.
+    untyped: Vec<u32>,
+    features: Vec<u16>,
+    input_len: u64,
+    binding: Hash,
+}
+
+/// One batch a check passed whole, and what the check found: its report, and each frame's raw
+/// kind, key, offset, length, hash, resolved portable links, removal proof, needed features and
+/// index link count, with the input's exact length and its byte binding
+/// ([`CheckedBatch::binding`]). It is made only by [`check_batch_prepared_with`], after the
+/// trailer, the end of the input and every dependency rule pass. It cannot be built from JSON or
+/// from a caller's report, and it holds no payload and no decoded value.
+///
+/// It says what [`BatchReport`] says, for the exact bytes it checked: a later stage that reuses
+/// it must first show that its input is those bytes (the same binding).
+#[derive(Debug, PartialEq, Eq)]
+pub struct CheckedBatch {
+    report: BatchReport,
+    facts: Facts,
+}
+
+impl CheckedBatch {
+    /// The batch's report, as [`check_batch`] returns it.
+    pub fn report(&self) -> &BatchReport {
+        &self.report
+    }
+
+    /// The batch's report, the rest dropped.
+    pub fn into_report(self) -> BatchReport {
+        self.report
+    }
+
+    /// Each object frame's facts, in wire order.
+    pub fn frames(&self) -> &[CheckedFrame] {
+        &self.facts.frames
+    }
+
+    /// The object links of frame `i` (in wire order), each resolved to the key of a record of
+    /// the batch or of a prerequisite, in the order of the record's sorted links: a present
+    /// record's portable links under the header's features, a dropped record's residue.
+    pub fn links(&self, i: usize) -> &[ObjectKey] {
+        let start = i
+            .checked_sub(1)
+            .map_or(0, |p| self.facts.frames[p].links_end as usize);
+        &self.facts.links[start..self.facts.frames[i].links_end as usize]
+    }
+
+    /// The object links of frame `i` (in wire order) as the record states them
+    /// ([`StreamRecord::refs`] under the header's features): [`CheckedBatch::links`], with no
+    /// kind on a link whose own ref named none. A later stage that resolves links over more
+    /// records than the batch (an upload's union, a holder) reads these, so a link that the
+    /// batch alone resolved is resolved again there.
+    pub fn refs(&self, i: usize) -> Vec<ObjectRef> {
+        let start = i
+            .checked_sub(1)
+            .map_or(0, |p| self.facts.frames[p].links_end as usize);
+        let end = self.facts.frames[i].links_end as usize;
+        let from = self
+            .facts
+            .untyped
+            .partition_point(|u| (*u as usize) < start);
+        let mut untyped = self.facts.untyped[from..].iter().peekable();
+        (start..end)
+            .map(|j| {
+                let k = self.facts.links[j];
+                let none = untyped.next_if(|u| **u as usize == j).is_some();
+                ObjectRef {
+                    kind: (!none).then_some(k.kind),
+                    hash: k.hash,
+                }
+            })
+            .collect()
+    }
+
+    /// The features frame `i` (in wire order) needs (`format::required_features`), each one of
+    /// the report's `record_features`, sorted by name.
+    pub fn features(&self, i: usize) -> impl Iterator<Item = &StoreFeature> + '_ {
+        let start = i
+            .checked_sub(1)
+            .map_or(0, |p| self.facts.frames[p].features_end as usize);
+        self.facts.features[start..self.facts.frames[i].features_end as usize]
+            .iter()
+            .map(|f| &self.report.record_features.features[*f as usize])
+    }
+
+    /// The exact length of the input the check read: the batch's bytes and its trailer frame,
+    /// up to the end of the input.
+    pub fn input_len(&self) -> u64 {
+        self.facts.input_len
+    }
+
+    /// The binding of the exact bytes the check read ([`batch_binding`]): with the stream's
+    /// framing, every byte of the input, its header, each frame's kind, length and payload
+    /// (encoding tags and dropped-record fields included), its trailer and its end.
+    pub fn binding(&self) -> Hash {
+        self.facts.binding
+    }
+}
+
+/// The binding of a batch's exact bytes: the hash of its stream format, its exact length and
+/// its trailer's digest. A reader that verifies the framing ([`StreamReader`]: the prelude,
+/// every frame's hash, the trailer and the end of the input) reads it again from the same bytes,
+/// and from no others: the digest covers the header's and each object frame's kind, length and
+/// payload hash, and the trailer and the length the rest.
+pub fn batch_binding(header: &StreamHeader, totals: &StreamTotals) -> Hash {
+    let mut b = Vec::with_capacity(BINDING_TAG.len() + 4 + 8 + 32);
+    b.extend_from_slice(BINDING_TAG);
+    b.extend_from_slice(&header.stream_format.to_le_bytes());
+    b.extend_from_slice(&input_len(totals).to_le_bytes());
+    b.extend_from_slice(&totals.digest.0);
+    Hash::of(&b)
+}
+
+/// The domain of [`batch_binding`].
+const BINDING_TAG: &[u8] = b"rdy-checked-batch-1\0";
+
+/// The totals the trailer of the batch file `f` states, read from its last frame with no payload
+/// read or hashed: what a count of a staged file's records needs before its full check. The frame
+/// must be a `TRAILER` of [`TRAILER_LEN`] bytes whose `bytes` end exactly where the frame starts;
+/// anything else is E_BAD_RECORD. The full check of the file stays [`check_batch`]'s.
+pub fn read_trailer_totals(f: &mut std::fs::File) -> Result<StreamTotals, StreamError> {
+    use std::io::{Seek, SeekFrom};
+    let io = |e: std::io::Error| StreamError::io(None, 0, &e);
+    let len = f.metadata().map_err(io)?.len();
+    let frame = FRAME_HEADER + TRAILER_LEN as u64;
+    let bad = |at: u64| StreamError::bad_record(0, at, Reason::InvalidHeader);
+    if len < frame {
+        return Err(bad(0));
+    }
+    let at = len - frame;
+    f.seek(SeekFrom::Start(at)).map_err(io)?;
+    let mut b = [0u8; (FRAME_HEADER as usize) + TRAILER_LEN];
+    f.read_exact(&mut b).map_err(io)?;
+    let n = u32::from_le_bytes(b[0..4].try_into().expect("four bytes")) as usize;
+    if n != TRAILER_LEN || b[4] != rec::TRAILER {
+        return Err(bad(at));
+    }
+    let p = &b[FRAME_HEADER as usize..];
+    let totals = StreamTotals {
+        records: u64::from_le_bytes(p[0..8].try_into().expect("eight bytes")),
+        bytes: u64::from_le_bytes(p[8..16].try_into().expect("eight bytes")),
+        digest: Hash(p[16..48].try_into().expect("32 bytes")),
+    };
+    if totals.bytes != at {
+        return Err(bad(at));
+    }
+    Ok(totals)
+}
+
+/// The exact length of a batch whose trailer states `totals`: its bytes and its trailer frame.
+fn input_len(totals: &StreamTotals) -> u64 {
+    totals.bytes + FRAME_HEADER + TRAILER_LEN as u64
+}
+
+thread_local! {
+    /// The batch checks (`check_inner`) this thread ran.
+    static CHECKS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn count_check() {
+    CHECKS.with(|c| c.set(c.get() + 1));
+}
+
+/// For tests: how many whole batch checks ([`check_batch_with`], [`check_batch_prepared_with`]
+/// and the calls over them) this thread ran so far. A test reads the difference over a call.
+#[doc(hidden)]
+pub fn batch_checks_for_tests() -> u64 {
+    CHECKS.with(Cell::get)
+}
+
+/// Reads `input` again as the exact bytes that `checked` checked, and gives each object record
+/// to `each` with its number in wire order, its checked frame and its place (record number and
+/// frame offset). It is no batch check: it makes no typed decode and keeps none of the batch's
+/// dependency rules. The reader ([`StreamReader`]) keeps the framing: the prelude, each frame's
+/// payload hash, a dropped record's descriptor, the trailer and the end of the input, each
+/// refused with its own error. Then the bytes must be the ones `checked` checked: the same
+/// header, each frame's kind, raw encoding, offset, length and payload hash, and the batch's
+/// binding ([`CheckedBatch::binding`], with its trailer and exact length). Anything else is
+/// `input changed during take`, at the first record that differs (at the header for a header,
+/// and at the last record for the trailer, a missing or an extra record). Path, length or time
+/// of a file are never read as proof: only matching bytes keep the earlier check's result.
+/// `each`'s error ends the read. Returns the header.
+pub fn read_checked<R: Read, E: From<StreamError>>(
+    input: R,
+    checked: &CheckedBatch,
+    mut each: impl FnMut(usize, &CheckedFrame, StreamRecord, (u64, u64)) -> Result<(), E>,
+) -> Result<StreamHeader, E> {
+    let changed =
+        |(n, at): (u64, u64)| StreamError::bad_record(n, at, Reason::InputChangedDuringTake);
     let (mut reader, header) = StreamReader::open_history(input)?;
+    if header != checked.report.header {
+        return Err(changed((0, PRELUDE)).into());
+    }
+    let frames = checked.frames();
+    let mut i = 0usize;
+    while let Some(r) = reader.next()? {
+        let place = reader.position();
+        let (frame_kind, frame_hash) = reader.last_frame();
+        let same = frames.get(i).is_some_and(|f| {
+            f.key == r.key()
+                && f.raw_kind == r.raw_kind()
+                && f.offset == place.1
+                && u64::from(f.frame_len) == r.frame_len()
+                && f.frame_hash == frame_hash
+                && f.dropped == (frame_kind == rec::DROPPED)
+        });
+        if !same {
+            return Err(changed(place).with_object(Some(r.key())).into());
+        }
+        each(i, &frames[i], r, place)?;
+        i += 1;
+    }
+    let last = reader.position();
+    let totals = reader.finish()?;
+    if i != frames.len()
+        || totals.records != checked.report.records
+        || batch_binding(&header, &totals) != checked.binding()
+    {
+        return Err(changed(last).into());
+    }
+    Ok(header)
+}
+
+/// The check of [`check_batch_with`] and [`check_batch_prepared_with`], one loop for both; with
+/// `keep`, it also keeps the facts of a [`CheckedBatch`]. With `state` it reads a canon state
+/// (format 5) and refuses every other purpose; without it, a history, and refuses a canon state.
+fn check_inner<R: Read, E: From<StreamError>>(
+    input: R,
+    on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
+    mut on_record: impl FnMut(u64, u64, &StreamRecord, &DecodedRecord) -> Result<(), E>,
+    keep: bool,
+    state: bool,
+) -> Result<(BatchReport, Option<Facts>), E> {
+    let caps = caps();
+    count_check();
+    let (mut reader, header) = if state {
+        StreamReader::open_for(input, StreamPurpose::CanonState)?
+    } else {
+        StreamReader::open_history(input)?
+    };
     on_header(&header)?;
+    let deltas = header.features.has(FEATURE_SNAPSHOT_DELTA);
     let mut keys: Vec<ObjectKey> = Vec::new();
     let mut record_features = RecordFeatures::default();
     let mut at: Vec<u64> = Vec::new();
@@ -1548,30 +2227,71 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
     // the removal proofs the dropped records name, which keep no order, each with the index of
     // its dropped record
     let mut proofs: Vec<(ObjectKey, usize)> = Vec::new();
+    // a prepared check's frames, and each frame's needed features (indexes into
+    // `record_features`, in the order of their first use)
+    let mut frames: Vec<CheckedFrame> = Vec::new();
+    let mut needs: Vec<u16> = Vec::new();
     while let Some(r) = reader.next()? {
         let (n, offset) = reader.position();
         let key = r.key();
         let grow = || StreamError::allocation(Some(n), offset);
+        let refused =
+            |e: RecordError| StreamError::from_record(n, offset, &e).with_object(Some(key));
         if index.contains_key(&key) {
             return Err(StreamError::bad_record(n, offset, Reason::ObjectIsRepeated)
                 .with_object(Some(key))
                 .into());
         }
+        // the record's one typed value, which every check below reads
+        let d = DecodedRecord::decode(&r).map_err(refused)?;
         // the links follow the features the stream declares (`portable_refs_of`)
-        let refs = r
-            .refs(&header.features)
-            .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(key)))?;
-        record_rules(n, offset, &r)?;
-        on_record(n, offset, &r)?;
-        record_features.add(&r);
+        let refs = r.refs_decoded(&header.features, &d).map_err(refused)?;
+        record_rules(n, offset, &r, &d)?;
+        on_record(n, offset, &r, &d)?;
+        let used = r.features_decoded(&d);
         let proof = r.proof();
         if (edges.len() + proofs.len() + refs.len() + usize::from(proof.is_some())) as u64
-            > MAX_EDGES
+            > caps.edges
         {
             return Err(StreamError::limit(Some(n), offset, LIMIT_GRAPH_EDGES)
                 .with_object(Some(key))
                 .into());
         }
+        if keep {
+            // the store's index counts a landing's `state` whatever the features
+            // (`links_entry`): only a landing under `snapshot_delta` counts another number
+            let index_links = match (&r, &d) {
+                (StreamRecord::Dropped { .. }, _) | (_, DecodedRecord::BlobChunk) => 0,
+                (_, DecodedRecord::Landing(_)) if deltas => {
+                    crate::object_refs::portable_refs_of_decoded(&StoreFeatures::of(vec![]), &d)
+                        .map_err(refused)?
+                        .len() as u64
+                }
+                _ => refs.len() as u64,
+            };
+            needs.try_reserve(used.len()).map_err(|_| grow())?;
+            for f in &used {
+                let i = record_features.index_of(f).map_err(|_| grow())?;
+                needs.push(i);
+            }
+            let (frame_kind, frame_hash) = reader.last_frame();
+            frames.try_reserve(1).map_err(|_| grow())?;
+            frames.push(CheckedFrame {
+                raw_kind: r.raw_kind(),
+                key,
+                offset,
+                frame_len: r.frame_len() as u32,
+                frame_hash,
+                dropped: frame_kind == rec::DROPPED,
+                proof,
+                index_links,
+                links_end: (edges.len() + refs.len()) as u32,
+                features_end: needs.len() as u32,
+            });
+        } else {
+            record_features.add_all(used);
+        }
+        drop(d);
         edges.try_reserve(refs.len()).map_err(|_| grow())?;
         edges.extend(refs);
         if let Some(p) = proof {
@@ -1595,6 +2315,14 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
     depth
         .try_reserve_exact(keys.len())
         .map_err(|_| StreamError::allocation(Some(0), PRELUDE))?;
+    // a prepared check's resolved links, one per edge, and the places of the untyped ones
+    let mut links: Vec<ObjectKey> = Vec::new();
+    let mut untyped: Vec<u32> = Vec::new();
+    if keep {
+        links
+            .try_reserve_exact(edges.len())
+            .map_err(|_| StreamError::allocation(Some(0), PRELUDE))?;
+    }
     let mut start = 0usize;
     for (i, end) in ends.iter().enumerate() {
         let n = i as u64 + 1;
@@ -1625,8 +2353,19 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
                 }
                 None => return Err(fail(Reason::UnlistedDependency(*e)).into()),
             }
+            if keep {
+                if e.kind.is_none() {
+                    untyped
+                        .try_reserve(1)
+                        .map_err(|_| StreamError::allocation(Some(n), at[i]))?;
+                    untyped.push(links.len() as u32);
+                }
+                links.push(target);
+            }
         }
-        depth.push(depth_of(n, at[i], deps).map_err(|e| e.with_object(Some(keys[i])))?);
+        depth.push(
+            depth_within(n, at[i], deps, caps.depth).map_err(|e| e.with_object(Some(keys[i])))?,
+        );
         start = *end as usize;
     }
     // a removal proof: anywhere in the batch, or a prerequisite
@@ -1661,14 +2400,42 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
     if let Some(extra) = prerequisites.iter().find(|k| !needed.contains(k)) {
         return Err(at_header(Reason::UnneededPrerequisite(*extra)).into());
     }
-    Ok(BatchReport {
-        header,
-        keys,
-        record_features: record_features.finish(),
-        records: totals.records,
-        bytes: totals.bytes,
-        digest: totals.digest,
-    })
+    // every check passed: only now are the facts kept
+    let (record_features, facts) = if keep {
+        let (sorted, order) = record_features.finish_with_order();
+        for f in &mut needs {
+            *f = order[*f as usize];
+        }
+        // each frame's features in the report's (name) order
+        let mut begin = 0usize;
+        for frame in &frames {
+            let end = frame.features_end as usize;
+            needs[begin..end].sort_unstable();
+            begin = end;
+        }
+        let facts = Facts {
+            frames,
+            links,
+            untyped,
+            features: needs,
+            input_len: input_len(&totals),
+            binding: batch_binding(&header, &totals),
+        };
+        (sorted, Some(facts))
+    } else {
+        (record_features.finish(), None)
+    };
+    Ok((
+        BatchReport {
+            header,
+            keys,
+            record_features,
+            records: totals.records,
+            bytes: totals.bytes,
+            digest: totals.digest,
+        },
+        facts,
+    ))
 }
 
 /// What a valid link delivery holds: its header, its `DELIVERY`, the logical key of every object

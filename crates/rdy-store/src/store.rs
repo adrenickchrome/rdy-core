@@ -23,7 +23,7 @@ use std::fs::{File, OpenOptions};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// The file a store creates when it opens and removes on a clean close. Finding it at open means the
@@ -92,6 +92,10 @@ pub struct StoreReader {
     /// The masks of recorded requests this reader reads as applied (`redaction_preview_reader`);
     /// None for every other reader.
     preview: Option<Arc<crate::redaction::Preview>>,
+    /// Whether this reader checks the full history (`full_history_reader`): it has no
+    /// incomplete history's frontier, so no partial-history exception applies, while the
+    /// history ref itself is kept as it is. False for every other reader.
+    pub(crate) full_history: bool,
 }
 
 /// What every reader of one store shares, whatever index it holds.
@@ -220,6 +224,14 @@ pub struct Store {
     /// Held batches are on (plan M2e2, D-Z0EMP): a `write` appends and indexes its frames but
     /// writes no marker and makes no sync, and `seal` ends the batch. Off after open.
     held: bool,
+    /// While set, a sealed write runs no threshold span-mapping pass: a project seed and the
+    /// receiving operations that write through the ordinary path map nothing (D-1ER84). Their
+    /// end leaves what they wrote to the next compact (`Store::leave_received`).
+    no_map_pass: bool,
+    /// While a move writes its checked objects (`Store::write_move_checked`): the index link
+    /// counts a batch check found for them, by raw kind and hash, which their index entries
+    /// read instead of a decode. None for every other write.
+    checked_links: Option<crate::take_batch::IndexLinks>,
     /// The held batch not yet sealed, if any.
     open: Option<OpenBatch>,
     /// Set by a failed seal: the index holds entries of frames the log no longer holds, so no
@@ -733,7 +745,22 @@ fn entries_for_frame(
     payload: &[u8],
     r: &mut Resolver<'_>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
-    let out = frame_entries(kind, hash, loc, payload, r)?;
+    entries_for_checked_frame(kind, hash, loc, payload, r, None)
+}
+
+/// [`entries_for_frame`] of a frame whose index link count a batch check of its exact bytes
+/// found (`checked`, keyed by the frame's raw kind and hash, `take_batch::IndexLinks`): that
+/// count stands for [`links_entry`]'s decode. Every other entry is read from the frame as
+/// [`entries_for_frame`] reads it.
+fn entries_for_checked_frame(
+    kind: u8,
+    hash: Hash,
+    loc: Location,
+    payload: &[u8],
+    r: &mut Resolver<'_>,
+    checked: Option<u64>,
+) -> Result<Vec<IndexEntry>, StoreError> {
+    let out = frame_entries(kind, hash, loc, payload, r, checked)?;
     r.note(crate::codec::logical_kind(kind), hash, loc)?;
     Ok(out)
 }
@@ -820,6 +847,7 @@ pub(crate) fn links_entry(raw: u8, hash: Hash, payload: &[u8]) -> Option<IndexEn
     if !crate::object_refs::is_portable(kind) || kind == kinds::BLOB_CHUNK {
         return None;
     }
+    crate::take_batch::count_index_link_decode();
     let links = crate::object_refs::portable_refs_of(
         &crate::format::StoreFeatures::of(vec![]),
         raw,
@@ -830,13 +858,26 @@ pub(crate) fn links_entry(raw: u8, hash: Hash, payload: &[u8]) -> Option<IndexEn
     (links > 0).then_some(IndexEntry::Links { kind, hash, links })
 }
 
-/// `entries_for_frame` before the frame is noted.
+/// [`links_entry`] of a frame of raw kind `raw` and hash `hash` whose link count `links` a
+/// batch check of its exact bytes found (`sync_stream::CheckedFrame::index_links`): the same
+/// entry, with no decode.
+fn checked_links_entry(raw: u8, hash: Hash, links: u64) -> Option<IndexEntry> {
+    let kind = crate::codec::logical_kind(raw);
+    if !crate::object_refs::is_portable(kind) || kind == kinds::BLOB_CHUNK {
+        return None;
+    }
+    (links > 0).then_some(IndexEntry::Links { kind, hash, links })
+}
+
+/// `entries_for_frame` before the frame is noted; `checked` is the frame's checked index link
+/// count, if a batch check found one ([`entries_for_checked_frame`]).
 fn frame_entries(
     kind: u8,
     hash: Hash,
     loc: Location,
     payload: &[u8],
     r: &Resolver<'_>,
+    checked: Option<u64>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
     if kind == kinds::BATCH_COMMIT {
         // a marker is neither an object nor a dedupe candidate
@@ -845,7 +886,10 @@ fn frame_entries(
     // the logical kind and the body of the frame's encoding (`crate::codec`): an index, a
     // dependency and a redaction identity know objects by their logical kind
     let o = crate::codec::split_stored(kind, payload)?;
-    let links = links_entry(kind, hash, payload);
+    let links = match checked {
+        Some(n) => checked_links_entry(kind, hash, n),
+        None => links_entry(kind, hash, payload),
+    };
     let (kind, payload) = (o.kind, o.body);
     let mut out = vec![IndexEntry::Object { kind, hash, loc }];
     out.extend(links);
@@ -935,7 +979,7 @@ fn frame_entries(
         kinds::DISPUTE => out.push(dispute_entry(hash, loc, &o)?),
         kinds::DISPUTE_RESOLUTION => out.push(resolution_entry(hash, loc, &o)?),
         kinds::ANSWER => out.extend(crate::plan::answer_entries(hash, loc, payload, r)?),
-        kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, payload, r)?),
+        kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, o.version, payload, r)?),
         kinds::SNAPSHOT_DELTA => out.push(snapshot_delta_entry(hash, loc, &o)?),
         _ => {}
     }
@@ -1997,7 +2041,22 @@ impl Store {
         // the boundary, because it lags the log.
         // two passes: the redaction bootstrap validates every apply from the log's own frames,
         // then the marker rule's scan hashes every payload but the authorized holes
-        let (log, quarantined) = SegmentLog::open_authorized(&segments, SEGMENT_MAX, acked)?;
+        // the span map is read first (D-1ER84): the marker rule's scan hashes mapped payloads
+        // through it. A follower reads it as a reader: it never writes or cuts the map.
+        let map_mode = if matches!(access, Access::ReadWrite) {
+            crate::dedup::MapOpen::Writable
+        } else {
+            crate::dedup::MapOpen::ReadOnly
+        };
+        let spans = Arc::new(RwLock::new(crate::dedup::SpanMap::load(dir, map_mode)?));
+        let (log, mut quarantined) =
+            SegmentLog::open_authorized(&segments, SEGMENT_MAX, acked, Arc::clone(&spans))?;
+        let map_torn = {
+            let map = spans.read().unwrap_or_else(|e| e.into_inner());
+            map.check_sealed(log.end())?;
+            quarantined.extend(map.quarantined().map(Path::to_path_buf));
+            map.torn()
+        };
         // the mode comes from the log's first batch, before any other ref is judged
         let creation = read_creation(&log)?;
         if let Some(n) = holder
@@ -2007,7 +2066,7 @@ impl Store {
         }
         let report = OpenReport {
             quarantined,
-            unclean_shutdown: unclean,
+            unclean_shutdown: unclean || map_torn,
             redb_repaired,
             index_rebuilt,
             ..OpenReport::default()
@@ -2016,7 +2075,7 @@ impl Store {
             index: Arc::new(index),
             shared: Arc::new(ReaderShared {
                 dir: dir.to_path_buf(),
-                segments: SegmentReader::open(&segments),
+                segments: SegmentReader::open_with(&segments, Arc::clone(&spans)),
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
@@ -2033,6 +2092,7 @@ impl Store {
             tracking: Arc::default(),
             epoch: 0,
             preview: None,
+            full_history: false,
         };
         let mut store = Store {
             dir: dir.to_path_buf(),
@@ -2053,6 +2113,8 @@ impl Store {
             last_batch: vec![],
             last_batch_end: ORIGIN,
             held: false,
+            no_map_pass: false,
+            checked_links: None,
             open: None,
             stale_index: false,
             creation,
@@ -2202,7 +2264,17 @@ impl Store {
         // the writable open's floor, read from a private copy of the source index: damage
         // before it is acknowledged data, refused as the writable open refuses it
         let floor = read_only_floor(dir, unclean, private.path())?;
-        let (log, tail) = SegmentLog::open_read_only(&segments, SEGMENT_MAX, dir, floor)?;
+        let spans = Arc::new(RwLock::new(crate::dedup::SpanMap::load(
+            dir,
+            crate::dedup::MapOpen::ReadOnly,
+        )?));
+        let (log, tail) =
+            SegmentLog::open_read_only(&segments, SEGMENT_MAX, dir, floor, Arc::clone(&spans))?;
+        let tail = {
+            let map = spans.read().unwrap_or_else(|e| e.into_inner());
+            map.check_sealed(log.end())?;
+            tail || map.torn()
+        };
         let creation = read_creation(&log)?;
         let index = Index::open(&private.path().join("index.redb"))?;
         replay_into(&log, &index, ORIGIN, None, RefRules::new(creation))?;
@@ -2210,7 +2282,7 @@ impl Store {
             index: Arc::new(index),
             shared: Arc::new(ReaderShared {
                 dir: dir.to_path_buf(),
-                segments: SegmentReader::open(&segments),
+                segments: SegmentReader::open_with(&segments, Arc::clone(&spans)),
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
@@ -2230,6 +2302,7 @@ impl Store {
             tracking: Arc::default(),
             epoch: 0,
             preview: None,
+            full_history: false,
         };
         let end = log.end();
         let mut store = Store {
@@ -2255,6 +2328,8 @@ impl Store {
             last_batch: vec![],
             last_batch_end: ORIGIN,
             held: false,
+            no_map_pass: false,
+            checked_links: None,
             open: None,
             stale_index: false,
             creation,
@@ -2506,6 +2581,15 @@ impl Store {
                     mode: holder.map_or(StoreMode::Project, |h| h.mode),
                     end: self.log.end(),
                 };
+                // a store that maps spans has its empty span map from creation (D-1ER84)
+                if features.has(format::FEATURE_DEDUP_SPANS) {
+                    match crate::dedup::SpanMap::create(&self.dir) {
+                        Ok(()) => {}
+                        Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
                 self.features = features;
                 // a new store is durable from its first open
                 self.checkpoint()?;
@@ -2656,6 +2740,7 @@ impl Store {
         let mut r = StoreReader::clone(self);
         r.epoch = r.shared.epoch.load(Ordering::Acquire);
         r.preview = None;
+        r.full_history = false;
         r
     }
 
@@ -2705,6 +2790,19 @@ impl Store {
     /// Whether held batches are on.
     pub(crate) fn held(&self) -> bool {
         self.held
+    }
+
+    /// Runs `f` with threshold span-mapping passes off on this handle (a receiving operation),
+    /// then, for the outermost call, leaves what the log now holds unmapped to the next compact
+    /// (`Store::leave_received`): no later ordinary write maps it.
+    pub(crate) fn without_map_pass<T>(&mut self, f: impl FnOnce(&mut Store) -> T) -> T {
+        let was = std::mem::replace(&mut self.no_map_pass, true);
+        let out = f(self);
+        self.no_map_pass = was;
+        if !was {
+            self.leave_received();
+        }
+        out
     }
 
     /// The log itself, for the byte report of `crate::compact`.
@@ -2775,6 +2873,11 @@ impl Store {
                     self.features = f;
                 }
                 self.held_features = None;
+                // D-1ER84: a sealed ordinary write past the unmapped-byte threshold maps once
+                // its batch is durable; the pass never changes this seal's reply
+                if !self.no_map_pass {
+                    self.threshold_pass();
+                }
                 Ok(())
             }
             Err(e) => {
@@ -2905,7 +3008,13 @@ impl Store {
         let mut r = Resolver::new(&reader);
         let mut out = vec![];
         for ((kind, payload), (at, hash)) in frames.iter().zip(placed) {
-            out.extend(entries_for_frame(*kind, *hash, *at, payload, &mut r)?);
+            let checked = self
+                .checked_links
+                .as_ref()
+                .and_then(|c| c.get(&(*kind, *hash)).copied());
+            out.extend(entries_for_checked_frame(
+                *kind, *hash, *at, payload, &mut r, checked,
+            )?);
         }
         Ok(out)
     }
@@ -2971,6 +3080,7 @@ impl Store {
             tracking,
             epoch,
             preview: None,
+            full_history: false,
         });
     }
 
@@ -3258,6 +3368,22 @@ impl Store {
         result
     }
 
+    /// [`Store::write_move`] of objects whose index link counts a batch check of their exact
+    /// bytes found (`links`, by raw kind and hash): each object's links entry is that count,
+    /// with no decode. A frame with no count, and the move's refs, are indexed as any write's.
+    /// The counts go with the frames by key, so a duplicate the write leaves out moves no count
+    /// onto another record.
+    pub(crate) fn write_move_checked(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+        links: crate::take_batch::IndexLinks,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.checked_links = Some(links);
+        let result = self.write_move(items);
+        self.checked_links = None;
+        result
+    }
+
     /// The ref rules of a write or seal of `items`, before anything is appended.
     fn check_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
         self.check_mode_refs(items, how)?;
@@ -3339,12 +3465,17 @@ impl Store {
         }
         if result.is_ok() {
             self.writes += 1;
+            // D-1ER84: an ordinary sealed write past the unmapped-byte threshold maps once its
+            // batch is durable; the pass never changes this write's reply
             if let Some(f) = activated {
                 if self.held && self.open.is_some() {
                     self.held_features = Some(f);
                 } else {
                     self.features = f;
                 }
+            }
+            if how == RefWrite::Public && !self.held && !self.no_map_pass {
+                self.threshold_pass();
             }
         }
         if result.is_err() && how == RefWrite::Upgrade && self.synced_unindexed {
@@ -4233,7 +4364,45 @@ impl StoreReader {
             .index()
             .typed(kind, h)?
             .ok_or(StoreError::NotFound(*h))?;
-        if let Some(request) = self.mask_at(&loc)? {
+        let mask = self.mask_at(&loc)?;
+        self.kind_raw_at(kind, h, loc, mask)
+    }
+
+    /// One read transaction of this reader's index, which a closure walk owns to its return.
+    pub(crate) fn read_for_closure(&self) -> Result<crate::index::IndexRead, StoreError> {
+        self.index().read_for_closure()
+    }
+
+    /// [`StoreReader::get_kind_raw`] of the frame at `loc`, which `read` found for `kind` and
+    /// `h`: the same pending check, mask (read in `read`, then this reader's preview),
+    /// frame-read count, hashed read and kind match. The location saves only the lookup.
+    pub(crate) fn get_kind_raw_in(
+        &self,
+        read: &crate::index::IndexRead,
+        kind: u8,
+        h: &Hash,
+        loc: Location,
+    ) -> Result<(u8, Vec<u8>), StoreError> {
+        self.refuse_pending()?;
+        let mask = match read.redaction_span_at(&loc)? {
+            Some(s) => Some(s.request),
+            // a preview reader's own masks: read as `mask_at` reads them
+            None if self.preview().is_some() => self.mask_at(&loc)?,
+            None => None,
+        };
+        self.kind_raw_at(kind, h, loc, mask)
+    }
+
+    /// The tail of [`StoreReader::get_kind_raw`]: the frame at `loc` unless `mask` names the
+    /// request that removed it, checked against `h` and `kind`.
+    fn kind_raw_at(
+        &self,
+        kind: u8,
+        h: &Hash,
+        loc: Location,
+        mask: Option<Hash>,
+    ) -> Result<(u8, Vec<u8>), StoreError> {
+        if let Some(request) = mask {
             return Err(StoreError::Redacted { request });
         }
         let (raw, payload) = self.read_object(h, loc)?;
@@ -4244,6 +4413,31 @@ impl StoreReader {
             )));
         }
         Ok((raw, payload))
+    }
+
+    /// The store's features ([`StoreReader::store_features`]), its ref read in `read`.
+    pub(crate) fn store_features_in(
+        &self,
+        read: &crate::index::IndexRead,
+    ) -> Result<crate::format::StoreFeatures, StoreError> {
+        match read.get_ref(crate::format::REF_STORE_FEATURES)? {
+            Some(v) => crate::format::decode_features(&v),
+            None => Err(crate::format::ManifestError("invalid JSON".into()).store_error()),
+        }
+    }
+
+    /// The store's mode ([`StoreReader::mode`]), its ref read in `read`.
+    pub(crate) fn mode_in(
+        &self,
+        read: &crate::index::IndexRead,
+    ) -> Result<crate::holder::StoreMode, StoreError> {
+        crate::holder::decode_mode(read.get_ref(crate::holder::REF_STORE_MODE)?.as_deref())
+    }
+
+    /// Counts one walk of the typed table ([`StoreReader::kind_walks`]) that a closure read
+    /// made in its own transaction.
+    pub(crate) fn note_kind_walk(&self) {
+        self.shared.kind_walks.fetch_add(1, Ordering::Relaxed);
     }
 
     /// The body of the object of logical kind `kind` with hash `h`: its stored payload less a
@@ -4269,6 +4463,18 @@ impl StoreReader {
         kind: u8,
         h: &Hash,
     ) -> Result<T, StoreError> {
+        // a plan hydrates through the one plan fold, which reads frames, never this method
+        if kind == kinds::PLAN
+            && std::any::TypeId::of::<T>() == std::any::TypeId::of::<rdy_model::Plan>()
+        {
+            let plan = crate::plan_record::fold(h, &self.plan_frames_read())
+                .map_err(crate::plan_record::FoldError::into_store)?;
+            let any: Box<dyn std::any::Any> = Box::new(plan);
+            return any
+                .downcast::<T>()
+                .map(|b| *b)
+                .map_err(|_| StoreError::Decode("a plan does not decode as this type".into()));
+        }
         let (raw, payload) = self.get_kind_raw(kind, h)?;
         crate::codec::decode_record(raw, &payload)
     }
@@ -4385,6 +4591,12 @@ impl StoreReader {
         self.shared
             .carried_frames_read
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read transactions this reader's index has begun so far (a test hook).
+    #[doc(hidden)]
+    pub fn index_read_transactions(&self) -> u64 {
+        self.index().read_transactions()
     }
 
     /// Object frames read so far by `get_raw` and `get_kind`.
@@ -5003,6 +5215,12 @@ impl StoreReader {
                 Op::Update { base, .. } | Op::Delete { base, .. } => {
                     let producers = self.index().producers(base)?;
                     if producers.is_empty() {
+                        // a version of the captured frontier's map, written behind the
+                        // frontier of an incomplete history (D-4PV25): its producer is not
+                        // held, so no dep can name it; the merge settles such a base side
+                        if self.frontier_map_holds(op.block_id(), base)? {
+                            continue;
+                        }
                         return Err(StoreError::NotFound(*base));
                     }
                     if producers.len() > 1
@@ -5055,6 +5273,16 @@ impl StoreReader {
         Ok(deps.into_iter().collect())
     }
 
+    /// Whether `version` is `id`'s version in the map of an incomplete history's frontier: a
+    /// version the store holds with no producer, as the captured canon state proves it. False
+    /// with no incomplete history.
+    pub fn frontier_map_holds(&self, id: &BlockId, version: &Hash) -> Result<bool, StoreError> {
+        let Some(frontier) = self.history_frontier()? else {
+            return Ok(false);
+        };
+        Ok(self.snapshot_at(&frontier)?.blocks.get(id) == Some(version))
+    }
+
     /// The landing view `view` reads from: canon's head for a view with no head or one that
     /// floats (unpinned, nothing included; its next commit catches it up to canon), else its
     /// stored base.
@@ -5085,6 +5313,34 @@ impl StoreReader {
             return Err(StoreError::RedactionPending);
         }
         Ok(())
+    }
+}
+
+/// A frame check captured by [`Store::capture_frame_check`]: it holds no store handle, so it
+/// may move to another thread.
+pub struct FrameCheck {
+    reader: StoreReader,
+    upto: Location,
+    auth: Arc<crate::redaction_io::Authorization>,
+}
+
+impl FrameCheck {
+    /// [`Store::verify_report`] of the log as it stood at the capture: every frame before the
+    /// captured end read whole and its hash checked, an authorized hole by its header alone,
+    /// each batch marker matched against its batch, and a sealed segment that does not end at a
+    /// marker refused; the counts are `verify_report`'s. A batch sealed after the capture is not
+    /// read: the caller compares what it captured again before it acts on the result.
+    pub fn run(self) -> Result<VerifyReport, StoreError> {
+        self.reader.refuse_pending()?;
+        let (frames, holes) = self
+            .reader
+            .segments()
+            .verify_frames_upto(self.upto, &self.auth.holes)?;
+        let redaction = self.auth.is_active().then(|| RedactionCounts {
+            checked_payloads: (frames - holes) as u64,
+            ..self.auth.counts()
+        });
+        Ok(VerifyReport { frames, redaction })
     }
 }
 
@@ -5254,7 +5510,7 @@ impl Store {
         }
         match self.finish(true) {
             Ok(_) => Ok(()),
-            Err(e @ StoreError::RedactionCorrupt { .. }) => Err(e),
+            Err(e @ (StoreError::RedactionCorrupt { .. } | StoreError::DedupCorrupt)) => Err(e),
             Err(_) => Err(StoreError::RedactionPending),
         }
     }
@@ -5280,7 +5536,7 @@ impl Store {
         }
         match self.finish(false) {
             Ok(c) => Ok(c),
-            Err(e @ StoreError::RedactionCorrupt { .. }) => Err(e),
+            Err(e @ (StoreError::RedactionCorrupt { .. } | StoreError::DedupCorrupt)) => Err(e),
             Err(_) => Err(self.pending_failure()),
         }
     }
@@ -5295,6 +5551,21 @@ impl Store {
     /// `finish`, and whether it erased anything (and so rebuilt the index).
     fn finish_erasing(&mut self, at_open: bool) -> Result<(RedactionCounts, bool), StoreError> {
         let auth = Arc::clone(self.log.authorization());
+        // D-1ER84: every mapped copy of a removed source is a target the same authority removes
+        // (a block's mapped change embeds that exact version); anything else is map damage,
+        // refused before a byte is erased, so no mapped copy can bring the text back
+        {
+            let map = self.log.spans().read().unwrap_or_else(|e| e.into_inner());
+            for loc in auth.holes.keys() {
+                if map
+                    .dependents_of(loc)
+                    .iter()
+                    .any(|t| !auth.holes.contains_key(t))
+                {
+                    return Err(StoreError::DedupCorrupt);
+                }
+            }
+        }
         let mut counts = auth.counts();
         let mut affected: BTreeSet<u32> = BTreeSet::new();
         for (loc, hole) in &auth.holes {
@@ -5368,6 +5639,21 @@ impl Store {
             ..auth.counts()
         });
         Ok(VerifyReport { frames, redaction })
+    }
+
+    /// [`Store::verify_report`]'s capture, for a check that runs off the writer (a history
+    /// completion's full check on a daemon's blocking pool): a reader, the log's end and its
+    /// authorization as they stand now. [`FrameCheck::run`] then reads every frame up to that
+    /// end with no store handle. An open batch is refused, as `verify_report` refuses it.
+    pub fn capture_frame_check(&self) -> Result<FrameCheck, StoreError> {
+        if self.open.is_some() {
+            return Err(batch_open("first"));
+        }
+        Ok(FrameCheck {
+            reader: self.reader(),
+            upto: self.log.end(),
+            auth: Arc::clone(self.log.authorization()),
+        })
     }
 
     /// Seals one batch that holds REDACTION_APPLY records, then finishes the removal before it
@@ -5640,7 +5926,7 @@ impl Store {
     }
 
     /// The fetch of a canon or view history into a project (D-3RSCW): the take's checks over
-    /// the project (`crate::take_batch::prepare_fetch`), then one sealed batch of its own, held
+    /// the project (`crate::take_batch::prepare_fetch_checked`), then one sealed batch of its own, held
     /// batches on or off, with the new records, the free tag refs with their free relay answer
     /// refs, and the remote's sync state, which activates `sync_state` when it is the first. It moves no canon or view ref. A
     /// holder is `TakeError::ModeMismatch`; an open held batch is refused; a retry of a fetch
@@ -5648,6 +5934,85 @@ impl Store {
     pub fn take_fetched<E>(
         &mut self,
         files: &[File],
+        target: &crate::take_batch::FetchTarget,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        self.take_fetched_core(files, None, None, target, check)
+    }
+
+    /// A project's take of a canon state (D-GGTYA, D-4PV25): the canon state batches `files`
+    /// of remote `target.remote` at `target.url`, rooted at the landing `target.root` (purpose
+    /// `canon_state`), checked over the project with the closed state link table
+    /// (`crate::take_batch::prepare_state_checked`), then one sealed batch of its own with the
+    /// state's records, `canon` at the root, the remote's canon state with the root fetched and
+    /// applied, the incomplete history ref `history` (`meta/sync/<remote>/history`) and the
+    /// first use of `partial_history`, so an rdy without the feature refuses the store before
+    /// it reads it. `history` names the stream's repo, the target's URL and root, is not
+    /// complete and counts at most 1,000,000 records; the caller checks that count against its
+    /// checked key file first. A project with another canon, or with another incomplete
+    /// history, is refused; a retry of a take already made writes nothing.
+    pub fn take_canon_state<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::FetchTarget,
+        history: &crate::sync_state::SyncHistory,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        self.take_fetched_core(files, None, Some(history), target, check)
+    }
+
+    /// [`Store::take_canon_state`] of files that a canon state check of this operation already
+    /// checked: `checked` holds one checked batch for each file, in file order, as
+    /// [`Store::take_fetched_checked`] takes them.
+    pub fn take_canon_state_checked<E>(
+        &mut self,
+        files: &[File],
+        checked: &[&crate::sync_stream::CheckedBatch],
+        target: &crate::take_batch::FetchTarget,
+        history: &crate::sync_state::SyncHistory,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        self.take_fetched_core(files, Some(checked), Some(history), target, check)
+    }
+
+    /// [`Store::take_fetched`] of files that a batch check of this operation already checked:
+    /// `checked` holds one checked batch for each file, in file order
+    /// ([`crate::sync_stream::CheckedBatch`], made only by a whole batch check). A file is not
+    /// checked again: its bytes are read once more, and only the exact bytes its checked batch
+    /// checked keep that check's links, features and index link counts (anything else is
+    /// `input changed during take`). The union, closure, typed context, snapshot chains,
+    /// removal, capacity and fetch checks over the project, the seal's re-read and its
+    /// durability are [`Store::take_fetched`]'s. The inputs, outcome and refusals are
+    /// [`Store::take_fetched`]'s; a count of checked batches other than the files' is refused.
+    pub fn take_fetched_checked<E>(
+        &mut self,
+        files: &[File],
+        checked: &[&crate::sync_stream::CheckedBatch],
+        target: &crate::take_batch::FetchTarget,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        self.take_fetched_core(files, Some(checked), None, target, check)
+    }
+
+    /// [`Store::take_fetched`], [`Store::take_fetched_checked`] and the canon state's takes
+    /// (with `history`): one prepare core.
+    fn take_fetched_core<E>(
+        &mut self,
+        files: &[File],
+        checked: Option<&[&crate::sync_stream::CheckedBatch]>,
+        history: Option<&crate::sync_state::SyncHistory>,
         target: &crate::take_batch::FetchTarget,
         check: impl FnOnce(
             &mut dyn crate::sync_proof::ObjectSource,
@@ -5692,20 +6057,38 @@ impl Store {
             .repo_id()?
             .ok_or_else(|| StoreError::Decode("the project has no meta/repo_id".into()))?;
         let reader = self.reader();
+        if history.is_some() {
+            // a canon state opens a project with no canon of its own, once (D-GGTYA)
+            let head = reader.canon_head()?;
+            if head.is_some_and(|h| h != target.root) {
+                return Err(TakeError::Store(StoreError::Refused(
+                    "a canon state is taken only into a project with no canon".into(),
+                )));
+            }
+            if let Some(h) = reader.partial_history_named()?
+                && (h.0 != target.remote || h.1.frontier != target.root)
+            {
+                return Err(TakeError::Store(StoreError::Refused(format!(
+                    "the project's history from remote {} is still arriving",
+                    h.0
+                ))));
+            }
+        }
         let auth = Arc::clone(self.log.authorization());
-        let plan = crate::take_batch::prepare_fetch(
-            &Receiver {
-                reader: &reader,
-                log: self.log.readers(),
-                auth: &auth,
-                end: self.log.end(),
-                repo,
-                features: &self.features,
-            },
-            files,
-            target,
-            check,
-        )?;
+        let rx = Receiver {
+            reader: &reader,
+            log: self.log.readers(),
+            auth: &auth,
+            end: self.log.end(),
+            repo,
+            features: &self.features,
+        };
+        let plan = match history {
+            Some(h) => {
+                crate::take_batch::prepare_state_checked(&rx, files, checked, target, h, check)?
+            }
+            None => crate::take_batch::prepare_fetch_checked(&rx, files, checked, target, check)?,
+        };
         drop(reader);
         // the fetch is one sealed batch of its own (as a move): no held batch is open here
         let held = std::mem::replace(&mut self.held, false);
@@ -5991,8 +6374,25 @@ impl Store {
     }
 
     /// Writes a prepared take (see [`Store::take_batches`], [`Store::take_fetched`]): returns
-    /// the log's end after it and the data frames it wrote (none for a complete retry).
+    /// the log's end after it and the data frames it wrote (none for a complete retry). A take
+    /// or move maps nothing (D-1ER84): once its batch is durable, what the log holds unmapped
+    /// is left to the next compact (`Store::leave_received`), so the operation's own later
+    /// batches and every later ordinary write map none of it.
     fn seal_take<E>(
+        &mut self,
+        files: &[File],
+        plan: &crate::take_batch::Plan,
+        how: RefWrite,
+    ) -> Result<(Location, u64), crate::take_batch::TakeError<E>> {
+        let sealed = self.seal_take_batch(files, plan, how);
+        if sealed.is_ok() {
+            self.leave_received();
+        }
+        sealed
+    }
+
+    /// The batch of [`Store::seal_take`].
+    fn seal_take_batch<E>(
         &mut self,
         files: &[File],
         plan: &crate::take_batch::Plan,
@@ -6154,7 +6554,11 @@ impl Store {
                     // logical kind of its key
                     let (loc, hash) = self.log.append_unrolled(at.kind, &buf)?;
                     if !plan.redaction {
-                        entries.extend(entries_for_frame(at.kind, hash, loc, &buf, &mut r)?);
+                        // the count a batch check of these exact bytes found, by the frame's key
+                        let checked = plan.index_links.get(&(at.kind, hash)).copied();
+                        entries.extend(entries_for_checked_frame(
+                            at.kind, hash, loc, &buf, &mut r, checked,
+                        )?);
                     }
                     frames.push((at.kind, hash));
                 }

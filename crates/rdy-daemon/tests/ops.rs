@@ -602,6 +602,28 @@ fn rdb7_clean_quarantine_zeroes_damaged_indexes() {
     assert!(!damaged.exists());
 }
 
+/// A torn span-map tail that a writable open moved aside is listed with the other quarantine
+/// files, and the human's clean removes it with a plain delete (the journal holds no payload
+/// text, so it is not zeroed first).
+#[test]
+fn r5902_torn_span_map_tail_is_listed_and_cleaned() {
+    let d = tempfile::tempdir().unwrap();
+    let store = d.path().join(".rdy/store");
+    std::fs::create_dir_all(store.join("segments")).unwrap();
+    std::fs::write(store.join("SPANMAP.torn-40"), b"torn").unwrap();
+    std::fs::write(store.join("SPANMAP"), b"kept").unwrap();
+    assert_eq!(quarantine(d.path()), vec!["SPANMAP.torn-40".to_string()]);
+    let (c, zeroed) = rdy_store::fsutil::record_zeroed(|| clean_quarantine(d.path()));
+    assert_eq!(c.removed, vec!["SPANMAP.torn-40".to_string()]);
+    assert!(c.skipped.is_empty(), "{:?}", c.skipped);
+    assert!(zeroed.is_empty(), "{zeroed:?}");
+    assert!(!store.join("SPANMAP.torn-40").exists());
+    assert!(
+        store.join("SPANMAP").exists(),
+        "the map itself is no quarantine file"
+    );
+}
+
 /// rdb7 (ruling task-7 Round 2, F6): a damaged index with a second link is not zeroed, since the
 /// zeroing is for rdy's own index file only: it is skipped untouched, the store logs it, and the
 /// other link keeps its bytes.

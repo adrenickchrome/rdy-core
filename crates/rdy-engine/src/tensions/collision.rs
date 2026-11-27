@@ -48,6 +48,12 @@ impl Detector for EditCollision {
         TensionKind::EditCollision
     }
 
+    /// A collision's ways out depend on what the block is: an editable block takes a write from
+    /// the chosen version; a frozen decision takes the landed side.
+    fn resolve_hint(&self) -> &'static str {
+        "read the conflict with rdy_context. For an editable block, write from the chosen version with base set to that version. For an accepted or rejected decision, use rdy_view resolve with landed true, or exclude a colliding reaffirm change."
+    }
+
     fn detect(
         &self,
         cx: &DetectCx<'_>,

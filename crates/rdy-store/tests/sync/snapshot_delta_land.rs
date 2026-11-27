@@ -492,6 +492,7 @@ fn sdl6_all_landing_paths_emit_one_delta_and_no_snapshot() {
         heads: vec![],
         provenance: approver(),
         seal: None,
+        read_identity: None,
     };
     let bound_id = f.s.bind_plan(&mut prepared, &bound).unwrap();
     let mut landing =
@@ -752,7 +753,11 @@ fn sdl6_first_delta_activates_the_feature_atomically() {
     assert!(s.get_ref(REF_UPGRADE).unwrap().is_none());
     s.check_objects().unwrap();
     s.close().unwrap();
-    assert!(upgrade::inspect(&dir).unwrap().steps.is_empty());
+    // no snapshot-delta step remains; span maps keep their own optional step
+    assert_eq!(
+        upgrade::inspect(&dir).unwrap().steps,
+        [upgrade::DEDUP_SPANS_STEP]
+    );
 
     // a legacy store whose head has no delta takes no landing until it is upgraded: the writer
     // refuses before anything is written
@@ -804,6 +809,10 @@ fn sdl6_new_store_and_holder_start_with_the_feature() {
         format::registered_features()
             .into_iter()
             .find(|f| f.name == format::FEATURE_CONTENT_HASH_V2)
+            .unwrap(),
+        format::registered_features()
+            .into_iter()
+            .find(|f| f.name == format::FEATURE_DEDUP_SPANS)
             .unwrap(),
         format::registered_features()
             .into_iter()

@@ -80,7 +80,7 @@ impl ReadState {
             return Err(RdyError::new(
                 E_UNKNOWN_BLOCK,
                 format!("no block {id}"),
-                "check the id with rdy_read",
+                self.missing_block_fix(scope, id, "check the id with rdy_read"),
             ));
         }
         Ok(m.path_of(id))

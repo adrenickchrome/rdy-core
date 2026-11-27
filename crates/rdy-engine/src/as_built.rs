@@ -434,10 +434,18 @@ impl ReadState {
         };
         SEALS.get_or_try((self.memo.id, head), || {
             let reader = self.reader();
+            // an incomplete history's chain stops at its frontier (D-4PV25): the landings
+            // behind it are not held yet
+            let frontier = self.history_frontier()?;
             let mut chain = vec![];
             crate::history_facts::walk_heads(
                 &[top],
-                |h| Ok(reader.landing(h)?.prev),
+                |h| {
+                    if frontier == Some(*h) {
+                        return Ok(None);
+                    }
+                    Ok(reader.landing(h)?.prev)
+                },
                 |h| {
                     chain.push(h);
                     false

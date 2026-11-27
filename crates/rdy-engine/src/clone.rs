@@ -36,8 +36,10 @@
 //!    id: its pack file, its settings and the one share remote `hub`. Hub canon's history,
 //!    rooted at the captured tip with no base, comes in as a pull fetches it, with its tags;
 //!    the pull's second batch moves canon to that tip and records it as fetched and applied.
-//! 5. A settings load and `fsck` of the new project, then one rename into the target. Any
-//!    refusal or failure removes the temporary directory and leaves the target as it was.
+//! 5. The settings and pack digest are checked again, and `fsck` runs on the handle that applied
+//!    canon (it reuses the tension set that apply built). That handle then closes, and one
+//!    rename moves the project into the target. Any refusal or failure removes the temporary
+//!    directory and leaves the target as it was.
 //!
 //! No token, no `.rdy/local.yaml` and no user config is written. A URL clone takes no view and
 //! never forks.
@@ -46,7 +48,7 @@
 use crate::Rdy;
 use crate::config_levels::PROJECT_FILE;
 use crate::dump::project_files;
-use crate::engine::Local;
+use crate::engine::{Engine, Local, with_writer_result};
 use crate::error::{
     CLONE_AT_NEEDS_FORK_FIX, CLONE_AT_NEEDS_FORK_MESSAGE, CLONE_AT_NEEDS_PROJECT_FIX,
     CLONE_AT_NEEDS_PROJECT_MESSAGE, CLONE_NO_CANON_FIX, CLONE_NO_CANON_MESSAGE,
@@ -57,13 +59,15 @@ use crate::error::{
     upstream_protocol,
 };
 use crate::fsck::FsckReport;
+use crate::history_fetch::HistoryFetchStep;
 use crate::hub_config::{HubConfig, RemoteEntry, RemoteMode};
 use crate::hub_http::HttpHubTransport;
 use crate::hub_publish::{PublishRenderer, RenderedUpload};
 use crate::hub_sync::{SyncService, Target};
-use crate::hub_sync_wire::{HttpSyncWire, PackReason, SETTINGS_MEMBERS, SettingsBundle};
-use crate::hub_types::{RemoteUrl, SystemHubClock};
+use crate::hub_sync_wire::{HttpSyncWire, PackReason, SETTINGS_MEMBERS, SettingsBundle, SyncWire};
+use crate::hub_types::{HubClock, HubTransport, RemoteUrl, SystemHubClock};
 use crate::load::{LoadSummary, Opened, inside_source_rdy, load_opened, open_dump, open_stream};
+use crate::partial_history::HistoryProgress;
 use crate::read_state::ReadState;
 use crate::readiness::assessment::pack_digest;
 use crate::render_inputs::{
@@ -178,6 +182,10 @@ pub fn clone_at(
     fork: bool,
     at: Option<&str>,
 ) -> Result<CloneSummary, RdyError> {
+    // a source whose history is still arriving is never copied: the copy would lack it
+    if let CloneSource::State(st) = &source {
+        st.require_complete_history()?;
+    }
     let (load, origin, repo_id) = match (at, source) {
         (Some(_), _) if !fork => return Err(at_needs_fork()),
         (Some(_), CloneSource::File(_)) => return Err(at_needs_project()),
@@ -431,12 +439,81 @@ pub struct UrlCloneSummary {
     pub warnings: Vec<CloneWarning>,
     pub fsck: FsckReport,
     pub next: String,
+    /// The project's history (D-GGTYA): present for a clone from a hub that sends a canon
+    /// tip's state, which is ready before its history arrives; absent for a clone that took the
+    /// whole history first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history: Option<HistoryProgress>,
+    /// The clone's notes: the old-hub note, or the pause note of a ready clone whose history
+    /// no process fetches now. Absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+impl UrlCloneSummary {
+    /// The ready text of a clone whose history is still arriving; None otherwise.
+    pub fn ready_text(&self) -> Option<String> {
+        self.history
+            .filter(|p| !p.complete)
+            .map(|p| crate::history_fetch::ready_text(&self.project, &p))
+    }
+
+    /// Whether the clone's history is still arriving.
+    pub fn history_pending(&self) -> bool {
+        self.history.is_some_and(|p| !p.complete)
+    }
+
+    /// Adds `e` as a warning: a history continuation that stopped keeps the ready project.
+    pub fn warn(&mut self, e: &RdyError) {
+        self.warnings.push(CloneWarning {
+            code: e.code.to_string(),
+            message: e.message.clone(),
+            fix: e.fix.clone(),
+        });
+    }
+
+    /// The end of a foreground history continuation: its final progress and the clone's fsck
+    /// once the history is complete, or the error that stopped either, kept as a warning.
+    pub fn finish_history(
+        &mut self,
+        fetched: Result<(HistoryProgress, Result<FsckReport, RdyError>), RdyError>,
+    ) {
+        match fetched {
+            Ok((p, checked)) => {
+                self.history = Some(p);
+                match checked {
+                    Ok(f) => {
+                        self.landings = f.landings;
+                        self.fsck = f;
+                    }
+                    Err(e) => self.warn(&e),
+                }
+            }
+            Err(e) => self.warn(&e),
+        }
+    }
 }
 
 /// A step that a test runs on the new project's directory after the fetch and before the
 /// clone's checks.
 #[doc(hidden)]
 pub type BeforeChecks<'a> = &'a mut dyn FnMut(&Path) -> Result<(), RdyError>;
+
+thread_local! {
+    /// This thread's count of normal opens of a URL clone's new project.
+    static OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn count_open() {
+    OPENS.with(|c| c.set(c.get() + 1));
+}
+
+/// This thread's count of normal opens of a URL clone's new project so far. A test reads the
+/// difference over a call.
+#[doc(hidden)]
+pub fn clone_opens() -> u64 {
+    OPENS.with(std::cell::Cell::get)
+}
 
 /// The refusal of a URL clone with `fork` (D-47HVF).
 pub fn url_fork() -> RdyError {
@@ -463,15 +540,132 @@ pub fn clone_url_checked(
     user_file: &Path,
     before_checks: Option<BeforeChecks>,
 ) -> Result<UrlCloneSummary, RdyError> {
-    let url = RemoteUrl::parse(url)?;
+    let parsed = RemoteUrl::parse(url)?;
     check_new_dir(dir, "clone a hub URL into a new directory, or an empty one")?;
     let settings = HubConfig::load(None, Some(user_file))?;
-    let api = HttpHubTransport::new(settings.fence(url.origin())?)?;
-    let wire = HttpSyncWire::new(HttpHubTransport::new(settings.fence(url.origin())?)?);
-    let service = SyncService::for_clone(user_file, &api, &SystemHubClock, &wire, &NoRenderer);
+    let api = HttpHubTransport::new(settings.fence(parsed.origin())?)?;
+    let wire = HttpSyncWire::new(HttpHubTransport::new(settings.fence(parsed.origin())?)?);
+    clone_url_via(
+        session,
+        url,
+        dir,
+        user_file,
+        &api,
+        &SystemHubClock,
+        &wire,
+        before_checks,
+    )
+}
+
+/// [`clone_url_checked`] over the credential transport `api`, the clock `clock` and the sync
+/// wire `wire` (a test's in-process hub). It returns at Ready.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn clone_url_via(
+    session: &Session,
+    url: &str,
+    dir: &Path,
+    user_file: &Path,
+    api: &dyn HubTransport,
+    clock: &dyn HubClock,
+    wire: &dyn SyncWire,
+    before_checks: Option<BeforeChecks>,
+) -> Result<UrlCloneSummary, RdyError> {
+    let url = RemoteUrl::parse(url)?;
+    check_new_dir(dir, "clone a hub URL into a new directory, or an empty one")?;
+    let service = SyncService::for_clone(user_file, api, clock, wire, &NoRenderer);
     service.clone_target(session, &url, |t| {
         clone_from(&service, session, t, dir, user_file, before_checks)
     })
+}
+
+/// [`clone_url`], then the history in this process (O17: the CLI's foreground): `ready` runs
+/// with the ready summary once the project is installed and before the first history get,
+/// then each history step runs until the history is complete. The reply is the final summary,
+/// its history complete. A continuation that stops keeps the installed project and the ready
+/// summary, with the stop's error added as a warning; nothing is rolled back. A clone that
+/// took the whole history first (an older hub) calls neither.
+pub fn clone_url_with_progress(
+    session: &Session,
+    url: &str,
+    dir: &Path,
+    user_file: &Path,
+    ready: &mut dyn FnMut(&UrlCloneSummary),
+) -> Result<UrlCloneSummary, RdyError> {
+    clone_url_with_steps(session, url, dir, user_file, ready, &mut |_| {})
+}
+
+/// [`clone_url_with_progress`] with `step` called with the progress after each history step
+/// that leaves more to do.
+pub fn clone_url_with_steps(
+    session: &Session,
+    url: &str,
+    dir: &Path,
+    user_file: &Path,
+    ready: &mut dyn FnMut(&UrlCloneSummary),
+    step: &mut dyn FnMut(&HistoryProgress),
+) -> Result<UrlCloneSummary, RdyError> {
+    let parsed = RemoteUrl::parse(url)?;
+    let summary = clone_url(session, url, dir, user_file)?;
+    if !summary.history_pending() {
+        return Ok(summary);
+    }
+    let settings = HubConfig::load(None, Some(user_file))?;
+    let api = HttpHubTransport::new(settings.fence(parsed.origin())?)?;
+    let wire = HttpSyncWire::new(HttpHubTransport::new(settings.fence(parsed.origin())?)?);
+    Ok(continue_history(
+        session,
+        summary,
+        user_file,
+        &api,
+        &SystemHubClock,
+        &wire,
+        ready,
+        step,
+    ))
+}
+
+/// The foreground continuation of the ready clone `summary` over `api`, `clock` and `wire`
+/// (see [`clone_url_with_progress`]).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn continue_history(
+    session: &Session,
+    mut summary: UrlCloneSummary,
+    user_file: &Path,
+    api: &dyn HubTransport,
+    clock: &dyn HubClock,
+    wire: &dyn SyncWire,
+    ready: &mut dyn FnMut(&UrlCloneSummary),
+    step: &mut dyn FnMut(&HistoryProgress),
+) -> UrlCloneSummary {
+    if !summary.history_pending() {
+        return summary;
+    }
+    ready(&summary);
+    let project = PathBuf::from(&summary.project);
+    let engine = match Local::open(&project) {
+        Ok(e) => e,
+        Err(e) => {
+            summary.warn(&e);
+            return summary;
+        }
+    };
+    let service = SyncService::new(&project, user_file, api, clock, wire, &NoRenderer);
+    let ran = (|| {
+        let mut fetch = service.begin_history(&engine, session, &summary.remote)?;
+        loop {
+            match service.resume_history_step(&engine, session, &mut fetch)? {
+                HistoryFetchStep::More(p) => step(&p),
+                HistoryFetchStep::Complete(p) => return Ok::<_, RdyError>(p),
+            }
+        }
+    })();
+    summary.finish_history(ran.map(|p| (p, engine.inspect(Rdy::fsck))));
+    if let Err(e) = engine.close() {
+        summary.warn(&e);
+    }
+    summary
 }
 
 /// The render-input capture of a URL clone: it renders nothing.
@@ -815,16 +1009,47 @@ fn clone_from(
         landing: Some(tip),
     };
     write_project(&project, &bundle, &t.url, &origin)?;
+    count_open();
     let engine = Local::open(&project)?;
-    let fetched = service.clone_fetch(&engine, session, t, &base_url, &state);
-    let closed = engine.close();
-    let (fetched, _) = fetched?;
-    closed?;
-    if let Some(step) = before_checks {
-        step(&project)?;
-    }
-    let checked = check_project(&project, user_file, &bundle, origin, t)?;
-    install(tmp, &target)?;
+    // a hub that sends a canon tip's state (format 5): the state now, the history after Ready;
+    // any other hub: the whole history first (a malformed format-5 reply is an error, never a
+    // reason to take the whole history instead)
+    let partial = state.sends_canon_state();
+    let fetched = if partial {
+        service.clone_state(&engine, t, &base_url, &state).map(Some)
+    } else {
+        service
+            .clone_fetch(&engine, session, t, &base_url, &state)
+            .map(|(f, _)| f)
+    };
+    let fetched = match fetched {
+        Ok(fetched) => fetched,
+        Err(e) => {
+            // the fetch's error wins over a failed close
+            let _ = engine.close();
+            return Err(e);
+        }
+    };
+    // the fetch's handle runs the checks (D-D5J18): it holds the canon tension set that applying
+    // canon built. A test's step edits the project's files, so that path closes, runs the step,
+    // and checks on a new open.
+    let engine = match before_checks {
+        Some(step) => {
+            engine.close()?;
+            step(&project)?;
+            count_open();
+            Local::open(&project)?
+        }
+        None => engine,
+    };
+    let checked = check_and_install(
+        engine,
+        tmp,
+        &target,
+        |e, project| check_project_on(e, project, user_file, &bundle, origin, t),
+        Local::close,
+        install,
+    )?;
     let fetched = fetched.map_or_else(ClonedFetch::default, |f| ClonedFetch {
         records_taken: f.records_taken,
         tags_taken: f.tags_taken,
@@ -846,6 +1071,12 @@ fn clone_from(
         warnings: bundle.warnings,
         fsck: checked.fsck,
         next: NEXT.to_string(),
+        history: checked.history,
+        notes: if partial {
+            Vec::new()
+        } else {
+            vec![crate::history_fetch::OLD_HUB_NOTE.to_string()]
+        },
     })
 }
 
@@ -957,43 +1188,66 @@ struct Checked {
     tags: usize,
     views: usize,
     fsck: FsckReport,
+    history: Option<HistoryProgress>,
 }
 
-/// Step 5's checks: the settings load (an open), the effective pack's digest, the origin's
-/// newest version, `fsck`, and the merged hub settings with the user config.
-fn check_project(
+/// Step 5's checks on `engine`, the handle that applied canon: the effective pack's digest (read
+/// again from the project's files, so a file that changed since the open is found), the origin's
+/// newest version, `fsck` on that handle, and the merged hub settings with the user config.
+fn check_project_on(
+    engine: &Local,
     project: &Path,
     user_file: &Path,
     b: &ReadBundle,
     mut origin: Origin,
     t: &Target,
 ) -> Result<Checked, RdyError> {
-    let mut r = Rdy::open(project)?;
-    let checked = (|| {
-        let st = r.read();
-        if pack_digest(st.pack()) != b.digest {
-            return Err(unfit("pack", &t.url, b.captured.as_ref()));
-        }
-        let versions = st.versions()?;
-        origin.tag = versions.last().map(|v| v.name.clone());
-        let tags = versions.len();
-        let views = st.view_names().len();
-        drop(st);
-        if origin.tag.is_some() {
-            r.store_mut().put_origin(&origin, None)?;
-        }
-        let fsck = r.fsck()?;
-        HubConfig::load(Some(project), Some(user_file))?;
-        Ok(Checked {
-            origin,
-            tags,
-            views,
-            fsck,
-        })
-    })();
-    let closed = r.close();
+    let (pack, _) = crate::pack_load::project_pack_compiled(project)?;
+    if pack_digest(&pack) != b.digest {
+        return Err(unfit("pack", &t.url, b.captured.as_ref()));
+    }
+    let (versions, views) = {
+        let st = engine.read();
+        (st.versions()?, st.view_names().len())
+    };
+    origin.tag = versions.last().map(|v| v.name.clone());
+    let tags = versions.len();
+    if origin.tag.is_some() {
+        let put = origin.clone();
+        with_writer_result(engine, move |r| {
+            r.store_mut().put_origin(&put, None)?;
+            Ok(())
+        })?;
+    }
+    let fsck = engine.inspect(Rdy::fsck)?;
+    HubConfig::load(Some(project), Some(user_file))?;
+    let history = engine.read().history_progress()?;
+    Ok(Checked {
+        origin,
+        tags,
+        views,
+        fsck,
+        history,
+    })
+}
+
+/// Runs `check` on `engine` and the staging project, closes `engine`, then installs the staging
+/// directory `tmp` at `target`. The close comes first and must succeed: no handle lives past the
+/// install. A failed check or close drops `tmp`, which removes the staging directory; the check's
+/// error wins over the close's.
+fn check_and_install<T>(
+    engine: Local,
+    tmp: tempfile::TempDir,
+    target: &Path,
+    check: impl FnOnce(&Local, &Path) -> Result<T, RdyError>,
+    close: impl FnOnce(Local) -> Result<(), RdyError>,
+    install: impl FnOnce(tempfile::TempDir, &Path) -> Result<(), RdyError>,
+) -> Result<T, RdyError> {
+    let checked = check(&engine, tmp.path());
+    let closed = close(engine);
     let checked = checked?;
     closed?;
+    install(tmp, target)?;
     Ok(checked)
 }
 
@@ -1030,4 +1284,122 @@ pub(crate) fn install(tmp: tempfile::TempDir, target: &Path) -> Result<(), RdyEr
         rdy_store::fsutil::sync_dir(parent).map_err(|e| io_at(parent, &e))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// A target beside a staging project that an engine holds open.
+    fn staged() -> (tempfile::TempDir, PathBuf, tempfile::TempDir, Local) {
+        let parent = tempfile::tempdir().unwrap();
+        let (target, tmp) = staging_beside(&parent.path().join("clone"), ".rdy-clone-").unwrap();
+        Rdy::init(tmp.path(), "rdy-standard")
+            .unwrap()
+            .close()
+            .unwrap();
+        let engine = Local::open(tmp.path()).unwrap();
+        (parent, target, tmp, engine)
+    }
+
+    fn injected(what: &str) -> RdyError {
+        RdyError::new(E_IO, format!("injected {what} failure"), "none")
+    }
+
+    /// What is in `dir`, by name.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut n: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        n.sort();
+        n
+    }
+
+    /// r59014: the checks run on the engine, which then closes, and only then the install
+    /// renames the project: no handle lives past it (a new open of the staging directory
+    /// succeeds in the install step). A failed check or close installs nothing and leaves no
+    /// staging directory; the check's error wins over the close's.
+    #[test]
+    fn r59014_clone_closes_before_install_and_cleans_failure() {
+        // success: check, close, then install, in that order, with the store free at install
+        let (parent, target, tmp, engine) = staged();
+        let staging = tmp.path().to_path_buf();
+        let log = RefCell::new(vec![]);
+        let got = check_and_install(
+            engine,
+            tmp,
+            &target,
+            |_, _| {
+                log.borrow_mut().push("check");
+                Ok(7)
+            },
+            |e| {
+                log.borrow_mut().push("close");
+                e.close()
+            },
+            |tmp, to| {
+                log.borrow_mut().push("install");
+                Local::open(tmp.path()).unwrap().close().unwrap();
+                install(tmp, to)
+            },
+        );
+        assert_eq!(got.unwrap(), 7);
+        assert_eq!(*log.borrow(), ["check", "close", "install"]);
+        assert_eq!(names(parent.path()), ["clone"]);
+        assert!(!staging.exists());
+        Rdy::open(&target).unwrap().close().unwrap();
+
+        // each failure: nothing installs, the staging directory goes, the target is as it was
+        for (check_fails, close_fails) in [(false, true), (true, true), (true, false)] {
+            for existing in [false, true] {
+                let (parent, target, tmp, engine) = staged();
+                if existing {
+                    std::fs::create_dir(&target).unwrap();
+                }
+                let staging = tmp.path().to_path_buf();
+                let log = RefCell::new(vec![]);
+                let got = check_and_install(
+                    engine,
+                    tmp,
+                    &target,
+                    |_, _| {
+                        log.borrow_mut().push("check");
+                        if check_fails {
+                            Err(injected("check"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |e| {
+                        log.borrow_mut().push("close");
+                        // the handle really closes; the failure is the close's report
+                        e.close()?;
+                        if close_fails {
+                            Err(injected("close"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |tmp, to| {
+                        log.borrow_mut().push("install");
+                        install(tmp, to)
+                    },
+                );
+                let want = if check_fails { "check" } else { "close" };
+                assert_eq!(
+                    got.unwrap_err().message,
+                    format!("injected {want} failure"),
+                    "check {check_fails}, close {close_fails}"
+                );
+                assert_eq!(*log.borrow(), ["check", "close"]);
+                assert!(!staging.exists());
+                assert_eq!(names(parent.path()).len(), usize::from(existing));
+                if existing {
+                    assert!(names(&target).is_empty());
+                }
+            }
+        }
+    }
 }

@@ -42,9 +42,11 @@ use crate::error::{
 };
 use crate::formats::formats;
 use crate::hub_http::{
-    BodyEncoding, HttpHubTransport, JsonLimits, Prefixes, ReplySink, UploadHttpRequest,
-    UploadMethod, api_error_entry, decode_bounded_json, reply_echoes, zstd_frame,
+    BodyEncoding, HttpHubTransport, JsonLimits, Prefixes, ReplyEncoding, ReplySink,
+    UploadHttpRequest, UploadMethod, api_error_entry, decode_bounded_json, reply_echoes,
+    zstd_frame,
 };
+use crate::hub_publish_stream::PreparedObjectBody;
 use crate::hub_types::{
     HubFailure, LimitUnit, MAX_ID_BYTES, MAX_URL_BYTES, Origin, OriginFence, RemoteUrl,
     RequestClaim, Secret, check_count, hub_limit,
@@ -347,6 +349,17 @@ pub trait PublishWire: Send + Sync {
         body: &mut dyn Read,
         len: u64,
     ) -> Result<ObjectPut, RdyError>;
+    /// `POST <base>/objects/put?push=<push>`: one prepared batch. The default sends the batch's
+    /// own bytes through [`PublishWire::put_objects`].
+    fn put_objects_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        let (raw, len) = body.identity()?;
+        self.put_objects(cx, push, raw, len)
+    }
     /// `POST <base>/files/known`: the hashes of `files` the hub repo lacks.
     fn known_files(
         &self,
@@ -887,6 +900,28 @@ struct ErrorDto {
     retry_after: Option<u64>,
     #[serde(default, rename = "corrected", deserialize_with = "present_object")]
     _corrected: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The catalog's variables of the error (the hub's copy catalog). Any JSON value is kept:
+    /// the body is already bounded by [`decode_bounded_json`], and the one member read from it
+    /// is `get_batch_bytes` (see [`get_cap_marker`]).
+    #[serde(default)]
+    args: Option<serde_json::Value>,
+}
+
+/// The hub's code of a get refused over its cap.
+const GET_CAP_CODE: &str = "E_HUB_VALIDATION";
+
+/// The structured over-cap marker of a refusal: for code `E_HUB_VALIDATION`, an `args` object
+/// whose `get_batch_bytes` member is a decimal string of a u64 from 1. Any other shape is no
+/// marker, and no message text is read.
+fn get_cap_marker(code: &str, args: Option<&serde_json::Value>) -> Option<u64> {
+    if code != GET_CAP_CODE {
+        return None;
+    }
+    let text = args?.as_object()?.get("get_batch_bytes")?.as_str()?;
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<u64>().ok().filter(|n| *n >= 1)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1418,12 +1453,14 @@ fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyE
         Some(code) => RdyError::new(code, dto.message, dto.fix),
         None => upstream_refused(),
     };
+    e.hub_get_cap = get_cap_marker(&dto.code, dto.args.as_ref());
     e.issues = dto.issues.into_iter().map(issue).collect();
     e.issues.push(notice(
         format!("{REQUEST_ID_NOTICE}{}", dto.request_id),
         REQUEST_ID_FIX,
     ));
     if let Some(n) = dto.retry_after {
+        e.upstream_retry_after = Some(n);
         e.issues
             .push(notice(format!("retry after {n} seconds"), RETRY_FIX));
     }
@@ -1479,7 +1516,10 @@ impl HttpPublishWire {
 
     /// `POST <url>` of a read step with the JSON body `json` as `content_type`, whose reply at
     /// status 200 streams to `sink`, at most `limit` bytes; a refusal is read within
-    /// [`REPLY_BYTES`]. Returns the bytes streamed.
+    /// [`REPLY_BYTES`]. `reply` is what the request offers: with
+    /// [`ReplyEncoding::ZstdOrIdentity`] the reply may be one zstd stream, and `limit` counts
+    /// its decoded bytes. Returns the bytes streamed, decoded.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn post_streamed(
         &self,
         cx: &UploadContext,
@@ -1488,6 +1528,7 @@ impl HttpPublishWire {
         json: Vec<u8>,
         sink: &mut dyn Write,
         limit: u64,
+        reply: ReplyEncoding,
     ) -> Result<u64, RdyError> {
         let effect = Effect::Read;
         let len = u64::try_from(json.len()).map_err(|_| hub_limit(usize::MAX, LimitUnit::Bytes))?;
@@ -1510,6 +1551,7 @@ impl HttpPublishWire {
                 status: 200,
                 out: sink,
                 limit,
+                encoding: reply,
             },
         );
         let (status, body, n) = sent.map_err(|f| failed(cx, effect, f))?;
@@ -1873,6 +1915,40 @@ impl PublishWire for HttpPublishWire {
         check_push(push)?;
         let url = route(cx, &["objects", "put"], &[("push", push)])?;
         let reply_body = self.put(cx, &url, "application/octet-stream", body, len, REPLY_BYTES)?;
+        reply(
+            &reply_body,
+            limits(REPLY_BYTES, MAX_JSON_VALUES),
+            Effect::Write,
+            &cx.bearer,
+        )
+    }
+
+    /// The prepared batch as it is: its frame with `Content-Encoding: zstd` when the context
+    /// takes zstd and the batch was framed, else its own bytes. Nothing is compressed here; the
+    /// send's checks are [`HttpPublishWire::put_objects`]'s.
+    fn put_objects_prepared(
+        &self,
+        cx: &UploadContext,
+        push: &str,
+        body: &mut PreparedObjectBody,
+    ) -> Result<ObjectPut, RdyError> {
+        check_push(push)?;
+        let url = route(cx, &["objects", "put"], &[("push", push)])?;
+        let (file, body_len, encoding) = body.wire(cx.zstd)?;
+        let reply_body = self.exchange(
+            cx,
+            Exchange {
+                effect: Effect::Write,
+                method: UploadMethod::Post,
+                url: &url,
+                content_type: "application/octet-stream",
+                body: Some(file),
+                body_len,
+                reply_limit: REPLY_BYTES,
+                success: &[200, 201],
+                encoding,
+            },
+        )?;
         reply(
             &reply_body,
             limits(REPLY_BYTES, MAX_JSON_VALUES),

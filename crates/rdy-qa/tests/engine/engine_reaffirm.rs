@@ -652,12 +652,12 @@ fn cp5_reaffirm_refusals_have_exact_text() {
         (
             json!({"op": "reaffirm", "id": f.d0n, "reason": "R"}),
             format!("{} has no suspect; there is nothing to re-affirm", f.d0n),
-            "read its context and pass a suspect decision",
+            "re-affirm only a decision that rdy_suspects or rdy_plan lists as suspect, and not in the write that causes the suspect; defer a plan item that has no suspect behind it, with a reason",
         ),
         (
             json!({"op": "reaffirm", "because": claim, "reason": "R"}),
             format!("no decision in this view is suspect on {claim}"),
-            "read the suspects in this view",
+            "read the suspects in this view (rdy_suspects), and re-affirm in a later write than the edit that causes them; defer a plan item that has no suspect behind it, with a reason",
         ),
         (
             json!({"op": "reaffirm", "id": f.d1, "reason": "   "}),
@@ -834,7 +834,7 @@ fn cp5_generic_write_cannot_set_or_unset_metadata() {
     assert_eq!(
         e.fix,
         format!(
-            "write a new decision that supersedes or revokes {}. {hint}",
+            "{} is frozen. To correct or extend it, write a new decision that refines it. To replace part of it, supersede it with part. To retire it, supersede or revoke it. Only its tracking fields change in place, with editorial, and a repin of it is refused. {hint}",
             f.d1
         )
     );
@@ -850,7 +850,10 @@ fn cp5_generic_write_cannot_set_or_unset_metadata() {
     assert_eq!(e.code, "E_FROZEN");
     assert_eq!(
         e.fix,
-        format!("write a new decision that supersedes or revokes {}", f.d0n)
+        format!(
+            "{} is frozen. To correct or extend it, write a new decision that refines it. To replace part of it, supersede it with part. To retire it, supersede or revoke it. Only its tracking fields change in place, with editorial, and a repin of it is refused",
+            f.d0n
+        )
     );
     assert_eq!(changes(&r, "w"), before);
 }

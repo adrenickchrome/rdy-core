@@ -5,6 +5,7 @@ pub mod answer;
 mod areas;
 pub mod as_built;
 pub mod brief;
+pub mod canon_state_export;
 pub mod card_words;
 pub mod carried_warning;
 pub mod check;
@@ -55,6 +56,7 @@ mod handle;
 pub use handle::{CompletionPhase, read_only_feature_for_tests, with_completion_hook_for_tests};
 mod history;
 pub mod history_facts;
+pub mod history_fetch;
 mod holder;
 pub mod hooks;
 pub mod hub_config;
@@ -96,6 +98,7 @@ mod materialize;
 pub mod mention_review;
 pub mod neighbors;
 mod pack_load;
+pub mod partial_history;
 mod paths;
 pub use paths::{logical_of, native_join};
 pub mod pending;
@@ -157,6 +160,8 @@ pub mod tool_reads;
 pub mod trace;
 pub mod transitions;
 mod tree_io;
+pub mod vector_neighbors;
+pub mod vectors;
 mod version;
 pub mod version_tests;
 pub mod view_api;
@@ -211,9 +216,11 @@ pub use query::{RedactionRef, source_body};
 pub use rdy_store::Relay;
 pub use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpKind};
 pub use read_state::{
-    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState, inflight_builds,
+    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, MISSING_BLOCK_BYTES,
+    MISSING_BLOCK_FRAMES, MISSING_BLOCK_OPS, MISSING_BLOCK_VIEWS, OpenIntent, ReadState,
+    SearchLimits, inflight_builds,
 };
-pub use search::{SearchQuery, SearchResult};
+pub use search::{SearchInput, SearchQuery, SearchResult, SearchSource};
 pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
     human_actor_for, human_actor_for_env, now_ms, pin_clock, rfc3339, rfc3339_now,
@@ -241,7 +248,7 @@ pub use config::{
     serve_config,
 };
 pub use engine::{Engine, Local, ReadFn, WriteFn};
-pub use fsck::FsckReport;
+pub use fsck::{FsckHistory, FsckReport};
 pub use pack_load::{
     FileStamp, PackFingerprint, ReloadOutcome, pack_fingerprint, pack_source_reads,
     pack_source_reads_on_this_thread, project_pack, project_pack_compiled, resolve_pack,

@@ -2,7 +2,9 @@
 //! fixture of hub ports, plan C2.
 //!
 //! `hub-ports-v1.json` is this plan's fixture. It started as a byte copy of the frozen
-//! `hub-forks-v1.json`, and every selector names it. One capture wrote its delta: the feature
+//! `hub-forks-v1.json`, and every selector named it until its successor `m5a-v1.json`. It is
+//! frozen since, and so is `m5a-v1.json` since its successor `rdy-0590-v1.json`, which the
+//! selectors name now. One capture wrote its delta: the feature
 //! `ported_change` and its first-use rules, the port flags of `rdy view replay` and `rdy_view`,
 //! the new refusal templates, the populated probes of a local and a dump port, and the semantic
 //! probes of a hub port. The tests here pin that delta leaf by leaf, keep every earlier fixture
@@ -49,12 +51,23 @@ const PREDECESSOR: &str = "hub-forks-v1.json";
 /// successor fixture, never an edit of that file.
 const PREDECESSOR_SHA: &str = "5cff7aee1f5afb3e1e1e0364fc72fb7367a6acf103b1ad64040818cc13cd3252";
 
-/// This plan's fixture, which every selector names.
+/// This plan's fixture, which every selector named until its successor [`SELECTED`].
 const CURRENT: &str = "hub-ports-v1.json";
 
 /// The sha256 of [`CURRENT`] after its capture, its final bytes. A later contract change is a
 /// successor.
 const CURRENT_SHA: &str = "1ca4ac7975b5518125d3ff65dc119f7e3d46e8305fc018a5425752d22f51fcab";
+
+/// The successors of [`CURRENT`] before [`SELECTED`], in order, each frozen since its own
+/// successor, with the sha256 that its successor copied.
+const LATER: [(&str, &str); 1] = [(
+    "m5a-v1.json",
+    "b18e1992465210f6af99eabafb0290fb9b12f2288db5d5ac83bfa4f1a44bc4ec",
+)];
+
+/// The latest successor of [`CURRENT`], which every selector names now; [`CURRENT`] is frozen
+/// since its first successor.
+const SELECTED: &str = "rdy-0590-v1.json";
 
 /// The source file of each current-fixture selector, from the workspace root.
 const SELECTORS: [&str; 3] = [
@@ -243,18 +256,21 @@ fn delta(was: &Value, now: &Value) -> Vec<String> {
     found
 }
 
-/// hpt5: every selector names this plan's fixture, and none names a fixture the selectors named
-/// before it.
+/// hpt5: every selector names the successor of this plan's fixture, and none names this plan's
+/// fixture or a fixture the selectors named before it.
 #[test]
 fn hpt5_selectors_name_the_current_fixture_only() {
     for file in SELECTORS {
         let text =
             std::fs::read_to_string(root().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert!(
-            text.contains(&format!("fixtures/contracts/{CURRENT}\"")),
-            "{file} selects {CURRENT}"
+            text.contains(&format!("fixtures/contracts/{SELECTED}\"")),
+            "{file} selects {SELECTED}"
         );
-        for earlier in [PREDECESSOR, "m5b-v1.json", "sync-client-b-v1.json"] {
+        for earlier in [PREDECESSOR, "m5b-v1.json", "sync-client-b-v1.json", CURRENT]
+            .into_iter()
+            .chain(LATER.map(|(n, _)| n))
+        {
             assert!(
                 !text.contains(&format!("contracts/{earlier}\"")),
                 "{file} no longer selects {earlier}"
@@ -264,8 +280,9 @@ fn hpt5_selectors_name_the_current_fixture_only() {
 }
 
 /// hpt5: the successor keeps every earlier fixture as it was. Each frozen file keeps its bytes,
-/// the folder holds those and this plan's fixture and no other, this plan's fixture differs from
-/// its predecessor, and it keeps its captured bytes.
+/// the folder holds those, this plan's fixture and its successors and no other, each earlier
+/// successor keeps its bytes, this plan's fixture differs from its predecessor, and it keeps its
+/// captured bytes.
 #[test]
 fn hpt5_predecessors_keep_their_bytes() {
     for (name, want) in FROZEN {
@@ -276,11 +293,19 @@ fn hpt5_predecessors_keep_their_bytes() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    let mut want: Vec<&str> = FROZEN.iter().map(|(n, _)| *n).chain([CURRENT]).collect();
+    for (name, want) in LATER {
+        assert_eq!(sha(&bytes(name)), want, "{name} is frozen");
+    }
+    let mut want: Vec<&str> = FROZEN
+        .iter()
+        .chain(LATER.iter())
+        .map(|(n, _)| *n)
+        .chain([CURRENT, SELECTED])
+        .collect();
     want.sort();
     assert_eq!(
         names, want,
-        "the folder holds every frozen fixture and {CURRENT}"
+        "the folder holds every frozen fixture, {CURRENT}, its successors and {SELECTED}"
     );
     let now = sha(&bytes(CURRENT));
     assert_ne!(now, PREDECESSOR_SHA, "{CURRENT} is a successor, not a copy");
@@ -2446,9 +2471,20 @@ fn hpt5_owned_leaves_hold_the_planned_values() {
         format::PORTED_CHANGE_REQUIRED_RDY
     );
     assert_eq!(format::PORTED_CHANGE_REQUIRED_RDY, "0.58.0");
+    // the registry less span maps' dedup_spans, plan deltas' plan_delta and canon states'
+    // partial_history, which came later
     assert_eq!(
         fixture["store"]["registered_names"],
-        json!(format::REGISTERED_FEATURES)
+        json!(
+            format::REGISTERED_FEATURES
+                .iter()
+                .filter(|n| {
+                    **n != format::FEATURE_DEDUP_SPANS
+                        && **n != format::FEATURE_PLAN_DELTA
+                        && **n != format::FEATURE_PARTIAL_HISTORY
+                })
+                .collect::<Vec<_>>()
+        )
     );
     assert_eq!(
         fixture["store"]["features"]
@@ -3073,11 +3109,14 @@ fn open_refused(root: &Path, what: &str) -> RdyError {
 }
 
 /// The minimum rdy a store's manifest asks for: the highest `required_rdy` of its features.
+/// The minimum rdy of `r`'s features as this plan knew them: span maps' `dedup_spans` and plan
+/// deltas' `plan_delta` came later.
 fn minimum_rdy(r: &Rdy) -> (u32, u32, u32) {
     r.store()
         .features()
         .features
         .iter()
+        .filter(|f| f.name != format::FEATURE_DEDUP_SPANS && f.name != format::FEATURE_PLAN_DELTA)
         .map(|f| version_of(&f.required_rdy))
         .max()
         .expect("a feature")
@@ -3112,8 +3151,14 @@ fn hpt5_formats_stay_fixed_and_first_use_is_required() {
         (2, 3, 4),
         "the stream formats"
     );
-    assert_eq!(rdy_store::sync_stream::READ_FORMATS, [2, 3, 4]);
-    assert_eq!(format::REGISTERED_FEATURES.len(), 13);
+    // format 5 (the canon state) came later; this release read 2, 3 and 4
+    assert_eq!(rdy_store::sync_stream::READ_FORMATS[..3], [2, 3, 4]);
+    // span maps' dedup_spans, plan deltas' plan_delta and canon states' partial_history came
+    // later
+    assert_eq!(format::REGISTERED_FEATURES.len(), 16);
+    assert!(format::REGISTERED_FEATURES.contains(&format::FEATURE_PARTIAL_HISTORY));
+    assert!(format::REGISTERED_FEATURES.contains(&format::FEATURE_DEDUP_SPANS));
+    assert!(format::REGISTERED_FEATURES.contains(&format::FEATURE_PLAN_DELTA));
     let (was, now) = (read(PREDECESSOR), read(CURRENT));
     // a new store starts with the features it did, and not with this one
     for member in [
@@ -3439,17 +3484,16 @@ fn hpt5_ported_fixture_opens_and_keeps_its_ports() {
         .clone();
     assert_eq!(feature["class"], "incompatible");
     assert_eq!(feature["required_rdy"], format::PORTED_CHANGE_REQUIRED_RDY);
-    // a copy with no index opens, and every recorded fact reads back
+    // a copy with no index opens, and every recorded fact reads back; it plans only span maps'
+    // optional step, whose one batch follows the recorded log
     let (_base, root) = rdy_qa::foreign_fixture::project_copy(&dir);
     let plan = rdy_store::upgrade::inspect(&root.join(".rdy/store")).expect("a plan");
-    assert!(plan.steps.is_empty(), "no step: {:?}", plan.steps);
+    assert_eq!(plan.steps, [rdy_store::upgrade::DEDUP_SPANS_STEP]);
     assert!(!plan.requires_upgrade && !plan.pending_check);
     let facts = opened_facts(&root);
     assert!(root.join(".rdy/store/index.redb").exists(), "rebuilt");
-    for member in want["store"].as_object().expect("facts").keys() {
-        assert_eq!(facts[member], want["store"][member], "{member}");
-    }
     let r = Rdy::open(&root).expect("the copy");
+    rdy_qa::foreign_fixture::assert_span_mapped_facts(&r, &want["store"], "the ported fixture");
     let world = &want["world"];
     let landing: Hash = world["landing"]
         .as_str()
@@ -3513,17 +3557,25 @@ fn hpt5_ported_fixture_opens_and_keeps_its_ports() {
         &std::fs::read(qa_dir().join("fixtures/dump").join(DUMP_EXPECT)).expect("an expect file"),
     )
     .expect("json");
-    assert_eq!(
-        dump_want["formats"],
-        rdy_qa::chain_fixture::current_formats()
-    );
+    // the formats this rdy writes, less span maps' dedup_spans, which came later
+    let mut formats = rdy_qa::chain_fixture::current_formats();
+    formats["features"]["features"]
+        .as_array_mut()
+        .expect("features")
+        .retain(|f| f["name"] != format::FEATURE_DEDUP_SPANS);
+    assert_eq!(dump_want["formats"], formats);
     assert_eq!(dump_want["world"], *world);
     let scratch = tempfile::tempdir().expect("a directory");
     let loaded = rdy_qa::foreign_fixture::dump_load_facts(&dump, &scratch.path().join("loaded"));
-    assert_eq!(
-        loaded["store"]["manifest"],
-        dump_want["whole"]["store"]["manifest"]
-    );
+    // the load's tail adds dedup_spans to the recorded manifest
+    let recorded: format::StoreFeatures =
+        serde_json::from_value(dump_want["whole"]["store"]["manifest"].clone())
+            .expect("a manifest");
+    let spans: Vec<_> = format::registered_features()
+        .into_iter()
+        .filter(|f| f.name == format::FEATURE_DEDUP_SPANS)
+        .collect();
+    assert_eq!(loaded["store"]["manifest"], json!(recorded.merged(&spans)));
     assert_eq!(
         rdy_qa::foreign_fixture::dump_file_facts(&dump)["store_format"],
         dump_want["file"]["store_format"]

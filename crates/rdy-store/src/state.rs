@@ -638,12 +638,15 @@ impl StoreReader {
         Ok((merged, order, out))
     }
 
+    /// Canon's landings, head first. While the history is incomplete the walk ends at its
+    /// frontier, the oldest landing held; it never stops at another missing `prev`.
     pub fn landings(&self) -> Result<Vec<(Hash, LandingRecord)>, StoreError> {
+        let frontier = self.history_frontier()?;
         let mut out = vec![];
         let mut cur = self.canon_head()?;
         while let Some(h) = cur {
             let rec = self.landing(&h)?;
-            cur = rec.prev;
+            cur = if frontier == Some(h) { None } else { rec.prev };
             out.push((h, rec));
         }
         Ok(out)

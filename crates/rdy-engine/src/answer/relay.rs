@@ -98,7 +98,7 @@ impl RelayRefusal {
             RelayRefusal::HumanRelays => RdyError::new(
                 E_PERMISSION,
                 "a person answers as themselves; only the relaying agent records a relay",
-                "drop the relay flags, or let the agent answer with its own RDY_ACTOR",
+                "if you are the person, drop the relay flags. If you relay for the person, set RDY_ACTOR=agent:<name> to your own actor and pass that actor in --relayed-by with the person's words in --evidence",
             ),
             RelayRefusal::NoEvidence => RdyError::new(
                 E_PERMISSION,

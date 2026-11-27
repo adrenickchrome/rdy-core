@@ -1717,6 +1717,36 @@ class GateWorkflowPolicy(unittest.TestCase):
                                          'RDY_GATE_BUDGET_SECS': '${{ env.GATE_BUDGET_SECS }}'})
         self.assertIn('./scripts/ci/windows_gate.ps1', hosted['run'])
 
+    def test_r59022_gate_retry_passes_the_flake_links(self):
+        """A push run has no inputs: each job's retry step reads the repository variable and passes
+        `--flake-links` only when it is set."""
+        for name in self.jobs:
+            with self.subTest(job=name):
+                retry = step_named({'jobs': {name: self.jobs[name]}}, 'Retry failed binaries once')
+                self.assertEqual(retry['env'], {'CARGO_NET_OFFLINE': 'true',
+                                                'GATE_FLAKE_LINKS': '${{ vars.RDY_GATE_FLAKE_LINKS }}'})
+                lines = [line for line in retry['run'].splitlines() if 'cargo qa' in line]
+                self.assertEqual(len(lines), 1, lines)
+                if name == 'windows':
+                    # the flag joins the argument array only when the value is not empty
+                    self.assertIn("if ($env:GATE_FLAKE_LINKS) { $flake = @('--flake-links', $env:GATE_FLAKE_LINKS) }",
+                                  retry['run'])
+                    self.assertIn('$flake = @()', retry['run'])
+                    self.assertTrue(lines[0].endswith('--retry-failed target\\qa\\report.json @flake'), lines[0])
+                else:
+                    self.assertTrue(lines[0].endswith('--retry-failed target/qa/report.json '
+                                                      '${GATE_FLAKE_LINKS:+--flake-links "$GATE_FLAKE_LINKS"}'),
+                                    lines[0])
+                # no other step knows of it
+                for step in self.jobs[name]['steps']:
+                    if step is not retry:
+                        self.assertNotIn('FLAKE_LINKS', json.dumps(step))
+        # a push run: no new trigger, no input beyond the hosted proof's
+        on = triggers(self.doc)
+        self.assertEqual(sorted(on), ['push', 'workflow_dispatch'])
+        self.assertEqual(sorted(on['workflow_dispatch']['inputs']), ['hosted'])
+        self.assertNotIn('RDY_GATE_FLAKE_LINKS', json.dumps(on))
+
     def test_test_files_go_to_a_ram_disk_or_tmpfs_that_is_removed(self):
         linux = ' '.join(self.runs('linux'))
         self.assertIn('dir="/tmp/rdy-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', linux)

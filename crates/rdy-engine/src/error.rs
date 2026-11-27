@@ -90,6 +90,11 @@ pub const E_ITEM_MOVED: &str = "E_ITEM_MOVED";
 pub const E_ELICITATION_UNAVAILABLE: &str = "E_ELICITATION_UNAVAILABLE";
 /// Changes in the view depend on the change being excluded (each one is an issue).
 pub const E_HAS_DEPENDENTS: &str = "E_HAS_DEPENDENTS";
+/// The project's history is incomplete (a clone took its canon state first) and the call needs
+/// records behind its frontier (D-GGTYA).
+pub const E_HISTORY_PENDING: &str = "E_HISTORY_PENDING";
+/// A read omits history behind an incomplete history's frontier (D-GGTYA).
+pub const W_HISTORY_PENDING: &str = "W_HISTORY_PENDING";
 /// A subset leaves out changes its members depend on (each one is an issue).
 pub const E_DEPS_MISSING: &str = "E_DEPS_MISSING";
 /// The version being landed carries conflicts it has not resolved (each one is an issue).
@@ -661,6 +666,16 @@ pub struct RdyError {
     /// step; the caller that rewraps the error names it again. Never serialized.
     #[serde(skip)]
     pub upstream_status: Option<u16>,
+    /// The hub's structured over-cap marker on a refused get: the bytes its get cap allows, read
+    /// from the error object's `args.get_batch_bytes` of the hub's validation refusal. A fetch
+    /// splits its key group on it. Never serialized.
+    #[serde(skip)]
+    pub hub_get_cap: Option<u64>,
+    /// The seconds a busy hub asked a client to wait, as its error object's validated
+    /// `retry_after` gave them (1 to 31,536,000). The write outcome lookup reads it to pace its
+    /// own retries. Never serialized.
+    #[serde(skip)]
+    pub upstream_retry_after: Option<u64>,
 }
 
 impl RdyError {
@@ -674,6 +689,8 @@ impl RdyError {
             briefing: None,
             warnings: None,
             upstream_status: None,
+            hub_get_cap: None,
+            upstream_retry_after: None,
         }
     }
 
@@ -681,6 +698,43 @@ impl RdyError {
         self.corrected = Some(v);
         self
     }
+}
+
+/// The most entries a recovery fix lists.
+pub const FIX_LIST_MAX: usize = 32;
+/// The most Unicode scalar values one listed entry shows.
+pub const FIX_ENTRY_MAX: usize = 256;
+
+/// `entry`, cut to [`FIX_ENTRY_MAX`] Unicode scalar values: a longer one keeps 255 and ends with
+/// `…`.
+pub fn fix_entry(entry: &str) -> String {
+    if entry.chars().nth(FIX_ENTRY_MAX).is_none() {
+        return entry.to_string();
+    }
+    let mut cut: String = entry.chars().take(FIX_ENTRY_MAX - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// The entries of `entries` (`total` of them), at most [`FIX_LIST_MAX`], each cut by
+/// [`fix_entry`], joined with `, `; and the sentence to append to the fix when `total` is over
+/// the limit (else empty). The iterator is read for its first entries only.
+pub fn fix_list<I>(entries: I, total: usize) -> (String, String)
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let shown: Vec<String> = entries
+        .into_iter()
+        .take(FIX_LIST_MAX)
+        .map(|e| fix_entry(e.as_ref()))
+        .collect();
+    let more = if total > FIX_LIST_MAX {
+        format!(" First {FIX_LIST_MAX} of {total}; read the full list before retrying.")
+    } else {
+        String::new()
+    };
+    (shown.join(", "), more)
 }
 
 impl fmt::Display for RdyError {
@@ -752,7 +806,7 @@ impl From<StoreError> for RdyError {
             StoreError::Frozen(id) => RdyError::new(
                 E_FROZEN,
                 format!("{id} is an accepted or rejected decision and cannot change"),
-                format!("write a new decision that supersedes or revokes {id}"),
+                crate::reaffirm::frozen_ways(&id),
             ),
             StoreError::UnknownBlock(id) => RdyError::new(
                 E_UNKNOWN_BLOCK,
@@ -783,7 +837,7 @@ impl From<StoreError> for RdyError {
                 E_VIEW_CLOSED,
                 format!("view {v:?} is closed"),
                 format!(
-                    "reopen it with rdy undo --view {v} <close op> (rdy view show {v} lists the ops), or fork it"
+                    "reopen it with rdy undo --view {v} <close op> (rdy view show {v} lists the ops; on MCP: rdy_view {{op: \"undo\", view: \"{v}\", target: <close op>}}), or fork it (rdy_view {{op: \"fork\", from: \"{v}\", name}})"
                 ),
             ),
             StoreError::ProposalMoved { stable, latest } => RdyError::new(
@@ -907,6 +961,16 @@ impl From<StoreError> for RdyError {
             StoreError::FollowerMarkCheckLimit => RdyError::new(
                 E_LIMIT,
                 "the follower mark check exceeds 100000000 frames",
+                "report this as a bug in rdy",
+            ),
+            StoreError::DedupCorrupt => RdyError::new(
+                E_IO,
+                "the store span map is damaged",
+                "restore the store and its span map from the same backup",
+            ),
+            StoreError::DedupLimit => RdyError::new(
+                E_LIMIT,
+                "the store span map exceeds its limits",
                 "report this as a bug in rdy",
             ),
             StoreError::UpgradeRequired => RdyError::new(
@@ -1337,7 +1401,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 119] = [
+const CORE_ERROR_CODES: [&str; 120] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1455,6 +1519,7 @@ const CORE_ERROR_CODES: [&str; 119] = [
     E_UPGRADE_FAILED,
     E_STORE_FOLLOWER,
     E_STORE_READ_ONLY,
+    E_HISTORY_PENDING,
     crate::brief::E_BRIEF_REQUIRED,
     crate::brief::E_BRIEF_STALE,
 ];

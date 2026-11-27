@@ -13,6 +13,7 @@ mod merge;
 mod merge_conflicts;
 mod merge_store;
 mod plan;
+mod plan_delta;
 mod policy_landing;
 mod reaffirm_landing;
 mod replay_merge;

@@ -1,5 +1,6 @@
 pub mod answer;
 pub mod bounded;
+pub mod canon_state;
 pub mod carried_records;
 mod check;
 pub mod check_holder;
@@ -8,6 +9,9 @@ pub mod closure;
 pub mod codec;
 pub mod compact;
 pub mod coord;
+pub mod decoded_record;
+pub mod dedup;
+pub mod dedup_candidates;
 pub mod diagram_cache;
 mod dispute;
 pub mod dump;
@@ -34,6 +38,7 @@ pub mod meta;
 pub mod object_refs;
 pub mod pio;
 pub mod plan;
+pub mod plan_record;
 pub mod redaction;
 pub mod redaction_carried;
 pub mod redaction_import;
@@ -88,7 +93,7 @@ pub use merge::{
 pub use segment::SegmentReader;
 pub use store::OpenPolicy;
 pub use store::{
-    BlobState, CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL,
+    BlobState, CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, FrameCheck, INDEX_OPEN_SENTINEL,
     LeftoverHookGuard, MAX_BLOB_BYTES, NoticeCapture, OpenReport, Rollback, SealFailure, Store,
     StoreLock, StoreReader, capture_notices_for_tests, check_chunk_len, drop_unclean_for_tests,
     lock_error, notice, on_leftover_checked_for_tests, unclean_closes_for_tests,

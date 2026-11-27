@@ -14,7 +14,14 @@ mod sync_env;
 
 use hub_tls::{Reply, Server};
 use rdy_engine::hub_http::HttpHubTransport;
+use rdy_engine::hub_publish::{PublishRenderer, RenderedUpload};
+use rdy_engine::hub_publish_stream::{
+    UploadProbe, with_upload_probe_for_tests, with_upload_worker_setup_for_tests,
+};
 use rdy_engine::hub_publish_wire::{SYNC_MEDIA_TYPE, UploadContext};
+use rdy_engine::hub_sync::{
+    CAPTURE_FAILED_FIX, CAPTURE_FAILED_MESSAGE, with_canon_walk_hook_for_tests,
+};
 use rdy_engine::hub_sync::{
     CanonPreview, PreviewKind, PullRequest, PushOutcome, PushRequest, SyncService, SyncWarning,
     WriteEnd, canon_preview,
@@ -26,20 +33,24 @@ use rdy_engine::hub_sync_wire::{
 use rdy_engine::hub_types::{Origin, OriginFence, RequestClaim, Secret};
 use rdy_engine::landing_check::CheckInputs;
 use rdy_engine::readiness::assessment::pack_digest;
+use rdy_engine::render_inputs::RenderInputs;
 use rdy_engine::sync_restore::{RestoreOutcome, RestoreRequest};
 use rdy_engine::*;
 use rdy_model::Hash;
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_state::{
-    KIND_CANON, SYNC_LOCKED_FIX, SyncCanon, SyncHeld, SyncPending, SyncStep, SyncUpload,
+    KIND_CANON, KIND_VIEW, SYNC_LOCKED_FIX, SyncCanon, SyncHeld, SyncPending, SyncStep, SyncUpload,
     sync_locked_message,
 };
 use rdy_store::sync_stream::StreamPurpose;
 use std::collections::BTreeSet;
 use std::net::TcpListener;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use sync_env::*;
 
 /// A loopback install origin on a port made at run time; nothing connects to it.
@@ -177,7 +188,8 @@ fn scc8_no_state_push_seeds_extends_or_diverges() {
     let out = push(&e, &hub, None).unwrap();
     let (id, base, pushed, tip, resumed, sent) = taken(&out);
     assert_eq!((base, pushed, tip, resumed), (None, head, head, false));
-    assert_eq!(hub.steps(), ["discovery", "state", "known", "put", "write"]);
+    // an empty hub holds nothing, so the seed skips the known step
+    assert_eq!(hub.steps(), ["discovery", "state", "put", "write"]);
     let sent_keys: BTreeSet<ObjectKey> = hub.sent_keys().into_iter().collect();
     assert_eq!(sent_keys, closure(&e, head, None));
     assert_eq!(sent.batches, 1);
@@ -383,7 +395,7 @@ fn scc8_sync_serializes_each_remote_and_keeps_pending_ownership() {
             seen.clone(),
         );
         *hub.hook.lock().unwrap() = Some((
-            "known",
+            "put",
             Box::new(move |_| {
                 let before = hub2.calls().len();
                 // the same remote: refused before any request
@@ -720,7 +732,12 @@ fn scc8_sign_in_credentials_and_tls_trust_stay_on_machine() {
         ca.display()
     );
     let e = env_with(install(), &config, Some("shared"), 2);
-    let hub = Hub::new().with_state(|s| s.batch_records = 2);
+    // a held repo id keeps the known step, so every step is checked
+    let repo = repo_of(&e);
+    let hub = Hub::new().with_state(|s| {
+        s.batch_records = 2;
+        s.repo_id = Some(repo);
+    });
     // a lost write reply leaves a pending write
     hub.plan_write(1, WritePlan::Lost { apply: true });
     let s = Sync::new(&e, &hub);
@@ -802,13 +819,13 @@ fn scc8_push_sends_canon_before_selected_views() {
             (WriteKind::View, Some("alpha".into())),
         ]
     );
-    // each upload's known, put and write come after the previous write
+    // each upload's known, put and write come after the previous write; the empty hub's canon
+    // seed skips known
     assert_eq!(
         hub.steps(),
         [
             "discovery",
             "state",
-            "known",
             "put",
             "write",
             "known",
@@ -1023,7 +1040,7 @@ fn scc8_each_write_owns_one_push_quarantine() {
     let mut current = None;
     for c in hub.calls() {
         match c.step {
-            "known" if current.is_none() => current = c.push.clone(),
+            "known" | "put" if current.is_none() => current = c.push.clone(),
             "known" | "put" => assert_eq!(c.push, current, "{}", c.step),
             "write" => {
                 assert_eq!(c.push, current);
@@ -1573,21 +1590,24 @@ fn scc8_pending_lookup_precedes_put_or_write_and_never_resends() {
     let out = push(&e, &hub, None).unwrap();
     assert_eq!(
         hub.steps(),
-        ["discovery", "state", "outcome", "known", "put", "write"]
+        ["discovery", "state", "outcome", "put", "write"]
     );
     let (id, ..) = taken(&out);
     assert_ne!(id, P1);
     assert_eq!(pending_of(&e, "shared"), None);
 
-    // F7: the lookup itself refused (the write intent is open): pending stays, nothing else
+    // F7: the lookup itself refused (the write intent is open): the hub's busy refusal is waited
+    // out to the polling bound (r59016), then pending stays and nothing else goes
     let e = env(1);
     let head = e.landings[0];
     let sent = seed_pending(&e, P1, head, T0);
     let hub = Hub::new();
-    hub.fail_at("outcome", 1, hub_words("E_HUB_BUSY"));
+    script_busy(&hub, 1, 200);
     let x = err(push(&e, &hub, None));
-    assert_eq!(x.code, "E_HUB_BUSY");
-    assert_eq!(hub.steps(), ["discovery", "state", "outcome"]);
+    assert_sync_uncertain(&x, P1);
+    assert_eq!(asks(&hub).len(), 82);
+    assert_eq!(hub.steps().len(), 2 + 82);
+    assert!(hub.writes().is_empty());
     assert_eq!(pending_of(&e, "shared"), Some(sent.clone()));
     // E_HUB_NOT_FOUND (Q5): kept too
     let hub = Hub::new();
@@ -1597,10 +1617,11 @@ fn scc8_pending_lookup_precedes_put_or_write_and_never_resends() {
 
     // on pull: the lookup comes first too
     let hub = Hub::new();
-    hub.fail_at("outcome", 1, hub_words("E_HUB_BUSY"));
+    script_busy(&hub, 1, 200);
     let x = err(Sync::new(&e, &hub).pull(PullRequest::default()));
-    assert_eq!(x.code, "E_HUB_BUSY");
-    assert_eq!(hub.steps(), ["discovery", "state", "outcome"]);
+    assert_sync_uncertain(&x, P1);
+    assert_eq!(asks(&hub).len(), 82);
+    assert_eq!(hub.steps().len(), 2 + 82);
     assert_eq!(pending_of(&e, "shared"), Some(sent));
     let hub = Hub::new();
     hub.answer(
@@ -1646,7 +1667,7 @@ fn scc8_unknown_outcome_waits_for_quarantine_expiry() {
     assert_eq!(pending_of(&e, "shared"), None);
     assert_eq!(
         hub.steps(),
-        ["discovery", "state", "outcome", "known", "put", "write"]
+        ["discovery", "state", "outcome", "put", "write"]
     );
     assert_eq!(out.lookup.as_ref().unwrap().outcome, LookupOutcome::Unknown);
     assert_ne!(taken(&out).0, P1);
@@ -1662,8 +1683,9 @@ fn scc8_outcome_lookup_never_infers_from_store_and_fetches_changed_head() {
     let sent = seed_pending(&e, P1, head, T0);
     let hub = Hub::new().with_state(|s| s.canon = Some(head));
     *hub.held.lock().unwrap() = closure(&e, head, None);
-    hub.fail_at("outcome", 1, hub_words("E_HUB_BUSY"));
-    err(push(&e, &hub, None));
+    script_busy(&hub, 1, 200);
+    assert_sync_uncertain(&err(push(&e, &hub, None)), P1);
+    assert_eq!(asks(&hub).len(), 82);
     assert_eq!(pending_of(&e, "shared"), Some(sent));
     assert_eq!(canon_of(&e, "shared"), None);
 
@@ -2091,9 +2113,22 @@ fn restore_with(
     scratch: &std::path::Path,
     dump: &std::path::Path,
 ) -> Result<RestoreOutcome, RdyError> {
+    restore_polled(e, wire, renderer, scratch, dump, &PollClock::default())
+}
+
+/// [`restore_with`] whose busy outcome lookups run on the fake clock `poll`.
+fn restore_polled(
+    e: &Env,
+    wire: &dyn SyncWire,
+    renderer: &Renderer,
+    scratch: &std::path::Path,
+    dump: &std::path::Path,
+    poll: &PollClock,
+) -> Result<RestoreOutcome, RdyError> {
     let api = NoApi::default();
     let clock = Clock::at(T0);
     SyncService::new(&e.project, &e.user_file, &api, &clock, wire, renderer)
+        .with_outcome_poll_clock(poll)
         .scratch_in(scratch)
         .restore(
             &agent(),
@@ -2588,7 +2623,8 @@ fn scc8_restore_cleans_temp_store_on_every_exit() {
     assert_eq!(e.code, E_UPSTREAM_TRANSPORT);
     check("transport failure");
 
-    // a lost reply of a write that took: one outcome lookup in the same run reports it
+    // a lost reply of a write that took: the outcome lookup in the same run reports it (one
+    // lookup when the hub answers at once, as here; busy answers are waited out, r59016)
     let hub = Hub::new();
     hub.plan_write(1, WritePlan::Lost { apply: true });
     let tap = Tap::new(&hub, true);
@@ -2980,4 +3016,2629 @@ fn upfast_restore_puts_follow_the_state_reply_zstd_member() {
             assert_eq!(c.zstd, zstd, "{zstd}: {}", c.step);
         }
     }
+}
+
+/// The hub's history of a store that lacks `later` landings of it: the project, the hub's
+/// fake serving the longer store, the keys the pull must fetch, and the new tip.
+struct Lacking {
+    e: Env,
+    hub: Hub,
+    tip: Hash,
+    want: Vec<ObjectKey>,
+    _dir: tempfile::TempDir,
+    _hub_store: Local,
+}
+
+fn lacking(later: usize) -> Lacking {
+    let e = env(2);
+    let (dir, hub_store) = copy_project(&e);
+    let mut tip = e.landings[1];
+    for i in 0..later {
+        tip = land_in(&hub_store, &format!("r59023-{i}"));
+    }
+    let hub = Hub::new();
+    hub.serve(hub_store.read());
+    hub.state.lock().unwrap().canon = Some(tip);
+    let read = e.engine.read();
+    let want: Vec<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .filter(|k| !read.reader().has_kind(k.kind, &k.hash).unwrap())
+        .collect();
+    drop(read);
+    Lacking {
+        e,
+        hub,
+        tip,
+        want,
+        _dir: dir,
+        _hub_store: hub_store,
+    }
+}
+
+/// A get that the hub refuses over its cap, with the structured marker, is split in two as a
+/// get over `batch_bytes` is: each refused group's front half is asked next, the halves are
+/// fetched in turn, and the fetch completes with the hub's history.
+#[test]
+fn r59023_get_refused_over_the_cap_halves_and_completes() {
+    const CAP: u64 = 8_192;
+    let l = lacking(20);
+    let (e, hub) = (&l.e, &l.hub);
+    *hub.refuse_get_over.lock().unwrap() = Some((CAP, true));
+    Sync::new(e, hub).pull(PullRequest::default()).unwrap();
+    let gets = hub.gets.lock().unwrap().clone();
+    let replies = hub.get_replies.lock().unwrap().clone();
+    assert_eq!(gets.len(), replies.len());
+    let refused: Vec<usize> = (0..gets.len()).filter(|&i| replies[i].0 > CAP).collect();
+    assert!(!refused.is_empty(), "{replies:?}");
+    for &i in &refused {
+        let group = &gets[i].keys;
+        assert!(group.len() >= 2, "{group:?}");
+        let (front, _) = group.split_at(group.len() / 2);
+        assert_eq!(gets[i + 1].keys, front, "get {i}");
+        assert_eq!(gets[i + 1].purpose, gets[i].purpose);
+        assert_eq!(gets[i + 1].root, gets[i].root);
+    }
+    // the gets that were served ask for every wanted key once, in the hub's order
+    let kept: Vec<ObjectKey> = (0..gets.len())
+        .filter(|&i| replies[i].0 <= CAP)
+        .flat_map(|i| gets[i].keys.clone())
+        .collect();
+    assert_eq!(kept, l.want);
+    assert!(gets.len() < 2 * l.want.len(), "{}", gets.len());
+    let read = e.engine.read();
+    for k in &l.want {
+        assert!(read.reader().has_kind(k.kind, &k.hash).unwrap(), "{k:?}");
+    }
+    assert!(read.reader().has_kind(kinds::LANDING, &l.tip).unwrap());
+    drop(read);
+    assert_eq!(canon_of(e, "shared").unwrap().fetched, Some(l.tip));
+}
+
+/// The same refusal with no marker ends the fetch after one get with the hub's code, message and
+/// fix, and nothing of the history is stored. A refusal with the marker of a one-key group ends
+/// it with the hub's error unchanged, after the halving has reached that key.
+#[test]
+fn r59023_refusal_without_the_marker_ends_the_fetch() {
+    const CAP: u64 = 8_192;
+    let l = lacking(20);
+    let (e, hub) = (&l.e, &l.hub);
+    *hub.refuse_get_over.lock().unwrap() = Some((CAP, false));
+    let x = err(Sync::new(e, hub).pull(PullRequest::default()));
+    assert_eq!(x.code, "E_HUB_VALIDATION");
+    assert_eq!(
+        x.message,
+        format!("the records you asked for are larger than {CAP} bytes")
+    );
+    assert_eq!(x.fix, "ask for fewer records in each get");
+    assert_eq!(x.hub_get_cap, None);
+    assert_eq!(hub.gets.lock().unwrap().len(), 1);
+    // nothing was fetched: the tip is not held and no fetched tip is recorded
+    let read = e.engine.read();
+    assert!(!read.reader().has_kind(kinds::LANDING, &l.tip).unwrap());
+    drop(read);
+    assert_eq!(canon_of(e, "shared").and_then(|c| c.fetched), None);
+
+    // with the marker, every get is refused: the halving reaches one key and the hub's error
+    // ends the fetch, unchanged
+    *hub.refuse_get_over.lock().unwrap() = Some((1, true));
+    hub.gets.lock().unwrap().clear();
+    hub.get_replies.lock().unwrap().clear();
+    let x = err(Sync::new(e, hub).pull(PullRequest::default()));
+    assert_eq!(x.code, "E_HUB_VALIDATION");
+    assert_eq!(
+        x.message,
+        "the records you asked for are larger than 1 bytes"
+    );
+    assert_eq!(x.fix, "ask for fewer records in each get");
+    assert_eq!(x.hub_get_cap, Some(1));
+    let gets = hub.gets.lock().unwrap().clone();
+    // each refusal asks next for the front half of its group, down to one key
+    let mut n = gets[0].keys.len();
+    assert!(n >= 2, "{n}");
+    let mut steps = 1;
+    while n > 1 {
+        n /= 2;
+        steps += 1;
+    }
+    assert_eq!(gets.len(), steps);
+    assert_eq!(gets.last().unwrap().keys.len(), 1);
+    let read = e.engine.read();
+    assert!(!read.reader().has_kind(kinds::LANDING, &l.tip).unwrap());
+    drop(read);
+    assert_eq!(canon_of(e, "shared").and_then(|c| c.fetched), None);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The canon capture beside the walk, and the empty hub's seed
+// ---------------------------------------------------------------------------------------------
+
+/// How long a channel wait may take before the test fails instead of hanging. No assertion
+/// reads elapsed time.
+const STUCK: Duration = Duration::from_secs(120);
+
+/// The capture's side of a rendezvous with the walk: it signals, then waits for the walk.
+type Meet = (Mutex<mpsc::Sender<()>>, Mutex<mpsc::Receiver<()>>);
+
+/// A renderer for the canon capture: at its first capture it runs `before`, then meets the
+/// caller's walk at a rendezvous when `meet` is set, then returns `fail`, or `fixed`, or what
+/// [`Renderer`] captures. `done` is set when that first capture returns.
+#[derive(Default)]
+struct CanonRenderer<'a> {
+    inner: Renderer,
+    before: Option<Box<dyn Fn() + Send + std::marker::Sync + 'a>>,
+    meet: Option<Meet>,
+    fail: Option<RdyError>,
+    panic: bool,
+    fixed: Option<RenderInputs>,
+    first: AtomicBool,
+    done: Arc<AtomicBool>,
+}
+
+impl PublishRenderer for CanonRenderer<'_> {
+    fn capture(&self, read: &ReadState, scope: &Scope) -> Result<RenderInputs, RdyError> {
+        if self.first.swap(true, Ordering::SeqCst) {
+            return self.inner.capture(read, scope);
+        }
+        if let Some(f) = &self.before {
+            f();
+        }
+        if let Some((tx, rx)) = &self.meet {
+            tx.lock().unwrap().send(()).unwrap();
+            rx.lock()
+                .unwrap()
+                .recv_timeout(STUCK)
+                .expect("the walk starts while the capture runs");
+        }
+        if self.panic {
+            panic!("SENTINEL-PANIC {}", access());
+        }
+        let out = match (&self.fail, &self.fixed) {
+            (Some(e), _) => Err(e.clone()),
+            (None, Some(inputs)) => Ok(inputs.clone()),
+            (None, None) => self.inner.capture(read, scope),
+        };
+        self.done.store(true, Ordering::SeqCst);
+        out
+    }
+
+    fn render(
+        &self,
+        _: &ReadState,
+        _: &Scope,
+        _: &str,
+        _: &str,
+        _: &RenderInputs,
+    ) -> Result<RenderedUpload, RdyError> {
+        panic!("a sync renders nothing")
+    }
+}
+
+/// A push of `e`'s canon through `hub` with `renderer`.
+fn push_rendered(
+    e: &Env,
+    hub: &Hub,
+    renderer: &(dyn PublishRenderer + std::marker::Sync),
+    request: PushRequest,
+) -> Result<PushOutcome, RdyError> {
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    SyncService::new(&e.project, &e.user_file, &api, &clock, hub, renderer).push(
+        &e.engine,
+        &agent(),
+        request,
+    )
+}
+
+/// Lands a doc with one prose block in `engine`; returns the block's id.
+fn land_prose(engine: &Local) -> String {
+    rdy_engine::engine::with_writer_result(engine, |r| {
+        let w = r.write(
+            &writer(),
+            rdy_engine::WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(serde_json::json!([
+                    {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "secret", "title": "Secret", "doc_type": "page"}},
+                    {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The launch code is ZEBRA-7731."}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: "r5907".into(),
+            },
+        )?;
+        let p = r.propose(&writer(), "work", "batch", Some(common::TEST_SUMMARY))?;
+        common::confirm_exceptions(r, &founder(), &p);
+        r.land(&founder(), &p.id)?;
+        Ok(w.created["$p"].clone())
+    })
+    .unwrap()
+}
+
+/// Removes every version of block `target` of `engine` through the store's own landing path.
+fn remove_in(engine: &Local, target: &str) {
+    let target = target.to_string();
+    rdy_engine::engine::with_writer_result(engine, move |r| {
+        let s = writer();
+        let req = r.redact(
+            &s,
+            rdy_engine::redaction::RedactInput {
+                targets: vec![target],
+                reason_class: "secret".into(),
+                reason: "a leaked code".into(),
+                dry_run: false,
+            },
+        )?;
+        assert!(req.redaction.is_some());
+        let p = r.propose(&s, "work", "Remove the code", None)?;
+        let version: Hash = p.id.parse().unwrap();
+        r.seal_open()?;
+        r.store_mut().set_held(false)?;
+        r.store_mut().land_atomic(rdy_store::LandRequest {
+            proposal: version,
+            accept: None,
+            approver: rdy_model::Provenance {
+                actor: "human:t".into(),
+                run: None,
+                role: rdy_model::Role::Approver,
+                at_ms: 1_000_000,
+            },
+            alt: None,
+            relay: None,
+            evidence: None,
+            assessment: None,
+        })?;
+        r.store_mut().set_held(true)?;
+        r.invalidate();
+        Ok(())
+    })
+    .unwrap()
+}
+
+/// Overwrites one byte in the middle of `kind` record `hash`'s stored payload in `e`.
+fn corrupt_in(e: &Env, kind: u8, hash: &Hash) {
+    use std::io::{Seek, SeekFrom, Write};
+    let read = e.engine.read();
+    let (_, payload) = read.reader().get_kind_raw(kind, hash).unwrap();
+    let segments = read.reader().dir().join("segments");
+    let mut hits = Vec::new();
+    for entry in std::fs::read_dir(&segments).unwrap() {
+        let path = entry.unwrap().path();
+        let bytes = std::fs::read(&path).unwrap();
+        if let Some(at) = bytes.windows(payload.len()).position(|w| w == &payload[..]) {
+            hits.push((path, at));
+        }
+    }
+    assert_eq!(hits.len(), 1, "the payload is stored once");
+    let (path, at) = &hits[0];
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    let mid = payload.len() / 2;
+    f.seek(SeekFrom::Start((*at + mid) as u64)).unwrap();
+    f.write_all(&[payload[mid] ^ 0xa5]).unwrap();
+    f.sync_all().unwrap();
+}
+
+fn capture_error() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "the injected capture refusal",
+        "the test's fix",
+    )
+}
+
+#[track_caller]
+fn envelope(e: &RdyError) -> (&str, &str, &str) {
+    (e.code, e.message.as_str(), e.fix.as_str())
+}
+
+/// D-3PNRK ruling 1: the canon capture runs on one worker beside the caller's walk, and both
+/// meet before either ends; the worker joins before the first put, and only one worker runs at
+/// a time (the batch preparation's starts after the capture's joined).
+#[test]
+fn r5907_capture_overlaps_walk_and_joins_before_send() {
+    let e = env(2);
+    let head = *e.landings.last().unwrap();
+    let hub = Hub::new().with_state(|s| s.batch_records = 2);
+    let (to_walk, at_walk) = mpsc::channel();
+    let (to_capture, at_capture) = mpsc::channel();
+    let renderer = CanonRenderer {
+        meet: Some((Mutex::new(to_walk), Mutex::new(at_capture))),
+        ..CanonRenderer::default()
+    };
+    let done = renderer.done.clone();
+    let walk: Arc<dyn Fn() + Send + std::marker::Sync> = {
+        let (to_capture, at_walk) = (Mutex::new(to_capture), Mutex::new(at_walk));
+        Arc::new(move || {
+            to_capture.lock().unwrap().send(()).unwrap();
+            at_walk
+                .lock()
+                .unwrap()
+                .recv_timeout(STUCK)
+                .expect("the capture runs while the walk starts");
+        })
+    };
+    let captured_before_put = Arc::new(Mutex::new(None));
+    {
+        let (done, seen) = (done.clone(), captured_before_put.clone());
+        *hub.hook.lock().unwrap() = Some((
+            "put",
+            Box::new(move |_| *seen.lock().unwrap() = Some(done.load(Ordering::SeqCst))),
+        ));
+    }
+    // the worker setup reaches the capture's and the preparation's workers
+    let workers = Arc::new(Mutex::new(Vec::new()));
+    let setup: rdy_engine::hub_publish_stream::UploadWorkerSetup = {
+        let workers = workers.clone();
+        Arc::new(move || {
+            let name = std::thread::current().name().unwrap_or("").to_string();
+            workers.lock().unwrap().push(name);
+            Box::new(())
+        })
+    };
+    let probe = Arc::new(UploadProbe::default());
+    let out = with_upload_worker_setup_for_tests(setup, || {
+        with_upload_probe_for_tests(probe.clone(), || {
+            with_canon_walk_hook_for_tests(walk, || {
+                push_rendered(&e, &hub, &renderer, PushRequest::default())
+            })
+        })
+    })
+    .unwrap();
+    let (_, base, pushed, _, _, sent) = taken(&out);
+    assert_eq!((base, pushed), (None, head));
+    assert!(sent.batches >= 2, "{sent:?}");
+    assert_eq!(*captured_before_put.lock().unwrap(), Some(true));
+    let steps = hub.steps();
+    assert_eq!(&steps[..3], ["discovery", "state", "put"]);
+    assert_eq!(steps.last(), Some(&"write"));
+    assert_eq!(
+        *workers.lock().unwrap(),
+        ["rdy-canon-capture", "rdy-upload-prepare"]
+    );
+    assert_eq!(probe.workers_started.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.max_workers.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.live_workers.load(Ordering::SeqCst), 0);
+    // one capture of canon, as before
+    assert_eq!(renderer.inner.scopes.lock().unwrap().len(), 1);
+}
+
+/// D-3PNRK ruling 1: when the capture and the walk both fail, the capture's error is returned;
+/// a capture that succeeds never hides a failed walk; a capture panic is core's own words. Each
+/// joins its worker, and nothing is sent or written.
+#[test]
+fn r5907_capture_failure_precedes_walk_failure() {
+    for case in ["both", "walk only", "panic"] {
+        let e = env(2);
+        let block = land_prose(&e.engine);
+        let fixed = rdy_engine::render_inputs::capture(&e.engine.read()).unwrap();
+        let (removed, at_walk) = mpsc::channel();
+        let engine = &e.engine;
+        let renderer = CanonRenderer {
+            // the removal lands while the walk waits, so the walk's reads fail
+            before: Some(Box::new(move || {
+                remove_in(engine, &block);
+                removed.send(()).unwrap();
+            })),
+            fail: (case == "both").then(capture_error),
+            panic: case == "panic",
+            fixed: Some(fixed),
+            ..CanonRenderer::default()
+        };
+        let walk: Arc<dyn Fn() + Send + std::marker::Sync> = {
+            let at_walk = Mutex::new(at_walk);
+            Arc::new(move || {
+                at_walk.lock().unwrap().recv_timeout(STUCK).unwrap();
+            })
+        };
+        let hub = Hub::new();
+        let probe = Arc::new(UploadProbe::default());
+        let got = with_upload_probe_for_tests(probe.clone(), || {
+            with_canon_walk_hook_for_tests(walk, || {
+                push_rendered(&e, &hub, &renderer, PushRequest::default())
+            })
+        });
+        let x = err(got);
+        match case {
+            "both" => assert_eq!(envelope(&x), envelope(&capture_error())),
+            "walk only" => assert_eq!(x.code, E_REDACTED_STATE, "{x}"),
+            _ => {
+                assert_eq!(
+                    envelope(&x),
+                    (E_INTERNAL, CAPTURE_FAILED_MESSAGE, CAPTURE_FAILED_FIX)
+                );
+                assert!(!format!("{x:?}").contains("SENTINEL"));
+                assert!(!format!("{x:?}").contains(&access()));
+            }
+        }
+        assert_eq!(hub.steps(), ["discovery", "state"], "{case}");
+        assert_eq!(probe.workers_started.load(Ordering::SeqCst), 1, "{case}");
+        assert_eq!(probe.live_workers.load(Ordering::SeqCst), 0, "{case}");
+        assert_eq!(upload_of(&e, "shared"), None, "{case}");
+        assert_eq!(pending_of(&e, "shared"), None, "{case}");
+    }
+}
+
+/// The captured read stays the one the push sends: a landing during the capture is left out,
+/// and a removal during it refuses the push.
+#[test]
+fn r5907_capture_and_epoch_guards_survive() {
+    // a later append is excluded
+    let e = env(2);
+    let head = *e.landings.last().unwrap();
+    let engine = &e.engine;
+    let later = Arc::new(Mutex::new(None));
+    let renderer = CanonRenderer {
+        before: Some(Box::new({
+            let later = later.clone();
+            move || *later.lock().unwrap() = Some(land_in(engine, "later"))
+        })),
+        ..CanonRenderer::default()
+    };
+    let hub = Hub::new();
+    let out = push_rendered(&e, &hub, &renderer, PushRequest::default()).unwrap();
+    let (_, base, pushed, tip, _, _) = taken(&out);
+    assert_eq!((base, pushed, tip), (None, head, head));
+    let sent_keys: BTreeSet<ObjectKey> = hub.sent_keys().into_iter().collect();
+    assert_eq!(sent_keys, closure(&e, head, None));
+    let later = later.lock().unwrap().unwrap();
+    assert!(!sent_keys.contains(&landing(later)));
+    assert_eq!(e.engine.read().canon_head(), Some(later));
+    assert_eq!(hub.state.lock().unwrap().canon, Some(head));
+
+    // a later removal refuses before anything is sent
+    let e = env(2);
+    let block = land_prose(&e.engine);
+    let engine = &e.engine;
+    let renderer = CanonRenderer {
+        before: Some(Box::new(move || remove_in(engine, &block))),
+        ..CanonRenderer::default()
+    };
+    let hub = Hub::new();
+    let x = err(push_rendered(&e, &hub, &renderer, PushRequest::default()));
+    assert_eq!(x.code, E_REDACTED_STATE, "{x}");
+    assert_eq!(hub.steps(), ["discovery", "state"]);
+    assert_eq!(upload_of(&e, "shared"), None);
+}
+
+/// D-3PNRK ruling 1: a new canon push to an empty hub (no repo id, no canon, no view) sends its
+/// first put with no known step; a held repo id, a resumed push and a view keep known. A bad
+/// record refuses before any put, and a racing seed loses the hub's compare.
+#[test]
+fn r5907_seed_skips_known_only_when_empty() {
+    // empty and new: put first, every key travels
+    let e = env(2);
+    let head = *e.landings.last().unwrap();
+    let hub = Hub::new();
+    taken(&push(&e, &hub, None).unwrap());
+    assert_eq!(hub.steps(), ["discovery", "state", "put", "write"]);
+    let sent_keys: BTreeSet<ObjectKey> = hub.sent_keys().into_iter().collect();
+    assert_eq!(sent_keys, closure(&e, head, None));
+
+    // a hub that holds the repo but no canon keeps known
+    let e = env(2);
+    let repo = repo_of(&e);
+    let hub = Hub::new().with_state(|s| s.repo_id = Some(repo));
+    taken(&push(&e, &hub, None).unwrap());
+    assert_eq!(hub.steps(), ["discovery", "state", "known", "put", "write"]);
+
+    // a view keeps known, after canon's seed
+    let e = env(1);
+    write_in(&e.engine, "alpha", "a1");
+    let hub = Hub::new();
+    Sync::new(&e, &hub)
+        .push(PushRequest {
+            views: names(&["alpha"]),
+            ..PushRequest::default()
+        })
+        .unwrap();
+    assert_eq!(
+        hub.steps(),
+        [
+            "discovery",
+            "state",
+            "put",
+            "write",
+            "known",
+            "put",
+            "write"
+        ]
+    );
+    assert_eq!(
+        write_kinds(&hub),
+        [
+            (WriteKind::Landings, None),
+            (WriteKind::View, Some("alpha".into()))
+        ]
+    );
+
+    // a resumed push keeps known, under the same push id
+    let e = env(2);
+    let hub = Hub::new().with_state(|s| s.batch_records = 2);
+    hub.fail_at("put", 2, transport_failure());
+    let x = err(push(&e, &hub, None));
+    assert_eq!(x.code, E_UPSTREAM_TRANSPORT, "{x}");
+    let first = hub.calls()[2].push.clone();
+    assert_eq!(hub.steps()[..3], ["discovery", "state", "put"]);
+    let slot = upload_of(&e, "shared").expect("the upload slot stays");
+    hub.clear();
+    let out = push(&e, &hub, None).unwrap();
+    let (id, _, _, _, resumed, _) = taken(&out);
+    assert!(resumed);
+    assert_eq!(Some(id.clone()), first);
+    assert_eq!(slot.push, id);
+    assert_eq!(hub.steps()[..3], ["discovery", "state", "known"]);
+
+    // a bad record refuses before any put
+    let e = env(2);
+    let landing_record: rdy_model::LandingRecord = e
+        .engine
+        .read()
+        .reader()
+        .get_typed(kinds::LANDING, &e.landings[0])
+        .unwrap();
+    corrupt_in(&e, kinds::CHANGE, &landing_record.changes[0]);
+    let hub = Hub::new();
+    let x = err(push(&e, &hub, None));
+    assert_eq!(x.code, E_IO, "{x}");
+    assert_eq!(hub.steps(), ["discovery", "state"]);
+    assert_eq!(upload_of(&e, "shared"), None);
+
+    // a seed racing another loses the hub's compare: canon is unchanged and nothing retries
+    let e = env(2);
+    let hub = Hub::new();
+    hub.plan_write(1, WritePlan::Refuse(hub_words("E_HUB_BEHIND")));
+    let head = e.engine.read().canon_head();
+    let out = push(&e, &hub, None).unwrap();
+    let WriteEnd::Refused { error, .. } = &out.canon else {
+        panic!("{out:?}")
+    };
+    assert_eq!(error.code, "E_HUB_BEHIND");
+    assert_eq!(hub.steps(), ["discovery", "state", "put", "write"]);
+    assert_eq!(hub.writes().len(), 1);
+    assert_eq!(canon_of(&e, "shared"), None);
+    assert_eq!(e.engine.read().canon_head(), head);
+    assert_eq!(hub.state.lock().unwrap().canon, None);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Busy outcome lookups (r59016: D-GS59E, D-H0BZN, D-J3YA0)
+// ---------------------------------------------------------------------------------------------
+
+/// The quarantine life these tests give the fake hub, in seconds and milliseconds. The sign-in
+/// lasts an hour, so a clock two lives on still holds a valid access.
+const QUARANTINE_S: u64 = 60;
+const QUARANTINE_MS: i64 = 60_000;
+
+/// Scripts the next `n` outcome lookups of `hub` as busy refusals that ask for `seconds`.
+fn script_busy(hub: &Hub, seconds: u64, n: usize) {
+    let seen = hub.steps().iter().filter(|s| **s == "outcome").count();
+    for i in 1..=n {
+        hub.fail_at("outcome", seen + i, busy_refusal(seconds));
+    }
+}
+
+/// What the hub answers to the lookup of the write it saw last.
+#[derive(Clone, Copy)]
+enum Last {
+    Taken,
+    /// Taken, with a tip of this kind in place of the write's own.
+    TakenAs(u8),
+    Held(u64),
+    Refused(&'static str),
+}
+
+/// Makes every outcome lookup of `hub` that no refusal scripts answer as `last` for the latest
+/// write the hub received (its push id is not known before the run).
+fn answer_last_write(hub: &Arc<Hub>, last: Last) {
+    let weak = Arc::downgrade(hub);
+    *hub.each.lock().unwrap() = Some((
+        "outcome",
+        Box::new(move |_| {
+            let h = weak.upgrade().expect("the hub is alive");
+            let w = h.writes().last().cloned().expect("a write came first");
+            let outcome = match last {
+                Last::Taken | Last::TakenAs(_) => {
+                    let tip = match &w.view {
+                        None => h.state.lock().unwrap().canon,
+                        Some(name) => h.views.lock().unwrap().get(name).map(|v| v.1),
+                    }
+                    .expect("the write moved the hub");
+                    let kind = match last {
+                        Last::TakenAs(kind) => kind,
+                        _ => w.root_kind(),
+                    };
+                    LookupOutcome::Taken {
+                        tip: ObjectKey { kind, hash: tip },
+                    }
+                }
+                Last::Held(number) => LookupOutcome::Held {
+                    request: HubRequest { number, version: 1 },
+                    tip: None,
+                },
+                Last::Refused(code) => LookupOutcome::Refused { code: code.into() },
+            };
+            h.answer(&w.push, outcome);
+        }),
+    ));
+}
+
+/// Advances `poll` by `seconds` at the start of every outcome lookup of `hub`: a lookup that
+/// takes that long.
+fn lookup_costs(hub: &Hub, poll: &Arc<PollClock>, seconds: u64) {
+    let poll = Arc::clone(poll);
+    *hub.each.lock().unwrap() = Some((
+        "outcome",
+        Box::new(move |_| poll.advance(Duration::from_secs(seconds))),
+    ));
+}
+
+/// Seeds a sent write of view `view` at head `head`, as [`seed_pending`] seeds canon's.
+fn seed_view_pending(e: &Env, push: &str, view: &str, head: Hash, at_ms: i64) -> SyncPending {
+    let pending = SyncPending {
+        repo_id: repo_of(e),
+        url: e.url.clone(),
+        push: push.into(),
+        kind: KIND_VIEW,
+        view: Some(view.into()),
+        expected: None,
+        head,
+        at_ms,
+    };
+    seed_sync(
+        e,
+        "shared",
+        vec![
+            SyncStep::Upload(SyncUpload {
+                repo_id: pending.repo_id,
+                url: pending.url.clone(),
+                push: push.into(),
+                kind: KIND_VIEW,
+                view: Some(view.into()),
+                at_ms,
+            }),
+            SyncStep::Send(pending.clone()),
+        ],
+    );
+    pending
+}
+
+/// The recovery of a found pending write by the next push or pull: the lookup's outcome.
+fn recover(s: &Sync<'_>, pull: bool) -> Result<Option<LookupOutcome>, RdyError> {
+    if pull {
+        s.pull(PullRequest::default())
+            .map(|o| o.lookup.map(|l| l.outcome))
+    } else {
+        s.push(PushRequest::default())
+            .map(|o| o.lookup.map(|l| l.outcome))
+    }
+}
+
+/// How many outcome lookups the hub saw, and the push ids they named.
+fn asks(hub: &Hub) -> Vec<String> {
+    hub.calls()
+        .iter()
+        .filter(|c| c.step == "outcome")
+        .map(|c| c.push.clone().expect("a lookup names its push"))
+        .collect()
+}
+
+/// A restore of a project dump whose canon write's reply is lost (the write took), on a hub the
+/// `setup` scripts and a fake clock it may use. Returns what the run left.
+type Restored = (
+    Arc<Hub>,
+    Arc<PollClock>,
+    tempfile::TempDir,
+    Result<RestoreOutcome, RdyError>,
+);
+
+fn lost_restore(setup: impl FnOnce(&Arc<Hub>, &Arc<PollClock>)) -> Restored {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let src = env(1);
+    let dump = dump_of(&src.engine, dir.path(), "project.rdydump");
+    let hub = Arc::new(Hub::new());
+    let poll = Arc::new(PollClock::default());
+    hub.plan_write(1, WritePlan::Lost { apply: true });
+    setup(&hub, &poll);
+    let renderer = Renderer::default();
+    let result = restore_polled(&caller, &*hub, &renderer, scratch.path(), &dump, &poll);
+    (hub, poll, scratch, result)
+}
+
+/// A restore of a hub dump that holds view `v1`, whose view write's reply is lost (the write
+/// took) after a canon write that is answered.
+fn lost_view_restore(setup: impl FnOnce(&Arc<Hub>, &Arc<PollClock>)) -> Restored {
+    let dir = private_dir();
+    let scratch = private_dir();
+    let caller = env(0);
+    let hsrc = env(1);
+    write_in(&hsrc.engine, "v1", "a");
+    let dump = hub_dump(&hsrc, &["v1"], None, dir.path(), "hub.rdydump");
+    let hub = Arc::new(Hub::new().with_state(|s| s.repo_id = Some(repo_of(&hsrc))));
+    let poll = Arc::new(PollClock::default());
+    hub.plan_write(2, WritePlan::Lost { apply: true });
+    setup(&hub, &poll);
+    let renderer = Renderer::default();
+    let result = restore_polled(&caller, &*hub, &renderer, scratch.path(), &dump, &poll);
+    (hub, poll, scratch, result)
+}
+
+/// The sync words of an uncertain pending write of push `push`.
+#[track_caller]
+fn assert_sync_uncertain(x: &RdyError, push: &str) {
+    assert_eq!(
+        (x.code, x.message.as_str(), x.fix.as_str()),
+        (
+            E_UPSTREAM_UNCERTAIN,
+            &*format!("the sync write of push {push} may have completed"),
+            &*format!(
+                "run rdy push or rdy pull again: rdy finds the outcome of push {push} before it writes again"
+            ),
+        )
+    );
+}
+
+/// A restore's uncertain words, with the one issue that names `push` and no warning.
+#[track_caller]
+fn assert_restore_uncertain(x: &RdyError, push: &str) {
+    assert_eq!(
+        (x.code, x.message.as_str(), x.fix.as_str()),
+        (
+            E_UPSTREAM_UNCERTAIN,
+            "the hub request may have completed",
+            "check its state on the hub before trying again"
+        )
+    );
+    assert_eq!(x.issues.len(), 1, "{:?}", x.issues);
+    assert_eq!(
+        (x.issues[0].code, x.issues[0].message.as_str()),
+        (
+            E_UPSTREAM_UNCERTAIN,
+            &*format!("the restore's write of push {push} has no known outcome")
+        )
+    );
+    assert_eq!(
+        x.issues[0].fix,
+        "check its state on the hub before trying again"
+    );
+}
+
+/// D-GS59E, D-H0BZN: a lookup that finds the hub still running the write waits its
+/// `retry_after` and asks again for the same push id, on a pending write's recovery by push and
+/// by pull (canon's and a view's) and on a restore's lost write (canon's and a view's). The
+/// taken reply applies once, and `pending` clears only then.
+#[test]
+fn r59016_busy_then_taken() {
+    // a pending canon write, found by push and by pull
+    for pull in [false, true] {
+        let e = env(1);
+        let head = e.landings[0];
+        seed_pending(&e, P1, head, T0);
+        let hub = Hub::new().with_state(|s| s.canon = Some(head));
+        *hub.held.lock().unwrap() = closure(&e, head, None);
+        let copy = pull.then(|| copy_project(&e));
+        if let Some((_, hub_store)) = &copy {
+            hub.serve(hub_store.read());
+        }
+        hub.fail_at("outcome", 1, busy_refusal(2));
+        hub.fail_at("outcome", 2, busy_refusal(5));
+        hub.answer(P1, LookupOutcome::Taken { tip: landing(head) });
+        let s = Sync::new(&e, &hub);
+        let out = recover(&s, pull).unwrap();
+        assert!(matches!(out, Some(LookupOutcome::Taken { .. })), "{out:?}");
+        assert_eq!(asks(&hub), [P1, P1, P1], "pull: {pull}");
+        assert_eq!(s.poll.seconds(), [2, 5]);
+        assert!(hub.writes().is_empty());
+        assert_eq!(pending_of(&e, "shared"), None);
+        assert_eq!(canon_of(&e, "shared").unwrap().applied, Some(head));
+    }
+
+    // a pending view write: a view op is its taken tip
+    let e = env(1);
+    write_in(&e.engine, "v1", "a");
+    let v1 = view_head(&e, "v1");
+    seed_view_pending(&e, P1, "v1", v1, T0);
+    let canon = e.landings[0];
+    let hub = Hub::new().with_state(|s| s.canon = Some(canon));
+    *hub.held.lock().unwrap() = closure(&e, canon, None);
+    hub.fail_at("outcome", 1, busy_refusal(2));
+    hub.fail_at("outcome", 2, busy_refusal(5));
+    hub.answer(
+        P1,
+        LookupOutcome::Taken {
+            tip: ObjectKey {
+                kind: kinds::VIEW_OP,
+                hash: v1,
+            },
+        },
+    );
+    let s = Sync::new(&e, &hub);
+    let out = recover(&s, false).unwrap();
+    assert!(matches!(out, Some(LookupOutcome::Taken { .. })), "{out:?}");
+    assert_eq!(asks(&hub), [P1, P1, P1]);
+    assert_eq!(s.poll.seconds(), [2, 5]);
+    assert_eq!(pending_of(&e, "shared"), None);
+    let applied = e.engine.read().reader().sync_view("shared", "v1").unwrap();
+    assert_eq!(applied.unwrap().applied, Some(v1));
+
+    // a restore's lost canon write: one lookup record, the temporary store gone
+    let (hub, poll, scratch, out) = lost_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(2));
+        hub.fail_at("outcome", 2, busy_refusal(5));
+        answer_last_write(hub, Last::Taken);
+    });
+    let out = out.unwrap();
+    assert_eq!(hub.writes().len(), 1);
+    let push = hub.writes()[0].push.clone();
+    assert_eq!(asks(&hub), [push.clone(), push.clone(), push.clone()]);
+    assert_eq!(poll.seconds(), [2, 5]);
+    assert_eq!(out.lookups.len(), 1);
+    assert_eq!(out.lookups[0].push, push);
+    assert!(matches!(
+        out.lookups[0].outcome,
+        LookupOutcome::Taken { .. }
+    ));
+    assert_eq!(
+        taken_end(&out.canon).2,
+        hub.state.lock().unwrap().canon.unwrap()
+    );
+    assert!(is_empty_dir(scratch.path()));
+
+    // a restore's lost view write: the taken tip must be a view op
+    let (hub, poll, scratch, out) = lost_view_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(2));
+        hub.fail_at("outcome", 2, busy_refusal(5));
+        answer_last_write(hub, Last::Taken);
+    });
+    let out = out.unwrap();
+    assert_eq!(hub.writes().len(), 2);
+    let push = hub.writes()[1].push.clone();
+    assert_eq!(asks(&hub), [push.clone(), push.clone(), push.clone()]);
+    assert_eq!(poll.seconds(), [2, 5]);
+    assert_eq!(out.lookups.len(), 1);
+    assert_eq!(out.lookups[0].view.as_deref(), Some("v1"));
+    assert!(matches!(&out.views[..], [(n, WriteEnd::Taken { .. })] if n == "v1"));
+    assert!(is_empty_dir(scratch.path()));
+
+    let (hub, _, scratch, out) = lost_view_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(1));
+        answer_last_write(hub, Last::TakenAs(kinds::LANDING));
+    });
+    assert_eq!(err(out).code, E_UPSTREAM_PROTOCOL);
+    assert_eq!(hub.writes().len(), 2);
+    assert!(is_empty_dir(scratch.path()));
+}
+
+/// D-H0BZN, D-GS59E: the hub state a push or pull captured while the write still ran is stale
+/// once the recovery learns the write took. Local canon and the pending head are B (parent A);
+/// the pull's state names canon A, the lookup polls busy, then answers taken(B). The operation
+/// reads the hub state again after the recovery, so local canon stays B, no landing is marked
+/// replaced, and `pending` clears once.
+#[test]
+fn r59016_busy_then_taken_keeps_the_newer_canon() {
+    for pull in [false, true] {
+        let e = env(2);
+        let (a, b) = (e.landings[0], e.landings[1]);
+        seed_pending(&e, P1, b, T0);
+        let hub = Arc::new(Hub::new().with_state(|s| s.canon = Some(a)));
+        *hub.held.lock().unwrap() = closure(&e, b, None);
+        let copy = copy_project(&e);
+        hub.serve(copy.1.read());
+        hub.fail_at("outcome", 1, busy_refusal(1));
+        hub.answer(P1, LookupOutcome::Taken { tip: landing(b) });
+        // the write completes while the lookup waits: later state reads name canon B
+        let weak = Arc::downgrade(&hub);
+        let mut seen = 0;
+        *hub.each.lock().unwrap() = Some((
+            "outcome",
+            Box::new(move |_| {
+                seen += 1;
+                if seen == 2 {
+                    let h = weak.upgrade().expect("the hub is alive");
+                    h.state.lock().unwrap().canon = Some(b);
+                }
+            }),
+        ));
+        let s = Sync::new(&e, &hub);
+        let replaced = if pull {
+            let out = s.pull(PullRequest::default()).unwrap();
+            assert!(matches!(
+                out.lookup.map(|l| l.outcome),
+                Some(LookupOutcome::Taken { .. })
+            ));
+            out.canon.and_then(|c| c.replaced)
+        } else {
+            let out = s.push(PushRequest::default()).unwrap();
+            assert!(matches!(
+                out.lookup.map(|l| l.outcome),
+                Some(LookupOutcome::Taken { .. })
+            ));
+            None
+        };
+        assert_eq!(replaced, None, "pull: {pull}");
+        assert_eq!(e.engine.read().canon_head(), Some(b), "pull: {pull}");
+        assert_eq!(asks(&hub), [P1, P1], "pull: {pull}");
+        assert_eq!(s.poll.seconds(), [1]);
+        // the state is read again after the recovery, before any further sync work
+        assert_eq!(hub.states.lock().unwrap().len(), 2, "pull: {pull}");
+        assert!(hub.writes().is_empty());
+        assert_eq!(pending_of(&e, "shared"), None);
+        assert_eq!(canon_of(&e, "shared").unwrap().applied, Some(b));
+        let marks = e
+            .engine
+            .read()
+            .reader()
+            .refs_with_prefix("replaced/")
+            .unwrap();
+        assert!(marks.is_empty(), "pull: {pull}");
+    }
+
+    // a recovery that waited on no busy reply keeps its single state read
+    let e = env(2);
+    let b = e.landings[1];
+    seed_pending(&e, P1, b, T0);
+    let hub = Hub::new().with_state(|s| s.canon = Some(b));
+    *hub.held.lock().unwrap() = closure(&e, b, None);
+    hub.answer(P1, LookupOutcome::Taken { tip: landing(b) });
+    let s = Sync::new(&e, &hub);
+    s.push(PushRequest::default()).unwrap();
+    assert_eq!(hub.states.lock().unwrap().len(), 1);
+    assert!(s.poll.seconds().is_empty());
+}
+
+/// One recovery of a pending write that the hub keeps busy: returns the lookups made and the
+/// seconds waited, after pinning the exact error and that nothing else changed.
+fn bounded_pending(view: bool, pull: bool, retry: u64, cost: u64, epoch: i64) -> (usize, Vec<u64>) {
+    let e = env(1);
+    let head = e.landings[0];
+    let sent = if view {
+        write_in(&e.engine, "v1", "a");
+        let v1 = view_head(&e, "v1");
+        seed_view_pending(&e, P1, "v1", v1, T0)
+    } else {
+        seed_pending(&e, P1, head, T0)
+    };
+    let hub = Hub::new().with_state(|s| {
+        s.canon = Some(head);
+        s.quarantine_seconds = QUARANTINE_S;
+    });
+    script_busy(&hub, retry, 200);
+    let s = Sync::new(&e, &hub);
+    s.clock.0.store(epoch, Ordering::SeqCst);
+    if cost > 0 {
+        lookup_costs(&hub, &s.poll, cost);
+    }
+    let x = err(recover(&s, pull));
+    assert_sync_uncertain(&x, P1);
+    let n = asks(&hub).len();
+    // discovery and state, then lookups only: no known, put, get or write
+    assert_eq!(hub.steps().len(), 2 + n, "{:?}", hub.steps());
+    assert!(hub.writes().is_empty());
+    assert_eq!(pending_of(&e, "shared"), Some(sent));
+    assert_eq!(canon_of(&e, "shared"), None);
+    assert_eq!(
+        e.engine.read().reader().sync_view("shared", "v1").unwrap(),
+        None
+    );
+    (n, s.poll.seconds())
+}
+
+/// D-GS59E: past the polling bound the lookup stops with the uncertain words and changes
+/// nothing. At zero cost and `retry_after` 1 it makes 82 lookups and 81 waits; at 5, 17 and 16;
+/// a lookup that takes 39 seconds leaves room for three lookups and two waits. The bound is the
+/// fake monotonic clock's: the epoch clock the stored refs use never feeds it.
+#[test]
+fn r59016_busy_past_bound_is_uncertain() {
+    let cases: [(u64, u64, usize, usize); 3] = [(1, 0, 82, 81), (5, 0, 17, 16), (1, 39, 3, 2)];
+    for (retry, cost, calls, waits) in cases {
+        let ones = vec![retry.clamp(1, 5); waits];
+        for (i, (view, pull)) in [(false, false), (false, true), (true, false)]
+            .into_iter()
+            .enumerate()
+        {
+            // the epoch clock may stand anywhere, and go back
+            let epoch = [T0, T0 + 2 * QUARANTINE_MS, T0 - 5_000_000][i];
+            let (n, seconds) = bounded_pending(view, pull, retry, cost, epoch);
+            assert_eq!(
+                (n, seconds.clone()),
+                (calls, ones.clone()),
+                "pending view {view} pull {pull} retry {retry} cost {cost}"
+            );
+        }
+
+        // a restore's lost write: its own uncertain words, no busy warning
+        let (hub, poll, scratch, out) = lost_restore(|hub, poll| {
+            script_busy(hub, retry, 200);
+            if cost > 0 {
+                lookup_costs(hub, poll, cost);
+            }
+        });
+        let x = err(out);
+        let push = hub.writes()[0].push.clone();
+        assert_restore_uncertain(&x, &push);
+        assert_eq!(asks(&hub).len(), calls, "restore retry {retry} cost {cost}");
+        assert_eq!(poll.seconds(), ones);
+        assert_eq!(hub.writes().len(), 1);
+        assert!(is_empty_dir(scratch.path()));
+
+        // a restore's lost view write
+        let (hub, poll, scratch, out) = lost_view_restore(|hub, poll| {
+            script_busy(hub, retry, 200);
+            if cost > 0 {
+                lookup_costs(hub, poll, cost);
+            }
+        });
+        let x = err(out);
+        let push = hub.writes()[1].push.clone();
+        assert_restore_uncertain(&x, &push);
+        assert_eq!(asks(&hub).len(), calls);
+        assert_eq!(poll.seconds(), ones);
+        assert_eq!(hub.writes().len(), 2);
+        assert!(is_empty_dir(scratch.path()));
+    }
+}
+
+/// D-H0BZN "After a lost write reply, the client never sends that write again": while the hub
+/// answers busy, the restore and the next push or pull send no known, put, write or get, also
+/// when the pending record is older than the quarantine life; a bound exit keeps it so, and a
+/// later taken reply clears `pending` without sending that push id's write again.
+#[test]
+fn r59016_busy_never_sends_a_second_write() {
+    // a restore: the one write is the lost one
+    let seen = Arc::new(Mutex::new(Vec::<(usize, &'static str)>::new()));
+    let (hub, poll, _scratch, out) = lost_restore(|hub, poll| {
+        script_busy(hub, 1, 200);
+        let (weak, probe) = (Arc::downgrade(hub), Arc::clone(&seen));
+        poll.on_wait(move |_| {
+            let h = weak.upgrade().unwrap();
+            probe
+                .lock()
+                .unwrap()
+                .push((h.writes().len(), *h.steps().last().unwrap()));
+        });
+    });
+    assert_restore_uncertain(&err(out), &hub.writes()[0].push);
+    assert_eq!(poll.seconds().len(), 81);
+    assert_eq!(seen.lock().unwrap().len(), 81);
+    assert!(seen.lock().unwrap().iter().all(|s| *s == (1, "outcome")));
+    assert_eq!(hub.writes().len(), 1);
+    let steps = hub.steps();
+    let write_at = steps.iter().position(|s| *s == "write").unwrap();
+    assert!(steps[write_at + 1..].iter().all(|s| *s == "outcome"));
+
+    // a push that loses its write reply stops at once; the next push and pull wait
+    let e = env(1);
+    let head = e.landings[0];
+    let hub = Arc::new(Hub::new().with_state(|s| s.quarantine_seconds = QUARANTINE_S));
+    hub.plan_write(1, WritePlan::Lost { apply: true });
+    let s = Sync::new(&e, &hub);
+    let first = err(s.push(PushRequest::default()));
+    let pending = pending_of(&e, "shared").expect("the lost write stays pending");
+    assert_sync_uncertain(&first, &pending.push);
+    assert!(asks(&hub).is_empty());
+    assert!(s.poll.seconds().is_empty());
+    assert_eq!(hub.writes().len(), 1);
+
+    // older than the quarantine life, still busy: not cleared, nothing sent
+    s.clock.0.store(T0 + 2 * QUARANTINE_MS, Ordering::SeqCst);
+    let during = Arc::new(Mutex::new(Vec::<(usize, &'static str)>::new()));
+    let (weak, probe) = (Arc::downgrade(&hub), Arc::clone(&during));
+    s.poll.on_wait(move |_| {
+        let h = weak.upgrade().unwrap();
+        probe
+            .lock()
+            .unwrap()
+            .push((h.writes().len(), *h.steps().last().unwrap()));
+    });
+    let before = hub.steps().len();
+    script_busy(&hub, 1, 200);
+    for pull in [false, true] {
+        assert_sync_uncertain(&err(recover(&s, pull)), &pending.push);
+        assert_eq!(pending_of(&e, "shared"), Some(pending.clone()));
+        assert_eq!(hub.writes().len(), 1);
+    }
+    assert_eq!(s.poll.seconds().len(), 162);
+    assert!(during.lock().unwrap().iter().all(|s| *s == (1, "outcome")));
+    assert!(
+        hub.steps()[before..]
+            .iter()
+            .all(|s| ["discovery", "state", "outcome"].contains(s))
+    );
+
+    // taken at last: pending clears, and the write of that push id is not sent again
+    hub.fail.lock().unwrap().clear();
+    hub.answer(&pending.push, LookupOutcome::Taken { tip: landing(head) });
+    let out = s.push(PushRequest::default()).unwrap();
+    assert!(matches!(
+        out.lookup.map(|l| l.outcome),
+        Some(LookupOutcome::Taken { .. })
+    ));
+    assert_eq!(pending_of(&e, "shared"), None);
+    assert_eq!(canon_of(&e, "shared").unwrap().applied, Some(head));
+    assert_eq!(hub.writes().len(), 1);
+}
+
+/// D-H0BZN, D-H67EN: a busy reply that ends in held or refused is that outcome, applied once.
+/// A completed refusal whose code is `E_HUB_BUSY` is not a running write: no wait follows it,
+/// whatever the pending record's age. Unknown and every other lookup failure stop at once with
+/// their own rule, and the held-request refresh asks once.
+#[test]
+fn r59016_busy_held_and_refused_are_terminal() {
+    // busy, then held: recorded once, no write
+    let e = env(1);
+    let head = e.landings[0];
+    seed_pending(&e, P1, head, T0);
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, busy_refusal(1));
+    hub.answer(
+        P1,
+        LookupOutcome::Held {
+            request: HubRequest {
+                number: 4,
+                version: 1,
+            },
+            tip: None,
+        },
+    );
+    let s = Sync::new(&e, &hub);
+    let out = s.push(PushRequest::default()).unwrap();
+    assert!(matches!(out.canon, WriteEnd::HeldOpen { request: 4, .. }));
+    assert_eq!(asks(&hub).len(), 2);
+    assert_eq!(s.poll.seconds(), [1]);
+    assert_eq!(pending_of(&e, "shared"), None);
+    assert_eq!(
+        canon_of(&e, "shared").unwrap().held,
+        Some(SyncHeld {
+            head,
+            request: 4,
+            push: P1.into(),
+        })
+    );
+
+    // busy, then refused: cleared once, and the push goes on under a new push id
+    let e = env(1);
+    let head = e.landings[0];
+    seed_pending(&e, P1, head, T0);
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, busy_refusal(1));
+    hub.answer(
+        P1,
+        LookupOutcome::Refused {
+            code: "E_HUB_BEHIND".into(),
+        },
+    );
+    let s = Sync::new(&e, &hub);
+    let out = s.push(PushRequest::default()).unwrap();
+    assert_eq!(
+        hub.steps(),
+        ["discovery", "state", "outcome", "outcome", "put", "write"]
+    );
+    assert_eq!(s.poll.seconds(), [1]);
+    assert_ne!(taken(&out).0, P1);
+    assert_eq!(pending_of(&e, "shared"), None);
+
+    // a completed refusal with the code E_HUB_BUSY: no wait, however old the record
+    for pull in [false, true] {
+        let e = env(1);
+        let head = e.landings[0];
+        seed_pending(&e, P1, head, T0);
+        let hub = Hub::new().with_state(|s| s.quarantine_seconds = QUARANTINE_S);
+        hub.answer(
+            P1,
+            LookupOutcome::Refused {
+                code: "E_HUB_BUSY".into(),
+            },
+        );
+        let copy = pull.then(|| copy_project(&e));
+        if let Some((_, hub_store)) = &copy {
+            hub.serve(hub_store.read());
+        }
+        let s = Sync::new(&e, &hub);
+        s.clock.0.store(T0 + 2 * QUARANTINE_MS, Ordering::SeqCst);
+        let out = if pull {
+            s.pull(PullRequest::default()).map(|_| None)
+        } else {
+            s.push(PushRequest::default()).map(Some)
+        }
+        .unwrap();
+        assert_eq!(asks(&hub), [P1], "pull {pull}");
+        assert!(s.poll.seconds().is_empty());
+        assert_eq!(pending_of(&e, "shared"), None);
+        if let Some(out) = out {
+            // the same behavior as before: a new push id sends the history again
+            assert_eq!(
+                hub.steps(),
+                ["discovery", "state", "outcome", "put", "write"]
+            );
+            assert_ne!(taken(&out).0, P1);
+        }
+    }
+
+    // unknown: a young record stops uncertain, at once or after busy; an old one clears
+    for (busy, young) in [(false, true), (true, true), (true, false)] {
+        let e = env(1);
+        let head = e.landings[0];
+        let sent = seed_pending(&e, P1, head, T0);
+        let hub = Hub::new().with_state(|s| s.quarantine_seconds = QUARANTINE_S);
+        if busy {
+            hub.fail_at("outcome", 1, busy_refusal(1));
+        }
+        let s = Sync::new(&e, &hub);
+        if !young {
+            s.clock.0.store(T0 + 2 * QUARANTINE_MS, Ordering::SeqCst);
+        }
+        let waits = usize::from(busy);
+        let r = s.push(PushRequest::default());
+        assert_eq!(s.poll.seconds().len(), waits);
+        assert_eq!(asks(&hub).len(), 1 + waits);
+        if young {
+            assert_sync_uncertain(&err(r), P1);
+            assert_eq!(pending_of(&e, "shared"), Some(sent));
+        } else {
+            assert_eq!(r.unwrap().lookup.unwrap().outcome, LookupOutcome::Unknown);
+            assert_eq!(pending_of(&e, "shared"), None);
+        }
+    }
+
+    // other failures stop at once: after a wait, a hub error of another code; a busy refusal
+    // with no wait stays the protocol error
+    let e = env(1);
+    let head = e.landings[0];
+    let sent = seed_pending(&e, P1, head, T0);
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, busy_refusal(1));
+    hub.fail_at("outcome", 2, hub_words("E_HUB_NOT_FOUND"));
+    let s = Sync::new(&e, &hub);
+    assert_eq!(err(s.push(PushRequest::default())).code, "E_HUB_NOT_FOUND");
+    assert_eq!(s.poll.seconds(), [1]);
+    assert_eq!(asks(&hub).len(), 2);
+    assert_eq!(pending_of(&e, "shared"), Some(sent.clone()));
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, transport_failure());
+    let s = Sync::new(&e, &hub);
+    assert_eq!(
+        err(s.push(PushRequest::default())).code,
+        E_UPSTREAM_TRANSPORT
+    );
+    assert!(s.poll.seconds().is_empty());
+    let hub = Hub::new();
+    hub.fail_at("outcome", 1, hub_words("E_HUB_BUSY"));
+    let s = Sync::new(&e, &hub);
+    assert_eq!(
+        err(s.push(PushRequest::default())).code,
+        E_UPSTREAM_PROTOCOL
+    );
+    assert!(s.poll.seconds().is_empty());
+    assert_eq!(asks(&hub).len(), 1);
+    assert_eq!(pending_of(&e, "shared"), Some(sent));
+
+    // the held-request refresh asks once and warns: it never waits
+    let e = env(2);
+    let tip = e.landings[0];
+    let hub = Hub::new().with_state(|s| s.canon = Some(tip));
+    hub.plan_write(
+        1,
+        WritePlan::Held {
+            number: 3,
+            version: 1,
+        },
+    );
+    let out = push(&e, &hub, None).unwrap();
+    let WriteEnd::Held { push: held, .. } = &out.canon else {
+        panic!("{:?}", out.canon)
+    };
+    let held = held.clone();
+    let (_dir, hub_store) = copy_project(&e);
+    hub.serve(hub_store.read());
+    hub.fail_at("outcome", 1, busy_refusal(1));
+    let s = Sync::new(&e, &hub);
+    let out = s.pull(PullRequest::default()).unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.code == "W_UPSTREAM_HELD_LOOKUP"),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(asks(&hub), [held]);
+    assert!(s.poll.seconds().is_empty());
+
+    // a restore: busy then held, busy then refused, a completed E_HUB_BUSY refusal (no wait),
+    // unknown, and a failed lookup after a wait
+    let (hub, poll, scratch, out) = lost_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(1));
+        answer_last_write(hub, Last::Held(7));
+    });
+    let out = out.unwrap();
+    assert!(
+        matches!(&out.canon, Some(WriteEnd::Held { request, .. }) if request.number == 7),
+        "{:?}",
+        out.canon
+    );
+    assert_eq!((out.lookups.len(), poll.seconds()), (1, vec![1]));
+    assert_eq!(hub.writes().len(), 1);
+    assert!(is_empty_dir(scratch.path()));
+
+    for (busy, code, waits) in [(true, "E_HUB_BEHIND", 1), (false, "E_HUB_BUSY", 0)] {
+        let (hub, poll, scratch, out) = lost_restore(|hub, _| {
+            if busy {
+                hub.fail_at("outcome", 1, busy_refusal(1));
+            }
+            answer_last_write(hub, Last::Refused(code));
+        });
+        let out = out.unwrap();
+        let push = hub.writes()[0].push.clone();
+        assert!(
+            matches!(&out.canon, Some(WriteEnd::Refused { push: Some(p), .. }) if *p == push),
+            "{:?}",
+            out.canon
+        );
+        assert_eq!(out.lookups.len(), 1);
+        assert_eq!(poll.seconds().len(), waits);
+        assert_eq!(asks(&hub).len(), 1 + waits);
+        assert_eq!(hub.writes().len(), 1);
+        assert!(is_empty_dir(scratch.path()));
+    }
+
+    let (hub, poll, _scratch, out) = lost_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(1));
+    });
+    assert_restore_uncertain(&err(out), &hub.writes()[0].push);
+    assert_eq!((asks(&hub).len(), poll.seconds()), (2, vec![1]));
+
+    let (hub, poll, _scratch, out) = lost_restore(|hub, _| {
+        hub.fail_at("outcome", 1, busy_refusal(1));
+        hub.fail_at("outcome", 2, hub_words("E_HUB_NOT_FOUND"));
+    });
+    let x = err(out);
+    assert_eq!(x.code, E_UPSTREAM_UNCERTAIN);
+    assert_eq!(x.issues.len(), 2, "{:?}", x.issues);
+    assert_eq!(x.issues[1].code, "E_HUB_NOT_FOUND");
+    assert_eq!((asks(&hub).len(), poll.seconds()), (2, vec![1]));
+    assert_eq!(hub.writes().len(), 1);
+}
+
+// ---- URL clone: the tip ready first, then the checked history (D-GGTYA, D-4PV25, O16, O17) ----
+
+/// A hub serving `e`'s project with canon at its last landing, `page` keys a known page, and
+/// the canon tip's state (stream format 5) when `state`.
+fn clone_hub(e: &Env, state: bool, page: usize) -> Hub {
+    let hub = Hub::new();
+    hub.serve(e.engine.read());
+    hub.state.lock().unwrap().canon = Some(*e.landings.last().unwrap());
+    *hub.page.lock().unwrap() = page;
+    if state {
+        hub.send_canon_state();
+    }
+    hub
+}
+
+/// The URL clone of `e`'s hub repo into `dest` over `hub`, returned at Ready.
+fn clone_ready(
+    e: &Env,
+    hub: &Hub,
+    dest: &std::path::Path,
+) -> Result<rdy_engine::clone::UrlCloneSummary, RdyError> {
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    rdy_engine::clone::clone_url_via(
+        &writer(),
+        &e.url,
+        dest,
+        &e.user_file,
+        &api,
+        &clock,
+        hub,
+        None,
+    )
+}
+
+/// The foreground continuation of the ready clone `s` over `hub`; `steps` collects each step's
+/// progress.
+fn continue_clone(
+    e: &Env,
+    hub: &Hub,
+    s: rdy_engine::clone::UrlCloneSummary,
+    steps: &mut Vec<rdy_engine::partial_history::HistoryProgress>,
+) -> rdy_engine::clone::UrlCloneSummary {
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    rdy_engine::clone::continue_history(
+        &writer(),
+        s,
+        &e.user_file,
+        &api,
+        &clock,
+        hub,
+        &mut |_| {},
+        &mut |p| steps.push(*p),
+    )
+}
+
+/// Each known pull and get the hub served, in order, with its purpose.
+fn wire_order(hub: &Hub) -> Vec<(&'static str, StreamPurpose)> {
+    let pulls = hub.pulls.lock().unwrap().clone();
+    let gets = hub.gets.lock().unwrap().clone();
+    let (mut p, mut g) = (pulls.iter(), gets.iter());
+    let mut out = Vec::new();
+    for c in hub.calls() {
+        match c.step {
+            "known_pull" => out.push(("known_pull", p.next().unwrap().purpose)),
+            "get" => {
+                // a failed get is entered but never recorded
+                if let Some(r) = g.next() {
+                    out.push(("get", r.purpose));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The canon history keys the hub got for `gets`.
+fn got_history(gets: &[GetRequest]) -> BTreeSet<ObjectKey> {
+    gets.iter()
+        .filter(|g| g.purpose == StreamPurpose::CanonHistory)
+        .flat_map(|g| g.keys.iter().copied())
+        .collect()
+}
+
+fn hub_gets(hub: &Hub) -> Vec<GetRequest> {
+    hub.gets.lock().unwrap().clone()
+}
+
+/// The history ref of the project at `dir`.
+fn history_ref(dir: &std::path::Path, remote: &str) -> rdy_store::sync_state::SyncHistory {
+    let engine = Local::open(dir).unwrap();
+    let h = engine
+        .read()
+        .reader()
+        .sync_history(remote)
+        .unwrap()
+        .unwrap();
+    engine.close().unwrap();
+    h
+}
+
+/// O16: every canon history key at the captured tip is listed (known reaches its last page)
+/// before the state take; the checked list's exact distinct count is Ready's denominator. A
+/// resume makes no known call and gets only the keys still missing. The history ref is written
+/// twice: at install (complete false) and at completion; no step writes progress.
+#[test]
+fn r59019_key_list_precedes_ready_and_survives_resume() {
+    let e = env(4);
+    let hub = clone_hub(&e, true, 2);
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    assert!(want.len() > 4, "{}", want.len());
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    // at Ready: the history listing ran to its end, base none at the captured tip, and no
+    // history record was got
+    let order = wire_order(&hub);
+    let history_pulls: Vec<KnownPull> = hub
+        .pulls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.purpose == StreamPurpose::CanonHistory)
+        .cloned()
+        .collect();
+    assert_eq!(history_pulls.len(), want.len().div_ceil(2), "{order:?}");
+    for p in &history_pulls {
+        assert_eq!((p.base, p.root), (None, landing(tip)));
+    }
+    assert!(
+        !order
+            .iter()
+            .any(|(s, p)| *s == "get" && *p == StreamPurpose::CanonHistory),
+        "{order:?}"
+    );
+    let p = s.history.expect("a ready clone's progress");
+    assert_eq!((p.total, p.complete), (want.len() as u64, false));
+    assert!(p.held < p.total, "{p:?}");
+    assert_eq!(
+        s.ready_text().unwrap(),
+        format!(
+            "ready: work in {} now; history arriving: {} of {} records",
+            s.project, p.held, p.total
+        )
+    );
+    assert!(s.notes.is_empty(), "{:?}", s.notes);
+    let installed = history_ref(&dest, &s.remote);
+    assert_eq!((installed.complete, installed.records), (false, p.total));
+    // a continuation that stops at its second get keeps the ready project and warns
+    hub.clear();
+    hub.gets.lock().unwrap().clear();
+    hub.pulls.lock().unwrap().clear();
+    // gets of at most two records each; the third fails
+    hub.state.lock().unwrap().batch_records = 2;
+    hub.fail_at("get", 3, hub_not_found());
+    let mut steps = Vec::new();
+    let mut stopped = continue_clone(&e, &hub, s, &mut steps);
+    assert_eq!(stopped.warnings.len(), 1, "{:?}", stopped.warnings);
+    assert_eq!(stopped.warnings[0].code, "E_HUB_NOT_FOUND");
+    assert!(
+        hub.pulls.lock().unwrap().is_empty(),
+        "a resume lists no key"
+    );
+    let first = got_history(&hub_gets(&hub));
+    assert!(!first.is_empty());
+    assert_eq!(history_ref(&dest, &stopped.remote), installed);
+    // the resume: no known call, only missing keys, then complete
+    hub.clear();
+    hub.gets.lock().unwrap().clear();
+    hub.fail.lock().unwrap().clear();
+    stopped.warnings.clear();
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, stopped, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    assert!(
+        hub.pulls.lock().unwrap().is_empty(),
+        "a resume lists no key"
+    );
+    let second = got_history(&hub_gets(&hub));
+    assert!(first.is_disjoint(&second), "{first:?} {second:?}");
+    let all: BTreeSet<ObjectKey> = first.union(&second).copied().collect();
+    assert!(all.is_subset(&want));
+    let p = done.history.unwrap();
+    assert_eq!(
+        (p.held, p.total, p.complete),
+        (p.total, want.len() as u64, true)
+    );
+    let completed = history_ref(&dest, &done.remote);
+    assert!(completed.complete);
+    assert_eq!(
+        (completed.frontier, completed.records, completed.repo_id),
+        (installed.frontier, installed.records, installed.repo_id)
+    );
+    // every step's progress came back from the steps, none was stored
+    assert!(
+        steps.windows(2).all(|w| w[0].held <= w[1].held),
+        "{steps:?}"
+    );
+    let engine = Local::open(&dest).unwrap();
+    let read = engine.read();
+    for k in &want {
+        assert!(read.reader().has_kind(k.kind, &k.hash).unwrap(), "{k:?}");
+    }
+    assert!(read.require_complete_history().is_ok());
+    drop(read);
+    engine.close().unwrap();
+}
+
+/// A13: a restore entered from a project whose history is still arriving is E_HISTORY_PENDING
+/// with the exact message and fix, before any capture, put or write.
+#[test]
+fn r59019_restore_refuses_while_history_pending() {
+    let e = env(3);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let p = s.history.unwrap();
+    assert!(!p.complete);
+    let dump = dump_of(&e.engine, dir.path(), "full.rdydump");
+    let engine = Local::open(&dest).unwrap();
+    hub.clear();
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    let renderer = Renderer::default();
+    let scratch = private_dir();
+    let service = SyncService::new(&dest, &e.user_file, &api, &clock, &hub, &renderer)
+        .scratch_in(scratch.path());
+    let request = || RestoreRequest {
+        dump: vec![dump.clone()],
+        remote: None,
+    };
+    for x in [
+        err(service.restore_from(&engine, &agent(), request())),
+        err(service.restore_preview_from(&engine, &agent(), request())),
+    ] {
+        assert_eq!(x.code, E_HISTORY_PENDING);
+        assert_eq!(
+            x.message,
+            rdy_engine::partial_history::history_pending_message(p.held, p.total)
+        );
+        assert_eq!(x.fix, rdy_engine::partial_history::HISTORY_PENDING_FIX);
+    }
+    assert!(hub.calls().is_empty(), "{:?}", hub.steps());
+    assert!(renderer.scopes.lock().unwrap().is_empty());
+    engine.close().unwrap();
+}
+
+/// D-GGTYA: a ready clone takes reads, writes and landings under their ordinary gates before
+/// any history record arrives; the completion keeps that local work.
+#[test]
+fn r59018_ready_allows_work_before_history() {
+    let e = env(3);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    assert!(s.history_pending());
+    let engine = Local::open(&dest).unwrap();
+    write_in(&engine, "draft", "local-draft");
+    let local = land_in(&engine, "local-landed");
+    let draft = view_head_of(&engine, "draft");
+    engine.close().unwrap();
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, s, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    assert!(done.history.unwrap().complete);
+    let engine = Local::open(&dest).unwrap();
+    let read = engine.read();
+    assert_eq!(read.canon_head(), Some(local));
+    drop(read);
+    assert_eq!(view_head_of(&engine, "draft"), draft);
+    engine.close().unwrap();
+}
+
+/// The head of view `name` in `engine`'s project.
+fn view_head_of(engine: &Local, name: &str) -> Hash {
+    engine.read().view_head(name).unwrap().head
+}
+
+/// An older hub (no format 5): the clone takes the whole history before it is ready, with the
+/// exact note. A hub that advertises format 5 and sends a bad state batch is an error, never a
+/// retry as an older hub, and leaves no project.
+#[test]
+fn r59018_old_hub_fallback_and_settings_stay_exact() {
+    let e = env(3);
+    let hub = clone_hub(&e, false, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    assert_eq!(
+        s.notes,
+        vec!["this hub sends history only; the clone waits for all of it".to_string()]
+    );
+    assert!(!s.history_pending());
+    assert_eq!(s.ready_text(), None);
+    assert!(
+        hub.pulls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| p.purpose != StreamPurpose::CanonState)
+    );
+    // a bad format-5 reply
+    let bad = clone_hub(&e, true, 100);
+    *bad.get_bytes.lock().unwrap() = Some(b"not a batch".to_vec());
+    let dest = dir.path().join("bad");
+    let x = err(clone_ready(&e, &bad, &dest));
+    assert_ne!(x.code, "", "{x:?}");
+    let gets = hub_gets(&bad);
+    assert_eq!(gets.len(), 1, "{gets:?}");
+    assert_eq!(gets[0].purpose, StreamPurpose::CanonState);
+    assert!(
+        bad.pulls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| p.purpose == StreamPurpose::CanonState),
+        "no fallback to the history"
+    );
+    assert!(!dest.join(".rdy").exists());
+}
+
+/// One "process" of the history fetch of the clone at `dest`: opens it, begins the fetch and
+/// runs steps until one is complete or `stop` says so after it, then drops the fetch and closes
+/// the project, as a crash leaves it. Returns the last step and the gets it made.
+fn fetch_until(
+    e: &Env,
+    hub: &Hub,
+    dest: &std::path::Path,
+    remote: &str,
+    stop: &dyn Fn(&rdy_engine::history_fetch::HistoryFetchStep) -> bool,
+) -> (rdy_engine::history_fetch::HistoryFetchStep, usize) {
+    use rdy_engine::history_fetch::HistoryFetchStep;
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    let renderer = Renderer::default();
+    let engine = Local::open(dest).unwrap();
+    let service = SyncService::new(dest, &e.user_file, &api, &clock, hub, &renderer);
+    let before = hub_gets(hub).len();
+    let mut fetch = service.begin_history(&engine, &writer(), remote).unwrap();
+    let last = loop {
+        let st = service
+            .resume_history_step(&engine, &writer(), &mut fetch)
+            .unwrap();
+        if matches!(st, HistoryFetchStep::Complete(_)) || stop(&st) {
+            break st;
+        }
+    };
+    drop(fetch);
+    engine.close().unwrap();
+    (last, hub_gets(hub).len() - before)
+}
+
+/// The keys of the staged batch file `path`.
+fn staged_keys(path: &std::path::Path) -> Vec<ObjectKey> {
+    let bytes = std::fs::read(path).unwrap();
+    rdy_store::sync_stream::check_batch(&bytes[..])
+        .unwrap()
+        .keys
+}
+
+/// Whether the project at `dest` holds every key of `keys`.
+fn holds_all(dest: &std::path::Path, keys: &BTreeSet<ObjectKey>) -> bool {
+    let engine = Local::open(dest).unwrap();
+    let read = engine.read();
+    let all = keys
+        .iter()
+        .all(|k| read.reader().has_kind(k.kind, &k.hash).unwrap());
+    drop(read);
+    engine.close().unwrap();
+    all
+}
+
+/// D-KE83X: a fetch cut after each checked file keeps the files; the next one gets only the
+/// keys no kept file holds. A kept file that changed is refused and its keys got again; a
+/// `.part` is removed. A hub that moved on and local landings made meanwhile change nothing of
+/// the frontier being completed, and the local work stays.
+#[test]
+fn r59018_resume_keeps_checked_files_and_local_work() {
+    use rdy_engine::history_fetch::{HistoryFetchStep, staged_batches_for_tests};
+    let e = env(5);
+    let hub = clone_hub(&e, true, 100);
+    hub.state.lock().unwrap().batch_records = 2;
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let installed = history_ref(&dest, &s.remote);
+    // two cuts, each after one checked file
+    let one = |_: &HistoryFetchStep| true;
+    for n in 1..=2 {
+        let (st, gets) = fetch_until(&e, &hub, &dest, &s.remote, &one);
+        assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+        assert_eq!(gets, 1);
+        assert_eq!(staged_batches_for_tests(&dest, &s.remote).len(), n);
+    }
+    let staged = staged_batches_for_tests(&dest, &s.remote);
+    let kept = staged_keys(&staged[0]);
+    let changed = staged_keys(&staged[1]);
+    // the second file changes; a .part is left behind
+    let mut bytes = std::fs::read(&staged[1]).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    std::fs::write(&staged[1], &bytes).unwrap();
+    let part = staged[1].with_extension("part");
+    std::fs::write(&part, b"half a reply").unwrap();
+    // the hub moves on; the clone lands work of its own
+    let (_hub_dir, hub_store) = copy_project(&e);
+    let later = land_in(&hub_store, "later");
+    hub.serve(hub_store.read());
+    hub.state.lock().unwrap().canon = Some(later);
+    let engine = Local::open(&dest).unwrap();
+    let local = land_in(&engine, "local");
+    engine.close().unwrap();
+    hub.gets.lock().unwrap().clear();
+    let (st, _) = fetch_until(&e, &hub, &dest, &s.remote, &|_| false);
+    assert!(matches!(st, HistoryFetchStep::Complete(_)), "{st:?}");
+    let got = got_history(&hub_gets(&hub));
+    assert!(
+        kept.iter().all(|k| !got.contains(k)),
+        "a kept file is not got again"
+    );
+    assert!(
+        changed.iter().all(|k| got.contains(k)),
+        "a changed file is got again"
+    );
+    assert!(!part.exists());
+    assert!(staged_batches_for_tests(&dest, &s.remote).is_empty());
+    let done = history_ref(&dest, &s.remote);
+    assert!(done.complete);
+    assert_eq!(
+        (done.frontier, done.records),
+        (installed.frontier, installed.records)
+    );
+    assert!(holds_all(&dest, &want));
+    let engine = Local::open(&dest).unwrap();
+    assert_eq!(engine.read().canon_head(), Some(local));
+    let landed = engine
+        .read()
+        .reader()
+        .has_kind(kinds::LANDING, &later)
+        .unwrap();
+    assert!(!landed, "the hub's move is the next pull's");
+    engine.close().unwrap();
+}
+
+/// A cut at each phase: before the take, after the take and before the full check, after the
+/// check and before the completion, and after the completion before the cleanup. Each reopen
+/// picks the right phase: no get once every key is staged, no second take, and complete stays
+/// false until a full check passed.
+#[test]
+fn r59018_completion_crash_never_claims_missing_history() {
+    use rdy_engine::history_fetch::{HistoryFetchStep, staged_batches_for_tests};
+    let e = env(4);
+    let hub = clone_hub(&e, true, 100);
+    hub.state.lock().unwrap().batch_records = 2;
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let total = s.history.unwrap().total;
+    let remote = s.remote.clone();
+    // every key staged, the take not yet run
+    let staged_all = |st: &HistoryFetchStep| st.progress().held == total;
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &staged_all);
+    assert!(
+        matches!(st, HistoryFetchStep::More(_)) && gets > 1,
+        "{st:?}"
+    );
+    assert!(!holds_all(&dest, &want));
+    assert!(!history_ref(&dest, &remote).complete);
+    let files = staged_batches_for_tests(&dest, &remote);
+    assert!(!files.is_empty());
+    let saved = std::fs::read(&files[0]).unwrap();
+    let one = |_: &HistoryFetchStep| true;
+    // the take, then a cut
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &one);
+    assert_eq!(
+        (st, gets),
+        (
+            HistoryFetchStep::More(rdy_engine::partial_history::HistoryProgress {
+                frontier: tip,
+                complete: false,
+                held: total,
+                total,
+            }),
+            0
+        )
+    );
+    assert!(holds_all(&dest, &want));
+    assert!(!history_ref(&dest, &remote).complete);
+    // the full check, then a cut: still not complete
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &one);
+    assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+    assert_eq!(gets, 0);
+    assert!(!history_ref(&dest, &remote).complete);
+    // a passing check is not stored: the next process checks again before the completion
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &one);
+    assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+    assert_eq!(gets, 0);
+    assert!(!history_ref(&dest, &remote).complete);
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &|_| false);
+    assert!(matches!(st, HistoryFetchStep::Complete(_)), "{st:?}");
+    assert_eq!(gets, 0);
+    let done = history_ref(&dest, &remote);
+    assert!(done.complete);
+    assert!(staged_batches_for_tests(&dest, &remote).is_empty());
+    // a cut after the completion and before the cleanup: the next fetch only cleans up
+    std::fs::write(&files[0], &saved).unwrap();
+    let (st, gets) = fetch_until(&e, &hub, &dest, &remote, &one);
+    assert!(matches!(st, HistoryFetchStep::Complete(_)), "{st:?}");
+    assert_eq!(gets, 0);
+    assert!(!files[0].exists());
+    assert_eq!(history_ref(&dest, &remote), done);
+    let engine = Local::open(&dest).unwrap();
+    assert!(engine.read().require_complete_history().is_ok());
+    engine.inspect(Rdy::fsck_full).unwrap();
+    engine.close().unwrap();
+}
+
+/// The sentence the drift projects' two prose blocks share.
+const SAID: &str = "Every job retries for five seconds and then reports a failure to the owner.";
+
+/// Writes `ops` in view `work` of `engine`'s project, answers the change plan's open items,
+/// proposes and lands it. Returns the landing and the write.
+fn land_ops(engine: &Local, ops: serde_json::Value) -> (Hash, WriteResult) {
+    rdy_engine::engine::with_writer_result(engine, move |r| {
+        let w = r.write(
+            &writer(),
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(ops).unwrap(),
+                justification: None,
+                message: "drift".into(),
+            },
+        )?;
+        common::answer_open_items(r, &writer(), "work");
+        let p = r.propose(&writer(), "work", "batch", Some(common::TEST_SUMMARY))?;
+        common::confirm_exceptions(r, &founder(), &p);
+        let l: Hash = r.land(&founder(), &p.id)?.parse().unwrap();
+        Ok((l, w))
+    })
+    .unwrap()
+}
+
+/// A project whose canon holds two prose blocks that share [`SAID`], then an edit of the first
+/// one that the change plan answers; with `unrelated`, one more landing of an unrelated doc
+/// after it, so the edit is not the tip.
+fn drift_env(unrelated: bool) -> Env {
+    let mut e = env(1);
+    let (l, w) = land_ops(
+        &e.engine,
+        serde_json::json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "jobs", "title": "Jobs", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$x", "parent": "$d", "body": SAID},
+            {"op": "create", "type": "doc", "id": "$e", "fields": {"name": "ops", "title": "Ops", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$y", "parent": "$e", "body": format!("In short: {SAID}")}
+        ]),
+    );
+    e.landings.push(l);
+    let x = w.created["$x"].clone();
+    let (l, _) = land_ops(
+        &e.engine,
+        serde_json::json!([{"op": "update", "id": x,
+            "body": "Every job retries for ten seconds and then reports a failure to the owner."}]),
+    );
+    e.landings.push(l);
+    if unrelated {
+        e.landings.push(land_in(&e.engine, "unrelated"));
+    }
+    e
+}
+
+/// The open restatement drift tensions of the project at `dir`, as their summaries.
+fn drifts_at(dir: &std::path::Path) -> Vec<String> {
+    let engine = Local::open(dir).unwrap();
+    let mut out: Vec<String> = engine
+        .read()
+        .tensions()
+        .unwrap()
+        .iter()
+        .filter(|t| t.kind == rdy_engine::tensions::TensionKind::RestatementDrift)
+        .map(|t| t.summary.clone())
+        .collect();
+    engine.close().unwrap();
+    out.sort();
+    out
+}
+
+/// The logged opening of each open tension of the project at `dir`, as its record's JSON
+/// bytes with the record's clock, in tension order.
+fn opened_moves(dir: &std::path::Path) -> Vec<(Vec<u8>, i64)> {
+    let engine = Local::open(dir).unwrap();
+    let read = engine.read();
+    let reader = read.reader();
+    let mut out = Vec::new();
+    for (id, record) in reader.open_tensions().unwrap() {
+        let t = reader.transitions(&record).unwrap();
+        let m = t.opened.iter().find(|m| m.tension == id).unwrap();
+        out.push((serde_json::to_vec(m).unwrap(), t.at_ms));
+    }
+    drop(read);
+    engine.close().unwrap();
+    out
+}
+
+/// How many TRANSITION records the log of the project at `dir` holds.
+fn transitions_logged(dir: &std::path::Path) -> usize {
+    let engine = Local::open(dir).unwrap();
+    let read = engine.read();
+    let mut n = 0;
+    read.reader()
+        .for_each_object_of(kinds::TRANSITION, |_| {
+            n += 1;
+            Ok(())
+        })
+        .unwrap();
+    drop(read);
+    engine.close().unwrap();
+    n
+}
+
+/// The sealed batches of the log of the project at `dir`, in log order: each data frame's
+/// logical kind and hash, and the ref name and value of each REF_UPDATE frame (the marker left
+/// out).
+type LogFrame = (u8, Hash, Option<(String, Vec<u8>)>);
+
+fn log_batches(dir: &std::path::Path) -> Vec<Vec<LogFrame>> {
+    let engine = Local::open(dir).unwrap();
+    let batches = engine
+        .inspect(|r| {
+            let reader = r.store().reader();
+            let mut out = Vec::new();
+            let mut cur = Vec::new();
+            reader.for_each_frame_from(ORIGIN, r.store().log_end(), |_, raw, h, _, _| {
+                let kind = rdy_store::codec::logical_kind(raw);
+                if kind == kinds::BATCH_COMMIT {
+                    out.push(std::mem::take(&mut cur));
+                } else {
+                    let r = (kind == kinds::REF_UPDATE).then(|| {
+                        let u: kinds::RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h).unwrap();
+                        (u.name, u.value)
+                    });
+                    cur.push((kind, h, r));
+                }
+                Ok(())
+            })?;
+            Ok(out)
+        })
+        .unwrap();
+    engine.close().unwrap();
+    batches
+}
+
+/// The batches of `dir`'s log that write remote `remote`'s history ref as complete.
+fn completion_batches(dir: &std::path::Path, remote: &str) -> Vec<Vec<LogFrame>> {
+    let name = rdy_store::sync_state::history_ref(remote);
+    log_batches(dir)
+        .into_iter()
+        .filter(|b| {
+            b.iter().any(|(_, _, r)| {
+                r.as_ref().is_some_and(|(n, v)| {
+                    *n == name
+                        && matches!(
+                            rdy_store::sync_state::check_ref(n, v),
+                            Ok(Some(rdy_store::sync_state::SyncValue::History(h))) if h.complete
+                        )
+                })
+            })
+        })
+        .collect()
+}
+
+/// The TRANSITION record that logged the opening of each open tension of the project at `dir`.
+fn opening_records(dir: &std::path::Path) -> Vec<Hash> {
+    let engine = Local::open(dir).unwrap();
+    let out = engine
+        .read()
+        .reader()
+        .open_tensions()
+        .unwrap()
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect();
+    engine.close().unwrap();
+    out
+}
+
+/// A copy of the directory tree `from` at `to` (a closed project).
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let p = entry.path();
+        if p.is_dir() {
+            copy_tree(&p, &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(&p, to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+/// The history fetch of `remote` in the project at `dest` over `hub`, driven past its take and
+/// its full check (every key of `want` held), then `arm` run on the writer's project and the
+/// completion step taken. Returns that step and the log's end before it. The engine is dropped
+/// with no clean close, as a cut process leaves it.
+fn complete_after(
+    e: &Env,
+    hub: &Hub,
+    dest: &std::path::Path,
+    remote: &str,
+    want: &BTreeSet<ObjectKey>,
+    arm: impl FnOnce(&mut Rdy) + Send + 'static,
+) -> (
+    Result<rdy_engine::history_fetch::HistoryFetchStep, RdyError>,
+    rdy_store::segment::Location,
+) {
+    use rdy_engine::history_fetch::HistoryFetchStep;
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    let renderer = Renderer::default();
+    let engine = Local::open(dest).unwrap();
+    let service = SyncService::new(dest, &e.user_file, &api, &clock, hub, &renderer);
+    let mut fetch = service.begin_history(&engine, &writer(), remote).unwrap();
+    let taken = |engine: &Local| {
+        let read = engine.read();
+        want.iter()
+            .all(|k| read.reader().has_kind(k.kind, &k.hash).unwrap())
+    };
+    while !taken(&engine) {
+        let st = service
+            .resume_history_step(&engine, &writer(), &mut fetch)
+            .unwrap();
+        assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+    }
+    // the full check
+    let st = service
+        .resume_history_step(&engine, &writer(), &mut fetch)
+        .unwrap();
+    assert!(matches!(st, HistoryFetchStep::More(_)), "{st:?}");
+    assert!(!history_ref_in(&engine, remote).complete);
+    let end = engine.inspect(|r| Ok(r.store().log_end())).unwrap();
+    rdy_engine::engine::with_writer_result(&engine, move |r| {
+        arm(r);
+        Ok(())
+    })
+    .unwrap();
+    let st = service.resume_history_step(&engine, &writer(), &mut fetch);
+    drop(fetch);
+    drop(engine);
+    (st, end)
+}
+
+/// The history ref of `remote` in `engine`'s project.
+fn history_ref_in(engine: &Local, remote: &str) -> rdy_store::sync_state::SyncHistory {
+    engine
+        .read()
+        .reader()
+        .sync_history(remote)
+        .unwrap()
+        .unwrap()
+}
+
+/// D-GGTYA: while the history ref is incomplete, canon's rows stop at the frontier, so the
+/// older landings that a completion's take holds are not canon's yet. A fresh read after the
+/// take (a reopen before the completion) reads no tension of theirs, as before the take, and so
+/// logs none that the completion would re-key; the completion then opens the reference's drift.
+#[test]
+fn r59019_taken_history_stays_behind_the_frontier_until_complete() {
+    let e = drift_env(false);
+    let dir = private_dir();
+    let reference = dir.path().join("reference");
+    let full = clone_hub(&e, false, 100);
+    clone_ready(&e, &full, &reference).unwrap();
+    let want_drifts = drifts_at(&reference);
+    assert_eq!(want_drifts.len(), 1, "{want_drifts:?}");
+    let hub = clone_hub(&e, true, 100);
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let total = s.history.unwrap().total;
+    let remote = s.remote.clone();
+    let before = drifts_at(&dest);
+    assert!(before.is_empty(), "{before:?}");
+    // every key staged, then the take
+    let staged_all = |st: &rdy_engine::history_fetch::HistoryFetchStep| st.progress().held == total;
+    fetch_until(&e, &hub, &dest, &remote, &staged_all);
+    fetch_until(&e, &hub, &dest, &remote, &|_| true);
+    assert!(holds_all(&dest, &want));
+    assert!(!history_ref(&dest, &remote).complete);
+    assert_eq!(drifts_at(&dest), before);
+    // a write in a fresh process logs no move of the older landings
+    let engine = Local::open(&dest).unwrap();
+    land_in(&engine, "local");
+    engine.close().unwrap();
+    assert_eq!(transitions_logged(&dest), 0);
+    let (st, _) = fetch_until(&e, &hub, &dest, &remote, &|_| false);
+    assert!(
+        matches!(st, rdy_engine::history_fetch::HistoryFetchStep::Complete(_)),
+        "{st:?}"
+    );
+    assert_eq!(drifts_at(&dest), want_drifts);
+    assert_eq!(transitions_logged(&dest), 1);
+}
+
+/// D-GGTYA: the completion's moves are durable with the completed history ref, in its one
+/// batch. A cut at the append of the moves' TRANSITION frame (the frame a completion that
+/// published its moves in a later batch would write after its ref was durable) leaves the
+/// history incomplete with no move logged; the next completion logs the reference's move once,
+/// under cause recheck, in the batch that completes the ref, and a reindex keeps it.
+#[test]
+fn r59019_completion_cut_before_its_moves_never_completes_without_them() {
+    let e = drift_env(false);
+    let dir = private_dir();
+    let reference = dir.path().join("reference");
+    let full = clone_hub(&e, false, 100);
+    clone_ready(&e, &full, &reference).unwrap();
+    let want_drifts = drifts_at(&reference);
+    assert_eq!(want_drifts.len(), 1, "{want_drifts:?}");
+    let as_recheck = |m: &[u8]| {
+        let mut t: rdy_store::transition::TensionMove = serde_json::from_slice(m).unwrap();
+        t.why.cause = rdy_store::transition::Cause::Recheck;
+        serde_json::to_vec(&t).unwrap()
+    };
+    let reference_moves: Vec<Vec<u8>> = opened_moves(&reference)
+        .iter()
+        .map(|(m, _)| as_recheck(m))
+        .collect();
+    let hub = clone_hub(&e, true, 100);
+    let tip = *e.landings.last().unwrap();
+    let want: BTreeSet<ObjectKey> = hub
+        .history(StreamPurpose::CanonHistory, tip, None)
+        .into_iter()
+        .collect();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let remote = s.remote.clone();
+    let engine = Local::open(&dest).unwrap();
+    land_in(&engine, "local");
+    engine.close().unwrap();
+    // a dry run on a copy finds the frame the moves' TRANSITION takes after the completed ref
+    let dry = dir.path().join("dry");
+    copy_tree(&dest, &dry);
+    let (st, end) = complete_after(&e, &hub, &dry, &remote, &want, |_| {});
+    assert!(
+        matches!(
+            st,
+            Ok(rdy_engine::history_fetch::HistoryFetchStep::Complete(_))
+        ),
+        "{st:?}"
+    );
+    let engine = Local::open(&dry).unwrap();
+    let mut seen = Vec::new();
+    engine
+        .inspect(|r| {
+            r.store().reader().for_each_frame_from(
+                end,
+                r.store().log_end(),
+                |_, raw, _, _, _| {
+                    seen.push(rdy_store::codec::logical_kind(raw));
+                    Ok(())
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    engine.close().unwrap();
+    let completed = seen
+        .iter()
+        .position(|k| *k == kinds::REF_UPDATE)
+        .expect("the completion writes its ref");
+    let cut = completed
+        + seen[completed..]
+            .iter()
+            .position(|k| *k == kinds::TRANSITION)
+            .expect("the completion logs its moves");
+    // the cut: every frame before the moves' TRANSITION is written, that one fails
+    let (st, _) = complete_after(&e, &hub, &dest, &remote, &want, move |r| {
+        r.store_mut().fail_append_at_frame_for_tests(Some((cut, 0)));
+    });
+    assert!(st.is_err(), "{st:?}");
+    let after_cut = history_ref(&dest, &remote);
+    assert!(
+        !after_cut.complete,
+        "a completed history without its moves: {:?}",
+        opened_moves(&dest)
+    );
+    assert!(completion_batches(&dest, &remote).is_empty());
+    assert_eq!(transitions_logged(&dest), 0);
+    // the next completion logs the reference's move once, in the batch that completes the ref
+    let (st, _) = fetch_until(&e, &hub, &dest, &remote, &|_| false);
+    assert!(
+        matches!(st, rdy_engine::history_fetch::HistoryFetchStep::Complete(_)),
+        "{st:?}"
+    );
+    assert_eq!(drifts_at(&dest), want_drifts);
+    let moves = opened_moves(&dest);
+    assert_eq!(
+        moves.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>(),
+        reference_moves
+    );
+    let batches = completion_batches(&dest, &remote);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let opened = opening_records(&dest);
+    assert_eq!(opened.len(), 1);
+    assert!(
+        batches[0]
+            .iter()
+            .any(|(k, h, _)| *k == kinds::TRANSITION && *h == opened[0]),
+        "{batches:?}"
+    );
+    let engine = Local::open(&dest).unwrap();
+    rdy_engine::engine::with_writer_result(&engine, |r| r.reindex()).unwrap();
+    engine.close().unwrap();
+    assert_eq!(opened_moves(&dest), moves);
+}
+
+/// A completion whose take writes the fetched PLAN records of the older landings carries the
+/// fetched batch's sync state, though the state take already named that tip: the plans keep
+/// the holder's rules and move no `plan/` ref. The full check, the completion and a reindex
+/// then pass.
+#[test]
+fn r59019_completion_takes_older_plans_as_fetched() {
+    let e = drift_env(true);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    assert!(s.history_pending());
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, s, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    assert!(done.history.unwrap().complete);
+    let engine = Local::open(&dest).unwrap();
+    engine.inspect(Rdy::fsck_full).unwrap();
+    rdy_engine::engine::with_writer_result(&engine, |r| r.reindex()).unwrap();
+    engine.inspect(Rdy::fsck_full).unwrap();
+    engine.close().unwrap();
+}
+
+/// A landing in view `w-plan` whose sealed plan's chain restarts at a whole version: an edit of
+/// a claim that another claim builds on opens one plan item, answered until the delta chain is
+/// [`rdy_model::plan_encoding::MAX_PLAN_DELTA_DEPTH`] long, so the proposal's bound version is
+/// written whole with a `prev`. The seal is a delta on that whole version. Returns the landing.
+fn land_restarted_plan_chain(r: &mut Rdy) -> Hash {
+    let write = |r: &mut Rdy, view: &str, ops: serde_json::Value| {
+        r.write(
+            &writer(),
+            WriteRequest {
+                view: view.into(),
+                ops: serde_json::from_value(ops).unwrap(),
+                justification: None,
+                message: "r59019".into(),
+            },
+        )
+        .unwrap()
+    };
+    let w = write(
+        r,
+        "work",
+        serde_json::json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$d", "body": "A holds 30 days."},
+            {"op": "create", "type": "claim", "id": "$b", "parent": "$d", "body": "B builds on {{$a}}."}
+        ]),
+    );
+    let claim = w.created["$a"].clone();
+    let p = r
+        .propose(&writer(), "work", "work", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap();
+    write(
+        r,
+        "w-plan",
+        serde_json::json!([{"op": "update", "id": claim, "body": "A holds 40 days."}]),
+    );
+    let items: Vec<String> = r
+        .read()
+        .view_plan("w-plan")
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|row| match row {
+            rdy_engine::plan::api::PlanRow::Live(i) => Some(i.id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!items.is_empty(), "the edit opens a plan item");
+    for n in 0..rdy_model::plan_encoding::MAX_PLAN_DELTA_DEPTH {
+        let answers: Vec<rdy_engine::plan::PlanAnswerInput> = items
+            .iter()
+            .map(|i| rdy_engine::plan::PlanAnswerInput {
+                item: i.clone(),
+                act: rdy_model::plan::PlanAct::Confirm,
+                reason: Some(format!("it still holds ({n})")),
+            })
+            .collect();
+        r.answer_plan(&writer(), "w-plan", &answers).unwrap();
+    }
+    let p = r
+        .propose(&writer(), "w-plan", "w-plan", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(r, &founder(), &p);
+    r.land(&founder(), &p.id).unwrap().parse().unwrap()
+}
+
+/// A canon state carries the root's sealed plan back to the nearest whole version; that
+/// version's own `prev` is a frontier edge, so the older plan versions arrive with the history,
+/// and only that held whole version links to them. The completion reaches them through the
+/// held sealed plan, as the closure attaches it to the root: the history completes with no
+/// warning, and the clone's canon history equals the source's.
+#[test]
+fn r59019_completion_reaches_plans_behind_a_held_sealed_chain() {
+    let mut e = env(1);
+    let root =
+        rdy_engine::engine::with_writer_result(&e.engine, |r| Ok(land_restarted_plan_chain(r)))
+            .unwrap();
+    e.landings.push(root);
+    // the shape: the state's plans end at a whole version whose `prev` the state does not hold
+    let read = e.engine.read();
+    let state =
+        rdy_engine::canon_state_export::PreparedCanonState::new(read.clone(), root).unwrap();
+    assert!(
+        state.prerequisites().iter().any(|k| k.kind == kinds::PLAN),
+        "the state names an older plan version as a frontier edge: {:?}",
+        state.prerequisites()
+    );
+    let mut source = Vec::new();
+    let full = rdy_engine::stream_export::write_history(
+        &read,
+        StreamPurpose::CanonHistory,
+        root,
+        None,
+        &BTreeSet::new(),
+        &mut source,
+    )
+    .unwrap();
+    drop(read);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    assert!(s.history_pending());
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, s, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    let history = done.history.unwrap();
+    assert!(history.complete, "{history:?}");
+    assert_eq!(history.held, history.total);
+    let engine = Local::open(&dest).unwrap();
+    engine.inspect(Rdy::fsck_full).unwrap();
+    let read = engine.read();
+    let mut clone = Vec::new();
+    let got = rdy_engine::stream_export::write_history(
+        &read,
+        StreamPurpose::CanonHistory,
+        root,
+        None,
+        &BTreeSet::new(),
+        &mut clone,
+    )
+    .unwrap();
+    drop(read);
+    engine.close().unwrap();
+    assert_eq!(
+        got.keys.iter().collect::<BTreeSet<_>>(),
+        full.keys.iter().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(got.digest, full.digest);
+}
+
+/// The older landings a completion makes visible order by canon's ancestry, not by where the
+/// log holds them (the state take wrote the tip first): the completed clone keeps the drift
+/// the complete-history reference has, after a reopen and a reindex too.
+#[test]
+fn r59019_completion_logs_the_history_moves() {
+    let e = drift_env(false);
+    let dir = private_dir();
+    let reference = dir.path().join("reference");
+    let full = clone_hub(&e, false, 100);
+    clone_ready(&e, &full, &reference).unwrap();
+    let want = drifts_at(&reference);
+    assert_eq!(want.len(), 1, "{want:?}");
+    let hub = clone_hub(&e, true, 100);
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let s_remote = s.remote.clone();
+    // local work before the history arrives: an unrelated landing and a draft
+    let engine = Local::open(&dest).unwrap();
+    let local = land_in(&engine, "local");
+    write_in(&engine, "draft", "local-draft");
+    let draft = view_head_of(&engine, "draft");
+    engine.close().unwrap();
+    let mut steps = Vec::new();
+    let done = continue_clone(&e, &hub, s, &mut steps);
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    assert_eq!(drifts_at(&dest), want);
+    // the completion moved no canon or view ref
+    let engine = Local::open(&dest).unwrap();
+    assert_eq!(engine.read().canon_head(), Some(local));
+    assert_eq!(view_head_of(&engine, "draft"), draft);
+    engine.close().unwrap();
+    // the logged opening: the reference's move, logged once under cause recheck
+    let moves = opened_moves(&dest);
+    // the reference's clone logged its opening as a write; the completion's is a recheck
+    let as_recheck = |m: &[u8]| {
+        let mut t: rdy_store::transition::TensionMove = serde_json::from_slice(m).unwrap();
+        t.why.cause = rdy_store::transition::Cause::Recheck;
+        serde_json::to_vec(&t).unwrap()
+    };
+    let reference_moves: Vec<Vec<u8>> = opened_moves(&reference)
+        .iter()
+        .map(|(m, _)| as_recheck(m))
+        .collect();
+    assert_eq!(
+        moves.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>(),
+        reference_moves,
+        "{}",
+        String::from_utf8_lossy(&moves[0].0)
+    );
+    assert_eq!(transitions_logged(&dest), 1);
+    // the causative batch: the one TRANSITION is the last data frame of the batch that writes
+    // the history ref complete, and that batch writes nothing else
+    let batches = completion_batches(&dest, &s_remote);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let kinds_in: Vec<u8> = batches[0].iter().map(|(k, _, _)| *k).collect();
+    assert_eq!(
+        kinds_in,
+        [kinds::REF_UPDATE, kinds::TRANSITION],
+        "{batches:?}"
+    );
+    assert_eq!(opening_records(&dest), [batches[0][1].1]);
+    let engine = Local::open(&dest).unwrap();
+    rdy_engine::engine::with_writer_result(&engine, |r| r.reindex()).unwrap();
+    engine.close().unwrap();
+    assert_eq!(drifts_at(&dest), want);
+    assert_eq!(opened_moves(&dest), moves);
+}
+
+/// An engine over `inner` that records whether a writer call (a write or a serialized read)
+/// is running.
+struct Watched {
+    inner: Local,
+    busy: Arc<AtomicBool>,
+}
+
+impl Watched {
+    fn call<T>(&self, f: impl FnOnce() -> T) -> T {
+        self.busy.store(true, Ordering::SeqCst);
+        let out = f();
+        self.busy.store(false, Ordering::SeqCst);
+        out
+    }
+}
+
+impl rdy_engine::engine::Engine for Watched {
+    fn read(&self) -> Arc<ReadState> {
+        self.inner.read()
+    }
+    fn write(&self, f: rdy_engine::engine::WriteFn) -> Result<serde_json::Value, RdyError> {
+        self.call(|| self.inner.write(f))
+    }
+    fn read_serialized(
+        &self,
+        f: rdy_engine::engine::ReadFn,
+    ) -> Result<serde_json::Value, RdyError> {
+        self.call(|| self.inner.read_serialized(f))
+    }
+    fn open_report(&self) -> OpenReport {
+        self.inner.open_report()
+    }
+    fn root(&self) -> std::path::PathBuf {
+        self.inner.root()
+    }
+    fn briefs(&self) -> Arc<BriefRegistry> {
+        self.inner.briefs()
+    }
+    fn leases(&self) -> Arc<rdy_engine::semantic::lease::LeaseRegistry> {
+        self.inner.leases()
+    }
+}
+
+/// D-GGTYA: a completion's staged-file checks and its full check (the frame walk, the tag rules
+/// and the state checks) run on a captured read, never inside a writer call; only the take and
+/// the completion ref batch hold the writer.
+#[test]
+fn r59019_full_check_runs_off_the_writer() {
+    use rdy_engine::history_fetch::{HistoryFetchStep, with_check_hook_for_tests};
+    let e = env(3);
+    let hub = clone_hub(&e, true, 100);
+    let dir = private_dir();
+    let dest = dir.path().join("clone");
+    let s = clone_ready(&e, &hub, &dest).unwrap();
+    let busy = Arc::new(AtomicBool::new(false));
+    let engine = Watched {
+        inner: Local::open(&dest).unwrap(),
+        busy: Arc::clone(&busy),
+    };
+    let api = NoApi::default();
+    let clock = Clock::at(T0);
+    let renderer = Renderer::default();
+    let service = SyncService::new(&dest, &e.user_file, &api, &clock, &hub, &renderer);
+    let seen: Arc<Mutex<Vec<(&'static str, bool)>>> = Arc::default();
+    let hook = {
+        let seen = Arc::clone(&seen);
+        let busy = Arc::clone(&busy);
+        Box::new(move |p: &'static str| seen.lock().unwrap().push((p, busy.load(Ordering::SeqCst))))
+    };
+    with_check_hook_for_tests(hook, || {
+        let mut fetch = service
+            .begin_history(&engine, &writer(), &s.remote)
+            .unwrap();
+        while let HistoryFetchStep::More(_) = service
+            .resume_history_step(&engine, &writer(), &mut fetch)
+            .unwrap()
+        {}
+    });
+    let seen = seen.lock().unwrap().clone();
+    for p in ["batches", "frames", "tags", "state"] {
+        assert!(seen.iter().any(|(q, _)| *q == p), "{p}: {seen:?}");
+    }
+    assert!(seen.iter().all(|(_, busy)| !busy), "{seen:?}");
+    engine.inner.close().unwrap();
 }

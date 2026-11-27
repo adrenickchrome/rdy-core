@@ -11,6 +11,7 @@ use crate::suggest::MentionScan;
 use crate::tensions::Detector;
 use crate::tensions::index::CanonIndex;
 use crate::tensions::set::TensionCell;
+use crate::vectors::{VectorWeights, WeightScope};
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
@@ -85,6 +86,10 @@ pub(crate) struct Built {
     pub(crate) tree: OnceLock<Arc<Vec<TreeNode>>>,
     /// The entity lexicon (FW-EN1), memoised; carried across a write like the graph.
     pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
+    /// The vector weights of this state's lexicon (D-ZX5S6), made on first read; each idf and
+    /// norm in them is computed when a read first asks for it. Never carried: a write drops only
+    /// this state's lazy values, and a held state keeps its own.
+    pub(crate) weights: OnceLock<Arc<VectorWeights>>,
     /// The structural layer of coverage (FW-CH1), memoised; carried across a write with the
     /// graph and the lexicon (`coverage::carry`, cc11).
     pub(crate) structural: OnceLock<Arc<Structural>>,
@@ -114,6 +119,7 @@ impl Built {
             graph: OnceLock::new(),
             tree: OnceLock::new(),
             lexicon: OnceLock::new(),
+            weights: OnceLock::new(),
             structural: OnceLock::new(),
             structural_from: OnceLock::new(),
             mentions: Mutex::new(vec![]),
@@ -130,8 +136,9 @@ impl Built {
     /// so are the mention scans (`MentionScan::carried`). cc11: when the graph, the lexicon and
     /// the structural layer of coverage are all built, that layer is carried too
     /// (`coverage::carry`, under `pack`), unless the ops change entries its dirty set does not
-    /// reach; then the next read rebuilds it. The tree and the tension index and canon part are
-    /// not carried.
+    /// reach; then the next read rebuilds it. The tree, the tension index and canon part, and the
+    /// vector weights are not carried: the next state computes its weights lazily from its own
+    /// lexicon, so nothing here normalizes the corpus.
     pub(crate) fn after(&self, ops: &[Op], pack: &Pack) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
@@ -763,10 +770,60 @@ pub struct ReadState {
     pub(crate) coverage_memo: CoverageMemo,
     /// The gate's landing reads on this state ([`memo`]), memoised; never carried.
     pub(crate) memo: memo::ReadMemo,
+    /// The history ref as this state was published, and its progress, read once on first use
+    /// ([`crate::partial_history`]); never stored.
+    pub(crate) history: Arc<crate::partial_history::HistoryCell>,
     /// The tension detectors: the registry, unless a test set others.
     pub(crate) detectors: &'static [&'static dyn Detector],
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
     pub(crate) error: Option<RdyError>,
+}
+
+/// How many open views a missing-block search looks at.
+pub const MISSING_BLOCK_VIEWS: usize = 32;
+/// The most distinct CHANGE frames one missing-block search reads.
+pub const MISSING_BLOCK_FRAMES: usize = 4_096;
+/// The most ops one missing-block search examines.
+pub const MISSING_BLOCK_OPS: usize = 100_000;
+/// The most payload bytes one missing-block search reads.
+pub const MISSING_BLOCK_BYTES: u64 = 67_108_864;
+/// The sentence a search over the first [`MISSING_BLOCK_VIEWS`] open views adds when more views
+/// exist.
+const VIEWS_CAPPED: &str =
+    " Only the first 32 open views were checked; list views with rdy_view before retrying.";
+/// The sentence a search that reached a frame, op or byte bound adds.
+const SEARCH_CAPPED: &str =
+    " The open-view hint reached its search limit; list views with rdy_view before retrying.";
+
+/// The bounds of one missing-block search. Production uses [`SearchLimits::DEFAULT`]; a test
+/// hook takes smaller ones, so a bound is proved without a store of that size.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchLimits {
+    pub views: usize,
+    pub frames: usize,
+    pub ops: usize,
+    pub bytes: u64,
+}
+
+impl SearchLimits {
+    /// The bounds of the hint.
+    pub const DEFAULT: SearchLimits = SearchLimits {
+        views: MISSING_BLOCK_VIEWS,
+        frames: MISSING_BLOCK_FRAMES,
+        ops: MISSING_BLOCK_OPS,
+        bytes: MISSING_BLOCK_BYTES,
+    };
+}
+
+/// How a missing-block search ended.
+enum Search {
+    /// The first open view whose changes write the block.
+    Found(String),
+    /// No view among those checked writes it; `more_views`: open views beyond the first 32 exist.
+    Clear { more_views: bool },
+    /// A frame, op or byte bound ended the search.
+    Capped,
 }
 
 impl ReadState {
@@ -1001,6 +1058,26 @@ impl ReadState {
         Some(Arc::new(carry(&of(c), old, new)))
     }
 
+    /// The vector weights of `ws` (D-ZX5S6), nothing computed until a read asks. A read scope's
+    /// weights are made once per build and kept on it, over the scope's lexicon: a floating view
+    /// shares canon's, a write starts the next state's afresh, and a held state keeps its own.
+    pub fn vector_weights(&self, ws: WeightScope<'_>) -> Result<Arc<VectorWeights>, RdyError> {
+        match ws {
+            WeightScope::Read(scope) => {
+                let built = self.built(scope)?;
+                if let Some(w) = built.weights.get() {
+                    return Ok(Arc::clone(w));
+                }
+                let lexicon = self.lexicon(scope)?;
+                Ok(Arc::clone(
+                    built
+                        .weights
+                        .get_or_init(|| Arc::new(VectorWeights::of(lexicon))),
+                ))
+            }
+        }
+    }
+
     /// Whether `scope`'s lexicon is built in this state. Never builds, and never marks an as-of
     /// scope used.
     pub fn lexicon_built(&self, scope: &Scope) -> bool {
@@ -1037,9 +1114,134 @@ impl ReadState {
             RdyError::new(
                 E_UNKNOWN_BLOCK,
                 format!("no block {id}"),
-                "check the id with rdy_read",
+                self.missing_block_fix(scope, id, "check the id with rdy_read"),
             )
         })
+    }
+
+    /// The block `id` of `scope` when the scope reads and holds it, else `None`: a probe, which
+    /// gives no recovery hint and so searches no view ([`ReadState::block`] does).
+    pub(crate) fn held_block(&self, scope: &Scope, id: &BlockId) -> Option<Block> {
+        self.materialized(scope).ok()?.get(id).cloned()
+    }
+
+    /// The fix of a read of block `id` in `scope` that was otherwise sound and found no such
+    /// block: `fallback`, or, when exactly the first open view (by name) that writes the block
+    /// holds it, the scope to read it in. Only canon, in-flight and view scopes search: absence
+    /// in a historical scope is history. The search reads this state's own captured views, never
+    /// another project; it materializes at most one view, and a search that cannot finish within
+    /// its bounds, or fails to read, keeps `fallback` (with a sentence when a bound ended it).
+    pub fn missing_block_fix(&self, scope: &Scope, id: &BlockId, fallback: &str) -> String {
+        self.missing_block_fix_within(scope, id, fallback, SearchLimits::DEFAULT)
+    }
+
+    /// [`ReadState::missing_block_fix`] under the bounds `limits` (a test hook).
+    #[doc(hidden)]
+    pub fn missing_block_fix_within(
+        &self,
+        scope: &Scope,
+        id: &BlockId,
+        fallback: &str,
+        limits: SearchLimits,
+    ) -> String {
+        let own = match scope {
+            Scope::Canon | Scope::Inflight => None,
+            Scope::View(v) => Some(v.as_str()),
+            Scope::At(_) | Scope::Proposal(_) => return fallback.to_string(),
+        };
+        if self.error.is_some() {
+            return fallback.to_string();
+        }
+        match self.open_view_with(own, id, limits) {
+            Ok(Search::Found(view)) => match self.materialized(&Scope::View(view.clone())) {
+                Ok(m) if m.get(id).is_some() => {
+                    format!("this id is in open view {view}; read with scope view:{view}")
+                }
+                _ => fallback.to_string(),
+            },
+            Ok(Search::Clear { more_views: true }) => format!("{fallback}{VIEWS_CAPPED}"),
+            Ok(Search::Capped) => format!("{fallback}{SEARCH_CAPPED}"),
+            Ok(Search::Clear { more_views: false }) | Err(_) => fallback.to_string(),
+        }
+    }
+
+    /// The first open view by name (other than `own`), among the first
+    /// [`MISSING_BLOCK_VIEWS`] open ones, whose included changes write block `id` as a create or an update;
+    /// a view whose written ids are already memoised answers from them. A change is read through
+    /// the indexed raw reader and the bounded decoder once per call, within
+    /// [`MISSING_BLOCK_FRAMES`] frames, [`MISSING_BLOCK_OPS`] ops and [`MISSING_BLOCK_BYTES`]
+    /// payload bytes in all; a frame's stored length is checked before it is read.
+    fn open_view_with(
+        &self,
+        own: Option<&str>,
+        id: &BlockId,
+        limits: SearchLimits,
+    ) -> Result<Search, RdyError> {
+        let mut seen: HashMap<Hash, bool> = HashMap::new();
+        let (mut ops, mut bytes) = (0usize, 0u64);
+        let mut checked = 0usize;
+        for name in self.view_names() {
+            if own == Some(name.as_str()) {
+                continue;
+            }
+            let (Some(entry), Some(head)) = (self.views.get(&name), self.view_head(&name)) else {
+                continue;
+            };
+            if head.closed {
+                continue;
+            }
+            if checked == limits.views {
+                return Ok(Search::Clear { more_views: true });
+            }
+            checked += 1;
+            if let Some(touched) = entry.touched.get() {
+                if touched.contains(id) {
+                    return Ok(Search::Found(name));
+                }
+                continue;
+            }
+            for change in entry.included.iter() {
+                let writes = match seen.get(change) {
+                    Some(w) => *w,
+                    None => {
+                        if seen.len() == limits.frames {
+                            return Ok(Search::Capped);
+                        }
+                        let len = self.reader.stored_len(rdy_store::kinds::CHANGE, change)?;
+                        if bytes.saturating_add(len) > limits.bytes {
+                            return Ok(Search::Capped);
+                        }
+                        bytes += len;
+                        let (raw, payload) =
+                            self.reader.get_kind_raw(rdy_store::kinds::CHANGE, change)?;
+                        let decoded: Change = rdy_store::codec::decode_bounded(raw, &payload)
+                            .map_err(|_| {
+                                RdyError::from(rdy_store::StoreError::Decode(format!(
+                                    "change {change} does not decode"
+                                )))
+                            })?;
+                        let mut writes = false;
+                        for op in &decoded.ops {
+                            if ops == limits.ops {
+                                return Ok(Search::Capped);
+                            }
+                            ops += 1;
+                            if matches!(op, Op::Create { block } | Op::Update { block, .. } if block.id == *id)
+                            {
+                                writes = true;
+                                break;
+                            }
+                        }
+                        seen.insert(*change, writes);
+                        writes
+                    }
+                };
+                if writes {
+                    return Ok(Search::Found(name));
+                }
+            }
+        }
+        Ok(Search::Clear { more_views: false })
     }
 
     /// insc1: the changes the in-flight scope merges onto canon, and the open views holding each.
@@ -1167,6 +1369,7 @@ impl ReadState {
             lease_ttl_ms: self.lease_ttl_ms,
             coverage_memo: Default::default(),
             memo: Default::default(),
+            history: Arc::clone(&self.history),
             detectors: self.detectors,
             error: self.error.clone(),
         }

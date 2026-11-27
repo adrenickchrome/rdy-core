@@ -245,6 +245,65 @@ pub fn failure_lines(failures: &[String], panics: &BTreeMap<String, String>) -> 
     s
 }
 
+/// The failures of one failed test binary, from its parsed run and its stderr. The run is the
+/// same parse the areas use. A run that names no failing test (a crash, a timeout) gives one
+/// failure with no test and the last 20 lines of `stderr`.
+pub fn binary_failures(binary: &str, run: &TestRun, stderr: &str) -> Vec<BinaryFailure> {
+    if run.failures.is_empty() {
+        let text = tail(stderr, 20);
+        return vec![BinaryFailure {
+            binary: binary.to_string(),
+            test: None,
+            panic: (!text.is_empty()).then_some(text),
+        }];
+    }
+    run.failures
+        .iter()
+        .map(|name| BinaryFailure {
+            binary: binary.to_string(),
+            test: Some(name.clone()),
+            panic: run.panics.get(name).cloned(),
+        })
+        .collect()
+}
+
+/// The "Failing in" sections of the failures of failed test binaries, one per binary in the
+/// order of first appearance, in the form of the area sections: `suffix` follows the binary name
+/// in the heading. A binary with no named test says so and keeps its stderr tail as an indented
+/// block. Empty for no failures.
+pub fn binary_failure_sections(failures: &[BinaryFailure], suffix: &str) -> String {
+    let mut order: Vec<&str> = vec![];
+    for f in failures {
+        if !order.contains(&f.binary.as_str()) {
+            order.push(&f.binary);
+        }
+    }
+    let mut s = String::new();
+    for binary in order {
+        let _ = writeln!(s, "\nFailing in `{binary}`{suffix}:");
+        let mine = || failures.iter().filter(|f| f.binary == binary);
+        let names: Vec<String> = mine().filter_map(|f| f.test.clone()).collect();
+        let panics: BTreeMap<String, String> = mine()
+            .filter_map(|f| Some((f.test.clone()?, f.panic.clone()?)))
+            .collect();
+        if names.is_empty() {
+            let _ = writeln!(
+                s,
+                "- (the test binary failed without naming a test; see its output)"
+            );
+            if let Some(text) = mine().find_map(|f| f.panic.as_deref()) {
+                s.push('\n');
+                for l in text.split('\n') {
+                    let _ = writeln!(s, "        {l}");
+                }
+                s.push('\n');
+            }
+        }
+        s += &failure_lines(&names, &panics);
+    }
+    s
+}
+
 /// The cargo arguments of the gate's one build: every test of the workspace, rdy-qa's included,
 /// and the `rdy` binary, in the gate profile, with one JSON record per artifact. The gate then
 /// starts every test binary itself, so every binary runs whatever another one did.
@@ -559,9 +618,23 @@ pub struct Gate {
     pub pass: bool,
     /// Passed/failed/ignored counts for test steps; empty otherwise.
     pub detail: String,
+    /// The failing tests of the failed test binaries of this step, with their panic text; empty
+    /// for a step that runs no test binary or whose binaries passed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<BinaryFailure>,
     /// Whether the step ran, or was skipped after a step it needs failed.
     #[serde(flatten)]
     pub state: RowState,
+}
+
+/// One failure of one test binary: the binary key (`<package>/<kind>/<name>`), the failing test,
+/// and its panic text. A binary that failed without naming a test (a crash or a timeout) has no
+/// `test`, and its `panic` is the last 20 lines of its stderr.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BinaryFailure {
+    pub binary: String,
+    pub test: Option<String>,
+    pub panic: Option<String>,
 }
 
 /// Whether a gate row's step ran. A skipped step never passes.
@@ -584,6 +657,7 @@ impl Gate {
             name: name.into(),
             pass,
             detail,
+            failures: vec![],
             state: RowState::Ran,
         }
     }
@@ -594,6 +668,7 @@ impl Gate {
             name: name.into(),
             pass: true,
             detail,
+            failures: vec![],
             state: RowState::Warning,
         }
     }
@@ -604,6 +679,7 @@ impl Gate {
             name: name.into(),
             pass: false,
             detail: String::new(),
+            failures: vec![],
             state: RowState::Skipped { after },
         }
     }
@@ -1121,6 +1197,12 @@ pub fn markdown(r: &Report) -> String {
         }
         s += &failure_lines(&a.failures, &a.panics);
     }
+    let ws_failures: Vec<BinaryFailure> = r
+        .gates
+        .iter()
+        .flat_map(|g| g.failures.iter().cloned())
+        .collect();
+    s += &binary_failure_sections(&ws_failures, "");
 
     let _ = writeln!(
         s,
@@ -2664,5 +2746,75 @@ error: 2 targets failed:
         add_run(&mut areas, "daemon", true, run_of(&text));
         assert_eq!(only_state(&areas, "daemon"), BinaryState::Unexecuted);
         assert!(!area_ok(&areas[0]));
+    }
+
+    /// Cargo output of a workspace test binary with two failing tests and their panics.
+    fn two_failures() -> String {
+        "running 3 tests\ntest w::ok ... ok\ntest w::first ... FAILED\ntest w::second ... FAILED\n\nfailures:\n\n---- w::first stdout ----\nthread 'w::first' (7) panicked at crates/w.rs:4:9:\nfirst panic text\n\n---- w::second stdout ----\nthread 'w::second' (8) panicked at crates/w.rs:9:1:\nsecond panic text\n\nfailures:\n    w::first\n    w::second\n\ntest result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out\n"
+            .to_string()
+    }
+
+    #[test]
+    fn r59024_a_failed_workspace_binary_names_its_tests_and_panics() {
+        let run = parse_cargo_test(&two_failures());
+        let failures = binary_failures("rdy-daemon/test/windows_lifecycle", &run, "");
+        assert_eq!(failures.len(), 2);
+        let mut r = report_of(vec![]);
+        let mut g = Gate::ran("cargo test --workspace --exclude rdy-qa", false, "x".into());
+        g.failures = failures;
+        r.gates.push(g);
+        let md = markdown(&r);
+        assert!(
+            md.contains("\nFailing in `rdy-daemon/test/windows_lifecycle`:\n- `w::first`\n\n        thread 'w::first' (7) panicked at crates/w.rs:4:9:\n        first panic text\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("- `w::second`\n\n        thread 'w::second' (8) panicked at crates/w.rs:9:1:\n        second panic text\n"),
+            "{md}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&json(&r)).unwrap();
+        let list = &v["gates"][0]["failures"];
+        assert_eq!(list.as_array().unwrap().len(), 2, "{list}");
+        assert_eq!(list[0]["binary"], "rdy-daemon/test/windows_lifecycle");
+        assert_eq!(list[0]["test"], "w::first");
+        assert_eq!(
+            list[0]["panic"],
+            "thread 'w::first' (7) panicked at crates/w.rs:4:9:\nfirst panic text\n"
+        );
+        assert_eq!(list[1]["test"], "w::second");
+        // a row without failures has no `failures` key
+        let ok = serde_json::to_value(Gate::ran("g", true, String::new())).unwrap();
+        assert!(ok.get("failures").is_none(), "{ok}");
+    }
+
+    #[test]
+    fn r59024_a_workspace_binary_that_crashed_keeps_its_stderr_tail() {
+        let run = parse_cargo_test("running 1 test\n");
+        let stderr: String = (1..=30).map(|i| format!("stderr line {i}\n")).collect();
+        let failures = binary_failures("rdy-store/test/sync", &run, &stderr);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].test, None);
+        let mut r = report_of(vec![]);
+        let mut g = Gate::ran("cargo test --workspace --exclude rdy-qa", false, "x".into());
+        g.failures = failures;
+        r.gates.push(g);
+        let md = markdown(&r);
+        let at = md.find("\nFailing in `rdy-store/test/sync`:\n").expect(&md);
+        let section = &md[at..];
+        assert!(
+            section.contains("- (the test binary failed without naming a test; see its output)"),
+            "{md}"
+        );
+        assert!(section.contains("        stderr line 30\n"), "{md}");
+        assert!(section.contains("        stderr line 11\n"), "{md}");
+        assert!(
+            !section.contains("stderr line 10\n"),
+            "last 20 lines only: {md}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&json(&r)).unwrap();
+        let f = &v["gates"][0]["failures"][0];
+        assert_eq!(f["binary"], "rdy-store/test/sync");
+        assert!(f["test"].is_null(), "{f}");
+        assert!(f["panic"].as_str().unwrap().ends_with("stderr line 30"));
     }
 }

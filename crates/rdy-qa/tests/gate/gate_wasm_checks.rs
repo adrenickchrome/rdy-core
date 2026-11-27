@@ -12,7 +12,8 @@ use rdy_engine::engine::Local;
 use rdy_engine::*;
 use rdy_mcp::tools::{rdy_session, rdy_write};
 use rdy_model::assessment::MAX_ROWS;
-use rdy_model::{BlockId, Hash, Op};
+use rdy_model::foreign::ForeignParts;
+use rdy_model::{Block, BlockId, Hash, Op};
 use rdy_qa::fixtures::*;
 use rdy_qa::intake::{TEST_SUMMARY, answer_open_items, confirm_before_landing};
 use rdy_qa::packs::use_pack;
@@ -989,7 +990,7 @@ fn wck6_module_reach_at_and_past_existing_limit() {
     // parents joined the reach, and the bound refused one block early
     let _ids = SeededIds::new(0x5743_4b36_5245_4143);
     let (_d, mut r) = wck6_project(&mrule("m", "type = claim", PASS, "", "advisory"), "");
-    let seeded = write(&mut r, "seed", json!([
+    write(&mut r, "seed", json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
         {"op": "create", "type": "claim", "id": "$w", "parent": "$s", "body": "W holds."}
@@ -998,46 +999,27 @@ fn wck6_module_reach_at_and_past_existing_limit() {
     land(&mut r, "seed").unwrap();
     let st = r.read();
     let canon = st.materialized(&Scope::Canon).unwrap().clone();
-    let base = canon.get(&id(&seeded.created["$w"])).unwrap().clone();
-    let at_root = |bid: BlockId, k: usize, body: String| {
-        let mut b = base.clone();
-        b.id = bid;
-        b.parent = None;
-        b.order = format!("{k:08}");
-        b.body = body;
-        Op::Create { block: b }
-    };
     let pref = ProposalRef {
         version: Hash::of(b"v"),
         stable: Hash::of(b"s"),
         n: 1,
     };
     let reach = |pack: &rdy_schema::Pack, pairs: usize, pads: usize| {
-        let before = canon.with(
-            &(0..pairs)
-                .map(|k| at_root(nth("r", k), k, format!("R{k} holds.")))
-                .collect::<Vec<_>>(),
-        );
-        let mut written = BTreeSet::new();
-        let mut ops = vec![];
-        for k in 0..pairs {
-            written.insert(nth("c", k));
-            ops.push(at_root(
-                nth("c", k),
-                k,
-                format!("C{k} builds on {{{{{}}}}}.", nth("r", k)),
-            ));
-        }
-        for k in 0..pads {
-            written.insert(nth("p", k));
-            ops.push(at_root(nth("p", k), k, format!("P{k} holds.")));
-        }
-        let projected = before.with(&ops);
+        let rows = reach_rows(pairs, pads);
+        let before = canon.with(&rows.before);
+        let projected = before.with(&rows.ops);
         let (bg, pg) = (
             rdy_graph::Graph::build_from(before.iter()),
             rdy_graph::Graph::build_from(projected.iter()),
         );
-        rule_reach_for_tests(&pref, pack, (&before, &bg), (&projected, &pg), &written).unwrap()
+        rule_reach_for_tests(
+            &pref,
+            pack,
+            (&before, &bg),
+            (&projected, &pg),
+            &rows.written,
+        )
+        .unwrap()
     };
     let deep = resolved(1);
     // each pair adds its two blocks, each pad its one
@@ -1063,6 +1045,101 @@ fn wck6_module_reach_at_and_past_existing_limit() {
     assert!(!got.contains(&nth("r", 0)));
     assert!(got.len() < MAX_ROWS, "{}", got.len());
     drop(st);
+}
+
+/// The claim of every large-row input, built field by field: it copies no live block, so its
+/// bytes do not depend on the ids or the content a run generated. It has no parent, the
+/// eight-digit order `k`, the given body, and no fields, links, pins or foreign part.
+fn explicit_claim(bid: BlockId, k: usize, body: String) -> Block {
+    Block {
+        id: bid,
+        block_type: "claim".to_string(),
+        parent: None,
+        order: format!("{k:08}"),
+        fields: BTreeMap::new(),
+        body,
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        foreign: ForeignParts::default(),
+        read_identity: None,
+    }
+}
+
+/// The large-row input of the module reach: `pairs` canon claims `r<k>` (`before`), and the
+/// version's `pairs` claims `c<k>`, each referencing its `r<k>`, and `pads` lone claims `p<k>`
+/// (`ops`, whose ids are `written`). All at the project root, so that no block has many
+/// neighbours.
+struct ReachRows {
+    before: Vec<Op>,
+    ops: Vec<Op>,
+    written: BTreeSet<BlockId>,
+}
+
+fn reach_rows(pairs: usize, pads: usize) -> ReachRows {
+    let at_root = |bid: BlockId, k: usize, body: String| Op::Create {
+        block: explicit_claim(bid, k, body),
+    };
+    let before = (0..pairs)
+        .map(|k| at_root(nth("r", k), k, format!("R{k} holds.")))
+        .collect();
+    let mut written = BTreeSet::new();
+    let mut ops = vec![];
+    for k in 0..pairs {
+        written.insert(nth("c", k));
+        ops.push(at_root(
+            nth("c", k),
+            k,
+            format!("C{k} builds on {{{{{}}}}}.", nth("r", k)),
+        ));
+    }
+    for k in 0..pads {
+        written.insert(nth("p", k));
+        ops.push(at_root(nth("p", k), k, format!("P{k} holds.")));
+    }
+    ReachRows {
+        before,
+        ops,
+        written,
+    }
+}
+
+/// The serialized bytes of the large-row input of `pairs` pairs and `pads` pads.
+fn reach_row_bytes(pairs: usize, pads: usize) -> Vec<u8> {
+    let rows = reach_rows(pairs, pads);
+    serde_json::to_vec(&json!({"before": rows.before, "ops": rows.ops})).unwrap()
+}
+
+#[test]
+fn r5903_reach_fixture_has_fixed_bytes() {
+    // two projects with different generated ids: the large rows are the same bytes beside both
+    let live = |name: &str| {
+        let (_d, mut r) = wck6_project(&mrule("m", "type = claim", PASS, "", "advisory"), "");
+        let made = write(&mut r, "seed", json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "Big", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
+            {"op": "create", "type": "claim", "id": "$w", "parent": "$s", "body": "W holds."}
+        ]))
+        .unwrap();
+        land(&mut r, "seed").unwrap();
+        (id(&made.created["$w"]), reach_row_bytes(20, 3))
+    };
+    let ((first, a), (second, b)) = (live("big-a"), live("big-b"));
+    assert_ne!(first, second, "the projects generate different ids");
+    assert_eq!(a, b, "the large rows do not depend on the project");
+    // the explicit claim, byte for byte
+    let one = explicit_claim(nth("c", 7), 7, "C7 holds.".to_string());
+    assert_eq!(
+        serde_json::to_string(&one).unwrap(),
+        r#"{"id":"c-00007","block_type":"claim","parent":null,"order":"00000007","fields":{},"body":"C7 holds.","links":{},"pins":{}}"#
+    );
+    assert_eq!(one.foreign, ForeignParts::default());
+    assert!(one.read_identity.is_none());
+    // and the whole input of a fixed shape
+    assert_eq!(
+        Hash::of(&a).to_string(),
+        "8fb3f51d9cf60a133598f740a29560083969dc4a9d7d019f6f8757740508e0a3",
+        "the large-row input changed"
+    );
 }
 
 /// Seeds this thread's new block ids while it lives; its drop returns the thread to random ids,

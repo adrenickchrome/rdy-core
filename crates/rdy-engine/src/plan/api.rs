@@ -39,8 +39,7 @@ pub const W_PLAN_ANSWER_LAPSED: &str = "W_PLAN_ANSWER_LAPSED";
 /// The fix of [`W_PLAN_ANSWER_LAPSED`].
 pub const PLAN_ANSWER_LAPSED_FIX: &str = "answer the item again";
 /// The fix of `E_PLAN_ITEM` (p-EVM5J).
-pub const PLAN_ITEM_FIX: &str =
-    "read the plan with rdy_plan / rdy plan and pass an item id it lists";
+pub const PLAN_ITEM_FIX: &str = "read the plan again after each write. Check counts.open and read every page before answering. An already_written consequence may have no item. One unmatched item or group refuses the whole call.";
 /// The budget of a plan read when none is given, in tokens (the briefing's).
 pub const PLAN_DEFAULT_TOKENS: usize = crate::brief::BRIEF_DEFAULT_TOKENS;
 /// The largest budget a plan read takes, in tokens.
@@ -394,6 +393,26 @@ fn check_expansion(have: usize, add: usize) -> Result<(), RdyError> {
 
 fn bad(message: &str, fix: &str) -> RdyError {
     RdyError::new(E_BAD_INPUT, message, fix)
+}
+
+/// The acts each item kind takes, in one line, for the fix of a group answer.
+pub const ACTS_BY_KIND: &str = "update, rejustify and reaffirm items take defer; confirm items take confirm or defer; update_implementation items take done or defer; tension items take confirm or dismiss";
+
+/// The fix of an answer whose act its item's kind does not take: the acts the kind takes, and
+/// how an item of that kind closes without an answer.
+pub fn act_fix(kind: PlanKind) -> String {
+    let acts: Vec<&str> = allowed_acts(kind).iter().map(|a| a.as_str()).collect();
+    let how = match kind {
+        PlanKind::Update => {
+            ". An update item also closes when you edit its block's content; a repin does not close it"
+        }
+        PlanKind::Rejustify => {
+            ". A rejustify item also closes when the block no longer links to or references the cause"
+        }
+        PlanKind::Reaffirm => ". A reaffirm item also closes with an rdy_write reaffirm op",
+        _ => "",
+    };
+    format!("{} items take: {}{how}", kind.as_str(), acts.join(" or "))
 }
 
 /// The refusal of more than `MAX_PLAN_ANSWERS` answers, in one request or in one plan.
@@ -973,16 +992,22 @@ impl ReadState {
     }
 }
 
-/// The refusal of an item `text` that the plan of `scope` does not hold.
-fn not_an_item(text: &str, scope: &str) -> RdyError {
+/// The refusal of an item `text` that the plan of `scope` does not hold; the fix says how many
+/// items are open (every page counts, not the visible one).
+fn not_an_item(text: &str, scope: &str, open: usize) -> RdyError {
     RdyError::new(
         E_PLAN_ITEM,
         format!(
             "{} is not an item of the change plan for {scope}",
             crate::views::clip(text)
         ),
-        PLAN_ITEM_FIX,
+        open_items_fix(open),
     )
+}
+
+/// [`PLAN_ITEM_FIX`] and the number of open items the call found before it.
+pub(crate) fn open_items_fix(open: usize) -> String {
+    format!("{PLAN_ITEM_FIX} Open items: {open}.")
 }
 
 /// The candidate `text` names in `computed`: a `pi-` prefix of exactly one item, a `tn-` id
@@ -991,11 +1016,12 @@ fn not_an_item(text: &str, scope: &str) -> RdyError {
 /// one item. Anything else is `E_PLAN_ITEM`.
 fn resolve_item<'c>(
     computed: &'c ComputedPlan,
+    prior: &[PlanAnswer],
     text: &str,
     scope: &str,
     find: &dyn Fn(&str) -> Result<Option<Consequence>, RdyError>,
 ) -> Result<&'c PlanCandidate, RdyError> {
-    let miss = || not_an_item(text, scope);
+    let miss = || not_an_item(text, scope, live_rows(computed, prior).1.open);
     if let Some(hex) = text.strip_prefix(ITEM_DISPLAY_PREFIX) {
         if hex.is_empty() || hex.len() > 64 || !hex.bytes().all(is_lower_hex) {
             return Err(miss());
@@ -1135,7 +1161,7 @@ pub(crate) fn prepare_plan_answers(
     };
     let mut fresh: BTreeMap<Hash, PlanAnswer> = BTreeMap::new();
     for input in inputs {
-        let c = resolve_item(computed, &input.item, &scope, &find)?;
+        let c = resolve_item(computed, prior, &input.item, &scope, &find)?;
         if fresh.contains_key(&c.id) {
             return Err(bad(
                 &format!(
@@ -1150,14 +1176,14 @@ pub(crate) fn prepare_plan_answers(
             return Err(RdyError::new(
                 E_PLAN_ITEM,
                 "dismiss answers a tension item only",
-                "answer it with confirm, defer or done",
+                act_fix(c.kind),
             ));
         }
         if input.act == PlanAct::Defer && c.kind == PlanKind::Tension {
             return Err(RdyError::new(
                 E_PLAN_ITEM,
                 "defer does not answer a tension item",
-                "answer it with confirm or dismiss, with a reason",
+                format!("{}, with a reason", act_fix(c.kind)),
             ));
         }
         if !allowed_acts(c.kind).contains(&input.act) {
@@ -1167,7 +1193,7 @@ pub(crate) fn prepare_plan_answers(
                     input.act.as_str(),
                     c.kind.as_str()
                 ),
-                "read the plan and use an act the item accepts",
+                &act_fix(c.kind),
             ));
         }
         let reason = match input.act {
@@ -1239,6 +1265,7 @@ impl Rdy {
             heads: vp.heads,
             provenance: session.provenance(),
             seal: None,
+            read_identity: None,
         };
         drop(st);
         let id = self.store.put_plan(&plan)?;
@@ -1362,7 +1389,9 @@ impl Rdy {
                                     .collect::<Vec<_>>()
                                     .join(", ")
                             ),
-                            "narrow the group, or answer those items one by one",
+                            format!(
+                                "narrow the group, or answer those items one by one ({ACTS_BY_KIND})"
+                            ),
                         ));
                     }
                     if s.repin {
@@ -1537,7 +1566,7 @@ mod tests {
     fn cp8_pi_prefixes_resolve_one_item_or_refuse() {
         let plan = plan_of(&[Hash([0x11; 32]), Hash([0x12; 32]), Hash([0x21; 32])]);
         let none = |_: &str| Ok(None);
-        let get = |t: &str| resolve_item(&plan, t, "view:w", &none).map(|c| c.id);
+        let get = |t: &str| resolve_item(&plan, &[], t, "view:w", &none).map(|c| c.id);
         assert_eq!(get("pi-12").unwrap(), Hash([0x12; 32]));
         assert_eq!(get("pi-2").unwrap(), Hash([0x21; 32]));
         let full = format!("pi-{}", Hash([0x11; 32]));
@@ -1557,7 +1586,7 @@ mod tests {
                 e.message,
                 format!("{t} is not an item of the change plan for view:w")
             );
-            assert_eq!(e.fix, PLAN_ITEM_FIX);
+            assert_eq!(e.fix, format!("{PLAN_ITEM_FIX} Open items: 3."));
         }
     }
 
