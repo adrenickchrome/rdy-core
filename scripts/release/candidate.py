@@ -48,6 +48,10 @@ KUNGFU_TABLE = 'crates/rdy-engine/kungfu-tools.json'
 # The baseline x86-64 check: the emulator, and the CPU model that leaves out SSE3, CX16 and LAHF-LM.
 BASELINE_EMULATOR = 'qemu-x86_64'
 BASELINE_CPU = 'qemu64,-sse3,-cx16,-lahf-lm'
+# The baseline sysroot (plain amd64 libc6 and libgcc-s1) that qemu loads the C runtime from. The hosted
+# runner's own glibc can be the amd64v3 build, which refuses to load on the baseline CPU model.
+BASELINE_SYSROOT_ENV = 'RELEASE_BASELINE_SYSROOT'
+BASELINE_LOADER = 'lib64/ld-linux-x86-64.so.2'
 LINUX_TARGET = 'x86_64-unknown-linux-gnu'
 # The packaged checker's six checks, in order (`CHECK_NAMES` in rdy-qa's release_install.rs).
 CHECK_NAMES = ('signature', 'checksums', 'install', 'version', 'daemon', 'mcp')
@@ -645,11 +649,15 @@ def check_baseline_cpu(binary, version, source, work, env):
     """Runs the extracted packaged Linux `binary` under the baseline x86-64 CPU model: `--version`, then a
     no-daemon load, fsck and dump of the frozen sample of the source archive, in a new home below `work`.
     The version, the sample's recorded formats and each step's success must match. A timeout, a signal
-    (a SIGILL from an instruction the baseline lacks) or a nonzero exit refuses the candidate."""
+    (a SIGILL from an instruction the baseline lacks) or a nonzero exit refuses the candidate. The C runtime
+    comes from the baseline sysroot that `RELEASE_BASELINE_SYSROOT` names, never from the runner."""
     failed = ControllerError('the packaged Linux binary failed the baseline x86-64 check')
     path = env.get('PATH')
     if shutil.which(BASELINE_EMULATOR, path=path) is None:
         raise ControllerError('baseline x86-64 check needs ' + BASELINE_EMULATOR)
+    sysroot = env.get(BASELINE_SYSROOT_ENV)
+    if not sysroot or not os.path.isabs(sysroot) or not (Path(sysroot) / BASELINE_LOADER).is_file():
+        raise ControllerError('the baseline x86-64 check needs the baseline sysroot')
     dump, freeze_file = Path(source) / SAMPLE_SOURCE, Path(source) / SAMPLE_FREEZE
     for sample in (dump, freeze_file):
         if sample.is_symlink() or not sample.is_file():
@@ -665,12 +673,12 @@ def check_baseline_cpu(binary, version, source, work, env):
     copy, project, again = folder / SAMPLE_NAME, folder / 'project', folder / 'again.rdydump'
     write_new(copy, dump.read_bytes())
     person = dict(env)
-    for name in ('RDY_ACTOR', 'RDY_RUN', 'RDY_NO_DAEMON', 'SSH_AUTH_SOCK'):
+    for name in ('RDY_ACTOR', 'RDY_RUN', 'RDY_NO_DAEMON', 'SSH_AUTH_SOCK', BASELINE_SYSROOT_ENV):
         person.pop(name, None)
     person.update({'HOME': str(home), 'XDG_CONFIG_HOME': str(config)})
 
     def run(*args):
-        status, out, _ = run_bounded([BASELINE_EMULATOR, '-cpu', BASELINE_CPU, binary] + list(args),
+        status, out, _ = run_bounded([BASELINE_EMULATOR, '-L', sysroot, '-cpu', BASELINE_CPU, binary] + list(args),
                                      deadline=HELPER_DEADLINE, env=person)
         if status != 0:
             raise failed

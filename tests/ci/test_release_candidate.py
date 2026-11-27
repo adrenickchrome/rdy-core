@@ -652,8 +652,9 @@ class agi6_Candidate(Fixture):
             'import hashlib, json, os, resource, signal, sys, time\n'
             'resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n'
             'argv = sys.argv[1:]\n'
-            'binary, args = argv[2], argv[3:]\n'
+            'binary, args = argv[4], argv[5:]\n'
             'open(%r, "a").write(json.dumps({"argv": argv, "home": os.environ.get("HOME"),\n'
+            '    "sysroot_env": os.environ.get("RELEASE_BASELINE_SYSROOT"),\n'
             '    "present": os.path.isfile(binary), "sha256": hashlib.sha256(open(binary, "rb").read()).hexdigest()}) + "\\n")\n'
             'mode = %r\n'
             'op = args[1] if args[:1] == ["--json"] else args[0]\n'
@@ -685,6 +686,8 @@ class agi6_Candidate(Fixture):
         env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + (os.environ['PATH'] if path is None else path),
                    CARGO_HOME=str(home / 'cargo'), RUSTUP_HOME=str(home / 'rustup'))
         env['USERPROFILE' if target == WINDOWS else 'HOME'] = str(home)
+        if target == LINUX and getattr(self, 'sysroot', True):
+            env['RELEASE_BASELINE_SYSROOT'] = str(self.baseline_sysroot())
         return CANDIDATE.build(repo, commit, V, target, self.tmp / 'work', self.tmp / 'out', gate, RUN_ID, ATTEMPT,
                                env=env)
 
@@ -877,6 +880,13 @@ class agi6_Candidate(Fixture):
         bin_dir, gate, log = self.toolchain(reply, reply)
         return repo, commit, bin_dir, gate
 
+    def baseline_sysroot(self):
+        """A stand-in for the plain amd64 sysroot the workflow extracts: only its loader is checked."""
+        root = self.tmp / 'baseline-root'
+        (root / 'lib64').mkdir(parents=True, exist_ok=True)
+        (root / 'lib64' / 'ld-linux-x86-64.so.2').write_bytes(b'loader')
+        return root
+
     def qemu_calls(self):
         path = self.tmp / 'qemu-calls.jsonl'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
@@ -902,10 +912,12 @@ class agi6_Candidate(Fixture):
             self.build(repo, commit, bin_dir, gate)
         calls = self.qemu_calls()
         binary = str(work / 'guide-check' / 'rdy')
-        prefix = ['-cpu', self.MASK, binary]
-        self.assertEqual([c['argv'][:3] for c in calls], [prefix] * 4)
-        dump_copy, project, out_dump = calls[1]['argv'][6], calls[1]['argv'][7], calls[3]['argv'][-1]
-        self.assertEqual([c['argv'][3:] for c in calls], [
+        prefix = ['-L', str(self.tmp / 'baseline-root'), '-cpu', self.MASK, binary]
+        self.assertEqual([c['argv'][:5] for c in calls], [prefix] * 4)
+        dump_copy, project, out_dump = calls[1]['argv'][8], calls[1]['argv'][9], calls[3]['argv'][-1]
+        # the sysroot reaches qemu as -L, never the rdy child's environment
+        self.assertEqual({c['sysroot_env'] for c in calls}, {None})
+        self.assertEqual([c['argv'][5:] for c in calls], [
             ['--version'],
             ['--json', 'load', '--no-daemon', dump_copy, project],
             ['--json', 'fsck', '--no-daemon', '--project', project],
@@ -937,9 +949,11 @@ class agi6_Candidate(Fixture):
         import unittest.mock as mock
         cases = [('signal', text), ('nonzero', text), ('version', text), ('sleep', text),
                  ('missing sample', 'the baseline x86-64 check needs the frozen sample dump'),
-                 ('missing emulator', 'baseline x86-64 check needs qemu-x86_64')]
+                 ('missing emulator', 'baseline x86-64 check needs qemu-x86_64'),
+                 ('missing sysroot', 'the baseline x86-64 check needs the baseline sysroot')]
         for mode, reason in cases:
             with self.subTest(mode=mode):
+                self.sysroot = mode != 'missing sysroot'
                 repo, commit, bin_dir, gate = self.fresh(mode if mode in ('signal', 'nonzero', 'version', 'sleep')
                                                          else 'ok', sample=mode != 'missing sample')
                 path = None

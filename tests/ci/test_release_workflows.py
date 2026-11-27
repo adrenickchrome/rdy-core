@@ -323,6 +323,11 @@ class Boundaries(unittest.TestCase):
         step = linux[linux.index('      - name: Baseline x86-64 emulator\n'):]
         step = step[:step.index('\n      - ', 10)]
         self.assertIn('sudo apt-get install -y --no-install-recommends qemu-user\n', step)
+        # the C runtime under qemu is the plain amd64 build, not the runner's (it can be amd64v3)
+        self.assertIn('-o APT::Architecture-Variants= ', step)
+        self.assertIn('download libc6 libgcc-s1)\n', step)
+        self.assertIn("grep -v '_amd64\\.deb$'; then", step)
+        self.assertIn('echo "RELEASE_BASELINE_SYSROOT=$sysroot" >> "$GITHUB_ENV"', step)
         self.assertNotIn('if:', step)
         self.assertNotIn('continue-on-error', step)
         self.assertNotIn('|| true', step)
@@ -333,6 +338,7 @@ class Boundaries(unittest.TestCase):
             self.assertNotIn('qemu', jobs[other], other)
         source = (ROOT / 'scripts/release/candidate.py').read_text()
         self.assertIn('if target == LINUX_TARGET:', source)
+        self.assertIn("[BASELINE_EMULATOR, '-L', sysroot, '-cpu', BASELINE_CPU, binary]", source)
 
     def test_rsig8_workflow_actions_and_signer_revision_are_pinned(self):
         for name in all_workflows():

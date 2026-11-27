@@ -154,10 +154,26 @@ jobs:
       - name: Baseline x86-64 emulator
         # The build step below runs the packaged Linux binary under qemu-x86_64 with a CPU model that has
         # no SSE3, CX16 or LAHF-LM. There is no skip: a missing emulator refuses the candidate.
+        # The runner's own glibc can be the amd64v3 build, which refuses to load on that CPU model, so qemu
+        # loads the C runtime from a sysroot of the plain amd64 libc6 and libgcc-s1 (apt checks their hashes).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-user
           command -v qemu-x86_64
+          debs="$RUNNER_TEMP/baseline-debs"
+          sysroot="$RUNNER_TEMP/baseline-root"
+          mkdir -p "$debs/lists/partial" "$debs/cache/archives/partial" "$sysroot"
+          plain=(-o APT::Architecture-Variants= -o Debug::NoLocking=1
+                 -o "Dir::State::Lists=$debs/lists" -o "Dir::Cache=$debs/cache")
+          apt-get "${plain[@]}" update -qq
+          (cd "$debs" && apt-get "${plain[@]}" download libc6 libgcc-s1)
+          test "$(ls "$debs"/*.deb | wc -l)" -eq 2
+          if ls "$debs"/*.deb | grep -v '_amd64\.deb$'; then echo "not the plain amd64 build" >&2; exit 1; fi
+          for deb in "$debs"/*.deb; do dpkg-deb -x "$deb" "$sysroot"; done
+          ln -s usr/lib64 "$sysroot/lib64"
+          ln -s usr/lib "$sysroot/lib"
+          test -f "$sysroot/lib64/ld-linux-x86-64.so.2"
+          echo "RELEASE_BASELINE_SYSROOT=$sysroot" >> "$GITHUB_ENV"
       - name: Locked dependencies
         run: cargo fetch --locked
       - name: Fast gate counts of the gate run at S
