@@ -552,8 +552,8 @@ const EARLIER: [(&str, &str); 13] = [
 const KEPT_TREES: [(&str, usize, &str); 12] = [
     (
         "tests/golden/disclosure_review",
-        5,
-        "dff9652a32b3d52da3938b82c223daefe888a59ff66bf02c03f2c3ed88b50e87",
+        4,
+        "a5003340beb5262e3fe2a7267c0164a9c24a554afd1e1a5268b979b8ce60ca79",
     ),
     // each page's cursor only: the span maps' manifest entries and the plan answer deltas
     // (0.59.0) moved the log end; every entry is unchanged
@@ -619,9 +619,10 @@ const KEPT_TREES: [(&str, usize, &str); 12] = [
 /// fixtures of `dedup_spans`, plan deltas' (0.59.0) first-use fixtures of `plan_delta` and the
 /// MCP goldens whose hashes, byte counts and cursors plan deltas moved, the
 /// four MCP goldens whose bytes span maps moved (the compact
-/// report's `ref_update` and `log_bytes`, and the inbox cursor), and canon states' (0.59.0)
-/// state fixtures and wire fixture.
-const LATER_OWNED: [&str; 24] = [
+/// report's `ref_update` and `log_bytes`, and the inbox cursor), canon states' (0.59.0)
+/// state fixtures and wire fixture, and the redacted disclosure review, whose removal
+/// manifest binds frame places that span maps moved.
+const LATER_OWNED: [&str; 25] = [
     "v4-f1-dedup-spans",
     "dedup-spans-1",
     "v4-f1-reduction",
@@ -646,6 +647,7 @@ const LATER_OWNED: [&str; 24] = [
     "rdy_view--include.json",
     "rdy_view--show-with-conflict.json",
     "rdy_view--undo.json",
+    "v1/redacted.json",
 ];
 
 /// The files under `dir` less [`LATER_OWNED`], and the sha256 of one line per file in byte order
